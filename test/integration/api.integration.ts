@@ -118,6 +118,23 @@ async function setSessionStatus(
   });
 }
 
+async function settleSessionTurnsForVariableSetDetach(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(dbSql`
+      update session_turns
+      set status = 'cancelled', active_attempt_id = null,
+        cancelled_by = 'integration-test', cancel_reason = 'explicit_variable_set_detach',
+        finished_at = coalesce(finished_at, now()), updated_at = now()
+      where workspace_id = ${workspaceId} and session_id = ${sessionId}
+        and status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+    `);
+  });
+}
+
 describe("API component integration", () => {
   let services: TestServices;
   let dbClient: ReturnType<typeof createDb>;
@@ -1093,7 +1110,7 @@ describe("API component integration", () => {
     });
   });
 
-  test("managed email/password auth bootstraps account access and workspace API keys", async () => {
+  test("managed email/password auth completes onboarding before using workspace API keys", async () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -1131,6 +1148,21 @@ describe("API component integration", () => {
     const cookie = signin.headers.get("set-cookie");
     expect(cookie).toBeTruthy();
 
+    const onboardingStatus = await app.request("/v1/auth/organization-onboarding", {
+      headers: { cookie: cookie! },
+    });
+    expect(onboardingStatus.status).toBe(200);
+    expect(await onboardingStatus.json()).toEqual({ state: "required" });
+    const onboarding = await app.request("/v1/auth/organization-onboarding", {
+      method: "POST",
+      headers: { cookie: cookie!, "content-type": "application/json" },
+      body: JSON.stringify({
+        organizationName: "Managed integration organization",
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(onboarding.status).toBe(200);
+
     const access = await app.request("/v1/access/me", {
       headers: { cookie: cookie! },
     });
@@ -1138,7 +1170,18 @@ describe("API component integration", () => {
     const context = (await access.json()) as AccessContext;
     expect(context.mode).toBe("managed");
     expect(context.accountGrants[0]?.permissions).toContain("billing:manage");
-    const workspaceId = context.defaultWorkspaceId!;
+    // Personal workspaces deliberately cannot mint API keys. Provision the
+    // shared workspace this API-key scenario is intended to administer.
+    const createdWorkspace = await app.request("/v1/workspaces", {
+      method: "POST",
+      headers: { cookie: cookie!, "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: context.defaultAccountId,
+        name: "Managed integration workspace",
+      }),
+    });
+    expect(createdWorkspace.status).toBe(201);
+    const workspaceId = ((await createdWorkspace.json()) as { id: string }).id;
     const createdKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookie! },
@@ -1508,7 +1551,10 @@ describe("API component integration", () => {
     const context = (await access.json()) as AccessContext;
     expect(context.mode).toBe("managed");
     expect(context.subjectId).toBe(`user:${userId}`);
-    expect(context.defaultWorkspaceId).toBeTruthy();
+    expect(context.defaultAccountId).toBeNull();
+    expect(context.defaultWorkspaceId).toBeNull();
+    expect(context.accountGrants).toEqual([]);
+    expect(context.workspaceGrants).toEqual([]);
   });
 
   test("managed credit gate blocks costly writes and exposes recorded usage", async () => {
@@ -3944,7 +3990,7 @@ describe("API component integration", () => {
     expect(capabilityInstallationAfterDelete).toBeNull();
   });
 
-  test("installs image Packs through explicit Rigs and shares identical inline Skills", async () => {
+  test("installs platform-base Packs through explicit Rigs and shares identical inline Skills", async () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -3957,15 +4003,13 @@ describe("API component integration", () => {
     const workspaceId = await defaultWorkspaceId(app);
     const suffix = crypto.randomUUID().slice(0, 8);
     const skillName = `infra-ops-${suffix}`;
-    const imagePackManifest = (id: string, image: string, modalImageId?: string) => ({
+    const packManifest = (id: string) => ({
       id,
       name: `Pack ${id}`,
-      description: "Pack with a pack-scoped sandbox image.",
+      description: "Pack with an explicit Rig on the deployment platform base.",
       role: "infrastructure",
       category: "infrastructure",
       version: "0.1.0",
-      sandboxImage: image,
-      ...(modalImageId ? { sandboxProviderImages: { modal: { imageId: modalImageId } } } : {}),
       skills: [
         {
           name: skillName,
@@ -3989,25 +4033,17 @@ describe("API component integration", () => {
     });
     const packA = `img-a-${suffix}`;
     const packB = `img-b-${suffix}`;
-    const packAImage =
-      "example.com/sandbox-a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const packBImage =
-      "example.com/sandbox-b@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-    const packAModalImageId = "im-1234567890123456789012";
-    for (const [packId, image, modalImageId] of [
-      [packA, packAImage, packAModalImageId],
-      [packB, packBImage, undefined],
-    ] as const) {
+    for (const packId of [packA, packB]) {
       const registered = await app.request(workspacePath(workspaceId, "/packs"), {
         method: "POST",
-        body: JSON.stringify(imagePackManifest(packId, image, modalImageId)),
+        body: JSON.stringify(packManifest(packId)),
         headers: { "content-type": "application/json" },
       });
       expect(registered.status).toBe(201);
     }
 
     // Packs that compose runtime components cannot use the legacy enable
-    // paths. They must be reviewed against an explicit Rig first.
+    // paths. This test selects an explicit Rig through the installation flow.
     const legacyEnableA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
       method: "POST",
       body: JSON.stringify({}),
@@ -4035,18 +4071,18 @@ describe("API component integration", () => {
     );
     expect(previewWithoutRig.status).toBe(200);
     expect(await previewWithoutRig.json()).toMatchObject({
-      ready: false,
-      rig: { required: true, status: "missing" },
+      ready: true,
+      rig: { required: false, status: "not_required" },
       legacyInlineSkillCount: 1,
-      legacySandboxImage: packAImage,
+      legacySandboxImage: null,
     });
 
-    const createRig = async (name: string, image: string): Promise<{ id: string }> => {
+    const createRig = async (name: string): Promise<{ id: string }> => {
       const response = await app.request(workspacePath(workspaceId, "/rigs"), {
         method: "POST",
         body: JSON.stringify({
           name,
-          image,
+          setupScript: "true",
           checks: [],
           credentialHooks: [],
           defaultVariableSetIds: [],
@@ -4058,8 +4094,8 @@ describe("API component integration", () => {
       return JSON.parse(body) as { id: string };
     };
     const [rigA, rigB] = await Promise.all([
-      createRig(`Pack A ${suffix}`, packAImage),
-      createRig(`Pack B ${suffix}`, packBImage),
+      createRig(`Pack A ${suffix}`),
+      createRig(`Pack B ${suffix}`),
     ]);
 
     const previewPack = async (
@@ -4156,17 +4192,15 @@ describe("API component integration", () => {
       ),
     ).toHaveLength(1);
 
-    // The catalog surfaces the pack's runtime composition (image ref and
-    // skill names) without leaking skill file content.
+    // The catalog surfaces skill names without accepting image metadata or
+    // leaking skill file content.
     const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
     const catalog = (await catalogResponse.json()) as {
       items: Array<{ id: string; metadata: Record<string, unknown> }>;
     };
     const packAItem = catalog.items.find((item) => item.id === `pack:${packA}`);
-    expect(packAItem?.metadata.sandboxImage).toBe(packAImage);
-    expect(packAItem?.metadata.sandboxProviderImages).toEqual({
-      modal: { imageId: packAModalImageId },
-    });
+    expect(packAItem?.metadata.sandboxImage).toBeUndefined();
+    expect(packAItem?.metadata.sandboxProviderImages).toBeUndefined();
     expect(packAItem?.metadata.skills).toEqual([skillName]);
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("spoofed");
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");
@@ -7937,7 +7971,7 @@ describe("API component integration", () => {
     expect(JSON.stringify(events)).not.toContain("session-secret-abcdef");
   });
 
-  test("preserves active Variable Set deletion fences and clears terminal attachments", async () => {
+  test("keeps every session attachment fenced until an explicit quiescent detach", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({
       settings: testSettings({
@@ -7977,6 +8011,9 @@ describe("API component integration", () => {
       "requires_action",
       "recovering",
       "waiting_capacity",
+      "idle",
+      "failed",
+      "cancelled",
     ] as const) {
       const { environment, session } = await createAttachedSession(status);
       const blocked = await app.request(
@@ -7984,31 +8021,35 @@ describe("API component integration", () => {
         { method: "DELETE" },
       );
       expect(blocked.status).toBe(409);
-      expect(await blocked.text()).toContain("active session");
+      expect(await blocked.text()).toContain("session");
       const retained = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
       expect(((await retained.json()) as { environmentId: string | null }).environmentId).toBe(
         environment.id,
       );
 
       await setSessionStatus(dbClient.db, workspaceId, session.id, "cancelled", null);
+      await settleSessionTurnsForVariableSetDetach(dbClient.db, workspaceId, session.id);
+      const detached = await app.request(
+        workspacePath(workspaceId, `/sessions/${session.id}/variable-sets`),
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ variableSetIds: [] }),
+        },
+      );
+      expect(detached.status).toBe(200);
+      expect(
+        ((await detached.json()) as { environmentId: string | null }).environmentId,
+      ).toBeNull();
+      const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
+      expect(events.filter((event) => event.type === "session.variable_sets.updated")).toHaveLength(
+        1,
+      );
       const cleanup = await app.request(
         workspacePath(workspaceId, `/environments/${environment.id}`),
         { method: "DELETE" },
       );
       expect(cleanup.status).toBe(200);
-    }
-
-    for (const status of ["idle", "failed", "cancelled"] as const) {
-      const { environment, session } = await createAttachedSession(status);
-      const allowed = await app.request(
-        workspacePath(workspaceId, `/environments/${environment.id}`),
-        { method: "DELETE" },
-      );
-      expect(allowed.status).toBe(200);
-      const detached = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
-      expect(
-        ((await detached.json()) as { environmentId: string | null }).environmentId,
-      ).toBeNull();
     }
   });
 
@@ -8243,8 +8284,25 @@ describe("API component integration", () => {
     expect(detach.status).toBe(200);
     expect(((await detach.json()) as { environmentId: string | null }).environmentId).toBeNull();
     // The still-attached idle reusable session remains a live attachment even
-    // after the task detaches. Terminal settlement releases that deletion fence.
+    // after the task detaches. Terminal settlement alone cannot bypass lease
+    // rotation, event, and audit evidence: detach through the session route.
     await setSessionStatus(dbClient.db, workspaceId, reusableSession.id, "failed", null);
+    const blockedBySession = await app.request(
+      workspacePath(workspaceId, `/environments/${environment.id}`),
+      { method: "DELETE" },
+    );
+    expect(blockedBySession.status).toBe(409);
+    expect(await blockedBySession.text()).toContain("session");
+    await settleSessionTurnsForVariableSetDetach(dbClient.db, workspaceId, reusableSession.id);
+    const sessionDetach = await app.request(
+      workspacePath(workspaceId, `/sessions/${reusableSession.id}/variable-sets`),
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ variableSetIds: [] }),
+      },
+    );
+    expect(sessionDetach.status).toBe(200);
     const deleteResponse = await app.request(
       workspacePath(workspaceId, `/environments/${environment.id}`),
       { method: "DELETE" },

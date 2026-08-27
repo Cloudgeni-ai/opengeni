@@ -75,8 +75,8 @@ export function personalWorkspaceMembership(
 }
 
 export function isPersonalWorkspace(
-  workspace: Pick<Workspace, "id" | "accountId"> | null,
-  selfContext: ManagedSelfContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  _selfContext: ManagedSelfContext | null,
 ): boolean {
-  return personalWorkspaceMembership(workspace, selfContext) !== null;
+  return workspace?.kind === "personal";
 }

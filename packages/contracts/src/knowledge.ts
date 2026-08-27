@@ -119,6 +119,7 @@ export const KnowledgeSearchRequest = z
     baseIds: z.array(z.string().uuid()).max(50).optional(),
     mode: z.enum(["hybrid", "vector", "keyword"]).optional(),
     sourceKinds: z.array(KnowledgeSource.shape.kind).max(8).optional(),
+    authorityKinds: z.array(KnowledgeAuthority.shape.kind).max(3).optional(),
     aclTags: z
       .array(boundedUtf8(KNOWLEDGE_TOPIC_MAX_BYTES).pipe(z.string().min(1)))
       .max(64)

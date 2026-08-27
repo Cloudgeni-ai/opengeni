@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
@@ -14,12 +14,14 @@ import {
 } from "@opengeni/db";
 import {
   createOpenGeniWorker,
+  createOpenGeniWorkerService,
   resolveOpenGeniWorkflowDefinition,
   workerOwnsInternalSchedules,
 } from "../src";
 import {
   createWorkerHttpHandler,
   dbReadyCheck,
+  natsReadyCheck,
   type ReadinessChecks,
   type WorkerLifecycleState,
 } from "../src/http";
@@ -107,6 +109,25 @@ describe("embedded worker lifecycle contract", () => {
     expect(workerOwnsInternalSchedules("control", "none")).toBe(false);
     expect(workerOwnsInternalSchedules("turn")).toBe(false);
     expect(workerOwnsInternalSchedules("turn", "none")).toBe(false);
+  });
+
+  test("embedded worker construction rejects a bus without durable subscriber recovery", async () => {
+    await expect(
+      createOpenGeniWorkerService({
+        role: "control",
+        activityDependencies: {
+          db: {} as Database,
+          bus: { publish: async () => undefined },
+        },
+      } as never),
+    ).rejects.toThrow("sessionEventDurableFanout v1");
+  });
+
+  test("worker readiness requires the durable subscriber-recovery capability", () => {
+    expect(() => natsReadyCheck(new MemoryEventBus())()).not.toThrow();
+    expect(() => natsReadyCheck({ isConnected: () => true } as never)()).toThrow(
+      "sessionEventDurableFanout v1",
+    );
   });
 
   test("turn workers reject the control-only workflow artifact override", async () => {
@@ -340,6 +361,28 @@ describe("embedded worker lifecycle contract", () => {
   test("worker database readiness enforces supplied posture and retains the embedded probe", async () => {
     let directExecutions = 0;
     let catalogQueries = 0;
+    const managedAuthSessionSetTables = [
+      "managed_auth_actor_mutation_leases",
+      "managed_auth_browser_installations",
+      "managed_auth_login_return_intents",
+      "managed_auth_login_slots",
+      "managed_auth_login_transaction_rate_limits",
+      "managed_auth_login_transactions",
+      "managed_auth_session_set_operations",
+      "managed_auth_session_sets",
+    ];
+    const organizationRecoveryTables = [
+      "organization_recovery_approvals",
+      "organization_recovery_command_receipts",
+      "organization_recovery_custodian_acceptances",
+      "organization_recovery_custodians",
+      "organization_recovery_events",
+      "organization_recovery_notification_attempts",
+      "organization_recovery_notification_outbox",
+      "organization_recovery_operations",
+      "organization_recovery_policies",
+      "organization_recovery_policy_heads",
+    ];
     const catalogResults: unknown[] = [
       [
         {
@@ -359,6 +402,7 @@ describe("embedded worker lifecycle contract", () => {
         },
       ],
       [{ activated: false }],
+      [{ present: true }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -393,6 +437,7 @@ describe("embedded worker lifecycle contract", () => {
           "organization_private_session_settings",
           "organization_profile_events",
           "organization_shared_workspace_administration_capabilities",
+          "organization_user_setup_intents",
           "organization_user_resource_authorities",
           "organization_user_resource_grants",
           "organization_user_retention_deletion_events",
@@ -400,6 +445,9 @@ describe("embedded worker lifecycle contract", () => {
           "organization_user_retention_object_deletion_receipts",
           "organization_user_retention_object_obligations",
           "organization_user_retention_policies",
+          "organization_workspace_lifecycle_events",
+          "organization_workspace_operation_receipts",
+          "self_service_organization_setup_receipts",
           "session_human_input_requests",
           "session_tenancy_activations",
           "session_turn_attempts",
@@ -429,6 +477,10 @@ describe("embedded worker lifecycle contract", () => {
           "canonical_human_identity_subjects",
           "canonical_human_login_bindings",
           "canonical_human_identity_operations",
+          ...managedAuthSessionSetTables,
+          ...organizationRecoveryTables,
+          "organization_user_setup_deliveries",
+          "organization_user_setup_delivery_attempts",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -578,6 +630,10 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        ...managedAuthSessionSetTables,
+        ...organizationRecoveryTables,
+        "organization_user_setup_deliveries",
+        "organization_user_setup_delivery_attempts",
       ],
       tablePrivileges: {},
       protectedNoDirectDmlTables: [
@@ -585,9 +641,13 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        ...managedAuthSessionSetTables,
+        ...organizationRecoveryTables,
+        "organization_user_setup_deliveries",
+        "organization_user_setup_delivery_attempts",
       ],
     })();
-    expect((catalogResults[8] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -599,7 +659,7 @@ describe("embedded worker lifecycle contract", () => {
   });
 
   test("embedded readiness enforces durable session-tenancy activation for both switch states", async () => {
-    const embeddedDb = (activated: boolean) => {
+    const embeddedDb = (activated: boolean, variableSetCutoverPresent = true) => {
       const results: unknown[] = [
         [
           {
@@ -619,6 +679,7 @@ describe("embedded worker lifecycle contract", () => {
           },
         ],
         [{ activated }],
+        [{ present: variableSetCutoverPresent }],
       ];
       let index = 0;
       return {
@@ -647,6 +708,9 @@ describe("embedded worker lifecycle contract", () => {
       })(),
     ).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
+    await expect(dbReadyCheck(embeddedDb(false, false), options)()).rejects.toThrow(
+      /missing the 0352 session Variable Set attachment runtime receipt/,
+    );
   });
 
   test("database readiness coalesces overlapping probe attempts", async () => {

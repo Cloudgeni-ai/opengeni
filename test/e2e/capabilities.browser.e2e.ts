@@ -1042,6 +1042,7 @@ function workspace() {
   return {
     id: workspaceId,
     accountId,
+    kind: "shared",
     name: "Focus Test Workspace",
     slug: "focus-test",
     externalSource: null,

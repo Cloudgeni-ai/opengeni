@@ -38,7 +38,7 @@ function inputSeriesHeading(seriesLabel: string, subject: string): string {
 const PROMPT_SOURCE_LABELS = {
   workspace_instruction_policy: "Workspace instruction policy",
   legacy_workspace_instructions: "Legacy workspace instructions",
-  preference_registry_descriptor: "Agent-noted preferences",
+  preference_registry_descriptor: "Skill descriptors",
   company_profile: "Company profile",
   legacy_memory_v1: "Workspace memory",
   runtime_skill_catalog: "Available skill guides",
@@ -417,11 +417,11 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       <Section title="Prompt context">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="max-w-2xl">
-            <h3 className="text-sm font-medium text-fg">Company Brain contribution</h3>
+            <h3 className="text-sm font-medium text-fg">Agent Knowledge contribution</h3>
             <p className="mt-1 text-xs leading-5 text-fg-muted">
-              Estimated tokens added to model input by workspace instructions, agent-noted
-              preferences, company profile, memory, and skill descriptors. Estimates use UTF-8 bytes
-              ÷ 4 and stay separate from provider-reported input-token totals.
+              Estimated tokens added to model input by workspace instructions, company profile,
+              memory, and Skill descriptors. Estimates use UTF-8 bytes ÷ 4 and stay separate from
+              provider-reported input-token totals.
             </p>
           </div>
           <p className="text-2xs text-fg-subtle">
@@ -434,7 +434,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
           <Metric
             label="Estimated prompt tokens"
             value={formatTokens(promptContributions.estimatedTokens)}
-            delta="Company Brain material only"
+            delta="Agent Knowledge material only"
           />
           <Metric
             label="Average per covered call"

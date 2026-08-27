@@ -267,7 +267,6 @@ describe("rig MCP tools", () => {
       name: `mcp-bounded-${crypto.randomUUID()}`,
       createdBy: "user:mcp",
       initialVersion: {
-        image: `registry.example.com/${huge}`,
         setupScript: `echo active-start\n${huge}\necho active-end`,
         checks: Array.from({ length: 40 }, (_, index) => ({
           name: `check-${index}`,
@@ -279,7 +278,6 @@ describe("rig MCP tools", () => {
     });
     for (let version = 2; version <= 7; version += 1) {
       await createRigVersion(client.db, workspaceId, rig.id, {
-        image: `registry.example.com/version-${version}-${huge}`,
         setupScript: `echo version-${version}\n${huge}`,
         checks: Array.from({ length: version }, (_, index) => ({
           name: `v${version}-check-${index}`,

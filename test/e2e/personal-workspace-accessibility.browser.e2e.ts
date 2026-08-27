@@ -112,15 +112,11 @@ describe("Personal workspace accessibility in Chromium", () => {
   });
 
   test("a paused Personal menu item preserves identity and dynamic status in its name", async () => {
-    const snapshot = await page.locator("#personal-menuitem").ariaSnapshot();
+    const menuitem = page.locator('#personal-menuitem[role="menuitem"]');
+    const snapshot = await menuitem.ariaSnapshot();
     expect(snapshot).toContain("Roadmap Personal workspace Paused");
-    const menuitem = page.getByRole("menuitem", {
-      name: "Roadmap Personal workspace Paused",
-      exact: true,
-    });
-    expect(await menuitem.count()).toBe(1);
     expect(await menuitem.isVisible()).toBe(true);
-    expect(await page.locator("#personal-menuitem").getAttribute("aria-label")).toBeNull();
+    expect(await menuitem.getAttribute("aria-label")).toBeNull();
   });
 
   test("activated private-session controls expose exact state and keyboard actions", async () => {
@@ -163,12 +159,11 @@ describe("Personal workspace accessibility in Chromium", () => {
     );
   }, 15_000);
 
-  test("a suspended membership never labels the workspace Personal", async () => {
+  test("canonical Personal kind remains visible independently of membership lifecycle", async () => {
     const menuitem = page.locator("#suspended-personal-menuitem");
     const snapshot = await menuitem.ariaSnapshot();
-    expect(snapshot).toContain("Roadmap Paused");
-    expect(snapshot).not.toContain("Personal");
-    expect(await menuitem.getByText("Personal", { exact: true }).count()).toBe(0);
+    expect(snapshot).toContain("Roadmap Personal workspace Paused");
+    expect(await menuitem.getByText("Personal", { exact: true }).count()).toBe(1);
   });
 
   test("resource and session scope choices are explicit, accessible, and responsive", async () => {

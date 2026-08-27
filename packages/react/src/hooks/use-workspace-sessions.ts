@@ -14,6 +14,8 @@ export type UseWorkspaceSessionsOptions = ClientOverride & {
   /** Refresh interval (ms) for fleet/manager views. Off by default. */
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
+  /** Optional shared causal clock invoked when each network read starts. */
+  beginRead?: (() => number) | undefined;
 };
 
 export type UseWorkspaceSessionsResult = {
@@ -29,6 +31,10 @@ export type UseWorkspaceSessionsResult = {
   nextCursor: string | null;
   loading: boolean;
   error: Error | null;
+  /** Monotonic revision of accepted authoritative list-page reads. */
+  readRevision: number;
+  /** Causal generation captured when the accepted network read started. */
+  readGeneration: number;
   refresh: () => Promise<void>;
 };
 
@@ -44,6 +50,9 @@ export function useWorkspaceSessions(
   const pinsOnly = options.pinsOnly;
   const archivedOnly = options.archivedOnly;
   const enabled = options.enabled ?? true;
+  const nextReadRevision = useRef(0);
+  const nextReadGeneration = useRef(0);
+  const beginRead = options.beginRead;
   const queryKey = [
     workspaceId,
     limit ?? "",
@@ -58,20 +67,34 @@ export function useWorkspaceSessions(
   useEffect(() => {
     previousQueryKey.current = queryKey;
   }, [queryKey]);
-  const load = useCallback(
-    async () => ({
+  const load = useCallback(async () => {
+    const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
+    const page = await client.listSessionPage(workspaceId, {
+      ...(limit !== undefined ? { limit } : {}),
+      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+      ...(cursor !== undefined ? { cursor } : {}),
+      ...(search !== undefined ? { search } : {}),
+      ...(pinsOnly ? { pinsOnly: true } : {}),
+      ...(archivedOnly ? { archivedOnly: true } : {}),
+    });
+    return {
       queryKey,
-      page: await client.listSessionPage(workspaceId, {
-        ...(limit !== undefined ? { limit } : {}),
-        ...(parentSessionId !== undefined ? { parentSessionId } : {}),
-        ...(cursor !== undefined ? { cursor } : {}),
-        ...(search !== undefined ? { search } : {}),
-        ...(pinsOnly ? { pinsOnly: true } : {}),
-        ...(archivedOnly ? { archivedOnly: true } : {}),
-      }),
-    }),
-    [client, workspaceId, limit, parentSessionId, cursor, search, pinsOnly, archivedOnly, queryKey],
-  );
+      page,
+      revision: ++nextReadRevision.current,
+      readGeneration,
+    };
+  }, [
+    beginRead,
+    client,
+    workspaceId,
+    limit,
+    parentSessionId,
+    cursor,
+    search,
+    pinsOnly,
+    archivedOnly,
+    queryKey,
+  ]);
   const state = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled,
@@ -100,6 +123,8 @@ export function useWorkspaceSessions(
         queryKeyTransition ||
         (state.data !== null && state.data.queryKey !== queryKey)),
     error: state.error,
+    readRevision: page ? (state.data?.revision ?? 0) : 0,
+    readGeneration: page ? (state.data?.readGeneration ?? 0) : 0,
     refresh: state.refresh,
   };
 }

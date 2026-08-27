@@ -1,11 +1,12 @@
-import type {
+import {
   NewSessionDraftOptions,
-  NewSessionSelectionHistory,
-  LatencyMode,
-  ReasoningEffort,
-  RepositoryResourceRef,
-  ResourceRef,
-  ToolRef,
+  type NewSessionDraftOptions as NewSessionDraftOptionsValue,
+  type NewSessionSelectionHistory,
+  type LatencyMode,
+  type ReasoningEffort,
+  type RepositoryResourceRef,
+  type ResourceRef,
+  type ToolRef,
 } from "@opengeni/contracts";
 import { stableJson } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
@@ -36,7 +37,7 @@ export type NewSessionDraftSnapshot = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
-  options: NewSessionDraftOptions;
+  options: NewSessionDraftOptionsValue;
 };
 
 export class NewSessionDraftConflictError extends Error {
@@ -55,7 +56,7 @@ export class NewSessionDraftAccessError extends Error {
   }
 }
 
-type StoredNewSessionDraftOptions = NewSessionDraftOptions & {
+type StoredNewSessionDraftOptions = NewSessionDraftOptionsValue & {
   /** JSONB-only compatibility marker; deliberately not part of public options. */
   toolsProvided?: boolean;
   /** Successful-create preference state, separate from transient draft edits. */
@@ -65,7 +66,7 @@ type StoredNewSessionDraftOptions = NewSessionDraftOptions & {
 const REMEMBERED_WORKING_DIR_MAX_LENGTH = 4096;
 
 function storedOptions(
-  options: NewSessionDraftOptions,
+  options: NewSessionDraftOptionsValue,
   toolsProvided: boolean,
   selectionHistory: NewSessionSelectionHistory = { projects: [] },
 ): StoredNewSessionDraftOptions {
@@ -118,7 +119,7 @@ export function newSessionDraftToolsProvided(row: NewSessionDraftRow): boolean {
   return options.toolsProvided === true || !Object.hasOwn(options, "toolsProvided");
 }
 
-export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessionDraftOptions {
+export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessionDraftOptionsValue {
   const options = { ...(row.sessionOptions as StoredNewSessionDraftOptions) };
   delete options.toolsProvided;
   delete options.selectionHistory;
@@ -157,7 +158,7 @@ export async function saveNewSessionDraftInTransaction(
     model: string;
     reasoningEffort: ReasoningEffort;
     latencyMode: LatencyMode;
-    options: NewSessionDraftOptions;
+    options: NewSessionDraftOptionsValue;
     /** API-key and delegated service subjects have no workspace-membership row. */
     requireWorkspaceMembership?: boolean;
     /**
@@ -407,16 +408,22 @@ export async function seedNewSessionDraftInTransaction(
     throw new NewSessionDraftConflictError(current.revision);
   }
 
-  const options = current.sessionOptions as StoredNewSessionDraftOptions;
+  const parsedOptions = NewSessionDraftOptions.safeParse(publicNewSessionDraftOptions(current));
+  const options = parsedOptions.success ? parsedOptions.data : {};
   const targetSandboxId =
     typeof options.targetSandboxId === "string" ? options.targetSandboxId : undefined;
-  const safeOptions: NewSessionDraftOptions = {
+  const safeOptions: NewSessionDraftOptionsValue = {
     ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
     ...(targetSandboxId ? { targetSandboxId } : {}),
     ...(targetSandboxId && typeof options.workingDir === "string"
       ? { workingDir: options.workingDir }
       : {}),
-    ...(options.variableSetId ? { variableSetId: options.variableSetId } : {}),
+    ...(options.variableSetIds && options.variableSetIds.length > 0
+      ? {
+          variableSetIds: options.variableSetIds,
+          variableSetId: options.variableSetIds[options.variableSetIds.length - 1],
+        }
+      : {}),
     ...(options.rigId ? { rigId: options.rigId } : {}),
   };
   const resources = (Array.isArray(current.resources) ? current.resources : []).flatMap((raw) => {

@@ -101,6 +101,24 @@ describe("timeline tip-follow browser regression", () => {
     }
   }, 30_000);
 
+  test("pinned live growth is visible by the next paint instead of creating camera debt", async () => {
+    await openHarness();
+    try {
+      await page.evaluate(() => window.tipFollowHarness!.lateGrow(300));
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          }),
+      );
+      expect((await page.evaluate(() => window.tipFollowHarness!.metrics())).distanceFromTip).toBe(
+        0,
+      );
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+
   test("wheel-up during the settle glide still unpins (echo counting stays honest)", async () => {
     await openHarness();
     try {

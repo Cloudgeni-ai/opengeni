@@ -235,6 +235,9 @@ const INTERACTION_INTERVENTION_OUTCOMES = new Set([
   "expired",
   "cancelled",
 ]);
+const WORKSPACE_INSIGHTS_RANGES = new Set(["today", "week", "month", "ytd"]);
+const WORKSPACE_INSIGHTS_OUTCOMES = new Set(["completed", "failed"]);
+const workspaceInsightsDurationHistogramBuckets = [0.05, 0.1, 0.25, 0.5, 1, 1.5, 2, 3, 5, 10, 30];
 const PUBLIC_STARTUP_DEPENDENCIES = new Set([
   "Modal private-registry image",
   "NATS",
@@ -1039,6 +1042,55 @@ export function interactionInterventionMetricObserver(
       }
     } catch {
       recordObserverFailure(observability, "interaction_intervention");
+    }
+  };
+}
+
+export type WorkspaceInsightsMetricObservation = {
+  range: string;
+  providerFiltered: boolean;
+  modelFiltered: boolean;
+  outcome: string;
+  durationMs: number;
+};
+
+/**
+ * Identity-free route timing for Workspace Insights. The dedicated two-second
+ * bucket is the service target; fixed enums and filter-presence flags keep
+ * tenant ids and caller-supplied provider/model values out of telemetry.
+ */
+export function workspaceInsightsMetricObserver(
+  observability: Observability | null | undefined,
+): (observation: WorkspaceInsightsMetricObservation) => void {
+  if (!observability) return () => undefined;
+  return (observation) => {
+    const range = boundedMetricEnum(WORKSPACE_INSIGHTS_RANGES, observation.range);
+    const outcome = boundedMetricEnum(WORKSPACE_INSIGHTS_OUTCOMES, observation.outcome);
+    const providerFilter = observation.providerFiltered ? "filtered" : "all";
+    const modelFilter = observation.modelFiltered ? "filtered" : "all";
+    const durationSeconds = boundedMetricDuration(observation.durationMs);
+    try {
+      observability.observeHistogram({
+        name: "opengeni_workspace_insights_request_duration_seconds",
+        help: "Workspace Insights route service duration by bounded range, filter presence, and outcome.",
+        buckets: workspaceInsightsDurationHistogramBuckets,
+        labels: {
+          range,
+          provider_filter: providerFilter,
+          model_filter: modelFilter,
+          outcome,
+        },
+        value: durationSeconds,
+      });
+      observability.info("Workspace Insights request measured", {
+        surface: "workspace_insights",
+        eventType: "request_latency",
+        route: "/v1/workspaces/:workspaceId/insights",
+        outcome,
+        durationMs: Math.round(durationSeconds * 1_000),
+      });
+    } catch {
+      recordObserverFailure(observability, "workspace_insights");
     }
   };
 }

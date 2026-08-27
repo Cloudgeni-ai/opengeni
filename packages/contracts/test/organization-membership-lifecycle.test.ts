@@ -19,6 +19,7 @@ describe("organization membership lifecycle contracts", () => {
     ).toEqual({
       id: "00000000-0000-4000-8000-000000000001",
       organizationId: "00000000-0000-4000-8000-000000000002",
+      organizationName: null,
       targetEmail: "existing@example.test",
       targetName: null,
       initialWorkspaceIds: [],
@@ -29,6 +30,7 @@ describe("organization membership lifecycle contracts", () => {
       acceptedMembershipId: null,
       createdAt: "2026-08-21T12:00:00.000Z",
       updatedAt: "2026-08-21T12:00:00.000Z",
+      delivery: null,
     });
   });
 });

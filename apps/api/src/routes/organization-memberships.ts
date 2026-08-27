@@ -1,5 +1,4 @@
 import {
-  AddOrganizationWorkspaceMemberRequest,
   AcceptOrganizationInvitationRequest,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
@@ -8,24 +7,28 @@ import {
   ListManagedOrganizationMembershipsResponse,
   ListOrganizationInvitationsPageQuery,
   ListOrganizationInvitationsPageResponse,
-  ListOrganizationMembersResponse,
+  ListOrganizationAdministrationMembersResponse,
   OrganizationAdministrationOverview,
   OrganizationInvitation,
+  OrganizationUserSetupDelivery,
   OrganizationMember,
   OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
   OrganizationSummary,
-  Permission,
+  OrganizationWorkspaceAccess,
+  OrganizationWorkspaceAccessMember,
+  PutOrganizationWorkspaceMemberRequest,
   RevokeOrganizationInvitationRequest,
+  RetryOrganizationUserSetupDeliveryRequest,
+  RevokeOrganizationWorkspaceMemberRequest,
+  RevokeOrganizationWorkspaceMemberResponse,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
   UpdateOrganizationPrivateSessionSettingsRequest,
   UpdateOrganizationRetentionPolicyRequest,
-  UpdateWorkspaceMemberRequest,
-  UpdateWorkspaceRequest,
+  UpdateOrganizationWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   Workspace,
-  WorkspaceMember,
 } from "@opengeni/contracts";
 import {
   getManagedSession,
@@ -35,32 +38,42 @@ import {
 import {
   acceptOrganizationInvitation,
   bindPendingOrganizationInvitationsForVerifiedEmail,
+  claimOrganizationUserSetupDelivery,
   createManagedOrganization,
-  createOrganizationSharedWorkspace,
+  createOrganizationWorkspace,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
-  getManagedUserProfilesByIds,
   getOrganizationAdministrationOverview,
+  getOrganizationInvitationForAdministration,
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
-  listOrganizationMembers,
+  listOrganizationAdministrationMembers,
   listOrganizationInvitations,
   listSelfOrganizationInvitations,
   nestedPostgresSqlState,
+  prepareOrganizationUserSetupDelivery,
   revokeOrganizationInvitation,
-  removeWorkspaceMember,
-  updateOrganizationSharedWorkspace,
+  settleOrganizationUserSetupDelivery,
+  putOrganizationWorkspaceMember,
+  revokeOrganizationWorkspaceMember,
+  updateOrganizationWorkspace,
   updateOrganizationSharedWorkspaceSettings,
   updateOrganizationMember,
   updateOrganizationName,
   updateOrganizationPrivateSessionSettings,
   updateOrganizationRetentionPolicy,
-  upsertOrganizationSharedWorkspaceMember,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+
+import {
+  assertOrganizationUserSetupDeliveryConfigured,
+  deriveOrganizationUserSetupToken,
+  organizationUserSetupPayloadDigest,
+  renderOrganizationUserSetupEmail,
+} from "../auth/organization-user-setup";
 
 const OrganizationId = z.string().uuid();
 const WorkspaceId = z.string().uuid();
@@ -78,6 +91,8 @@ async function requireManagedHuman(context: Context, deps: ApiRouteDeps) {
   }
   const session = await getManagedSession(context, deps.managedAuth, {
     db: deps.db,
+    sessionAdapter: deps.managedAuthSessionAdapter,
+    sessionSetMode: deps.settings.managedAuthSessionSetMode,
   });
   if (!session?.user) {
     throw new HTTPException(401, { message: "managed human session required" });
@@ -118,19 +133,6 @@ function rethrowMembershipError(error: unknown): never {
   throw error;
 }
 
-function parseWorkspacePermissions(permissions: string[]) {
-  const parsed = z.array(Permission).max(128).safeParse(permissions);
-  if (!parsed.success) {
-    throw new HTTPException(422, { message: "invalid workspace permissions" });
-  }
-  return parsed.data;
-}
-
-function normalizeAgentInstructions(value: string | null): string | null {
-  if (value === null) return null;
-  return value.trim() || null;
-}
-
 export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/organizations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
@@ -159,6 +161,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         email: session.user.email,
         name: session.user.name,
         emailVerified: session.user.emailVerified,
+        provisionFallbackOrganization: false,
       });
       return context.json(
         ListManagedOrganizationMembershipsResponse.parse({
@@ -166,6 +169,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         }),
       );
     } catch (error) {
+      // Not dead after 0348: a terminal-only membership is now a bounded EMPTY
+      // projection rather than a 42501, but the verified-email binder still
+      // raises 42501 when the session claims `emailVerified` and the durable
+      // `auth_users` row disagrees (an email change clears it), so this stays
+      // the correct deny for a stale-verification session.
       if (nestedPostgresSqlState(error) === "42501") {
         throw new HTTPException(403, {
           message: "organization membership is not active",
@@ -256,21 +264,17 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-    const payload = await parseBody(context, UpdateWorkspaceRequest);
+    const payload = await parseBody(context, UpdateOrganizationWorkspaceRequest);
     try {
       return context.json(
-        Workspace.parse(
-          await updateOrganizationSharedWorkspace(deps.db, {
+        OrganizationWorkspaceAccess.parse(
+          await updateOrganizationWorkspace(deps.db, {
             organizationId,
             workspaceId,
             actorSubjectId: subjectId,
-            ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),
-            ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
-            ...(payload.agentInstructions !== undefined
-              ? {
-                  agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
-                }
-              : {}),
+            name: payload.name.trim(),
+            expectedUpdatedAt: payload.expectedUpdatedAt,
+            operationId: payload.operationId,
           }),
         ),
       );
@@ -289,15 +293,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     const payload = await parseBody(context, CreateOrganizationWorkspaceRequest);
     try {
       return context.json(
-        Workspace.parse(
-          await createOrganizationSharedWorkspace(deps.db, {
+        OrganizationWorkspaceAccess.parse(
+          await createOrganizationWorkspace(deps.db, {
             organizationId,
             actorSubjectId: subjectId,
             name: payload.name.trim(),
-            ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
-            ...(payload.agentInstructions !== undefined
-              ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
-              : {}),
             operationId: payload.operationId,
           }),
         ),
@@ -336,121 +336,69 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     },
   );
 
-  app.post("/v1/organizations/:organizationId/workspaces/:workspaceId/members", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
-    const organizationId = parseId(
-      OrganizationId,
-      context.req.param("organizationId"),
-      "organization id",
-    );
-    const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-    const payload = await parseBody(context, AddOrganizationWorkspaceMemberRequest);
-    try {
-      const members = await listOrganizationMembers(deps.db, {
-        organizationId,
-        actorSubjectId: subjectId,
-      });
-      const target = members.find(
-        (member) => member.id === payload.organizationMembershipId && member.status === "active",
-      );
-      if (!target) {
-        throw new HTTPException(404, {
-          message: "active organization member not found",
-        });
-      }
-      const [profile] = await getManagedUserProfilesByIds(deps.db, [
-        target.subjectId.slice("user:".length),
-      ]);
-      return context.json(
-        WorkspaceMember.parse(
-          await upsertOrganizationSharedWorkspaceMember(deps.db, {
-            organizationId,
-            workspaceId,
-            actorSubjectId: subjectId,
-            targetOrganizationMembershipId: target.id,
-            subjectLabel: profile?.email ?? profile?.name ?? null,
-            role: payload.role ?? "member",
-            permissions: parseWorkspacePermissions(payload.permissions),
-            requireExisting: false,
-          }),
-        ),
-        201,
-      );
-    } catch (error) {
-      if (error instanceof HTTPException) throw error;
-      rethrowMembershipError(error);
-    }
-  });
-
-  app.patch(
-    "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:subjectId",
+  app.put(
+    "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId",
     async (context) => {
-      const { subjectId: actorSubjectId } = await requireManagedHuman(context, deps);
+      const { subjectId } = await requireManagedHuman(context, deps);
       const organizationId = parseId(
         OrganizationId,
         context.req.param("organizationId"),
         "organization id",
       );
       const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-      const targetSubjectId = decodeURIComponent(context.req.param("subjectId"));
-      const payload = await parseBody(context, UpdateWorkspaceMemberRequest);
+      const membershipId = parseId(
+        MembershipId,
+        context.req.param("membershipId"),
+        "membership id",
+      );
+      const payload = await parseBody(context, PutOrganizationWorkspaceMemberRequest);
       try {
-        const members = await listOrganizationMembers(deps.db, {
-          organizationId,
-          actorSubjectId,
-        });
-        const target = members.find(
-          (member) => member.subjectId === targetSubjectId && member.status === "active",
-        );
-        if (!target) {
-          throw new HTTPException(404, {
-            message: "active organization member not found",
-          });
-        }
-        const [profile] = await getManagedUserProfilesByIds(deps.db, [
-          target.subjectId.slice("user:".length),
-        ]);
         return context.json(
-          WorkspaceMember.parse(
-            await upsertOrganizationSharedWorkspaceMember(deps.db, {
+          OrganizationWorkspaceAccessMember.parse(
+            await putOrganizationWorkspaceMember(deps.db, {
               organizationId,
               workspaceId,
-              actorSubjectId,
-              targetOrganizationMembershipId: target.id,
-              subjectLabel: profile?.email ?? profile?.name ?? null,
-              ...(payload.role === undefined ? {} : { role: payload.role }),
-              permissions: payload.permissions,
-              requireExisting: true,
+              actorSubjectId: subjectId,
+              targetOrganizationMembershipId: membershipId,
+              access: payload,
             }),
           ),
         );
       } catch (error) {
-        if (error instanceof HTTPException) throw error;
         rethrowMembershipError(error);
       }
     },
   );
 
-  app.delete(
-    "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:subjectId",
+  app.post(
+    "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId/revoke",
     async (context) => {
-      const { subjectId: actorSubjectId } = await requireManagedHuman(context, deps);
+      const { subjectId } = await requireManagedHuman(context, deps);
       const organizationId = parseId(
         OrganizationId,
         context.req.param("organizationId"),
         "organization id",
       );
       const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-      const targetSubjectId = decodeURIComponent(context.req.param("subjectId"));
+      const membershipId = parseId(
+        MembershipId,
+        context.req.param("membershipId"),
+        "membership id",
+      );
+      const payload = await parseBody(context, RevokeOrganizationWorkspaceMemberRequest);
       try {
-        await removeWorkspaceMember(deps.db, {
-          accountId: organizationId,
-          workspaceId,
-          actorSubjectId,
-          targetSubjectId,
-          requireOrganizationSharedWorkspaceAdministration: true,
-        });
-        return context.body(null, 204);
+        return context.json(
+          RevokeOrganizationWorkspaceMemberResponse.parse(
+            await revokeOrganizationWorkspaceMember(deps.db, {
+              organizationId,
+              workspaceId,
+              actorSubjectId: subjectId,
+              targetOrganizationMembershipId: membershipId,
+              expectedUpdatedAt: payload.expectedUpdatedAt,
+              operationId: payload.operationId,
+            }),
+          ),
+        );
       } catch (error) {
         rethrowMembershipError(error);
       }
@@ -514,19 +462,42 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
+    // Bearer construction configuration must fail before the invitation
+    // commits. Provider outcomes are journaled durably after this boundary.
     try {
+      assertOrganizationUserSetupDeliveryConfigured(deps.settings, deps.managedEmailTransport);
+    } catch {
+      throw new HTTPException(503, {
+        message: "invited-user account setup delivery is not configured on this deployment",
+      });
+    }
+    try {
+      const invitation = OrganizationInvitation.parse(
+        await createOrganizationInvitation(deps.db, {
+          organizationId,
+          actorSubjectId: subjectId,
+          operationId: payload.operationId,
+          targetSubjectId: null,
+          targetEmail: payload.email.trim().toLowerCase(),
+          ...(payload.name === undefined ? {} : { targetName: payload.name }),
+          initialWorkspaceIds: payload.initialWorkspaceIds,
+          role: payload.role,
+          expiresAt: payload.expiresAt,
+        }),
+      );
+      await deliverOrganizationUserSetup(deps, {
+        organizationId,
+        actorSubjectId: subjectId,
+        invitationId: invitation.id,
+        invitationOperationId: payload.operationId,
+        operationId: payload.operationId,
+      });
       return context.json(
         OrganizationInvitation.parse(
-          await createOrganizationInvitation(deps.db, {
+          await getOrganizationInvitationForAdministration(deps.db, {
             organizationId,
             actorSubjectId: subjectId,
-            operationId: payload.operationId,
-            targetSubjectId: null,
-            targetEmail: payload.email.trim().toLowerCase(),
-            ...(payload.name === undefined ? {} : { targetName: payload.name }),
-            initialWorkspaceIds: payload.initialWorkspaceIds,
-            role: payload.role,
-            expiresAt: payload.expiresAt,
+            invitationId: invitation.id,
           }),
         ),
         201,
@@ -565,6 +536,45 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       rethrowMembershipError(error);
     }
   });
+
+  app.post(
+    "/v1/organizations/:organizationId/invitations/:invitationId/delivery/retry",
+    async (context) => {
+      const { subjectId } = await requireManagedHuman(context, deps);
+      const organizationId = parseId(
+        OrganizationId,
+        context.req.param("organizationId"),
+        "organization id",
+      );
+      const invitationId = parseId(
+        InvitationId,
+        context.req.param("invitationId"),
+        "invitation id",
+      );
+      const payload = await parseBody(context, RetryOrganizationUserSetupDeliveryRequest);
+      try {
+        assertOrganizationUserSetupDeliveryConfigured(deps.settings, deps.managedEmailTransport);
+      } catch {
+        throw new HTTPException(503, {
+          message: "invited-user account setup delivery is not configured on this deployment",
+        });
+      }
+      try {
+        return context.json(
+          OrganizationUserSetupDelivery.parse(
+            await deliverOrganizationUserSetup(deps, {
+              organizationId,
+              actorSubjectId: subjectId,
+              invitationId,
+              operationId: payload.operationId,
+            }),
+          ),
+        );
+      } catch (error) {
+        rethrowMembershipError(error);
+      }
+    },
+  );
 
   app.post("/v1/organization-invitations/:invitationId/accept", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
@@ -639,26 +649,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     try {
-      const members = await listOrganizationMembers(deps.db, {
-        organizationId,
-        actorSubjectId: subjectId,
-      });
-      const profiles = await getManagedUserProfilesByIds(
-        deps.db,
-        members.flatMap((member) =>
-          member.subjectId.startsWith("user:") ? [member.subjectId.slice("user:".length)] : [],
-        ),
-      );
-      const profileById = new Map(profiles.map((profile) => [profile.id, profile]));
       return context.json(
-        ListOrganizationMembersResponse.parse({
-          members: members.map((member) => {
-            const profile = profileById.get(member.subjectId.slice("user:".length));
-            return {
-              ...member,
-              name: profile?.name?.trim() || null,
-              email: profile?.email ?? null,
-            };
+        ListOrganizationAdministrationMembersResponse.parse({
+          members: await listOrganizationAdministrationMembers(deps.db, {
+            organizationId,
+            actorSubjectId: subjectId,
           }),
         }),
       );
@@ -738,5 +733,69 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     } catch (error) {
       rethrowMembershipError(error);
     }
+  });
+}
+
+async function deliverOrganizationUserSetup(
+  deps: ApiRouteDeps,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    invitationId: string;
+    invitationOperationId?: string;
+    operationId: string;
+  },
+) {
+  const claim = await claimOrganizationUserSetupDelivery(deps.db, input);
+  if (!claim.claimed) return claim.delivery;
+  const setup = await deriveOrganizationUserSetupToken(deps.settings, {
+    invitationId: claim.invitationId,
+    deliveryId: claim.delivery.id,
+  });
+  const message = renderOrganizationUserSetupEmail({
+    senderEmail: deps.managedEmailTransport.sender,
+    recipientEmail: claim.recipientEmail,
+    recipientName: claim.recipientName,
+    organizationName: claim.organizationName,
+    organizationRole: claim.organizationRole,
+    sharedWorkspaceAccess: claim.sharedWorkspaceAccess,
+    setupUrl: setup.url,
+  });
+  await prepareOrganizationUserSetupDelivery(deps.db, {
+    organizationId: input.organizationId,
+    actorSubjectId: input.actorSubjectId,
+    deliveryId: claim.delivery.id,
+    attemptId: claim.attemptId,
+    claimHolderId: claim.claimHolderId,
+    tokenDigest: setup.digest,
+    payloadDigest: await organizationUserSetupPayloadDigest({
+      ...message,
+      providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
+    }),
+    providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
+    providerIdempotencyRetentionSeconds: deps.managedEmailTransport.idempotency.retentionSeconds,
+  });
+  let outcome:
+    | { status: "sent"; providerMessageId: string | null }
+    | { status: "failed" | "outcome_unknown"; errorClass: string };
+  try {
+    outcome = await deps.managedEmailTransport.send({
+      kind: "organization_user_setup",
+      ...message,
+      idempotencyKey: claim.providerKey,
+    });
+  } catch {
+    outcome = { status: "outcome_unknown", errorClass: "transport_threw" };
+  }
+  return await settleOrganizationUserSetupDelivery(deps.db, {
+    organizationId: input.organizationId,
+    actorSubjectId: input.actorSubjectId,
+    deliveryId: claim.delivery.id,
+    attemptId: claim.attemptId,
+    claimHolderId: claim.claimHolderId,
+    outcome: outcome.status,
+    ...(outcome.status === "sent"
+      ? { providerMessageId: outcome.providerMessageId }
+      : { errorClass: outcome.errorClass }),
   });
 }

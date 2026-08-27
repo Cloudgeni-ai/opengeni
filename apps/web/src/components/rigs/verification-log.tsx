@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import type { RigChangeVerification, RigCheckResult } from "@/types";
 
 export function VerificationLog({ verification }: { verification: RigChangeVerification }) {
+  const platformCheckResults = verification.platformCheckResults ?? [];
   const checkResults = verification.checkResults ?? [];
   const passed = typeof verification.passed === "boolean" ? verification.passed : undefined;
   return (
@@ -38,18 +39,11 @@ export function VerificationLog({ verification }: { verification: RigChangeVerif
         </div>
       ) : null}
 
-      {checkResults.length > 0 ? (
-        <div className="grid gap-1.5">
-          <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">Checks</div>
-          {withOccurrenceKeys(
-            checkResults,
-            (result) =>
-              `${result.name}\u0000${result.command}\u0000${result.exitCode}\u0000${result.output}`,
-          ).map(({ key, item: result }) => (
-            <CheckResultRow key={key} result={result} />
-          ))}
-        </div>
+      {platformCheckResults.length > 0 ? (
+        <CheckResults label="Platform checks" results={platformCheckResults} />
       ) : null}
+
+      {checkResults.length > 0 ? <CheckResults label="Rig checks" results={checkResults} /> : null}
 
       {verification.log ? (
         <div className="grid gap-1.5">
@@ -62,9 +56,24 @@ export function VerificationLog({ verification }: { verification: RigChangeVerif
         </div>
       ) : null}
 
-      {checkResults.length === 0 && !verification.log ? (
+      {platformCheckResults.length === 0 && checkResults.length === 0 && !verification.log ? (
         <p className="text-xs text-fg-subtle">No verification output was captured for this run.</p>
       ) : null}
+    </div>
+  );
+}
+
+function CheckResults({ label, results }: { label: string; results: RigCheckResult[] }) {
+  return (
+    <div className="grid gap-1.5">
+      <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">{label}</div>
+      {withOccurrenceKeys(
+        results,
+        (result) =>
+          `${result.name}\u0000${result.command}\u0000${result.exitCode}\u0000${result.output}`,
+      ).map(({ key, item: result }) => (
+        <CheckResultRow key={key} result={result} />
+      ))}
     </div>
   );
 }

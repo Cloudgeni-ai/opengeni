@@ -23,18 +23,28 @@ const ignoreMarker = "<!-- docs-refs: ignore -->";
 const architecturePath = "docs/architecture.md";
 const architectureMaxWords = 12_000;
 const architectureMaxLineLength = 500;
+const architectureWorkspaceMapHeadings = [
+  "### 6.1 Applications",
+  "### 6.2 Packages",
+  "### 6.3 Examples",
+  "### 6.4 Rust agent and relay",
+] as const;
 const pathReferencePattern =
-  /^(?:apps|packages|scripts|docs|deploy|agent|\.github|\.agents)\/[A-Za-z0-9_./-]+$/;
+  /^(?:apps|examples|packages|scripts|docs|deploy|agent|\.github|\.agents)\/[A-Za-z0-9_./-]+$/;
 const packageReferencePattern = /@opengeni\/[a-z0-9-]+/g;
 const inlineCodePattern = /`([^`\n]+)`/g;
 const skippedPathFragments = ["*", "<", ">", "{", "$", "..."];
 const externalPackageAllowlist = new Set<string>();
+const workspaceRoots = await listWorkspaceRoots();
 
 const [files, workspaceFiles] = await Promise.all([
   listFiles(sourceRoots),
-  listFiles(["apps", "packages"]),
+  listFiles(workspaceRoots),
 ]);
-const workspacePackages = await listWorkspacePackages(workspaceFiles);
+const workspaceManifests = workspaceFiles.filter((file) =>
+  isWorkspaceManifest(file, workspaceRoots),
+);
+const workspacePackages = await listWorkspacePackages(workspaceManifests);
 const findings: Finding[] = [];
 
 for (const file of files.filter(isCurrentTierDoc)) {
@@ -50,7 +60,7 @@ for (const file of files.filter(isCurrentTierDoc)) {
 const architectureText = await Bun.file(architecturePath)
   .text()
   .catch(() => "");
-checkArchitectureMap(architectureText, workspaceFiles, findings);
+checkArchitectureMap(architectureText, workspaceManifests, findings);
 
 if (findings.length > 0) {
   for (const finding of findings) {
@@ -64,9 +74,6 @@ console.log("Docs reference freshness and architecture map guards passed.");
 async function listWorkspacePackages(packageFiles: string[]): Promise<Set<string>> {
   const names = new Set<string>();
   for (const file of packageFiles) {
-    if (!/^(?:apps|packages)\/[^/]+\/package\.json$/.test(file)) {
-      continue;
-    }
     const manifest = await Bun.file(file)
       .json()
       .catch(() => null);
@@ -117,22 +124,28 @@ function checkArchitectureMap(text: string, mapFiles: string[], out: Finding[]):
     });
   }
 
-  const workspaceMapStart = text.indexOf("### 6.1 Applications");
-  const workspaceMapEnd = text.indexOf("### 6.3 Rust agent and relay");
-  if (workspaceMapStart < 0 || workspaceMapEnd < 0 || workspaceMapEnd <= workspaceMapStart) {
+  const workspaceMapPositions = architectureWorkspaceMapHeadings.map((heading) =>
+    text.indexOf(heading),
+  );
+  const workspaceMapStart = workspaceMapPositions[0] ?? -1;
+  const workspaceMapEnd = workspaceMapPositions[workspaceMapPositions.length - 1] ?? -1;
+  if (
+    workspaceMapPositions.some((position) => position < 0) ||
+    workspaceMapPositions.some(
+      (position, index) => index > 0 && position <= (workspaceMapPositions[index - 1] ?? -1),
+    )
+  ) {
     out.push({
       file: architecturePath,
       line: 1,
       token: "§6 workspace map",
-      reason: "architecture app/package map headings are missing or out of order",
+      reason: "architecture workspace map headings are missing or out of order",
     });
     return;
   }
   const workspaceMap = text.slice(workspaceMapStart, workspaceMapEnd);
 
-  for (const manifest of mapFiles.filter((file) =>
-    /^(?:apps|packages)\/[^/]+\/package\.json$/.test(file),
-  )) {
+  for (const manifest of mapFiles) {
     const packagePath = manifest.slice(0, -"/package.json".length);
     if (workspaceMap.includes(`\`${packagePath}\``)) {
       continue;
@@ -141,9 +154,42 @@ function checkArchitectureMap(text: string, mapFiles: string[], out: Finding[]):
       file: architecturePath,
       line: 1,
       token: packagePath,
-      reason: "workspace app/package is missing from the architecture map",
+      reason: "workspace package is missing from the architecture map",
     });
   }
+}
+
+async function listWorkspaceRoots(): Promise<string[]> {
+  const manifest = await Bun.file("package.json")
+    .json()
+    .catch(() => null);
+  if (!manifest || typeof manifest !== "object" || !("workspaces" in manifest)) {
+    throw new Error("Root package.json does not declare workspaces");
+  }
+  const workspaces = manifest.workspaces;
+  if (!Array.isArray(workspaces) || workspaces.length === 0) {
+    throw new Error("Root package.json workspaces must be a non-empty array");
+  }
+  return workspaces.map((workspace) => {
+    if (typeof workspace !== "string") {
+      throw new Error("Root package.json workspace entries must be strings");
+    }
+    const match = /^([A-Za-z0-9_./-]+)\/\*$/.exec(workspace);
+    if (!match?.[1]) {
+      throw new Error(`Unsupported workspace pattern: ${workspace}`);
+    }
+    return match[1].replace(/^\.\//, "");
+  });
+}
+
+function isWorkspaceManifest(file: string, roots: string[]): boolean {
+  return roots.some((root) => {
+    const prefix = `${root}/`;
+    if (!file.startsWith(prefix)) {
+      return false;
+    }
+    return /^[^/]+\/package\.json$/.test(file.slice(prefix.length));
+  });
 }
 
 function checkReferences(

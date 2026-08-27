@@ -54,6 +54,13 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     if (!owned) return;
     const { admin, adminUrl, ownerUrl, ownerRole, appPassword } = owned;
     await applyBelow(ownerUrl, REPAIR);
+    // Current session adapters select the complete current sessions row while
+    // this fixture intentionally holds the database below 0343. Supply only
+    // the later column they need, then remove it before the real deferred
+    // migration chain runs so 0348 still owns creation and backfill.
+    await admin`
+      alter table sessions
+      add column variable_set_ids jsonb not null default '[]'::jsonb`;
     await provisionRoles(adminUrl, { appPassword, rlsStrategy: "force" });
 
     const [posture] = await admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
@@ -85,7 +92,8 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     const appUrl = new URL(ownerUrl);
     appUrl.username = "opengeni_app";
     appUrl.password = appPassword;
-    const app = postgres(appUrl.toString(), { max: 1, onnotice: () => undefined });
+    const openApp = () => postgres(appUrl.toString(), { max: 1, onnotice: () => undefined });
+    let app = openApp();
     const runtimeOwner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
     const db = createDb(adminUrl, { max: 1 });
 
@@ -140,6 +148,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     const prepare = async () =>
       await runtimeOwner.begin(async (tx) => {
         await tx`select
+          set_config('opengeni.session_variable_set_attachments_v1', '1', true),
           set_config('opengeni.account_id', ${accountId}, true),
           set_config('opengeni.workspace_id', ${sharedWorkspaceId}, true),
           set_config('opengeni.subject_id', ${subjectId}, true)`;
@@ -178,7 +187,22 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       where resource_kind = 'document' and resource_id = ${beforeDocument}`;
     expect(legacyAuthorities).toHaveLength(0);
 
+    const applicationSessionCount = async () => {
+      const [row] = await admin<Array<{ count: number }>>`
+        select count(*)::int as count
+        from pg_stat_activity
+        where datname = current_database()
+          and usename = 'opengeni_app'`;
+      return row!.count;
+    };
+    expect(await applicationSessionCount()).toBe(1);
+    // This historical 0343 replay now crosses maintenance migration 0348. Model
+    // the required application-writer drain instead of weakening its fail-closed guard.
+    await app.end({ timeout: 5 });
+    expect(await applicationSessionCount()).toBe(0);
+    await admin`alter table sessions drop column variable_set_ids`;
     await migrate(ownerUrl);
+    app = openApp();
 
     const afterDocument = crypto.randomUUID();
     const [authority] = await mint(afterDocument);

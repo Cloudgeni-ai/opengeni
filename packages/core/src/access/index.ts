@@ -18,6 +18,7 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
+import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
@@ -61,6 +62,7 @@ export type AccessDeps = {
   db: Database;
   settings: Settings;
   managedAuth?: ManagedAuth | null;
+  managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
 };
 
 export async function requireAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext> {
@@ -226,9 +228,15 @@ async function accessGrantAuthorization(
 /**
  * May this grant use the owner-only managed personal-workspace exception?
  *
- * A managed human's personal workspace has no `workspace_memberships` row
- * (migration 0219), so seams that fence on one must consult the
- * `organization_memberships.personal_workspace_id` pointer instead. `AGENTS.md`
+ * A managed human's personal workspace carries no `workspace_memberships` row,
+ * so seams that fence on one must consult the
+ * `organization_memberships.personal_workspace_id` pointer instead. That is a
+ * runtime property, not a schema one: migration 0219's `42501` is a
+ * precondition inside the provisioning function rather than a constraint, and
+ * the parity report records `personal_workspace_has_no_membership_row` as
+ * `basis: "runtime"` - its own term for something nothing in the schema
+ * prevents. It holds because every membership writer requires `members:manage`
+ * on the target, which a personal-workspace grant deliberately omits. `AGENTS.md`
  * scopes that exception tightly: it "derives an owner-only personal-workspace
  * grant only for the canonical managed-cookie (Better Auth) session", and
  * "Bearer/delegated principals, API keys, and account or organization
@@ -371,7 +379,11 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await getManagedSession(c, deps.managedAuth, { db: deps.db });
+    const session = await getManagedSession(c, deps.managedAuth, {
+      db: deps.db,
+      sessionSetMode: deps.settings.managedAuthSessionSetMode,
+      sessionAdapter: deps.managedAuthSessionAdapter,
+    });
     if (session?.user) {
       // THE canonical managed-cookie (Better Auth) branch, and the only place
       // that may stamp a context as such. Every `return` above this point leaves
@@ -382,6 +394,8 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         email: session.user.email,
         name: session.user.name,
         emailVerified: session.user.emailVerified,
+        provisionFallbackOrganization: false,
+        bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
       return context;

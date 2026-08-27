@@ -5287,8 +5287,8 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
 });
 
 describe("structuredToolTransportForTurn", () => {
-  const resolved = (kind: RegistryProviderKind) =>
-    ({ provider: { kind } }) as Parameters<typeof structuredToolTransportForTurn>[0];
+  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi = "responses") =>
+    ({ provider: { kind, api } }) as Parameters<typeof structuredToolTransportForTurn>[0];
 
   test("keeps OpenAI-hosted tool types off connected subscriptions and Gateway paths", () => {
     expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
@@ -5297,7 +5297,13 @@ describe("structuredToolTransportForTurn", () => {
     expect(structuredToolTransportForTurn(resolved("vercel-gateway-workspace"))).toBe(false);
   });
 
+  test("keeps hosted sandbox tools off every Chat Completions provider", () => {
+    expect(structuredToolTransportForTurn(resolved("anonymous", "chat"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("api-key", "chat"))).toBe(false);
+  });
+
   test("preserves hosted tool types for real Responses providers and the legacy path", () => {
+    expect(structuredToolTransportForTurn(resolved("anonymous"))).toBe(true);
     expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
     expect(structuredToolTransportForTurn(null)).toBe(true);
   });

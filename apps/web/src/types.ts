@@ -55,6 +55,7 @@ export type {
   OAuthStartRequest,
   OAuthStartResponse,
   OrganizationPrivateSessionSettings,
+  OrganizationRecoveryOverview,
   CreateWorkspaceRequest,
   Document as IndexedDocument,
   DocumentAuthorityKind,
@@ -192,6 +193,7 @@ export type TurnSubmission = {
   reasoningEffort?: ReasoningEffort;
   latencyMode?: LatencyMode;
   sandboxBackend?: SandboxBackend;
+  variableSetIds?: string[];
   variableSetId?: string;
   /**  use variableSetId */
   environmentId?: string;

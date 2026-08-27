@@ -1,5 +1,31 @@
 # @opengeni/react
 
+## 2.5.0
+
+### Minor Changes
+
+- 76d6396: Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, custom-role and old-image rolling-compatible least-privilege database posture, and UI projections that never use raw initial prompts as display names. Durable title fanout now requires a versioned subscriber-recovery capability: managed NATS and supported embedded brokers coalesce one Postgres catch-up after reconnect, while legacy buses without that contract fail readiness/worker startup before durable rows can be acknowledged.
+
+### Patch Changes
+
+- 85e4f3c: Release committed older-history pagination ownership when projected rows stay unchanged, while preserving the legacy public callback return compatibility.
+- d741f38: Make fresh session reads generation-aware, expose authoritative detail and list read revisions plus causal read generations, and keep retained pagination and independently polled pinned projections from overriding newer session channel authority.
+- Updated dependencies [d741f38]
+- Updated dependencies [b5071cf]
+  - @opengeni/sdk@2.5.0
+
+## 2.4.0
+
+### Patch Changes
+
+- c10f396: Keep one completed commentary reply visible when a tool-bearing turn settles without a final answer, including goal-wait holds, while preserving ordinary finals and avoiding disclosure duplicates.
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+  - @opengeni/sdk@2.4.0
+
 ## 2.3.0
 
 ### Patch Changes

@@ -8,6 +8,7 @@ import {
   planUnitTestProcesses,
   runBoundedTestProcesses,
   sourceMutatesSharedPostgresRole,
+  sourceRequiresExclusiveSharedPostgres,
   sourceUsesExplicitTestConcurrency,
   sourceUsesWallClockPerformanceAssertion,
 } from "./run-unit-shard";
@@ -105,6 +106,11 @@ describe("unit process planning", () => {
     ).toBe(true);
     expect(
       sourceMutatesSharedPostgresRole(
+        "let shared = null; shared = await acquireSharedTestDatabase('x'); await provisionRoles(shared!.adminUrl, {});",
+      ),
+    ).toBe(true);
+    expect(
+      sourceMutatesSharedPostgresRole(
         "await shared.admin.unsafe(`create role ${quotedRole} nologin`);",
       ),
     ).toBe(true);
@@ -120,6 +126,13 @@ describe("unit process planning", () => {
     ).toBe(false);
   });
 
+  test("recognizes only the explicit shared-PostgreSQL exclusivity marker", () => {
+    expect(
+      sourceRequiresExclusiveSharedPostgres("// opengeni:test-shared-postgres-exclusive"),
+    ).toBe(true);
+    expect(sourceRequiresExclusiveSharedPostgres("// shared postgres exclusive")).toBe(false);
+  });
+
   test("classifies generated and helper-driven shared-cluster role DDL in the real corpus", () => {
     const root = join(import.meta.dir, "../..");
     for (const path of [
@@ -129,12 +142,13 @@ describe("unit process planning", () => {
       "packages/db/test/session-activity-commit-gate.test.ts",
       "packages/db/test/migration-0120-durable-goal-wake.test.ts",
       "packages/db/test/migration-0138-sandbox-checkpoints.test.ts",
+      "packages/db/test/migration-0352-session-variable-set-attachments.test.ts",
     ]) {
       expect(sourceMutatesSharedPostgresRole(readFileSync(join(root, path), "utf8"))).toBe(true);
     }
   });
 
-  test("keeps explicit concurrency, wall clocks, and cluster roles out of the parallel pool", () => {
+  test("keeps explicit concurrency, wall clocks, shared PostgreSQL, and cluster roles out of the parallel pool", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-unit-process-plan-"));
     try {
       for (const path of ["batch-a.test.ts", "isolated-a.test.ts"]) {
@@ -148,6 +162,10 @@ describe("unit process planning", () => {
         join(root, "role.test.ts"),
         "const shared = await acquireSharedTestDatabase('x'); await provisionRoles(shared.adminUrl, {});\n",
       );
+      writeFileSync(
+        join(root, "shared-postgres.test.ts"),
+        "// opengeni:test-shared-postgres-exclusive\ntest('authority', () => {});\n",
+      );
       mkdirSync(join(root, "nested"));
       writeFileSync(
         join(root, "nested/concurrent.test.ts"),
@@ -155,7 +173,13 @@ describe("unit process planning", () => {
       );
       const plan = planUnitTestProcesses(
         root,
-        ["batch-a.test.ts", "nested/concurrent.test.ts", "timed.test.ts", "role.test.ts"],
+        [
+          "batch-a.test.ts",
+          "nested/concurrent.test.ts",
+          "timed.test.ts",
+          "shared-postgres.test.ts",
+          "role.test.ts",
+        ],
         ["isolated-a.test.ts"],
         1,
       );
@@ -167,6 +191,7 @@ describe("unit process planning", () => {
         ],
         explicitConcurrency: [{ files: ["nested/concurrent.test.ts"], isolated: false }],
         wallClockSensitive: [{ files: ["timed.test.ts"], isolated: false }],
+        sharedPostgresExclusive: [{ files: ["shared-postgres.test.ts"], isolated: false }],
         clusterRoleSensitive: [{ files: ["role.test.ts"], isolated: false }],
       });
     } finally {

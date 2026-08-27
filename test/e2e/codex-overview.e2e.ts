@@ -48,6 +48,7 @@ let detailedCredentialId: string;
 let priorNonConsumingAttemptId: string;
 let priorNonConsumingUpstreamKey: string;
 let available = true;
+const pageDiagnostics = new WeakMap<Page, string[]>();
 
 const provider = {
   consumeBodies: [] as Array<{ redeem_request_id: string; credit_id: string }>,
@@ -240,6 +241,55 @@ async function holdFirstAccountList(context: BrowserContext): Promise<() => void
   return release;
 }
 
+function trackPageDiagnostics(page: Page): void {
+  const diagnostics: string[] = [];
+  pageDiagnostics.set(page, diagnostics);
+  page.on("console", (message) => diagnostics.push(`console.${message.type()}: ${message.text()}`));
+  page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.stack ?? error.message}`));
+  page.on("requestfailed", (request) =>
+    diagnostics.push(
+      `requestfailed: ${request.method()} ${request.url()} (${request.failure()?.errorText ?? "unknown"})`,
+    ),
+  );
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      diagnostics.push(
+        `response: ${response.status()} ${response.request().method()} ${response.url()}`,
+      );
+    }
+  });
+}
+
+function failureDiagnostics(page: Page): string {
+  const diagnostics = pageDiagnostics.get(page) ?? [];
+  const failures = diagnostics.filter(
+    (diagnostic) =>
+      diagnostic.startsWith("pageerror:") ||
+      diagnostic.startsWith("requestfailed:") ||
+      diagnostic.startsWith("response:") ||
+      diagnostic.startsWith("console.error:"),
+  );
+  return (failures.length > 0 ? failures : diagnostics).slice(-10).join(" | ");
+}
+
+async function waitForSubscriptionsHeading(page: Page): Promise<void> {
+  try {
+    await page.locator("#codex-subscriptions-heading").waitFor({ timeout: 20_000 });
+  } catch (error) {
+    const [title, body] = await Promise.all([
+      page.title().catch(() => "<unavailable>"),
+      page
+        .locator("body")
+        .innerText()
+        .catch(() => "<unavailable>"),
+    ]);
+    throw new Error(
+      `Codex subscriptions heading did not become visible. URL: ${page.url()}; diagnostics: ${failureDiagnostics(page)}; title: ${title}; body: ${body.slice(0, 2_000)}`,
+      { cause: error },
+    );
+  }
+}
+
 async function expandAccountDetails(
   page: Page,
   name: string,
@@ -305,6 +355,7 @@ beforeAll(async () => {
       id: OWNER_USER_ID,
       name: "Codex quota Owner",
       email: `codex-quota-owner-${RUN_ID}@example.com`,
+      emailVerified: true,
     },
   });
   await client.db.execute(sql`
@@ -368,6 +419,35 @@ beforeAll(async () => {
     codexFetch: provider.fetch.bind(provider) as typeof fetch,
   });
 
+  const onboarding = await api.request("/v1/auth/organization-onboarding", {
+    method: "POST",
+    headers: { cookie: OWNER_COOKIE, "content-type": "application/json" },
+    body: JSON.stringify({
+      organizationName: "Codex quota organization",
+      operationId: crypto.randomUUID(),
+    }),
+  });
+  expect(onboarding.status).toBe(200);
+  const access = await api.request("/v1/access/me", {
+    headers: { cookie: OWNER_COOKIE },
+  });
+  expect(access.status).toBe(200);
+  const context = (await access.json()) as AccessContext;
+  const accountId = context.defaultAccountId!;
+  defaultAccountId = accountId;
+  // Self-service setup creates only the owner-only Personal workspace. This
+  // administrative scenario therefore creates the shared workspace it needs.
+  const workspace = await api.request("/v1/workspaces", {
+    method: "POST",
+    headers: { cookie: OWNER_COOKIE, "content-type": "application/json" },
+    body: JSON.stringify({
+      accountId,
+      name: "Codex quota workspace",
+    }),
+  });
+  expect(workspace.status).toBe(201);
+  workspaceId = ((await workspace.json()) as { id: string }).id;
+
   const extensionBuild = Bun.spawn(["bun", "run", "build"], {
     cwd: `${repoRoot}/apps/browser-extension`,
     env: {
@@ -416,13 +496,6 @@ beforeAll(async () => {
     },
   });
 
-  const access = await api.request("/v1/access/me", {
-    headers: { cookie: OWNER_COOKIE },
-  });
-  const context = (await access.json()) as AccessContext;
-  workspaceId = context.defaultWorkspaceId!;
-  const accountId = context.defaultAccountId!;
-  defaultAccountId = accountId;
   const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
   for (const [externalId, label] of [
     ["detailed", "Detailed account"],
@@ -510,6 +583,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     ]);
     const page = await context.newPage();
+    trackPageDiagnostics(page);
     await page.goto(
       `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
       {
@@ -517,7 +591,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     );
     const subscriptionsHeading = page.locator("#codex-subscriptions-heading");
-    await subscriptionsHeading.waitFor({ timeout: 20_000 });
+    await waitForSubscriptionsHeading(page);
     await subscriptionsHeading.scrollIntoViewIfNeeded();
     const initialAccountCount = await page
       .getByRole("article", { name: "Detailed account Codex subscription" })
@@ -618,6 +692,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     ]);
     const mobile = await mobileContext.newPage();
+    trackPageDiagnostics(mobile);
     await mobile.goto(
       `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
       {
@@ -625,7 +700,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     );
     const mobileSubscriptionsHeading = mobile.locator("#codex-subscriptions-heading");
-    await mobileSubscriptionsHeading.waitFor({ timeout: 20_000 });
+    await waitForSubscriptionsHeading(mobile);
     await mobileSubscriptionsHeading.scrollIntoViewIfNeeded();
     const initialMobileAccountCount = await mobile
       .getByRole("article", { name: "Detailed account Codex subscription" })

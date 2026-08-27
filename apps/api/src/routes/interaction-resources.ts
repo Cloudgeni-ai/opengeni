@@ -45,6 +45,7 @@ import {
   updateSiteAuthConnection,
 } from "@opengeni/db";
 import {
+  getManagedAuthRequestActorEpoch,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   requireAccessGrant,
@@ -74,6 +75,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
       context.req.raw.signal,
       {
         observability: deps.observability,
+        actorEpoch: getManagedAuthRequestActorEpoch(context.req.raw) ?? undefined,
         reauthorize: async () => {
           const freshGrant = await requireFreshAccessGrant(
             context,
@@ -98,6 +100,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
       context.req.raw.signal,
       {
         observability: deps.observability,
+        actorEpoch: getManagedAuthRequestActorEpoch(context.req.raw) ?? undefined,
         reauthorize: async () => {
           await requireFreshAccessGrant(context, deps, workspaceId, "sessions:read");
         },

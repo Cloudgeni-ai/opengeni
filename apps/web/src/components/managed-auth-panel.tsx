@@ -15,13 +15,23 @@ import {
 } from "@/lib/managed-auth-form";
 
 export function ManagedAuthPanel(props: {
-  emailVerificationRequired: boolean;
+  initialMode?: ManagedAuthMode;
+  allowedModes?: readonly ManagedAuthMode[];
+  emailVerificationRequired?: boolean;
+  presentation?: "card" | "embedded";
   onSubmit: (
     mode: "signin" | "signup",
     input: { name: string; email: string; password: string },
   ) => Promise<void>;
 }) {
-  const [mode, setMode] = useState<ManagedAuthMode>("signin");
+  const allowedModes = props.allowedModes ?? (["signin", "signup"] as const);
+  const requestedInitialMode = props.initialMode ?? "signin";
+  const [mode, setMode] = useState<ManagedAuthMode>(
+    allowedModes.includes(requestedInitialMode)
+      ? requestedInitialMode
+      : (allowedModes[0] ?? "signin"),
+  );
+  const emailVerificationRequired = props.emailVerificationRequired ?? true;
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -66,8 +76,12 @@ export function ManagedAuthPanel(props: {
     setBusy(true);
     try {
       await props.onSubmit(mode, { ...input, name: input.name || input.email });
-      if (mode === "signup" && props.emailVerificationRequired) {
-        setSuccessMessage(`We sent a verification link to ${input.email}.`);
+      if (mode === "signup") {
+        setSuccessMessage(
+          emailVerificationRequired
+            ? `We sent a verification link to ${input.email}.`
+            : "Account created. You can sign in now.",
+        );
       }
     } catch (error) {
       const failure = managedAuthFailure(mode, error);
@@ -107,10 +121,20 @@ export function ManagedAuthPanel(props: {
   }
 
   return (
-    <section className="flex flex-1 items-center justify-center px-4">
+    <section
+      className={
+        props.presentation === "embedded"
+          ? "w-full"
+          : "flex flex-1 items-center justify-center px-4"
+      }
+    >
       <form
         noValidate
-        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+        className={
+          props.presentation === "embedded"
+            ? "w-full"
+            : "w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
+        }
         onSubmit={(event) => {
           event.preventDefault();
           void submit();
@@ -129,24 +153,26 @@ export function ManagedAuthPanel(props: {
             </p>
           </div>
         </div>
-        <div className="mb-4 grid grid-cols-2 rounded-md border border-border bg-bg p-1">
-          <Button
-            type="button"
-            size="sm"
-            variant={mode === "signin" ? "secondary" : "ghost"}
-            onClick={() => selectMode("signin")}
-          >
-            Sign in
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={mode === "signup" ? "secondary" : "ghost"}
-            onClick={() => selectMode("signup")}
-          >
-            Sign up
-          </Button>
-        </div>
+        {allowedModes.length > 1 ? (
+          <div className="mb-4 grid grid-cols-2 rounded-md border border-border bg-bg p-1">
+            <Button
+              type="button"
+              size="sm"
+              variant={mode === "signin" ? "secondary" : "ghost"}
+              onClick={() => selectMode("signin")}
+            >
+              Sign in
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={mode === "signup" ? "secondary" : "ghost"}
+              onClick={() => selectMode("signup")}
+            >
+              Sign up
+            </Button>
+          </div>
+        ) : null}
         {mode === "signup" ? (
           <div className="mb-3">
             <Label htmlFor="managed-auth-name">Name</Label>
@@ -223,7 +249,7 @@ export function ManagedAuthPanel(props: {
             title={mode === "signup" ? "Couldn't create account" : "Couldn't sign in"}
             className="mt-4"
             action={
-              formActionMode && formActionMode !== mode ? (
+              formActionMode && formActionMode !== mode && allowedModes.includes(formActionMode) ? (
                 <Button
                   type="button"
                   variant="ghost"
@@ -239,7 +265,11 @@ export function ManagedAuthPanel(props: {
           </Notice>
         ) : null}
         {successMessage ? (
-          <Notice tone="success" title="Check your email" className="mt-4">
+          <Notice
+            tone="success"
+            title={emailVerificationRequired ? "Check your email" : "Account created"}
+            className="mt-4"
+          >
             {successMessage}
           </Notice>
         ) : null}
@@ -253,12 +283,12 @@ export function ManagedAuthPanel(props: {
         </Button>
         {mode === "signup" ? (
           <p className="mt-2 text-center text-xs text-fg-subtle">
-            {props.emailVerificationRequired
+            {emailVerificationRequired
               ? "We'll email you a link before you can sign in."
               : "This local stack signs you in immediately; no verification email is sent."}
           </p>
         ) : null}
-        {props.emailVerificationRequired ? (
+        {emailVerificationRequired ? (
           <Button
             type="button"
             variant="ghost"

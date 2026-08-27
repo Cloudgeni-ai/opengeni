@@ -49,22 +49,30 @@ side-effectful agents while owning the durable control plane around them:
 identity, tenancy, session state, human intervention, long-running goals,
 recovery, compute routing, files, artifacts, usage, and observability.
 
-Public clients communicate through the HTTP API. Agent execution happens in a
-worker, either inside a provisioned sandbox or directly on a Connected Machine.
-Postgres holds durable truth, Temporal coordinates long-lived work, and NATS
-provides reconstructible live fanout plus Connected Machine transport.
+Public control and authorization begin at the HTTP API. After the API grants a
+bounded capability, high-bandwidth browser data planes may connect directly to
+object storage, a sandbox/provider or relay stream, Codex WebRTC, or the AI
+Gateway realtime WebSocket. Agent execution happens in a worker, either inside
+a provisioned sandbox or directly on a Connected Machine. Postgres holds durable
+truth, Temporal coordinates long-lived work, and NATS provides reconstructible
+live fanout plus Connected Machine transport.
 
 The product has several deliberately separate surfaces:
 
 - **Sessions and turns** provide Send, Steer, Pause, Resume, Cancel, queues,
-  goals, approvals, structured human input, and durable history.
+  goals, approvals, structured human input, durable semantic titles, and
+  durable history.
+- **Browser voice** has two separate boundaries: realtime conversation is a
+  coexisting transport for an ordinary session, while composer transcription
+  produces an editable draft that reaches session truth only through Send.
 - **Compute** supports provisioned sandbox providers and user-owned Connected
   Machines without changing the session model.
 - **Tools and integrations** combine first-party MCP, per-session MCP servers,
   workspace capabilities, Codemode, connections, and provider-specific
   adapters under explicit authority.
-- **Knowledge and governance** keep Documents/RAG, Memory, preferences,
-  instructions, company profile, and learning policy as distinct authorities.
+- **Knowledge and governance** keep Documents/RAG, Agent Knowledge, typed
+  Memory, preferences, instructions, organization identity, and learning policy
+  as distinct authorities.
 - **Artifacts and interaction** support retained files, generated media,
   editable documents/spreadsheets/presentations, browser control, computer use,
   terminals, and published outputs.
@@ -181,7 +189,7 @@ The similar-looking stores are not interchangeable:
 | `session_system_updates` | Durable machine-origin inputs such as child results and schedules | Synthetic human messages |
 | `session_goals` | The standing objective and continuation obligation | Workflow-local state |
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
-| Documents, Memory, Knowledge, preferences, policies, and company profile | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
+| Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
 Accepted conversation and tool content is preserved at its canonical boundary;
 OpenGeni does not centrally rewrite arbitrary text because it resembles a
@@ -213,6 +221,11 @@ worker process, a connection row, or provenance metadata. A turn freezes its
 initiating principal and the authority snapshots needed by later execution and
 recovery.
 
+Managed browser login slots are explicit session-set actors, not tenant hints.
+Organization recovery custody is a separate quorum and actor-fenced authority;
+ordinary organization administration cannot transfer immutable workspace
+ownership or bypass recovery settlement.
+
 Personal connections and resources require the exact human authority that made
 them executable. Workspace-owned credentials remain workspace-scoped and are
 revalidated at use. An embedding host may narrow access through an explicit
@@ -221,6 +234,8 @@ port; it cannot grant access that OpenGeni denied.
 Canonical: `packages/core/src/access/index.ts`,
 `packages/core/src/session-authorization.ts`, `packages/db/src/runtime-posture.ts`,
 [`organization-tenancy.md`](organization-tenancy.md),
+[`organization-recovery.md`](organization-recovery.md),
+[`browser-login-session-sets.md`](browser-login-session-sets.md),
 [`agent-session-authority.md`](agent-session-authority.md), and
 [`credentials.md`](credentials.md).
 
@@ -329,6 +344,8 @@ flowchart LR
   Sandbox["Provisioned sandbox"]
   Machine["Connected Machine"]
   NATS(["NATS\nlive fanout + machine transport"])
+  Relay(["Relay\nConnected Machine pixels + terminal"])
+  Realtime(["Realtime provider\nCodex WebRTC / Gateway WebSocket"])
   Objects[("Object storage\nfiles and retained bytes")]
 
   Client --> API
@@ -346,6 +363,12 @@ flowchart LR
   API --> Client
   API --> Objects
   Worker --> Objects
+  API -. grants / negotiates .-> Realtime
+  Client <--> Realtime
+  Client <-. signed object transfer .-> Objects
+  Client <-. authorized sandbox stream .-> Sandbox
+  Client <--> Relay
+  Relay <--> Machine
 ```
 
 ### 4.1 Request and event path
@@ -373,16 +396,23 @@ flowchart LR
 The API, Postgres, Temporal, and worker form the durable control plane. NATS
 session fanout is a live projection of that control state. Connected Machine
 commands also cross NATS, but authorization and durable ownership are decided
-before transport.
+before transport. Direct browser data planes are established only from a
+short-lived API-authorized grant and never become an independent source of
+session, tenant, or provider authority.
 
 Large or high-frequency bytes take separate paths:
 
 - files, generated media, recordings, and retained evidence use object storage;
 - terminal and desktop streams use the sandbox/provider transport or the
   dedicated relay edge for Connected Machines;
+- realtime voice uses Codex WebRTC or the AI Gateway WebSocket while durable
+  ownership, ledger, delegation, context, and recovery remain in OpenGeni;
 - model token and tool events use the session event stream, not Temporal; and
 - editable artifacts use their typed artifact authority and kernels rather
   than treating Office files or rendered output as mutable truth.
+
+Canonical realtime behavior is in [`run-lifecycle.md`](run-lifecycle.md) and
+the public transport surface is in [`../packages/sdk/README.md`](../packages/sdk/README.md).
 
 ### 4.3 Dependency direction
 
@@ -506,10 +536,15 @@ without provisioning a box or contacting a Connected Machine. Once a tool
 needs filesystem, process, Git, browser, or computer access, routing resolves
 the exact current target and validates its epoch and authority.
 
+Explicit Variable Sets are ordered from low to high precedence and are frozen
+for execution. Reconfiguration is a quiescent session-control mutation that
+rotates managed compute rather than hot-swapping credentials into active work.
+
 Canonical: [`model-providers.md`](model-providers.md),
 [`mcp-surfaces.md`](mcp-surfaces.md),
 [`session-mcp-servers.md`](session-mcp-servers.md), and
-[`connected-machines.md`](connected-machines.md).
+[`connected-machines.md`](connected-machines.md). Variable Set lifecycle and
+ordering are canonical in [`variable-sets.md`](variable-sets.md).
 
 ### 5.6 Files, knowledge, and artifacts
 
@@ -520,10 +555,12 @@ artifact-retention fences; provider bytes do not become permanent prompt
 history.
 
 Documents/RAG and scoped Knowledge are retrieval systems whose authority is
-checked before ranking. Workspace Memory and governance sources are separate
-prompt/retrieval authorities. Editable documents, spreadsheets, and
-presentations use a canonical artifact model with native and WASM kernels;
-Office formats are import/export forms, not the mutable source of truth.
+checked before ranking. Agent Knowledge is the product view over workspace
+instructions, Skills, accepted Memory, organization knowledge, and related
+governance sources; those underlying authorities remain separate. Editable
+documents, spreadsheets, and presentations use a canonical artifact model with
+native and WASM kernels; Office formats are import/export forms, not the mutable
+source of truth.
 
 Canonical: [`knowledge-retrieval.md`](knowledge-retrieval.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),
@@ -600,7 +637,13 @@ metadata.
 | `packages/deployment` | `@opengeni/deployment` | Typed deployment profiles, preflight, plans, and generated runtime artifacts |
 | `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers |
 
-### 6.3 Rust agent and relay
+### 6.3 Examples
+
+| Path | Package | Owns |
+| --- | --- | --- |
+| `examples/northstar-support` | `@opengeni/example-northstar-support` | Executable standalone-product integration reference with a server-side SDK proxy, authenticated product MCP, React embedding, and independent event streams |
+
+### 6.4 Rust agent and relay
 
 `agent/` is the Cargo workspace for Connected Machine execution and the relay
 edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
@@ -614,13 +657,12 @@ it is stateless beyond active channels and does not own session or lease truth.
 Canonical: [`../agent/README.md`](../agent/README.md) and
 [`connected-machines.md`](connected-machines.md).
 
-### 6.4 Deployment, examples, docs, scripts, and tests
+### 6.5 Deployment, docs, scripts, and tests
 
 - `deploy/helm/opengeni` owns the Helm chart for OpenGeni services and
   integration resources.
 - `deploy/terraform/` contains cloud-specific infrastructure roots;
   `deploy/stacks/` wraps external dependencies.
-- `examples/northstar-support` is the executable product-integration example.
 - `docs/` contains current topic docs and point-in-time records; its canonical
   index is [`README.md`](README.md).
 - `scripts/` owns development, static checks, release mechanics, deployment
@@ -735,6 +777,11 @@ can exist before a box does. The lease tracks provider identity, epoch,
 holders, workspace mutation generation, archive/recovery state, and teardown
 authority. The active session pointer selects an effective target without
 rewriting the session's durable home policy.
+
+Rigs layer versioned setup and checks on the deployment-owned platform sandbox
+base; they cannot replace that base image. A verified provider-native Rig image
+is only a physical cold-create optimization and never changes the logical lease
+image, workspace archive, session snapshot, or credential authority.
 
 Sandbox snapshots and provider-native checkpoints are recovery artifacts, not
 session history. Capturing a workspace requires proof that no unaccounted writer
@@ -877,6 +924,8 @@ This index intentionally routes at subsystem granularity. Use
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
 | Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
+| Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
+| Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 
 ### Contracts, access, and persistence
 
@@ -885,10 +934,12 @@ This index intentionally routes at subsystem granularity. Use
 | Wire type, enum, permission, or event | `packages/contracts/src/` | §3.7 and contract-parity tests |
 | Setting, default, or boot validation | `packages/config/src/index.ts` | [`deployment.md`](deployment.md) when operator-visible |
 | Authentication or workspace grants | `packages/core/src/access/index.ts`, `apps/api/src/http/auth.ts` | [`../SECURITY.md`](../SECURITY.md) |
+| Managed browser login actors or session sets | `packages/contracts/src/managed-auth-session-sets.ts`, `packages/core/src/managed-auth-session-sets.ts`, `apps/api/src/routes/managed-auth-session-sets.ts` | [`browser-login-session-sets.md`](browser-login-session-sets.md) |
 | Agent access to peer sessions | `packages/core/src/session-authorization.ts`, `packages/db/src/session-control.ts` | [`agent-session-authority.md`](agent-session-authority.md) |
 | Schema, repository, RLS, or migration | `packages/db/src/`, `packages/db/drizzle/` | [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) |
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |
-| Variable sets or secret reads | `packages/core/src/`, `packages/db/src/`, `apps/api/src/routes/` | [`variable-sets.md`](variable-sets.md) |
+| Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
+| Variable Sets, ordered session attachment, or secret reads | `packages/core/src/`, `packages/db/src/`, `apps/api/src/routes/` | [`variable-sets.md`](variable-sets.md) |
 | Connections and credential ownership | `apps/api/src/routes/connections.ts`, `packages/db/src/connection-token-resolver.ts` | [`credentials.md`](credentials.md) |
 
 ### Models, tools, and compute
@@ -911,10 +962,12 @@ This index intentionally routes at subsystem granularity. Use
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Documents, RAG, or Knowledge retrieval | `packages/documents/`, `apps/api/src/routes/documents.ts` | [`knowledge-retrieval.md`](knowledge-retrieval.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
-| Memory, preferences, instructions, profile, or learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
+| Agent Knowledge, Memory, preferences, instructions, organization identity, or learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
-| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/github/` | [`integrations-design.md`](integrations-design.md) and the provider doc |
+| Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
+| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review-pack.md`](pr-review-pack.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK or React public surface | `packages/sdk/src/`, `packages/react/src/` | Package READMEs and §3.10 |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
@@ -936,8 +989,8 @@ This index intentionally routes at subsystem granularity. Use
 A stale architecture map is a defect because it sends maintainers to the wrong
 authority. Update this file in the same change when you:
 
-- add, remove, or rename an application, package, sandbox backend, or major
-  process;
+- add, remove, or rename an application, package, example workspace, sandbox
+  backend, or major process;
 - move a responsibility across package or process boundaries;
 - change a cross-cutting invariant in §3;
 - change the control/data-flow shape in §4 or the session/turn/attempt spine in

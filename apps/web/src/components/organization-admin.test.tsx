@@ -87,9 +87,8 @@ function member(
     role,
     status: "active",
     authorizationRevision: 1,
-    personalWorkspaceId: null,
+    sharedWorkspaceAccess: [],
     revokedAt: null,
-    personalRetentionUntil: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -99,6 +98,7 @@ function invitation(role: OrganizationInvitation["role"]): OrganizationInvitatio
   return {
     id: `invite-${role}`,
     organizationId: identityA.organizationId,
+    organizationName: "Organization A",
     targetEmail: `${role}@example.test`,
     targetName: null,
     initialWorkspaceIds: [],
@@ -109,6 +109,7 @@ function invitation(role: OrganizationInvitation["role"]): OrganizationInvitatio
     acceptedMembershipId: null,
     createdAt: timestamp,
     updatedAt: timestamp,
+    delivery: null,
   };
 }
 
@@ -130,6 +131,26 @@ function overview(identity: OrganizationAdminIdentity): OrganizationAdministrati
       createdAt: timestamp,
       updatedAt: timestamp,
     },
+    roles: [
+      {
+        role: "viewer",
+        label: "Viewer",
+        description: "Can read workspace content",
+        permissions: ["workspace:read"],
+      },
+      {
+        role: "member",
+        label: "Member",
+        description: "Can work in this workspace",
+        permissions: ["workspace:read", "sessions:create"],
+      },
+      {
+        role: "admin",
+        label: "Workspace administrator",
+        description: "Can manage workspace content and access",
+        permissions: ["workspace:read", "workspace:admin", "members:manage"],
+      },
+    ],
     workspaces: [
       {
         id: "workspace-company",
@@ -140,21 +161,31 @@ function overview(identity: OrganizationAdminIdentity): OrganizationAdministrati
         members: [
           {
             membershipId: "workspace-member-a",
+            organizationMembershipId: "organization-member-a",
             subjectId: "user:alice",
+            name: "Alice Example",
+            email: "alice@example.com",
             subjectLabel: "Alice Example",
             principalKind: "human",
+            organizationRole: "member",
             role: "admin",
             permissions: ["workspace:read", "sessions:read"],
             createdAt: timestamp,
+            updatedAt: timestamp,
           },
           {
             membershipId: "workspace-service-a",
+            organizationMembershipId: null,
             subjectId: "service:deploy",
+            name: null,
+            email: null,
             subjectLabel: "Deployment automation",
             principalKind: "service",
-            role: "service",
+            organizationRole: null,
+            role: "custom",
             permissions: ["workspace:read"],
             createdAt: timestamp,
+            updatedAt: timestamp,
           },
         ],
       },
@@ -349,7 +380,7 @@ describe("organization administration component fences", () => {
     const onOrganizationChanged = mock(() => undefined);
     const client = {
       getOrganizationAdministrationOverview,
-      listOrganizationMembers: mock(async () => ({
+      listOrganizationAdministrationMembers: mock(async () => ({
         members: [member(identityA, "overview")],
       })),
       updateOrganizationName,
@@ -369,7 +400,6 @@ describe("organization administration component fences", () => {
             accessibleWorkspaceIds={new Set(["workspace-company"])}
             onOrganizationChanged={onOrganizationChanged}
             onCreateWorkspace={async () => undefined}
-            onCreateOrganization={async () => undefined}
           />
         </StrictMode>,
       );
@@ -409,7 +439,7 @@ describe("organization administration component fences", () => {
       accountId: identityA.organizationId,
       name: "Company systems",
     }));
-    const updateOrganizationWorkspaceMember = mock(async () => ({
+    const putOrganizationWorkspaceMember = mock(async () => ({
       subjectId: "user:alice",
       subjectLabel: "Alice Example",
       role: "admin",
@@ -418,11 +448,11 @@ describe("organization administration component fences", () => {
     }));
     const client = {
       getOrganizationAdministrationOverview: mock(async () => overview(identityA)),
-      listOrganizationMembers: mock(async () => ({
+      listOrganizationAdministrationMembers: mock(async () => ({
         members: [member(identityA, "overview")],
       })),
       updateOrganizationWorkspace,
-      updateOrganizationWorkspaceMember,
+      putOrganizationWorkspaceMember,
     } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -438,7 +468,6 @@ describe("organization administration component fences", () => {
           accessibleWorkspaceIds={new Set()}
           onOrganizationChanged={() => undefined}
           onCreateWorkspace={async () => undefined}
-          onCreateOrganization={async () => undefined}
         />,
       );
     });
@@ -454,7 +483,11 @@ describe("organization administration component fences", () => {
     expect(updateOrganizationWorkspace).toHaveBeenCalledWith(
       identityA.organizationId,
       "workspace-company",
-      { name: "Company systems" },
+      {
+        name: "Company systems",
+        expectedUpdatedAt: timestamp,
+        operationId: expect.any(String),
+      },
     );
 
     const access = container.querySelector<HTMLSelectElement>(
@@ -470,11 +503,15 @@ describe("organization administration component fences", () => {
       await Promise.resolve();
     });
     await flush();
-    expect(updateOrganizationWorkspaceMember).toHaveBeenCalledWith(
+    expect(putOrganizationWorkspaceMember).toHaveBeenCalledWith(
       identityA.organizationId,
       "workspace-company",
-      "user:alice",
-      { role: "admin", permissions: ["workspace:admin"] },
+      "organization-member-a",
+      {
+        role: "admin",
+        expectedUpdatedAt: timestamp,
+        operationId: expect.any(String),
+      },
     );
 
     await act(async () => root.unmount());
@@ -497,7 +534,7 @@ describe("organization administration component fences", () => {
     });
     const client = {
       getOrganizationAdministrationOverview,
-      listOrganizationMembers: mock(async () => ({
+      listOrganizationAdministrationMembers: mock(async () => ({
         members: [member(identityA, "overview")],
       })),
       updateOrganizationName,
@@ -516,7 +553,6 @@ describe("organization administration component fences", () => {
           accessibleWorkspaceIds={new Set()}
           onOrganizationChanged={() => undefined}
           onCreateWorkspace={async () => undefined}
-          onCreateOrganization={async () => undefined}
         />,
       );
     });
@@ -546,51 +582,6 @@ describe("organization administration component fences", () => {
     container.remove();
   });
 
-  test("lets an ordinary member create another organization and safely retries it", async () => {
-    const uncertain = Object.assign(new Error("response lost"), {
-      outcomeUnknown: true,
-    });
-    const onCreateOrganization = mock(async (_name: string, _operationId: string) => {
-      if (onCreateOrganization.mock.calls.length === 1) throw uncertain;
-    });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-
-    await act(async () => {
-      root.render(
-        <OrganizationOverviewSection
-          client={{} as OpenGeniCoreClient}
-          identity={identityA}
-          actorRole="member"
-          managedSession
-          accessibleWorkspaceIds={new Set()}
-          onOrganizationChanged={() => undefined}
-          onCreateWorkspace={async () => undefined}
-          onCreateOrganization={onCreateOrganization}
-        />,
-      );
-    });
-
-    expect(container.textContent).toContain("Create another organization");
-    expect(container.textContent).toContain("does not allow you to change this organization");
-    const nameInput = container.querySelector<HTMLInputElement>(
-      'input[aria-label="New organization name"]',
-    );
-    if (!nameInput) throw new Error("Missing new organization name input");
-    await enterText(nameInput, "Independent team");
-    await act(async () => button(container, "Create").click());
-    await flush();
-    await act(async () => button(container, "Create").click());
-    await flush();
-
-    expect(onCreateOrganization).toHaveBeenCalledTimes(2);
-    expect(onCreateOrganization.mock.calls[1]?.[1]).toBe(onCreateOrganization.mock.calls[0]?.[1]);
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
   test("reports a failed account-menu refresh without misreporting a committed rename", async () => {
     const getOrganizationAdministrationOverview = mock(async () => overview(identityA));
     const updateOrganizationName = mock(async () => ({
@@ -600,7 +591,7 @@ describe("organization administration component fences", () => {
     }));
     const client = {
       getOrganizationAdministrationOverview,
-      listOrganizationMembers: mock(async () => ({
+      listOrganizationAdministrationMembers: mock(async () => ({
         members: [member(identityA, "overview")],
       })),
       updateOrganizationName,
@@ -619,7 +610,6 @@ describe("organization administration component fences", () => {
           accessibleWorkspaceIds={new Set()}
           onOrganizationChanged={() => Promise.reject(new Error("access refresh unavailable"))}
           onCreateWorkspace={async () => undefined}
-          onCreateOrganization={async () => undefined}
         />,
       );
     });
@@ -656,7 +646,7 @@ describe("organization administration component fences", () => {
       name: "Second Owner",
       email: "owner-2@example.com",
     };
-    const listOrganizationMembers = mock(async () => ({
+    const listOrganizationAdministrationMembers = mock(async () => ({
       members: [actor, secondOwner],
     }));
     const updateOrganizationMember = mock(async () => ({
@@ -666,7 +656,7 @@ describe("organization administration component fences", () => {
     }));
     const onAuthorityChanged = mock(() => undefined);
     const client = {
-      listOrganizationMembers,
+      listOrganizationAdministrationMembers,
       listOrganizationInvitationsForOrganization: async () => ({
         invitations: [],
         nextCursor: null,
@@ -696,7 +686,8 @@ describe("organization administration component fences", () => {
     });
     await flush();
 
-    expect(listOrganizationMembers.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(listOrganizationAdministrationMembers.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("No organization invitations yet.");
     expect(container.textContent).toContain("Second Owner");
     const roleSelect = container.querySelector<HTMLSelectElement>(
       'select[aria-label="Organization role for Test person (you)"]',
@@ -787,8 +778,18 @@ describe("organization administration component fences", () => {
     });
     const createOrganizationInvitation = mock(() => createResult.promise);
     const revokeOrganizationInvitation = mock(() => revokeResult.promise);
+    const requestJson = mock(async (_method: string, _path: string, _request: unknown) => ({
+      id: "delivery-created",
+      state: "sent" as const,
+      attemptCount: 1,
+      revision: 3,
+      errorClass: null,
+      retryState: "unavailable" as const,
+      sentAt: timestamp,
+      updatedAt: timestamp,
+    }));
     const client = {
-      listOrganizationMembers: async () => ({
+      listOrganizationAdministrationMembers: async () => ({
         members: [
           member(identityA, "actor"),
           { ...member(identityA, "owner-2"), subjectId: "user:owner-2" },
@@ -801,6 +802,7 @@ describe("organization administration component fences", () => {
       }),
       createOrganizationInvitation,
       revokeOrganizationInvitation,
+      requestJson,
     } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -844,10 +846,18 @@ describe("organization administration component fences", () => {
     await flush();
     expect(container.textContent).toContain("new-member@example.test");
     expect(container.textContent).toContain(
-      "Invitation created for new-member@example.test. It is available in OpenGeni.",
+      "Invitation recorded for new-member@example.test; delivery has not started.",
     );
-    expect(toastSuccess).toHaveBeenCalledWith("Organization invitation created");
+    expect(toastSuccess).toHaveBeenCalledWith("Organization invitation recorded");
     expect(button(container, "Load more invitations").disabled).toBe(false);
+    const sendInvitation = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Send invitation to new-member@example.test"]',
+    );
+    expect(sendInvitation).not.toBeNull();
+    await act(async () => sendInvitation?.click());
+    await flush();
+    expect(requestJson).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("Email sent");
 
     await act(async () => button(container, "Revoke invitation for member@example.test").click());
     await act(async () => button(container, "Revoke invitation").click());
@@ -879,7 +889,7 @@ describe("organization administration component fences", () => {
     const acceptOrganizationInvitation = mock(() => acceptResult.promise);
     const onAuthorityChanged = mock(() => undefined);
     const client = {
-      listOrganizationMembers: async () => ({
+      listOrganizationAdministrationMembers: async () => ({
         members: [
           member(identityA, "actor"),
           { ...member(identityA, "owner-2"), subjectId: "user:owner-2" },
@@ -942,7 +952,7 @@ describe("organization administration component fences", () => {
     const updateOrganizationMember = mock(() => pendingUpdate.promise);
     const onAuthorityChanged = mock(() => undefined);
     const client = {
-      listOrganizationMembers: async (organizationId: string) => ({
+      listOrganizationAdministrationMembers: async (organizationId: string) => ({
         members: organizationId === identityA.organizationId ? [actorA, secondOwner] : [actorB],
       }),
       listOrganizationInvitationsForOrganization: async () => ({
@@ -1067,7 +1077,7 @@ describe("organization administration component fences", () => {
   test("does not expose or invoke owner/admin invitation revocation for an admin", async () => {
     const revokeOrganizationInvitation = mock(async () => invitation("member"));
     const client = {
-      listOrganizationMembers: async () => ({
+      listOrganizationAdministrationMembers: async () => ({
         members: [member(identityA, "admin", "admin")],
       }),
       listOrganizationInvitationsForOrganization: async () => ({

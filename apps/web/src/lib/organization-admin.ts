@@ -4,7 +4,14 @@ import type {
   OrganizationRetentionPolicy,
 } from "@/types";
 
-export const ORGANIZATION_ADMIN_SECTIONS = ["overview", "people", "retention", "billing"] as const;
+export const ORGANIZATION_ADMIN_SECTIONS = [
+  "overview",
+  "knowledge",
+  "people",
+  "recovery",
+  "retention",
+  "billing",
+] as const;
 
 export type OrganizationAdminSection = (typeof ORGANIZATION_ADMIN_SECTIONS)[number];
 export type OrganizationAdminResource =
@@ -13,6 +20,7 @@ export type OrganizationAdminResource =
   | "members"
   | "admin-invitations"
   | "incoming-invitations"
+  | "recovery"
   | "retention"
   | "billing"
   | "invoices"

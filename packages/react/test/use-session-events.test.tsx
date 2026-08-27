@@ -242,10 +242,11 @@ describe("useSessionEvents", () => {
     await flush(20);
     expect(hook.result.current.hasOlder).toBeTrue();
 
-    let oldLoad!: Promise<boolean>;
+    let oldLoad!: ReturnType<typeof hook.result.current.loadOlder>;
     await actRun(() => {
       oldLoad = hook.result.current.loadOlder();
     });
+    expect(oldLoad.committed).toBeFalse();
     expect(hook.result.current.loadingOlder).toBeTrue();
 
     await hook.rerender({ sessionId: SECOND_SESSION_ID });
@@ -258,6 +259,7 @@ describe("useSessionEvents", () => {
       ...Array.from({ length: 99 }, (_, index) => event(index + 2)),
     ]);
     expect(await actRun(async () => await oldLoad)).toBeFalse();
+    expect(oldLoad.committed).toBeFalse();
     await flush(20);
     expect(hook.result.current.loadingOlder).toBeFalse();
     expect(hook.result.current.events.map((item) => item.id)).toEqual(["evt-second-session"]);
@@ -341,12 +343,15 @@ describe("useSessionEvents", () => {
 
     let first!: Promise<boolean>;
     let second!: Promise<boolean>;
+    let receipt!: ReturnType<typeof hook.result.current.loadOlder>;
     await actRun(() => {
-      first = hook.result.current.loadOlder();
+      receipt = hook.result.current.loadOlder();
+      first = receipt;
       second = hook.result.current.loadOlder();
     });
     await flush();
     expect(listCalls.filter((call) => call.before === 5001)).toHaveLength(1);
+    expect(receipt.committed).toBeFalse();
     const [firstResult, secondResult] = await actRun(async () => {
       releaseOlder();
       return await Promise.all([first, second]);
@@ -362,6 +367,7 @@ describe("useSessionEvents", () => {
       store.length,
     );
     expect(hook.result.current.hasOlder).toBe(false);
+    expect(receipt.committed).toBeTrue();
 
     await hook.unmount();
   });

@@ -71,9 +71,12 @@ describe("Workspace switcher trigger in Chromium", () => {
       expect(await page.getByRole("menuitem", { name: label, exact: true }).isVisible()).toBe(true);
     }
     expect(await page.getByRole("menuitem", { name: "Settings", exact: true }).count()).toBe(0);
-    expect(
-      await page.getByRole("menuitem", { name: /Personal workspace/, exact: false }).isVisible(),
-    ).toBe(true);
+    const personalMenuItem = page.getByRole("menuitem", {
+      name: "Personal workspace Personal workspace",
+      exact: true,
+    });
+    expect(await personalMenuItem.isVisible()).toBe(true);
+    expect(await personalMenuItem.getByText("Personal", { exact: true }).isVisible()).toBe(true);
 
     const rail = page.getByTestId("production-rail");
     expect(await rail.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);

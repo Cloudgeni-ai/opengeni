@@ -31,6 +31,8 @@ export type {
   UseSessionEventsOptions,
   UseSessionEventsResult,
 } from "./hooks/use-session-events";
+export { createOlderHistoryLoadReceipt } from "./older-history";
+export type { OlderHistoryLoader, OlderHistoryLoadReceipt } from "./older-history";
 export {
   useComposer,
   composeSendInput,

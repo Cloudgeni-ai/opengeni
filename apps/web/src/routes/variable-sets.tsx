@@ -37,12 +37,25 @@ import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { sessionDisplayTitle } from "@/lib/session-rename";
 import type {
   ScheduledTask,
   Session,
   WorkspaceVariableSet,
   WorkspaceVariableSetSecret,
 } from "@/types";
+
+export function sessionUsesVariableSet(
+  session: Pick<Session, "variableSetIds" | "variableSetId">,
+  variableSetId: string,
+): boolean {
+  // An advertised plural field is the complete authoritative selection,
+  // including an intentionally empty one. Fall back to the singular alias only
+  // for sessions returned by older servers that do not advertise the array.
+  return session.variableSetIds === undefined
+    ? session.variableSetId === variableSetId
+    : session.variableSetIds.includes(variableSetId);
+}
 
 export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
@@ -267,8 +280,8 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               key={variableSet.id}
               workspaceId={workspaceId}
               variableSet={variableSet}
-              attachedSessions={sessions.filter(
-                (session) => session.variableSetId === variableSet.id,
+              attachedSessions={sessions.filter((session) =>
+                sessionUsesVariableSet(session, variableSet.id),
               )}
               attachedTasks={tasks.filter((task) => task.variableSetId === variableSet.id)}
               attachmentsUnknown={attachmentsUnknown}
@@ -790,10 +803,10 @@ export function VariableSetCard(props: {
                       sessionId: session.id,
                     }}
                     className="min-w-0 max-w-full rounded-md hover:text-fg"
-                    title={session.initialMessage}
+                    title={sessionDisplayTitle(session)}
                   >
                     <MetaChip className="hover:border-border-strong">
-                      session · {session.initialMessage}
+                      session · {sessionDisplayTitle(session)}
                     </MetaChip>
                   </Link>
                 ))}

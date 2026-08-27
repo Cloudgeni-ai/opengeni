@@ -1654,6 +1654,7 @@ async function setLegacyScheduledTaskWriterContext(
   subjectId: string,
 ): Promise<void> {
   await sql.unsafe("set local role opengeni_app");
+  await sql`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
   await sql`select set_config('opengeni.account_id', ${fixture.accountId}, true)`;
   await sql`select set_config('opengeni.workspace_id', ${fixture.targetWorkspaceId}, true)`;
   await sql`select set_config('opengeni.subject_id', ${subjectId}, true)`;

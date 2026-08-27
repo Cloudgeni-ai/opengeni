@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CreateRigRequest,
   ProposeRigChangeRequest,
+  RIG_SETUP_SCRIPT_MAX_CHARS,
   Rig,
   RigChange,
   RigChangeKind,
@@ -32,6 +33,21 @@ describe("rig contracts", () => {
     expect(
       CreateRigRequest.safeParse({ name: "dev", defaultVariableSetIds: ["not-a-uuid"] }).success,
     ).toBe(false);
+    expect(CreateRigRequest.safeParse({ name: "dev", image: "ubuntu:24.04" }).success).toBe(false);
+  });
+
+  test("rig setup scripts accept 1 MiB and reject larger definitions", () => {
+    const maximum = "x".repeat(RIG_SETUP_SCRIPT_MAX_CHARS);
+    expect(CreateRigRequest.safeParse({ name: "large", setupScript: maximum }).success).toBe(true);
+    expect(
+      ProposeRigChangeRequest.safeParse({
+        kind: "definition_edit",
+        payload: { setupScript: maximum },
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateRigRequest.safeParse({ name: "too-large", setupScript: `${maximum}x` }).success,
+    ).toBe(false);
   });
 
   test("UpdateRigRequest accepts a nullable description and partial fields", () => {
@@ -52,13 +68,20 @@ describe("rig contracts", () => {
     expect(ProposeRigChangeRequest.safeParse({ kind: "setup_append", payload: {} }).success).toBe(
       false,
     );
-    // definition_edit accepts a partial next-version content.
+    // definition_edit accepts partial setup/check content but rejects an
+    // explicit base-image override.
     expect(
       ProposeRigChangeRequest.safeParse({
         kind: "definition_edit",
-        payload: { image: "ubuntu:24.10", changelog: "bump" },
+        payload: { setupScript: "apt-get install -y jq", changelog: "add jq" },
       }).success,
     ).toBe(true);
+    expect(
+      ProposeRigChangeRequest.safeParse({
+        kind: "definition_edit",
+        payload: { image: "ubuntu:24.10" },
+      }).success,
+    ).toBe(false);
     // Unknown kind is rejected by the union.
     expect(
       ProposeRigChangeRequest.safeParse({ kind: "delete_everything", payload: {} }).success,

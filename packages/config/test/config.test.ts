@@ -126,6 +126,18 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("Slack workspace routing defaults on and parses the rollout flag", () => {
+    expect(getSettings().slackWorkspaceRoutingEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "false" }, () => getSettings())
+        .slackWorkspaceRoutingEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "true" }, () => getSettings())
+        .slackWorkspaceRoutingEnabled,
+    ).toBe(true);
+  });
+
   test("parses public provider identifiers without treating them as credentials", () => {
     const settings = withEnv(
       {
@@ -392,6 +404,37 @@ describe("Google Drive integration settings", () => {
     expect(() =>
       withEnv({ OPENGENI_GOOGLE_DRIVE_PROVIDER_RETRY_MAX_DELAY_MS: "60001" }, () => getSettings()),
     ).toThrow();
+  });
+});
+
+describe("managed auth browser session-set rollout", () => {
+  test("remains default-off and accepts only the rolling compatibility modes", () => {
+    expect(withEnv({}, () => getSettings()).managedAuthSessionSetMode).toBe("legacy");
+    expect(
+      withEnv({ OPENGENI_MANAGED_AUTH_SESSION_SET_MODE: "dual" }, () => getSettings())
+        .managedAuthSessionSetMode,
+    ).toBe("dual");
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_SESSION_SET_MODE: "enabled" }, () => getSettings()),
+    ).toThrow();
+  });
+
+  test("requires an HTTPS public authority outside local/test", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+          OPENGENI_PUBLIC_BASE_URL: "http://managed.example.test",
+          OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+          OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+          OPENGENI_RESEND_API_KEY: "re_test",
+          OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 1).toString("base64"),
+          OPENGENI_MANAGED_AUTH_SESSION_SET_MODE: "dual",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/must use https when browser session sets are enabled/);
   });
 });
 

@@ -96,6 +96,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const conflictRef = useRef<Error | null>(null);
   const loadingRef = useRef(true);
+  const activeRemoteReads = useRef(new Set<AbortController>());
   const targetKey = `${workspaceId}\u0000${clientIdentity(client)}`;
   const targetKeyRef = useRef(targetKey);
 
@@ -104,13 +105,22 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     setConflict(next);
   }, []);
 
+  const abortActiveRemoteReads = useCallback(() => {
+    for (const controller of activeRemoteReads.current) controller.abort();
+    activeRemoteReads.current.clear();
+  }, []);
+
   const validateRemoteDraft = useCallback(
-    async (remote: NewSessionDraft, generation: number): Promise<ValidatedRemoteDraft | null> => {
-      if (!resourceHydrationReady) return null;
+    async (
+      remote: NewSessionDraft,
+      generation: number,
+      signal: AbortSignal,
+    ): Promise<ValidatedRemoteDraft | null> => {
+      if (!resourceHydrationReady || signal.aborted) return null;
       const hydratedResources = hydrateResources
         ? await hydrateResources(remote.resources)
         : remote.resources;
-      if (generation !== targetGeneration.current) return null;
+      if (generation !== targetGeneration.current || signal.aborted) return null;
       const seen = new Set<string>();
       const fileRefs = hydratedResources.flatMap((resource) => {
         if (resource.kind !== "file" || seen.has(resource.fileId)) return [];
@@ -118,9 +128,9 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         return [resource];
       });
       const settled = await Promise.allSettled(
-        fileRefs.map((resource) => client.getFile(workspaceId, resource.fileId)),
+        fileRefs.map((resource) => client.getFile(workspaceId, resource.fileId, { signal })),
       );
-      if (generation !== targetGeneration.current) return null;
+      if (generation !== targetGeneration.current || signal.aborted) return null;
       const files = settled.flatMap((result, index) => {
         if (result.status !== "fulfilled") return [];
         const file = result.value;
@@ -156,10 +166,18 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   );
 
   const readRemote = useCallback(async (): Promise<ValidatedRemoteDraft | null> => {
+    const controller = new AbortController();
+    activeRemoteReads.current.add(controller);
     const generation = targetGeneration.current;
-    const remote = normalizeLegacyNewSessionDraft(await client.getNewSessionDraft(workspaceId));
-    if (generation !== targetGeneration.current) return null;
-    return await validateRemoteDraft(remote, generation);
+    try {
+      const remote = normalizeLegacyNewSessionDraft(
+        await client.getNewSessionDraft(workspaceId, { signal: controller.signal }),
+      );
+      if (generation !== targetGeneration.current || controller.signal.aborted) return null;
+      return await validateRemoteDraft(remote, generation, controller.signal);
+    } finally {
+      activeRemoteReads.current.delete(controller);
+    }
   }, [client, validateRemoteDraft, workspaceId]);
 
   const applyRemote = useCallback(
@@ -214,6 +232,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       targetKeyRef.current = targetKey;
     }
     targetGeneration.current += 1;
+    abortActiveRemoteReads();
     persistenceEpoch.current += 1;
     draftRef.current = null;
     lastSavedSignature.current = null;
@@ -228,10 +247,11 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     setLoading(true);
     return () => {
       targetGeneration.current += 1;
+      abortActiveRemoteReads();
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
       autosaveTimer.current = null;
     };
-  }, [setCurrentConflict, targetKey]);
+  }, [abortActiveRemoteReads, setCurrentConflict, targetKey]);
 
   // Initial/target reads wait for the catalogs required to validate resources.
   // A later catalog refresh keeps this boolean true and therefore does not

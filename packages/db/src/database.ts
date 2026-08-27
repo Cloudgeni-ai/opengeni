@@ -317,11 +317,14 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     prepare: false,
     idle_timeout: 30,
     max_lifetime: 1800,
-    // `connection` carries per-session Postgres STARTUP parameters. `application_name`
-    // (always) aids server-side diagnostics; `search_path` (embedded only) is the
-    // supported, query-param-free way to scope a connection to a dedicated schema —
-    // postgres-js IGNORES a URL `?search_path=`. Unset searchPath → omit it so the
-    // server default (`public`) is unchanged for standalone.
+    // `connection` carries per-session Postgres STARTUP parameters. The exact
+    // `application_name` is also the PgBouncer-compatible current-image receipt
+    // for migration 0352's restrictive sessions policy; arbitrary custom startup
+    // parameters are not portable through transaction poolers. `search_path`
+    // (embedded only) is the supported, query-param-free way to scope a connection
+    // to a dedicated schema — postgres-js IGNORES a URL `?search_path=`. Unset
+    // searchPath → omit it so the server default (`public`) is unchanged for
+    // standalone.
     connection: {
       application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
       ...(options.searchPath ? { search_path: options.searchPath } : {}),
@@ -377,12 +380,13 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   );
   // Transaction-local writer identity covers supported injected/embedded
   // database handles whose connection-level application_name is host-owned.
-  // Old OpenGeni binaries do not set this GUC, so migration-installed update
-  // fences can distinguish their partial writes without inspecting content.
+  // Standalone createDb connections also carry version receipts in their exact
+  // application_name, while old OpenGeni binaries set neither current receipt.
   await db.execute(sql`select set_config('opengeni.lossless_content_writer', '1', true)`);
   await db.execute(sql`select
     set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
-    set_config('opengeni.pending_tool_event_output_v1', '1', true)`);
+    set_config('opengeni.pending_tool_event_output_v1', '1', true),
+    set_config('opengeni.session_variable_set_attachments_v1', '1', true)`);
   const sessionActor = sessionRlsActorContext.getStore();
   if (sessionActor) {
     await setSubjectRlsContext(db, sessionActor.subjectId);

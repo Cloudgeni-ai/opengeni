@@ -534,6 +534,11 @@ export function boundSessionDetailMcp(
   effectiveControl: unknown = session.effectiveControl,
   maxBytes = SESSION_DETAIL_MCP_MAX_BYTES,
 ) {
+  const variableSetIds = session.variableSetIds;
+  // The plural selection is authoritative. Keep the singular/environment
+  // fields only as final-entry compatibility aliases so they cannot be read as
+  // complete attachment membership by newer consumers.
+  const variableSetId = variableSetIds.at(-1) ?? null;
   const title = session.title === null ? null : modelStringProjection(session.title, 512);
   const initialMessage = modelStringProjection(session.initialMessage, 4_000);
   const instructions =
@@ -592,8 +597,9 @@ export function boundSessionDetailMcp(
     sandboxGroupId: session.sandboxGroupId,
     activeSandboxId: session.activeSandboxId,
     activeEpoch: session.activeEpoch,
-    variableSetId: session.variableSetId,
-    environmentId: session.environmentId,
+    variableSetIds,
+    variableSetId,
+    environmentId: variableSetId,
     rigId: session.rigId,
     rigVersionId: session.rigVersionId,
     firstPartyMcpPermissions: permissions.value,

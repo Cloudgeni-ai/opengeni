@@ -99,7 +99,7 @@ content, credentials, or another human's receipts.
 
 Policy revision creation, activation, and rollback plus exact governed-change
 undo require `workspace:admin` and an authenticated human session. The
-Learning & autonomy Workspace State view exposes only the workspace learning
+The Workspace settings **Learning & autonomy** section exposes only the workspace learning
 mode, mapped directly to the canonical backend modes (`Off`, `Review first` =
 `suggest`, and `Autonomous` = `automatic`); a mode change creates and activates
 a new revision under activation-version CAS and carries the active revision's
