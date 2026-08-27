@@ -9,6 +9,7 @@ import {
   bootstrapWorkspace,
   createConnection,
   createDb,
+  createSession,
   upsertWorkspaceModelPolicy,
   type DbClient,
 } from "@opengeni/db";
@@ -187,6 +188,17 @@ describe("workspace Gateway custom model API", () => {
       "not-read-by-metadata-only-catalog-tests",
     );
 
+    const session = await createSession(client!.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Policy-check fixture",
+      resources: [],
+      metadata: {},
+      model: settings.openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
     await upsertWorkspaceModelPolicy(client!.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -194,7 +206,7 @@ describe("workspace Gateway custom model API", () => {
       allowedModels: [settings.openaiModel],
     });
     const blockedSend = await publicApp.request(
-      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${crypto.randomUUID()}/events`,
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/events`,
       {
         method: "POST",
         headers: {

@@ -2586,6 +2586,7 @@ export async function acceptSessionUserMessageWithOutcome(
   if (effectiveModel === null) {
     throw new Error("effective follow-up model unexpectedly resolved to null");
   }
+  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
   try {
     assertSessionAllowsProductModel(existingSession, effectiveModel);
   } catch (error) {
