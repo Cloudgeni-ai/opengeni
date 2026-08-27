@@ -149,6 +149,13 @@ Temporal cancellation is a delivery mechanism, not proof that tools and
 sandbox work have physically stopped; durable quiescence evidence gates
 replacement admission.
 
+A recoverable activity shutdown creates a transactional workflow-wake
+obligation in Postgres. Delivery remains unacknowledged until the exact closed
+attempt has durable quiescence, and every attempt-owned retained-process
+settlement advances that same outbox row in its settlement transaction. A
+workflow close or a writer exit racing the final reconciliation check therefore
+cannot orphan a session in recovery.
+
 A background command becomes session-owned only after its exact provider
 identity is durably adopted. Before adoption it remains attempt-owned. After
 adoption, ordinary turn completion and Steer detach from it, while explicit

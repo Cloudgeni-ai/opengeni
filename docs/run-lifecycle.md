@@ -1001,13 +1001,18 @@ best-effort live fanout; a NATS failure cannot trigger proof recovery or undo a
 committed receipt.
 
 Settling or stale-rejecting an interruption atomically commits its own durable
-control wake. While the receipt is absent, wake acknowledgement remains pending,
+control wake. Activity-owned recoverable shutdown commits an ordinary durable
+wake in the same transaction as `turn.recovery.requested`. While the receipt is
+absent, wake acknowledgement remains pending for either recovery form,
 `peekSessionWork` returns `cancellation-wait`, and every claim path remains
 `control-pending` from the interruption ledger alone—queue presentation metadata
 is never admission authority. The workflow waits up to five seconds for a wake
 and may then close without running another turn activity; the outbox continues
-bounded redelivery until the exact activity disappears or supplies its proof. A
-proof accepted at that timeout boundary is persisted before close. Once the
+bounded redelivery until the exact activity disappears or supplies its proof.
+When an attempt-owned retained process was the final writer, its terminal
+settlement advances that outbox revision atomically, so settlement racing the
+workflow's last reconciliation check cannot be lost. A proof accepted at that
+timeout boundary is persisted before close. Once the
 receipt commits, its coalescing outbox wake uses immediate `signalWithStart` on
 the same stable workflow id, which restarts the exact
 session and admits the replacement once. This event-driven path needs no

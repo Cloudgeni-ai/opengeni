@@ -42286,6 +42286,51 @@ async function lockWorkspaceMutationSessionTx(
   return session;
 }
 
+/** True while an exact closed attempt still owns the physical-quiescence gate.
+ * Both user control interruptions and activity-owned recoverable shutdowns use
+ * this predicate so wake delivery cannot turn an unfinished writer drain into
+ * an acknowledged edge-trigger. */
+async function hasPendingSessionAttemptQuiescenceTx(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string; attemptId?: string },
+): Promise<boolean> {
+  const [row] = await tx.execute<{ pending: boolean }>(sql`
+    select exists (
+      select 1
+      from session_turn_attempts attempt
+      where attempt.workspace_id = ${input.workspaceId}
+        and attempt.session_id = ${input.sessionId}
+        ${input.attemptId ? sql`and attempt.id = ${input.attemptId}` : sql``}
+        and attempt.state = 'closed'
+        and attempt.quiesced_at is null
+        and (
+          exists (
+            select 1
+            from session_attempt_interruptions interruption
+            where interruption.workspace_id = attempt.workspace_id
+              and interruption.session_id = attempt.session_id
+              and interruption.attempt_id = attempt.id
+              and interruption.state in ('settled', 'rejected_stale')
+          )
+          or (
+            attempt.outcome = 'interrupted_recoverable'
+            and exists (
+              select 1
+              from session_events event
+              where event.account_id = attempt.account_id
+                and event.workspace_id = attempt.workspace_id
+                and event.session_id = attempt.session_id
+                and event.turn_id = attempt.turn_id
+                and event.turn_attempt_id = attempt.id
+                and event.type = 'turn.recovery.requested'
+            )
+          )
+        )
+    ) as pending
+  `);
+  return row?.pending === true;
+}
+
 /**
  * Resolve the organization grant identity behind a causal human, and refuse the
  * operation when that grant has been revoked or suspended.
@@ -44263,7 +44308,11 @@ export async function settleRetainedProcess(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        await lockWorkspaceMutationSessionTx(tx, input.workspaceId, input.sessionId);
+        const session = await lockWorkspaceMutationSessionTx(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+        );
         const [process] = await tx
           .select()
           .from(schema.sandboxRetainedProcesses)
@@ -44470,6 +44519,22 @@ export async function settleRetainedProcess(
           where id = ${process.leaseId}
             and sandbox_group_id = ${process.sandboxGroupId}
         `);
+        if (
+          process.ownerAttemptId &&
+          (await hasPendingSessionAttemptQuiescenceTx(tx, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            attemptId: process.ownerAttemptId,
+          }))
+        ) {
+          await enqueueSessionWorkflowWakeInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+            reason: "retained_process_settled_quiescence",
+          });
+        }
         return { settled: true, process: mapRetainedProcess(updated) };
       }),
   );
@@ -62866,6 +62931,13 @@ export async function requestSessionTurnRecovery(
       if (!updatedSession) {
         throw new Error(`Active session turn changed while locked: ${input.turnId}`);
       }
+      await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+        reason: "turn_recovery_requested",
+      });
       return {
         action: "recovering" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
@@ -64610,33 +64682,12 @@ export async function markSessionWorkflowWakeDelivered(
               blocker: "pending_agent_steer",
             } as const;
           }
-          const [pendingQuiescence] = await tx
-            .select({ id: schema.sessionTurnAttempts.id })
-            .from(schema.sessionTurnAttempts)
-            .innerJoin(
-              schema.sessionAttemptInterruptions,
-              and(
-                eq(
-                  schema.sessionAttemptInterruptions.workspaceId,
-                  schema.sessionTurnAttempts.workspaceId,
-                ),
-                eq(
-                  schema.sessionAttemptInterruptions.sessionId,
-                  schema.sessionTurnAttempts.sessionId,
-                ),
-                eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
-              ),
-            )
-            .where(
-              and(
-                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-                eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
-                isNull(schema.sessionTurnAttempts.quiescedAt),
-                inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
-              ),
-            )
-            .limit(1);
-          if (pendingQuiescence) {
+          if (
+            await hasPendingSessionAttemptQuiescenceTx(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+            })
+          ) {
             return {
               action: "pending_admission",
               blocker: "pending_quiescence",
