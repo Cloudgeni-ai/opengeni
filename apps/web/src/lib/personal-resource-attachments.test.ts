@@ -7,6 +7,7 @@ import {
   buildPersonalResourceAttachmentIntent,
   isPersonalAttachmentConflict,
   loadPersonalResourceCatalog,
+  newSessionFixedResourceCatalogFailed,
   newSessionPersonalResourceAttachment,
   personalResourceSelectionIdentityKey,
   personalSelection,
@@ -159,6 +160,45 @@ describe("personal resource attachment authority", () => {
     expect(replacement).not.toBe(first);
   });
 
+  test("surfaces retry only when a failed catalog blocks a restored fixed selection", () => {
+    expect(
+      newSessionFixedResourceCatalogFailed({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: "",
+        selectionResolved: false,
+        variableSetCatalogFailed: true,
+        rigCatalogFailed: false,
+      }),
+    ).toBe(true);
+    expect(
+      newSessionFixedResourceCatalogFailed({
+        selectedVariableSetIds: [],
+        selectedRigId: rigId,
+        selectionResolved: false,
+        variableSetCatalogFailed: false,
+        rigCatalogFailed: true,
+      }),
+    ).toBe(true);
+    expect(
+      newSessionFixedResourceCatalogFailed({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: "",
+        selectionResolved: true,
+        variableSetCatalogFailed: false,
+        rigCatalogFailed: true,
+      }),
+    ).toBe(false);
+    expect(
+      newSessionFixedResourceCatalogFailed({
+        selectedVariableSetIds: [],
+        selectedRigId: "",
+        selectionResolved: true,
+        variableSetCatalogFailed: true,
+        rigCatalogFailed: true,
+      }),
+    ).toBe(false);
+  });
+
   test("resets acknowledgement and refreshes both catalogs after a definitive conflict", async () => {
     const events: string[] = [];
     const recovered = await recoverNewSessionPersonalResourceAttachment({
@@ -171,10 +211,8 @@ describe("personal resource attachment authority", () => {
         },
       },
       resetAcknowledgement: () => events.push("reset"),
-      refreshVariableSets: async () => {
+      refreshCatalogs: async () => {
         events.push("variable_sets");
-      },
-      refreshRigs: async () => {
         events.push("rigs");
       },
     });
@@ -193,10 +231,8 @@ describe("personal resource attachment authority", () => {
           },
         },
         resetAcknowledgement: () => events.push("reset"),
-        refreshVariableSets: async () => {
+        refreshCatalogs: async () => {
           events.push("variable_sets");
-        },
-        refreshRigs: async () => {
           events.push("rigs");
         },
       }),

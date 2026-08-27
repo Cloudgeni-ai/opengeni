@@ -329,6 +329,22 @@ export function reconcileNewSessionFixedResources(input: {
   };
 }
 
+/** Show recovery only when a selected fixed resource is actually blocked by a failed catalog. */
+export function newSessionFixedResourceCatalogFailed(input: {
+  selectedVariableSetIds: readonly string[];
+  selectedRigId: string;
+  selectionResolved: boolean;
+  variableSetCatalogFailed: boolean;
+  rigCatalogFailed: boolean;
+}): boolean {
+  if (input.selectionResolved) return false;
+  return (
+    ((input.selectedVariableSetIds.length > 0 || input.selectedRigId.length > 0) &&
+      input.variableSetCatalogFailed) ||
+    (input.selectedRigId.length > 0 && input.rigCatalogFailed)
+  );
+}
+
 /** Stable typed identity for resetting shared-output acknowledgement. */
 export function personalResourceSelectionIdentityKey(input: {
   variableSetIds: readonly string[];
@@ -393,11 +409,10 @@ export async function recoverNewSessionPersonalResourceAttachment(input: {
   error: unknown;
   attemptedInput: { personalResourceAttachment?: PersonalResourceAttachmentIntent } | undefined;
   resetAcknowledgement: () => void;
-  refreshVariableSets: () => Promise<void>;
-  refreshRigs: () => Promise<void>;
+  refreshCatalogs: () => Promise<void>;
 }): Promise<boolean> {
   if (!isPersonalAttachmentConflict(input.error, input.attemptedInput)) return false;
   input.resetAcknowledgement();
-  await Promise.all([input.refreshVariableSets(), input.refreshRigs()]);
+  await input.refreshCatalogs();
   return true;
 }

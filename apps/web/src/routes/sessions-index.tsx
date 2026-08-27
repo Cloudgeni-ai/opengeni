@@ -98,6 +98,7 @@ import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   isPersonalAttachmentConflict,
+  newSessionFixedResourceCatalogFailed,
   newSessionPersonalResourceAttachment,
   personalResourceSelectionIdentityKey,
   reconcileNewSessionFixedResources,
@@ -283,6 +284,15 @@ function SessionsIndexRouteContent({
       personalResourceEligibilitySettled && !variableSets.loading && variableSets.error === null,
     rigsSettled: personalResourceEligibilitySettled && !rigs.loading && rigs.error === null,
   });
+  const fixedResourceCatalogError =
+    draft.compute.kind === "sandbox" &&
+    newSessionFixedResourceCatalogFailed({
+      selectedVariableSetIds: draft.variableSetIds,
+      selectedRigId: draft.rigId,
+      selectionResolved: fixedResourceSelection.selectionResolved,
+      variableSetCatalogFailed: variableSets.error !== null,
+      rigCatalogFailed: rigs.error !== null,
+    });
   useEffect(() => {
     setDraft((current) => {
       const reconciled = reconcileNewSessionFixedResources({
@@ -380,21 +390,25 @@ function SessionsIndexRouteContent({
     visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
     sharedAcknowledged: personalResourcesSharedAcknowledged,
   });
+  const refreshPersonalResourceCatalogs = useLatestCallback(async (): Promise<void> => {
+    const generation = ++personalResourceCatalogRefreshGeneration.current;
+    setPersonalResourceCatalogRefreshPending(true);
+    try {
+      await Promise.all([variableSets.refresh(), rigs.refresh()]);
+    } finally {
+      if (personalResourceCatalogRefreshGeneration.current === generation) {
+        setPersonalResourceCatalogRefreshPending(false);
+      }
+    }
+  });
   const recoverPersonalResourceAttachment = useLatestCallback(
     (error: unknown, attemptedInput: Parameters<typeof isPersonalAttachmentConflict>[1]): void => {
       if (!isPersonalAttachmentConflict(error, attemptedInput)) return;
-      const generation = ++personalResourceCatalogRefreshGeneration.current;
-      setPersonalResourceCatalogRefreshPending(true);
       void recoverNewSessionPersonalResourceAttachment({
         error,
         attemptedInput,
         resetAcknowledgement: () => setPersonalResourcesSharedAcknowledged(false),
-        refreshVariableSets: variableSets.refresh,
-        refreshRigs: rigs.refresh,
-      }).finally(() => {
-        if (personalResourceCatalogRefreshGeneration.current === generation) {
-          setPersonalResourceCatalogRefreshPending(false);
-        }
+        refreshCatalogs: refreshPersonalResourceCatalogs,
       });
     },
   );
@@ -1092,6 +1106,11 @@ function SessionsIndexRouteContent({
             machines={machines}
             variableSets={selectableVariableSets}
             rigs={selectableRigs}
+            catalogRecovery={{
+              error: fixedResourceCatalogError,
+              refreshing: personalResourceCatalogRefreshPending,
+              onRetry: () => void refreshPersonalResourceCatalogs(),
+            }}
             selectedChannelId={selectedChannelId}
             selectionHistory={selectionHistory}
           />
@@ -1478,6 +1497,12 @@ type NewSessionPersonalResourceAccess = {
   onSharedAcknowledgedChange: (acknowledged: boolean) => void;
 };
 
+type FixedResourceCatalogRecovery = {
+  error: boolean;
+  refreshing: boolean;
+  onRetry: () => void;
+};
+
 function ComputeTargetControl(props: {
   workspaceId: string;
   draft: SessionDraft;
@@ -1488,6 +1513,7 @@ function ComputeTargetControl(props: {
   machines: MachineView[];
   variableSets: VariableSet[];
   rigs: Rig[];
+  catalogRecovery: FixedResourceCatalogRecovery;
   selectedChannelId: string | null;
   selectionHistory: NewSessionSelectionHistory;
 }) {
@@ -1623,6 +1649,7 @@ function ComputeTargetControl(props: {
             personalResourceAccess={props.personalResourceAccess}
             variableSets={props.variableSets}
             rigs={props.rigs}
+            catalogRecovery={props.catalogRecovery}
           />
           <FleetErrorNotice onRetry={() => void fleet.refresh()} />
         </section>
@@ -1636,6 +1663,7 @@ function ComputeTargetControl(props: {
         personalResourceAccess={props.personalResourceAccess}
         variableSets={props.variableSets}
         rigs={props.rigs}
+        catalogRecovery={props.catalogRecovery}
       />
     );
   }
@@ -1680,6 +1708,7 @@ function ComputeTargetControl(props: {
           personalResourceAccess={props.personalResourceAccess}
           variableSets={props.variableSets}
           rigs={props.rigs}
+          catalogRecovery={props.catalogRecovery}
         />
       ) : (
         <ConnectedMachineFields
@@ -1763,6 +1792,7 @@ function ManagedSandboxFields(props: {
   personalResourceAccess: NewSessionPersonalResourceAccess;
   variableSets: VariableSet[];
   rigs: Rig[];
+  catalogRecovery: FixedResourceCatalogRecovery;
 }) {
   const { draft, onChange } = props;
   const personalRigs = props.rigs.filter((resource) => resource.scope === "user");
@@ -1771,7 +1801,7 @@ function ManagedSandboxFields(props: {
   const workspaceVariableSets = props.variableSets.filter((resource) => resource.scope !== "user");
   const showRigs = workspaceRigs.length > 0 || personalRigs.length > 0;
   const showVariableSets = workspaceVariableSets.length > 0 || personalVariableSets.length > 0;
-  if (!showRigs && !showVariableSets) {
+  if (!showRigs && !showVariableSets && !props.catalogRecovery.error) {
     return null;
   }
 
@@ -1779,6 +1809,31 @@ function ManagedSandboxFields(props: {
     // One flat card: hairline-separated rows, controls right-aligned, no
     // nested boxes and no restating helper text — the controls speak.
     <div className="mt-5 overflow-hidden rounded-lg border border-border bg-surface/40">
+      {props.catalogRecovery.error ? (
+        <div
+          role="alert"
+          className={cn((showRigs || showVariableSets) && "border-b border-border/70", "p-2.5")}
+        >
+          <Notice
+            tone="failed"
+            className="p-2.5 text-xs"
+            title="Couldn’t verify the selected Variable Set or Rig"
+            action={
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={props.disabled || props.catalogRecovery.refreshing}
+                onClick={props.catalogRecovery.onRetry}
+              >
+                Retry
+              </Button>
+            }
+          >
+            Retry to reload your available resources before starting this session.
+          </Notice>
+        </div>
+      ) : null}
       {/* Rig picker — offered only when the workspace has at least one rig.
           Picking a rig preselects its default variable sets in the control
           below (still user-overridable). Empty ⇒ the workspace default rig,

@@ -1,4 +1,5 @@
 import { AlertTriangleIcon, RefreshCwIcon } from "lucide-react";
+import { useId } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -28,6 +29,7 @@ export function PersonalResourceAttachmentControl(props: {
   compact?: boolean;
 }) {
   const { controller } = props;
+  const durationLabelId = useId();
   if (
     !controller.eligible ||
     (!controller.loading &&
@@ -58,12 +60,16 @@ export function PersonalResourceAttachmentControl(props: {
         </p>
       ) : controller.selected.resourceCount > 0 ? (
         <>
-          <p className="text-xs text-fg-muted">
+          <p id={durationLabelId} className="text-xs text-fg-muted">
             {names.join(" · ")} {controller.selected.resourceCount === 1 ? "belongs" : "belong"} to
             you. Choose how long OpenGeni may use{" "}
             {controller.selected.resourceCount === 1 ? "it" : "them"}.
           </p>
-          <div className="mt-3 grid gap-2 sm:grid-cols-3" role="radiogroup">
+          <div
+            className="mt-3 grid gap-2 sm:grid-cols-3"
+            role="radiogroup"
+            aria-labelledby={durationLabelId}
+          >
             {MODE_OPTIONS.map((option) => (
               <label
                 key={option.value}

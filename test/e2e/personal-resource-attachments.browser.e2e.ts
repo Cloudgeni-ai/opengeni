@@ -56,6 +56,12 @@ describe("personal resource attachments in Chromium", () => {
     expect(await control.first().ariaSnapshot()).toContain("Private deploy keys");
     expect(await control.first().locator("fieldset").count()).toBe(0);
     expect(await control.first().getByText("Your resource access").count()).toBe(0);
+    expect(
+      await control
+        .first()
+        .getByRole("radiogroup", { name: /Choose how long OpenGeni may use/ })
+        .count(),
+    ).toBe(1);
     expect(await page.getByRole("button", { name: "Create session" }).isDisabled()).toBe(true);
     expect(await control.first().getByRole("radio").count()).toBe(3);
     await control
