@@ -1,5 +1,20 @@
 # @opengeni/api-router
 
+## 2.4.1
+
+### Patch Changes
+
+- 09beefa: Attribute fatal API startup and runtime failures with secret-safe structural diagnostics, drain pending OTLP exports for a bounded interval, and preserve the required nonzero process exit.
+- 92f227f: Make session and workspace Pause/Resume desired-state mutations report authoritative changed, unchanged, and replayed outcomes. Represented no-ops no longer allocate control revisions, events, interruptions, or wakes, while newer descendant overrides and missing lifecycle repairs still produce real mutations. First-party MCP session control now returns the same versioned mutation receipt for agent-bound and sessionless callers.
+- Updated dependencies [da0c2d2]
+- Updated dependencies [09beefa]
+- Updated dependencies [92f227f]
+  - @opengeni/db@3.5.1
+  - @opengeni/observability@0.8.8
+  - @opengeni/core@2.5.1
+  - @opengeni/documents@0.8.4
+  - @opengeni/events@0.4.2
+
 ## 2.4.0
 
 ### Minor Changes
