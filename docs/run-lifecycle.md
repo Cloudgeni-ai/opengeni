@@ -1146,6 +1146,11 @@ UUID, parent admission, process holder, lease/group, provider backend/instance,
 lease epoch, route target/epoch, and provider session; exact replays are
 idempotent and cannot touch a successor. This reconciliation never calls a
 provider terminate/kill API and never captures or rotates a workspace snapshot.
+Repeated Modal binding-missing or binding-mismatch observations enter a durable
+24-hour reconciliation quarantine after five claimed probes. Quarantine is
+only backoff: the process remains active, retains every blocker, carries no
+exit/loss proof, and is periodically eligible for a later positive binding
+lookup and ordinary reconciliation.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 
