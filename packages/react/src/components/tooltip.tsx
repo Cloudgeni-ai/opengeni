@@ -8,10 +8,20 @@
  * tips and look like a blank white bubble.
  */
 import { Tooltip as TooltipPrimitive } from "radix-ui";
-import { createContext, useContext, type ComponentProps, type CSSProperties } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+  type CSSProperties,
+} from "react";
 
 import { cn } from "../lib/cn";
-import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 
 type TooltipSourceContextValue = {
   source: HTMLElement | null;
@@ -28,10 +38,38 @@ function TooltipProvider({
 }
 
 function Tooltip({ children, ...props }: ComponentProps<typeof TooltipPrimitive.Root>) {
-  const source = usePortalTokenSource<HTMLElement>();
+  const { onOpenChange, ...rootProps } = props;
+  const sourceRef = useRef<HTMLElement | null>(null);
+  const sourcePublishedRef = useRef(false);
+  const [source, setSource] = useState<HTMLElement | null>(null);
+  const ref = useCallback((node: HTMLElement | null) => {
+    sourceRef.current = node;
+    if (sourcePublishedRef.current) {
+      setSource((current) => (current === node ? current : node));
+    }
+  }, []);
+  const sourceContext = useMemo(() => ({ source, ref }), [ref, source]);
+  const publishCurrentSource = useCallback(() => {
+    sourcePublishedRef.current = true;
+    setSource((current) => (current === sourceRef.current ? current : sourceRef.current));
+  }, []);
+  const publishSourceOnOpen = useCallback(
+    (open: boolean) => {
+      if (open) {
+        publishCurrentSource();
+      }
+      onOpenChange?.(open);
+    },
+    [onOpenChange, publishCurrentSource],
+  );
+  useLayoutEffect(() => {
+    if (rootProps.open === true || rootProps.defaultOpen === true) {
+      publishCurrentSource();
+    }
+  }, [publishCurrentSource, rootProps.defaultOpen, rootProps.open]);
   return (
-    <TooltipSourceContext.Provider value={source}>
-      <TooltipPrimitive.Root data-slot="tooltip" {...props}>
+    <TooltipSourceContext.Provider value={sourceContext}>
+      <TooltipPrimitive.Root data-slot="tooltip" onOpenChange={publishSourceOnOpen} {...rootProps}>
         {children}
       </TooltipPrimitive.Root>
     </TooltipSourceContext.Provider>

@@ -49,6 +49,21 @@ function streamedItem(text: string): TimelineItem {
   };
 }
 
+/** Model the fresh projected item objects produced from a changed event window. */
+function reprojectedItem(timelineItem: TimelineItem): TimelineItem {
+  if (timelineItem.kind === "user-message") {
+    return {
+      ...timelineItem,
+      resources: [...timelineItem.resources],
+      tools: [...timelineItem.tools],
+    };
+  }
+  if (timelineItem.kind === "agent-message") {
+    return { ...timelineItem };
+  }
+  return timelineItem;
+}
+
 function Harness() {
   const adjacentPrepend = new URLSearchParams(window.location.search).has("adjacent");
   const [items, setItems] = useState(() => [
@@ -93,7 +108,7 @@ function Harness() {
     startTransition(() => {
       setItems((current) => [
         ...(adjacentPrepend ? range(1_000, 40) : range(900, 100)),
-        ...current,
+        ...current.map(reprojectedItem),
       ]);
     });
   }, [adjacentPrepend]);

@@ -164,6 +164,14 @@ The published `MessageTimeline` and its `useSessionEvents` integration should be
   - display-only closure of unfinished markdown structures.
 - `packages/react/src/components/user-message-body.tsx`
   - disclosure height and anchor interactions.
+- `packages/react/src/timeline/entrance.tsx`
+  - mount-time versus live entrance-animation ownership.
+- `packages/react/src/components/tooltip.tsx`
+  - copy-control portal source publication and closed-row mount cost.
+- `packages/react/src/lib/format.ts`
+  - message-footer date formatting on every newly mounted chat row.
+- `packages/react/demo/vite.config.ts`
+  - isolated production build boundary for the timeline performance harness.
 - `packages/react/src/timeline/turn-summary.tsx` and `fold-memory.ts`
   - live-to-settled fold transitions and durable fold resting state.
 
@@ -772,10 +780,10 @@ The branch is ready to merge only when:
 
 ### F9 — large prepend commits produced browser long tasks
 
-- Reproduction: production React build, 100-row prepend, PerformanceObserver and rAF sampling; ordinary urgent state updates repeatedly produced >100 ms long tasks.
-- Root cause: a large synchronous React history commit monopolized the main thread; replacing `flushSync` alone did not remove it.
+- Reproduction: dedicated production bundle, 100-row prepend, PerformanceObserver and rAF sampling under 4× CPU throttling; reverting to an ordinary urgent state update produced 680 ms and 389 ms long tasks.
+- Root cause: a large urgent React history update monopolized the main thread; replacing `flushSync` alone did not make the remaining state update interruptible.
 - Fix: publish accepted older/newer/start/latest bulk navigation state in React transitions, with window, availability, mode, status, receipt/loading state scheduled together.
-- Regression: Chromium `production-scheduled 100-row prepend avoids a browser long task`, repeated three times.
+- Regression: Chromium `production-scheduled 100-row prepend avoids a browser long task`; the transition implementation passed three consecutive 4× CPU-throttled runs while the urgent-scheduling revert failed.
 
 ### F10 — the expanded browser gate left its retained workflow contract stale
 
@@ -784,6 +792,13 @@ The branch is ready to merge only when:
 - Fix: regenerate the workflow execution graph manifest from Bun 1.4.0 and update the release-automation contract to require the combined pagination/tip-follow command exactly.
 - Regression: workflow graph verification plus the 113-test workflow graph/release-automation matrix.
 
+### F11 — settled history and closed tooltip chrome still overworked a transition prepend
+
+- Reproduction: after correcting the test to serve a dedicated production bundle, an unthrottled transition-scheduled 100-row prepend still produced repeated 54–83 ms long tasks. The stricter final fixture recreates every retained projected item, matching the live host's fresh projection identities.
+- Root cause: every projection produced fresh group wrappers, so row memoization could not retain settled suffixes; the global bulk-animation context woke all consumers; and every newly mounted closed copy tooltip published its trigger through React state. A sampled production CPU profile attributed about 25 ms to per-row locale formatter construction and showed material garbage collection. The anchor fallback also retained offsets for the entire window although it reads only the first group.
+- Fix: reuse prior group objects only when recursively render-equivalent, keep changed streaming/tool values invalidating immediately, memoize the complete keyed group shell, split mount-time and live entrance gates per durable group, retain only the first-group anchor offset, reuse one `Intl.DateTimeFormat`, and publish tooltip portal sources only when the tooltip opens (including controlled/default-open compatibility).
+- Regressions: direct-item and raw-event prepends prove retained message render callbacks do not run again; same-key streaming still invalidates immediately; a closed copy tooltip stays at two profiler commits instead of the reverted three; the exact production fixture passed three unthrottled and three 4× CPU-throttled repetitions. Reintroducing mount-time tooltip publication made the same production-shaped gate fail with a 67 ms long task.
+
 ## 26. Falsified or harness-limited candidates
 
 - Combined unpinned anchor loss was falsified after waiting for the real keyboard `scrollend`; PageUp had already released the pin before native movement began.
@@ -791,16 +806,19 @@ The branch is ready to merge only when:
 - CDP synthesized touch gestures hung in this headless rig; deterministic PointerEvent plus real scroll geometry was used. This is a harness limitation, not a retained product defect.
 - Sending Runtime.evaluate after fully freezing a page hangs by design; queued work is installed before freeze and verified after resume.
 - Removing `flushSync` alone did not fix prepend long tasks; ordinary urgent React state still produced 354 ms and 109 ms tasks. `startTransition` was the effective intervention.
+- The first long-task regression served the Vite development graph while describing itself as production-scheduled. GitHub CI therefore measured 238 ms and 212 ms development tasks even with the transition fix. A dedicated production build plus static server replaced that invalid performance boundary; at 4× CPU throttling the fixed transition passed while the urgent revert failed with 680 ms and 389 ms tasks.
+- `content-visibility` did not materially reduce the production-shaped task and would weaken exact `scrollHeight`/anchor truth, so it was rejected.
+- Replacing per-key selectors with one all-group DOM scan left the measured task at 72 ms; the retained geometry improvement instead stores only the one first-group offset that restoration actually consumes.
 
 ## 27. Final verification evidence
 
 - Repository-pinned Bun: 1.4.0 (`34cbb9a40`).
-- Targeted timeline unit/component matrix: 400 tests across 10 files, zero failures.
-- Tip-follow Chromium suite: 13/13 in three repeated matrix runs plus one final strict console/page-error run.
-- Timeline scroll/history Chromium suite: 33/33 in three repeated matrix runs plus one final strict console/page-error run.
+- Targeted timeline/unit/host matrix: 517 tests across 12 files, zero failures.
+- Tip-follow Chromium suite: 13/13 in the final strict console/page-error run; the cadence/responsive/stress matrix had also passed three prior repetitions.
+- Timeline scroll/history Chromium suite: 33/33 in the final strict console/page-error run; the full matrix had also passed three prior repetitions before the final performance-source hardening.
 - Responsive coverage: mobile DPR 3, tablet DPR 2 with reduced motion, desktop fractional DPR 1.25.
 - Stress coverage: seeded 60-operation mixed trace with bounded operation log, frame/long-task/DOM/overflow assertions, frozen-page resume, keyboard, wheel, and coarse-pointer paths.
-- Performance coverage: transition-scheduled 100-row prepend produced no Long Task entries and kept maximum sampled frame interval below 50 ms in every repetition.
+- Performance coverage: a dedicated production-bundle transition-scheduled 100-row prepend with fresh retained projection objects produced no Long Task entries and kept the maximum sampled frame interval below 50 ms in three consecutive unthrottled and three consecutive 4× CPU-throttled repetitions. The urgent-scheduling revert produced 680 ms and 389 ms long tasks; the closed-tooltip mount-publication revert produced a 67 ms long task in the final fixture.
 - Browser hygiene: zero uncaught page errors or unexpected console errors; the demo-only missing favicon request is the sole exact allowlisted resource miss.
 - CI workflow ownership: the retained execution graph and exact browser-gate contract pass, including the combined pagination/tip-follow interaction command.
 - No merge, publish, staging deployment, or production mutation was performed.

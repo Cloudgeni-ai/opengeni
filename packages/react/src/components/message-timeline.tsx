@@ -427,7 +427,6 @@ export function MessageTimeline({
     }
     return sources;
   }, [resolvedItems]);
-  const groups = useStableTimelineGroupKeys(allGroups);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -527,7 +526,7 @@ export function MessageTimeline({
   const userMessageDisclosureMemoryRef = useRef<Map<string, boolean>>(new Map());
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
   const firstItemGroupKeyRef = useRef<string | null>(null);
-  const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
+  const firstItemGroupOffsetTopRef = useRef<number | null>(null);
   const firstItemContentTopRef = useRef<number | null>(null);
   const firstItemId = resolvedItems[0]?.id ?? null;
   // Pagination ownership follows the oldest committed input, before host
@@ -547,6 +546,7 @@ export function MessageTimeline({
     previousBulkFirstKeyRef.current !== undefined &&
     previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender = allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk);
+  const groups = useStableTimelineGroupKeys(allGroups, !bulkRender);
 
   // The ONLY writer of the pinned flag. Ref and state move together, so
   // behavior (refs read by rAF callbacks) and rendering (the anchor class,
@@ -1030,7 +1030,7 @@ export function MessageTimeline({
     }
     const previousFirstItemId = previousFirstItemIdRef.current;
     const previousFirstItemGroupKey = firstItemGroupKeyRef.current;
-    const previousGroupOffsetByKey = groupOffsetByKeyRef.current;
+    const previousFirstItemGroupOffsetTop = firstItemGroupOffsetTopRef.current;
     const previousItemContentTop = firstItemContentTopRef.current;
     const previousScrollTop = lastScrollTopRef.current;
     const previousMaxScroll = lastMaxScrollRef.current;
@@ -1063,14 +1063,16 @@ export function MessageTimeline({
         }
       }
       const anchorKey = previousFirstItemGroupKey;
-      const previousAnchorTop =
-        anchorKey != null ? previousGroupOffsetByKey.get(anchorKey) : undefined;
       const anchorEl =
         anchorKey != null
           ? node.querySelector(`[data-og-group-key="${cssEscapeAttribute(anchorKey)}"]`)
           : null;
-      if (delta == null && anchorEl instanceof HTMLElement && previousAnchorTop !== undefined) {
-        const moved = Math.round(anchorEl.offsetTop - previousAnchorTop);
+      if (
+        delta == null &&
+        anchorEl instanceof HTMLElement &&
+        previousFirstItemGroupOffsetTop != null
+      ) {
+        const moved = Math.round(anchorEl.offsetTop - previousFirstItemGroupOffsetTop);
         if (moved) {
           delta = moved;
         }
@@ -1173,14 +1175,12 @@ export function MessageTimeline({
       hasNewer ||
       firstItemContentTopRef.current == null;
     if (needOffsets) {
-      const nextOffsetByKey = new Map<string, number>();
-      for (const { key } of groups) {
-        const el = node.querySelector(`[data-og-group-key="${cssEscapeAttribute(key)}"]`);
-        if (el instanceof HTMLElement) {
-          nextOffsetByKey.set(key, el.offsetTop);
-        }
-      }
-      groupOffsetByKeyRef.current = nextOffsetByKey;
+      const committedFirstGroupKey = firstItemGroupKeyRef.current;
+      const firstGroupEl = committedFirstGroupKey
+        ? node.querySelector(`[data-og-group-key="${cssEscapeAttribute(committedFirstGroupKey)}"]`)
+        : null;
+      firstItemGroupOffsetTopRef.current =
+        firstGroupEl instanceof HTMLElement ? firstGroupEl.offsetTop : null;
       const firstItemEl = firstItemId
         ? node.querySelector(`[data-og-item="${cssEscapeAttribute(firstItemId)}"]`)
         : null;
@@ -1282,7 +1282,7 @@ export function MessageTimeline({
     lastScrollHeightRef.current = 0;
     lastClientHeightRef.current = 0;
     firstItemGroupKeyRef.current = null;
-    groupOffsetByKeyRef.current = new Map();
+    firstItemGroupOffsetTopRef.current = null;
     firstItemContentTopRef.current = null;
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
@@ -1648,7 +1648,7 @@ export function MessageTimeline({
       <FoldMemoryProvider value={foldMemoryRef.current}>
         <SeenActivityIdsProvider value={seenActivityIdsRef.current}>
           <TimelineComputeLabelProvider value={computeLabel ?? null}>
-            <EntranceAnimationProvider value={!bulkRender}>
+            <EntranceAnimationProvider value={false}>
               <TooltipProvider delayDuration={400}>
                 <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
                   {onAnnotate ? (
@@ -1701,56 +1701,29 @@ export function MessageTimeline({
                           className="pointer-events-none absolute inset-x-0 top-0 h-px"
                         />
                       ) : null}
-                      {groups.map(({ group, key }, index) => {
-                        const next = groups[index + 1]?.group;
-                        const contextCompactionCount =
-                          group.kind === "turn"
-                            ? (group.contextCompactionCount ?? 0)
-                            : group.kind === "activity" &&
-                                next?.kind === "item" &&
-                                next.item.kind === "context-compaction" &&
-                                next.item.phase === "compacted"
-                              ? 1
-                              : 0;
+                      {groups.map(({ group, key, entranceEnabled }, index) => {
                         return (
-                          <div key={key} data-og-timeline-group-anchor="" data-og-group-key={key}>
-                            <TimelineGroupRenderBoundary
-                              resetKeys={[
-                                group,
-                                renderMessageText,
-                                onOpenSession,
-                                onMemoryClick,
-                                onReconnect,
-                                resolveProviderLogo,
-                                toolRegistry,
-                                loadRetainedScreenshot,
-                                loadRetainedArtifact,
-                                loadVideoArtifactPlayback,
-                                turnSummary,
-                              ]}
-                            >
-                              <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
-                                <TimelineGroupView
-                                  group={group}
-                                  renderMessageText={renderMessageText}
-                                  onOpenSession={onOpenSession}
-                                  onMemoryClick={onMemoryClick}
-                                  onReconnect={onReconnect}
-                                  resolveProviderLogo={resolveProviderLogo}
-                                  toolRegistry={toolRegistry}
-                                  loadRetainedScreenshot={loadRetainedScreenshot}
-                                  loadRetainedArtifact={loadRetainedArtifact}
-                                  loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-                                  turnSummary={turnSummary}
-                                  foldLiveCluster={isAgentProgress(next)}
-                                  trailingAgentText={trailingAgentTextAfterTurn(group, next)}
-                                  contextCompactionCount={
-                                    contextCompactionCount > 0 ? contextCompactionCount : undefined
-                                  }
-                                />
-                              </UserMessageDisclosureProvider>
-                            </TimelineGroupRenderBoundary>
-                          </div>
+                          <TimelineGroupEntry
+                            key={key}
+                            groupKey={key}
+                            group={group}
+                            nextGroup={groups[index + 1]?.group}
+                            entranceEnabled={entranceEnabled}
+                            liveEntranceEnabled={
+                              group.kind === "activity" ? !bulkRender : undefined
+                            }
+                            userMessageDisclosureContext={userMessageDisclosureContext}
+                            renderMessageText={renderMessageText}
+                            onOpenSession={onOpenSession}
+                            onMemoryClick={onMemoryClick}
+                            onReconnect={onReconnect}
+                            resolveProviderLogo={resolveProviderLogo}
+                            toolRegistry={toolRegistry}
+                            loadRetainedScreenshot={loadRetainedScreenshot}
+                            loadRetainedArtifact={loadRetainedArtifact}
+                            loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+                            turnSummary={turnSummary}
+                          />
                         );
                       })}
                       {groups.length > 0 && trailingState ? (
@@ -1941,7 +1914,90 @@ export function MessageTimeline({
 type KeyedTimelineGroup = {
   group: TimelineGroup;
   key: string;
+  entranceEnabled: boolean;
 };
+
+/**
+ * Timeline projections are plain acyclic data in normal operation, but the
+ * public pre-projected-item API can carry consumer-owned `unknown` payloads.
+ * Compare arrays and plain records recursively, retain callback identity, and
+ * fail closed for newly-created class instances or other exotic objects. The
+ * seen-pair table also keeps a malformed cyclic consumer payload bounded.
+ */
+function timelineRenderValueEqual(
+  previous: unknown,
+  next: unknown,
+  seenPairs: WeakMap<object, WeakSet<object>> = new WeakMap(),
+): boolean {
+  if (Object.is(previous, next)) {
+    return true;
+  }
+  if (
+    previous === null ||
+    next === null ||
+    typeof previous !== "object" ||
+    typeof next !== "object"
+  ) {
+    return false;
+  }
+
+  const previousIsArray = Array.isArray(previous);
+  if (previousIsArray !== Array.isArray(next)) {
+    return false;
+  }
+
+  let matchingNextValues = seenPairs.get(previous);
+  if (matchingNextValues?.has(next)) {
+    return true;
+  }
+  if (!matchingNextValues) {
+    matchingNextValues = new WeakSet();
+    seenPairs.set(previous, matchingNextValues);
+  }
+  matchingNextValues.add(next);
+
+  if (previousIsArray) {
+    const previousValues = previous as unknown[];
+    const nextValues = next as unknown[];
+    return (
+      previousValues.length === nextValues.length &&
+      previousValues.every((value, index) =>
+        timelineRenderValueEqual(value, nextValues[index], seenPairs),
+      )
+    );
+  }
+
+  const previousPrototype = Object.getPrototypeOf(previous);
+  if (
+    previousPrototype !== Object.getPrototypeOf(next) ||
+    (previousPrototype !== Object.prototype && previousPrototype !== null)
+  ) {
+    return false;
+  }
+
+  const previousRecord = previous as Record<string, unknown>;
+  const nextRecord = next as Record<string, unknown>;
+  const previousKeys = Object.keys(previousRecord);
+  if (previousKeys.length !== Object.keys(nextRecord).length) {
+    return false;
+  }
+  return previousKeys.every(
+    (key) =>
+      Object.prototype.hasOwnProperty.call(nextRecord, key) &&
+      timelineRenderValueEqual(previousRecord[key], nextRecord[key], seenPairs),
+  );
+}
+
+function timelineGroupsRenderEqual(previous: TimelineGroup, next: TimelineGroup): boolean {
+  try {
+    return timelineRenderValueEqual(previous, next);
+  } catch {
+    // Consumer-owned `unknown` payloads may be proxies/getters. Equality is an
+    // optimization only; a hostile comparator surface must fall back to the
+    // authoritative new group rather than taking down the timeline render.
+    return false;
+  }
+}
 
 /**
  * Projection can legitimately change a group's content-derived key while
@@ -1951,7 +2007,10 @@ type KeyedTimelineGroup = {
  * committed groups by their durable item IDs so both the React key and the
  * progressive-window anchor survive either change.
  */
-function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGroup[] {
+function useStableTimelineGroupKeys(
+  allGroups: TimelineGroup[],
+  entranceEnabled: boolean,
+): KeyedTimelineGroup[] {
   const previousRef = useRef<KeyedTimelineGroup[]>([]);
   const keyedGroups = useMemo(() => {
     const previousByItemId = new Map<string, KeyedTimelineGroup>();
@@ -1964,29 +2023,36 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
     const usedKeys = new Set<string>();
     return allGroups.map((group, index) => {
       const itemIds = timelineGroupItemIds(group);
-      let retainedKey: string | undefined;
+      let retainedGroup: KeyedTimelineGroup | undefined;
       for (const itemId of itemIds) {
         const previous = previousByItemId.get(itemId);
         // Retain only same-kind matches. Activity → turn wrap must NOT keep the
         // activity chip's React key: that reused a collapsed TurnSummary and
         // skipped the settle beat (insta-collapse / content flash).
         if (previous && previous.group.kind === group.kind && !usedKeys.has(previous.key)) {
-          retainedKey = previous.key;
+          retainedGroup = previous;
           break;
         }
       }
 
       const canonicalKey = timelineGroupKey(group);
-      let key = retainedKey ?? canonicalKey;
+      let key = retainedGroup?.key ?? canonicalKey;
       let collision = 0;
       while (usedKeys.has(key)) {
         key = `${canonicalKey}:${index}:${collision}`;
         collision += 1;
       }
       usedKeys.add(key);
-      return { group, key };
+      return {
+        group:
+          retainedGroup && timelineGroupsRenderEqual(retainedGroup.group, group)
+            ? retainedGroup.group
+            : group,
+        key,
+        entranceEnabled: retainedGroup?.entranceEnabled ?? entranceEnabled,
+      };
     });
-  }, [allGroups]);
+  }, [allGroups, entranceEnabled]);
 
   useLayoutEffect(() => {
     previousRef.current = keyedGroups;
@@ -2079,11 +2145,106 @@ class TimelineGroupRenderBoundary extends Component<
   }
 }
 
+type TimelineGroupEntryProps = {
+  groupKey: string;
+  group: TimelineGroup;
+  nextGroup?: TimelineGroup | undefined;
+  entranceEnabled: boolean;
+  liveEntranceEnabled?: boolean | undefined;
+  userMessageDisclosureContext: UserMessageDisclosureContextValue;
+  renderMessageText: MessageTimelineProps["renderMessageText"];
+  onOpenSession: MessageTimelineProps["onOpenSession"];
+  onMemoryClick: MessageTimelineProps["onMemoryClick"];
+  onReconnect: MessageTimelineProps["onReconnect"];
+  resolveProviderLogo: MessageTimelineProps["resolveProviderLogo"];
+  toolRegistry: ToolRegistry;
+  loadRetainedScreenshot: MessageTimelineProps["loadRetainedScreenshot"];
+  loadRetainedArtifact: MessageTimelineProps["loadRetainedArtifact"];
+  loadVideoArtifactPlayback: MessageTimelineProps["loadVideoArtifactPlayback"];
+  turnSummary: MessageTimelineProps["turnSummary"];
+};
+
+/**
+ * Keep the complete settled-row shell behind one shallow memo boundary. A
+ * prepend still reconciles the keyed list, but render-equivalent suffix groups
+ * skip their providers, error boundaries, disclosure wrappers, and row trees.
+ */
+const TimelineGroupEntry = memo(function TimelineGroupEntry({
+  groupKey,
+  group,
+  nextGroup,
+  entranceEnabled,
+  liveEntranceEnabled,
+  userMessageDisclosureContext,
+  renderMessageText,
+  onOpenSession,
+  onMemoryClick,
+  onReconnect,
+  resolveProviderLogo,
+  toolRegistry,
+  loadRetainedScreenshot,
+  loadRetainedArtifact,
+  loadVideoArtifactPlayback,
+  turnSummary,
+}: TimelineGroupEntryProps) {
+  const contextCompactionCount =
+    group.kind === "turn"
+      ? (group.contextCompactionCount ?? 0)
+      : group.kind === "activity" &&
+          nextGroup?.kind === "item" &&
+          nextGroup.item.kind === "context-compaction" &&
+          nextGroup.item.phase === "compacted"
+        ? 1
+        : 0;
+  return (
+    <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
+      <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
+        <TimelineGroupRenderBoundary
+          resetKeys={[
+            group,
+            renderMessageText,
+            onOpenSession,
+            onMemoryClick,
+            onReconnect,
+            resolveProviderLogo,
+            toolRegistry,
+            loadRetainedScreenshot,
+            loadRetainedArtifact,
+            loadVideoArtifactPlayback,
+            turnSummary,
+          ]}
+        >
+          <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
+            <TimelineGroupView
+              group={group}
+              renderMessageText={renderMessageText}
+              onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
+              onReconnect={onReconnect}
+              resolveProviderLogo={resolveProviderLogo}
+              toolRegistry={toolRegistry}
+              loadRetainedScreenshot={loadRetainedScreenshot}
+              loadRetainedArtifact={loadRetainedArtifact}
+              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+              turnSummary={turnSummary}
+              foldLiveCluster={isAgentProgress(nextGroup)}
+              trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
+              contextCompactionCount={
+                contextCompactionCount > 0 ? contextCompactionCount : undefined
+              }
+            />
+          </UserMessageDisclosureProvider>
+        </TimelineGroupRenderBoundary>
+      </EntranceAnimationProvider>
+    </div>
+  );
+});
+
 // The full loaded window stays mounted, so settled history rows must be cheap
-// on every commit: projection reuses group objects for unchanged groups, so
-// memo skips them. Live projection creates a new group object, and
-// behavior/callback changes are separate props, so ordinary streaming and host
-// updates still invalidate immediately.
+// on every commit: the stable-key projection reuses render-equivalent group
+// objects, so memo skips them. Changed projection content receives a new group
+// object, and behavior/callback changes are separate props, so ordinary
+// streaming and host updates still invalidate immediately.
 const TimelineGroupView = memo(function TimelineGroupView({
   group,
   renderMessageText,
