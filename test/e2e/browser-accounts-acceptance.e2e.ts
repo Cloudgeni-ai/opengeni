@@ -184,6 +184,7 @@ const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<string, ReadonlySet<string
   ["cross-tab-select-race", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["late-old-epoch-setup-beta-to-alpha", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["cross-slot-deep-link", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["slot-revocation-reauthentication", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["responsive-evidence-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
 ]);
 
@@ -2061,6 +2062,19 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/config/client`,
       }),
     ).toBeNull();
+    const reauthenticationBootstrapRead = {
+      ...crossTabBootstrapRead,
+      actorEpoch: "current-actor",
+      dispatchPhase: "slot-revocation-reauthentication",
+      responsePhase: "slot-revocation-reauthentication",
+    };
+    expect(requestFailureProblem(reauthenticationBootstrapRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        url: `${publicOrigin}/v1/config/other`,
+      }),
+    ).toContain("/v1/config/other");
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,

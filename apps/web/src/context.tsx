@@ -33,7 +33,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import { Toaster, toast } from "sonner";
+import { toast } from "sonner";
 
 import {
   clearStoredAccessKey,
@@ -52,6 +52,7 @@ import { OrganizationOnboardingPanel } from "@/components/organization-onboardin
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
@@ -2609,7 +2610,7 @@ export function RootRouteComponent() {
     // overflow via ContentPage / session panes. `min-h-screen` used to let
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
-      <Toaster richColors theme="dark" />
+      <Toaster />
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager
