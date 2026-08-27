@@ -8,11 +8,15 @@ import {
 import {
   escapedMcpTimeoutRecoveryDetail,
   isTurnActivityFenceCancellation,
+  postClaimDatabaseRecoveryDetail,
+  preClaimFailureDetail,
   preClaimFailureDisposition,
 } from "../src/workflows/session";
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
 } from "../src/activities/types";
@@ -92,6 +96,10 @@ describe("pre-claim admission failure wire classification", () => {
         ],
       });
       expect(preClaimFailureDisposition(activityFailure(failure))).toBe(disposition);
+      expect(preClaimFailureDetail(activityFailure(failure))).toEqual({
+        disposition,
+        code: disposition === "retryable" ? "db_deadlock" : "claim_invariant",
+      });
     }
   });
 
@@ -119,6 +127,54 @@ describe("pre-claim admission failure wire classification", () => {
         ),
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("post-claim database recovery wire classification", () => {
+  const detail = {
+    turnId: "turn-1",
+    triggerEventId: "trigger-1",
+    executionGeneration: 2,
+    code: "db_failure" as const,
+  };
+
+  test("accepts only the exact claimed-turn recovery contract", () => {
+    const failure = ApplicationFailure.create({
+      message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+      type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+      nonRetryable: true,
+      details: [detail],
+    });
+    expect(postClaimDatabaseRecoveryDetail(activityFailure(failure))).toEqual(detail);
+  });
+
+  test("rejects malformed identity, permanent codes, and unrelated activities", () => {
+    const failure = (candidate: Record<string, unknown>) =>
+      activityFailure(
+        ApplicationFailure.create({
+          message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+          type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+          details: [candidate],
+        }),
+      );
+    expect(
+      postClaimDatabaseRecoveryDetail(failure({ ...detail, executionGeneration: 0 })),
+    ).toBeNull();
+    expect(
+      postClaimDatabaseRecoveryDetail(failure({ ...detail, code: "claim_invariant" })),
+    ).toBeNull();
+    expect(
+      postClaimDatabaseRecoveryDetail(
+        new ActivityFailure(
+          "Activity task failed",
+          "someOtherActivity",
+          "activity-1",
+          "IN_PROGRESS",
+          "worker-1",
+          failure(detail).cause,
+        ),
+      ),
+    ).toBeNull();
   });
 });
 

@@ -240,6 +240,14 @@ export type FailSessionAttemptInput = {
    * admission transaction; omission is a rolling-deploy/legacy unknown and
    * deliberately keeps the recoverable wake behavior. */
   preClaimFailureDisposition?: PreClaimFailureDisposition;
+  /** Added in v4. Retains the safe classified DB code so an ambiguously
+   * committed claim discovered by the control lane can recover the exact
+   * attempt instead of terminally failing it. */
+  preClaimFailure?: PreClaimFailureDetail;
+  /** Added in v4. A claimed attempt that lost operational database access
+   * before turn-start completion carries its exact immutable turn identity so
+   * the DB-only control lane can recover it instead of terminally failing it. */
+  postClaimDatabaseRecovery?: PostClaimDatabaseRecoveryDetail;
   /** The workflow admission trigger is required to re-evaluate the same
    * durable admission branch before terminally settling a permanent failure. */
   trigger?: RunAgentTurnInput["trigger"];
@@ -248,6 +256,7 @@ export type FailSessionAttemptInput = {
 
 export type FailSessionAttemptResult =
   | { action: "failed" }
+  | { action: "recovering" }
   | { action: "unclaimed" }
   | { action: "terminal" }
   | { action: "stale" };
@@ -261,6 +270,17 @@ export type PreClaimFailureDetail = {
 
 export const PRE_CLAIM_FAILURE_TYPE = "OpenGeniPreClaimFailure";
 export const PRE_CLAIM_FAILURE_MESSAGE = "Agent turn admission failed before attempt claim.";
+
+export type PostClaimDatabaseRecoveryDetail = {
+  turnId: string;
+  triggerEventId: string;
+  executionGeneration: number;
+  code: "db_deadlock" | "db_serialization_failure" | "db_failure";
+};
+
+export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";
+export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE =
+  "Agent turn database recovery required after attempt claim.";
 
 export type RecoverDispatchInput = {
   accountId: string;

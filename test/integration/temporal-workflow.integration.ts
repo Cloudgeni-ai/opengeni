@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
+import { ApplicationFailure } from "@temporalio/activity";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { startTestServices, type TestServices, waitFor } from "@opengeni/testing";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
@@ -8,6 +9,10 @@ import {
   createTurnWorkerTuner,
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
+import {
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+} from "../../apps/worker/src/activities/types";
 
 // An ungraceful worker death cannot be faked by throwing a TimeoutFailure
 // from the activity (the worker coerces thrown activity errors into
@@ -302,6 +307,90 @@ describe("Temporal workflow integration", () => {
         expect(failures[0]).toMatchObject({
           attemptId: attempts[0],
           retryDelayMs: 1_000,
+        });
+        expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "backs off and reclaims the same turn after post-claim database failure",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const turn = queuedTurn("event-1");
+      const attempts: string[] = [];
+      const failures: Array<{
+        attemptId: string;
+        retryDelayMs?: number;
+        postClaimDatabaseRecovery?: unknown;
+      }> = [];
+      let admission!: ReturnType<typeof createTurnAdmission>;
+      admission = createTurnAdmission([turn], async (input, currentTurn) => {
+        attempts.push(input.attemptId);
+        if (attempts.length === 1) {
+          throw ApplicationFailure.create({
+            message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+            type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+            nonRetryable: true,
+            details: [
+              {
+                turnId: currentTurn.id,
+                triggerEventId: currentTurn.triggerEventId,
+                executionGeneration: 1,
+                code: "db_failure",
+              },
+            ],
+          });
+        }
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async (input: (typeof failures)[number]) => {
+          failures.push(input);
+          if (input.postClaimDatabaseRecovery) {
+            admission.recover();
+            return { action: "recovering" as const };
+          }
+          return { action: "failed" as const };
+        },
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const startedAt = Date.now();
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [
+            {
+              ...scope,
+              sessionId: crypto.randomUUID(),
+              initialEventId: "event-1",
+            },
+          ],
+        });
+        await handle.result();
+
+        expect(attempts).toHaveLength(2);
+        expect(attempts[1]).not.toBe(attempts[0]);
+        expect(failures).toHaveLength(1);
+        expect(failures[0]).toMatchObject({
+          attemptId: attempts[0],
+          retryDelayMs: 1_000,
+          postClaimDatabaseRecovery: {
+            turnId: turn.id,
+            triggerEventId: turn.triggerEventId,
+            executionGeneration: 1,
+            code: "db_failure",
+          },
         });
         expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
       } finally {
