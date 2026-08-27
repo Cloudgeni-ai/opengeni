@@ -6,7 +6,17 @@ import {
   isWorkspaceConfigPath,
 } from "./workspace-nav-data";
 
+const workspaceNavSource = await Bun.file(`${import.meta.dir}/workspace-nav.tsx`).text();
+
 describe("workspace rail destinations", () => {
+  test("labels the settings entry without changing its destination", () => {
+    expect(workspaceNavSource).toContain('aria-label="Settings"');
+    expect(workspaceNavSource).toContain('title={rail.collapsed ? "Settings" : undefined}');
+    expect(workspaceNavSource).toContain('<span className="min-w-0 truncate">Settings</span>');
+    expect(workspaceNavSource).toContain('to="/workspaces/$workspaceId/settings"');
+    expect(workspaceNavSource).toContain('search={{ section: "general" }}');
+  });
+
   test("keeps primary product destinations out of workspace administration", () => {
     const primaryTargets = PRIMARY_WORKSPACE_ITEMS.map((item) => item.to);
     const settingsTargets = WORKSPACE_CONFIG_GROUPS.flatMap((group) => group.items).map(
