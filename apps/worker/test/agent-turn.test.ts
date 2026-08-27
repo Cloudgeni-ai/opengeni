@@ -626,6 +626,24 @@ describe("turn exact-content boundaries", () => {
     expect(Object.hasOwn(rawItem.output, "optional")).toBe(true);
   });
 
+  test("correlates native tool-search results whose id only survives in provider data", () => {
+    const rawItem = {
+      type: "tool_search_output",
+      tools: [{ name: "matching_tool" }],
+      providerData: { call_id: "tool-search-provider-id" },
+    };
+
+    expect(
+      completedToolCallFromSdkEvent({
+        type: "run_item_stream_event",
+        item: { type: "tool_search_output_item", rawItem },
+      }),
+    ).toEqual({
+      callId: "tool-search-provider-id",
+      resultItem: rawItem,
+    });
+  });
+
   test("keeps non-object undefined values fail-closed at the pending receipt boundary", () => {
     expect(() =>
       pendingToolCallFromSdkEvent({

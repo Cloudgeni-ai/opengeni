@@ -442,6 +442,7 @@ export {
   serializeHumanInputRequests,
   serializeInteractionInterventionRequests,
 } from "./run-events";
+export { toolCallIdFromSdkItem } from "./tool-call-identity";
 export {
   compactMcpResultCustomDataRunState,
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
