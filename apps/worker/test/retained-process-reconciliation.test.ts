@@ -41,6 +41,8 @@ import {
   classifyRetainedProcessPollResult,
   createSandboxLeaseActivities,
   probeRetainedProcessAtProvider,
+  RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
+  RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
   type HistoricalModalSandboxLifecycleProbeFn,
   type RetainedProcessProbeFn,
 } from "../src/activities/sandbox-lease";
@@ -847,6 +849,54 @@ describe("retained-process terminal-owner reconciliation", () => {
       providerBinding: null,
       lastReconcileOutcome: "provider_binding_missing",
     });
+  }, 60_000);
+
+  test("repeated missing Modal binding is quarantined without releasing its blocker", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    await admin`
+      update sandbox_leases set
+        lease_epoch = lease_epoch + 1,
+        instance_id = 'successor-modal-sandbox'
+      where id = ${fixture.leaseId}`;
+    await admin`
+      update sandbox_retained_processes set
+        provider_binding_key = null,
+        provider_binding = null,
+        reconcile_attempts = ${RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS - 1},
+        reconcile_after = now()
+      where id = ${fixture.process.id}`;
+    const before = await settlementProjection(fixture);
+    const startedAt = Date.now();
+
+    const observability = await runReaper(
+      async () => {
+        throw new Error("successor lease must not probe the historical process");
+      },
+      async () => ({
+        status: "not_found",
+        providerBindingKey: MODAL_PROVIDER_BINDING.key,
+        providerBinding: MODAL_PROVIDER_BINDING.binding,
+      }),
+    );
+
+    const process = await durableProcess(fixture);
+    expect(process).toMatchObject({
+      state: "active",
+      providerBindingKey: null,
+      providerBinding: null,
+      reconcileClaimId: null,
+      reconcileAttempts: RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
+      lastReconcileOutcome: "quarantined_provider_binding_missing",
+      reconcileProofOutcome: null,
+    });
+    expect(new Date(process.reconcileAfter).getTime()).toBeGreaterThanOrEqual(
+      startedAt + RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS - 5_000,
+    );
+    expect(await settlementProjection(fixture)).toEqual(before);
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_retained_process_reconciliation_total\{[^}]*outcome="quarantined_binding_missing"[^}]*\} 1/,
+    );
   }, 60_000);
 
   test("claims every closed terminal/recovery attempt and direct owner, but not a live attempt", async () => {
