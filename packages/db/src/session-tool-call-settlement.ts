@@ -20,10 +20,15 @@ export function historyCallId(item: Record<string, unknown>): string | null {
       ? (item.providerData as Record<string, unknown>)
       : null;
   // Native tool-search `id` is the provider item id, not the call correlation
-  // id. Prefer its providerData identity before the generic item-id fallback.
-  const value =
-    item.callId ?? item.call_id ?? providerData?.callId ?? providerData?.call_id ?? item.id;
-  return typeof value === "string" && value.length > 0 ? value : null;
+  // id. Validate direct and provider identities before the item-id fallback.
+  const value = [
+    item.callId,
+    item.call_id,
+    providerData?.callId,
+    providerData?.call_id,
+    item.id,
+  ].find((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+  return value ?? null;
 }
 
 export function historyItemType(item: Record<string, unknown>): string | null {
@@ -70,13 +75,33 @@ export function interruptedToolCallResult(input: {
   }
   if (input.callType === "computer_call") return null;
   if (input.callType === "tool_search_call") {
+    const providerData =
+      input.callItem.providerData &&
+      typeof input.callItem.providerData === "object" &&
+      !Array.isArray(input.callItem.providerData)
+        ? (input.callItem.providerData as Record<string, unknown>)
+        : null;
+    const execution =
+      input.callItem.execution === "client" || input.callItem.execution === "server"
+        ? input.callItem.execution
+        : providerData?.execution === "client" || providerData?.execution === "server"
+          ? providerData.execution
+          : null;
+    const providerIdentity =
+      typeof providerData?.call_id === "string" || typeof providerData?.callId === "string";
     const snakeId = typeof input.callItem.call_id === "string";
     return {
       type: "tool_search_output",
-      ...(snakeId ? { call_id: input.callId } : { callId: input.callId }),
-      ...(input.callItem.execution === "client" || input.callItem.execution === "server"
-        ? { execution: input.callItem.execution }
-        : {}),
+      ...(providerIdentity
+        ? {
+            providerData: {
+              call_id: input.callId,
+              ...(execution ? { execution } : {}),
+            },
+          }
+        : snakeId
+          ? { call_id: input.callId, ...(execution ? { execution } : {}) }
+          : { callId: input.callId, ...(execution ? { execution } : {}) }),
       status: "incomplete",
       tools: [],
     };
