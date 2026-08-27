@@ -3,10 +3,10 @@
 // connector-only code does not increase the core session bundle.
 import {
   OpenGeniApiError,
-  OpenGeniCoreClient,
+  OpenGeniBrowserClient,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
-} from "@opengeni/sdk/core";
+} from "@opengeni/sdk/browser";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 
 import type { AuthSession, ClientConfig } from "./types";
@@ -69,9 +69,9 @@ export function isApiErrorStatus(error: unknown, status: number): boolean {
  * request (the stored access key can change at runtime) and cookies ride
  * along for managed-session deployments.
  */
-export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniCoreClient {
+export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBrowserClient {
   const createdAtActorRevision = managedActorRevision;
-  return new OpenGeniCoreClient({
+  return new OpenGeniBrowserClient({
     baseUrl: apiBaseUrl,
     beginSharedRead,
     headers: () => authHeaders(),

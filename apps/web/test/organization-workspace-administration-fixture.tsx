@@ -1,4 +1,4 @@
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Toaster } from "sonner";
@@ -223,7 +223,7 @@ const invitations: OrganizationInvitation[] = [
 function Fixture() {
   const overviewRef = useRef(structuredClone(initialOverview));
   const [receipt, setReceipt] = useState<Record<string, unknown>>({});
-  const clientRef = useRef<OpenGeniCoreClient>();
+  const clientRef = useRef<OpenGeniBrowserClient>();
 
   clientRef.current ??= {
     getOrganizationAdministrationOverview: async () => structuredClone(overviewRef.current),
@@ -347,7 +347,7 @@ function Fixture() {
       setReceipt({ action: "retry-delivery", invitationId, ...retry });
       return structuredClone(invitation.delivery);
     },
-  } as unknown as OpenGeniCoreClient;
+  } as unknown as OpenGeniBrowserClient;
 
   return (
     <main className="mx-auto grid max-w-5xl gap-8 p-4 sm:p-8">

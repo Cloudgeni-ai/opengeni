@@ -6,7 +6,7 @@ import {
   type Session,
   type Workspace,
 } from "@opengeni/sdk";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AuthSession } from "@/types";
@@ -62,7 +62,7 @@ export type PersonalResourceAttachmentController = Readonly<{
  * the optional Personal catalog into submission UI.
  */
 export function useFixedResourceScopes(
-  client: OpenGeniCoreClient,
+  client: OpenGeniBrowserClient,
   workspaceId: string | null,
   variableSetIds: readonly string[],
   rigId: string | null,
@@ -115,7 +115,7 @@ export function useFixedResourceScopes(
 }
 
 export function usePersonalResourceAttachment(input: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   authMode: string;
   authSession: AuthSession | null;
   accessSubjectId: string;

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type Session } from "@opengeni/sdk";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import { managedSelfContextIdentity } from "./managed-self-context";
 import {
@@ -155,7 +155,7 @@ describe("personal resource attachment authority", () => {
           nextCursor: null,
         };
       },
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(catalog.variableSets.map((resource) => resource.name)).toEqual(["Private deploy keys"]);
@@ -174,7 +174,7 @@ describe("personal resource attachment authority", () => {
         authorities: [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(
@@ -257,7 +257,7 @@ describe("personal resource attachment authority", () => {
             : [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(
@@ -289,7 +289,7 @@ describe("personal resource attachment authority", () => {
           options.resourceKind === "variable_set" ? [authority("variable_set", variableSetId)] : [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(
@@ -326,7 +326,7 @@ describe("personal resource attachment authority", () => {
           nextCursor: options.resourceKind === "variable_set" ? `page-${variablePages}` : null,
         };
       },
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(variablePages).toBe(4);

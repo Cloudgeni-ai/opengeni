@@ -1,5 +1,5 @@
-/** Backward-compatible non-artifact client surface. */
-export { OpenGeniDocumentAuthorityClient as OpenGeniCoreClient } from "./document-authority-client";
+/** Browser-console client. Optional SDK surfaces must not enter this eager graph. */
+export { OpenGeniClient as OpenGeniBrowserClient } from "./client";
 export type {
   FetchLike,
   GetSessionOptions,

@@ -1,4 +1,4 @@
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   CheckIcon,
   ClockIcon,
@@ -82,7 +82,7 @@ function unavailableReasonCopy(reason: OrganizationRecoveryOverview["unavailable
 }
 
 export function OrganizationRecoverySection(props: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   identity: OrganizationAdminIdentity;
   managedSession: boolean;
 }) {

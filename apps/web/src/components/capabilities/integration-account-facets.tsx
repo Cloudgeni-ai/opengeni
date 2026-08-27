@@ -1,4 +1,4 @@
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import { GoogleDriveKnowledgeSourceDialog } from "@/components/capabilities/google-drive-knowledge-source-dialog";
 import { IntegrationFacetsPanel } from "@/components/capabilities/integration-facets-panel";
@@ -26,7 +26,7 @@ export function IntegrationAccountFacets({
   canManageOrganizationDestination,
   refreshRevision,
 }: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   facetCount: number;

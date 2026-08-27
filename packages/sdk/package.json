@@ -30,6 +30,14 @@
       "types": "./src/core.ts",
       "default": "./src/core.ts"
     },
+    "./browser": {
+      "types": "./src/browser.ts",
+      "default": "./src/browser.ts"
+    },
+    "./document-authority": {
+      "types": "./src/document-authority.ts",
+      "default": "./src/document-authority.ts"
+    },
     "./accounts": {
       "types": "./src/accounts.ts",
       "default": "./src/accounts.ts"
