@@ -32,6 +32,14 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+function deferredValue<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
 async function within<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   return await Promise.race([
     promise,
@@ -53,6 +61,20 @@ async function waitForApplicationLock(applicationName: string): Promise<void> {
     await Bun.sleep(10);
   }
   throw new Error(`Timed out waiting for ${applicationName} to block on a row lock`);
+}
+
+async function waitForBackendLock(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const [activity] = await shared!.admin<Array<{ waitEventType: string | null }>>`
+      select wait_event_type as "waitEventType"
+      from pg_stat_activity
+      where datname = current_database()
+        and pid = ${pid}
+      limit 1`;
+    if (activity?.waitEventType === "Lock") return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`Timed out waiting for backend ${pid} to block on a row lock`);
 }
 
 async function deadlockCount(): Promise<number> {
@@ -252,15 +274,11 @@ describe("migration 0364 workspace learning-policy snapshot lock order", () => {
   test("holds the attempt fence through commit so interruption creation cannot cross revalidation", async () => {
     if (!available) return;
     const fixture = await seedAttempt();
-    const interruptionApplicationName = `learning-policy-interruption-${crypto.randomUUID()}`;
     const snapshot = postgres(shared!.appUrl, { max: 1, prepare: false });
-    const interruptionWriter = postgres(shared!.adminUrl, {
-      max: 1,
-      prepare: false,
-      connection: { application_name: interruptionApplicationName },
-    });
+    const interruptionWriter = postgres(shared!.adminUrl, { max: 1, prepare: false });
     const snapshotCreated = deferred();
     const releaseSnapshot = deferred();
+    const interruptionBackend = deferredValue<number>();
     const operationId = crypto.randomUUID();
     let snapshotCall: Promise<Array<{ snapshotId: string }>> | undefined;
     let interruptionCall: Promise<unknown> | undefined;
@@ -287,6 +305,10 @@ describe("migration 0364 workspace learning-policy snapshot lock order", () => {
       await within(snapshotCreated.promise, 10_000, "Snapshot transaction did not reach commit");
 
       interruptionCall = interruptionWriter.begin(async (tx) => {
+        const [backend] = await tx<Array<{ pid: number }>>`
+          select pg_backend_pid()::int as pid`;
+        if (!backend) throw new Error("Interruption writer has no PostgreSQL backend");
+        interruptionBackend.resolve(backend.pid);
         await tx`
           select id from session_turn_attempts
           where account_id = ${fixture.accountId}
@@ -316,8 +338,13 @@ describe("migration 0364 workspace learning-policy snapshot lock order", () => {
           )`;
       });
       void interruptionCall.catch(() => undefined);
+      const interruptionBackendPid = await within(
+        interruptionBackend.promise,
+        10_000,
+        "Interruption writer did not establish a PostgreSQL backend",
+      );
       await Promise.race([
-        waitForApplicationLock(interruptionApplicationName),
+        waitForBackendLock(interruptionBackendPid),
         interruptionCall.then(() => {
           throw new Error("Interruption writer completed before reaching the attempt fence");
         }),
