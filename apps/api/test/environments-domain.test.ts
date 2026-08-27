@@ -102,7 +102,8 @@ describe("variable set attachment metadata surface", () => {
     expect(end).toBeGreaterThan(start);
     expect(resolver.match(/withRlsContext\(/gu)?.length).toBe(1);
     expect(resolver).toContain("setSubjectRlsContext(scopedDb, context.subjectId)");
-    expect(resolver).toContain("unnest(${[...variableSetIds]}::uuid[]) with ordinality");
+    expect(resolver).toContain("const requestedValues = sql.join(");
+    expect(resolver).toContain("values ${requestedValues}");
     expect(resolver).toContain("cross join lateral list_scoped_variable_sets(");
     expect(resolver).toContain("order by requested.ordinal");
     expect(resolver).not.toContain("Promise.all(");

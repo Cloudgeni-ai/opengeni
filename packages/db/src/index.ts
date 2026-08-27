@@ -16184,14 +16184,20 @@ export async function resolveVariableSetAttachments(
   variableSetIds: readonly string[],
 ): Promise<Array<Pick<VariableSet, "id" | "scope">>> {
   if (variableSetIds.length === 0) return [];
+  // Drizzle expands a bare JavaScript array into a parameter list rather than
+  // one PostgreSQL array value. Build the bounded requested relation directly.
+  const requestedValues = sql.join(
+    variableSetIds.map(
+      (variableSetId, index) => sql`(${variableSetId}::uuid, ${index + 1}::integer)`,
+    ),
+    sql`, `,
+  );
   return await withRlsContext(db, context, async (scopedDb) => {
     await setSubjectRlsContext(scopedDb, context.subjectId);
     return await rawRows<Pick<VariableSet, "id" | "scope">>(
       scopedDb,
       sql`with requested(variable_set_id, ordinal) as (
-        select requested.variable_set_id, requested.ordinal
-        from unnest(${[...variableSetIds]}::uuid[]) with ordinality
-          requested(variable_set_id, ordinal)
+        values ${requestedValues}
       )
       select
         resolved.value->>'id' as id,
