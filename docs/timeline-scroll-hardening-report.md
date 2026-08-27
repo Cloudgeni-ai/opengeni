@@ -777,6 +777,13 @@ The branch is ready to merge only when:
 - Fix: publish accepted older/newer/start/latest bulk navigation state in React transitions, with window, availability, mode, status, receipt/loading state scheduled together.
 - Regression: Chromium `production-scheduled 100-row prepend avoids a browser long task`, repeated three times.
 
+### F10 — the expanded browser gate left its retained workflow contract stale
+
+- Reproduction: run `bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'` after adding the tip-follow suite to the interaction lane.
+- Root cause: the CI step name and command changed, but the checked-in workflow graph manifest and the release-automation workflow expectation still described the pagination-only command.
+- Fix: regenerate the workflow execution graph manifest from Bun 1.4.0 and update the release-automation contract to require the combined pagination/tip-follow command exactly.
+- Regression: workflow graph verification plus the 113-test workflow graph/release-automation matrix.
+
 ## 26. Falsified or harness-limited candidates
 
 - Combined unpinned anchor loss was falsified after waiting for the real keyboard `scrollend`; PageUp had already released the pin before native movement began.
@@ -795,4 +802,5 @@ The branch is ready to merge only when:
 - Stress coverage: seeded 60-operation mixed trace with bounded operation log, frame/long-task/DOM/overflow assertions, frozen-page resume, keyboard, wheel, and coarse-pointer paths.
 - Performance coverage: transition-scheduled 100-row prepend produced no Long Task entries and kept maximum sampled frame interval below 50 ms in every repetition.
 - Browser hygiene: zero uncaught page errors or unexpected console errors; the demo-only missing favicon request is the sole exact allowlisted resource miss.
+- CI workflow ownership: the retained execution graph and exact browser-gate contract pass, including the combined pagination/tip-follow interaction command.
 - No merge, publish, staging deployment, or production mutation was performed.
