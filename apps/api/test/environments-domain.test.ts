@@ -85,7 +85,27 @@ describe("variable set attachment metadata surface", () => {
     expect(resolver).toContain('requirePermission(grant, "variable-sets:use")');
     expect(resolver).not.toContain('"variable-sets:list"');
     expect(resolver).not.toContain('"secrets:list"');
-    expect(resolver).toContain("getVariableSet(");
-    expect(resolver).toContain("{ id: variableSet.id, scope: variableSet.scope }");
+    expect(resolver).toContain("resolveVariableSetAttachments(");
+    expect(resolver).not.toContain("Promise.all(");
+    expect(resolver).not.toContain("getVariableSet(");
+  });
+
+  test("resolves requested ids set-wise in one transaction-pinned RLS scope", async () => {
+    const source = await Bun.file(
+      new URL("../../../packages/db/src/index.ts", import.meta.url),
+    ).text();
+    const start = source.indexOf("export async function resolveVariableSetAttachments(");
+    const end = source.indexOf("export async function getVariableSet(", start);
+    const resolver = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(resolver.match(/withRlsContext\(/gu)?.length).toBe(1);
+    expect(resolver).toContain("setSubjectRlsContext(scopedDb, context.subjectId)");
+    expect(resolver).toContain("unnest(${[...variableSetIds]}::uuid[]) with ordinality");
+    expect(resolver).toContain("cross join lateral list_scoped_variable_sets(");
+    expect(resolver).toContain("order by requested.ordinal");
+    expect(resolver).not.toContain("Promise.all(");
+    expect(resolver).not.toContain(".map(async");
   });
 });

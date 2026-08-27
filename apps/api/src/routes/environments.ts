@@ -13,10 +13,10 @@ import {
   deleteVariableSet,
   deleteVariableSetVariable,
   encryptVariableSetValue,
-  getVariableSet,
   getVariableSetByName,
   listVariableSets,
   readVariableSetSecretAtomically,
+  resolveVariableSetAttachments,
   setVariableSetVariable,
   updateVariableSet,
   VariableSetAttachedError,
@@ -145,22 +145,15 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
         requirePermission(grant, "variable-sets:attach");
         requirePermission(grant, "variable-sets:use");
         const payload = ResolveVariableSetAttachmentsRequest.parse(await c.req.json());
-        const variableSets = (
-          await Promise.all(
-            payload.variableSetIds.map(async (variableSetId) => {
-              const variableSet = await getVariableSet(
-                db,
-                {
-                  accountId: grant.accountId,
-                  workspaceId,
-                  subjectId: grant.subjectId,
-                },
-                variableSetId,
-              );
-              return variableSet ? { id: variableSet.id, scope: variableSet.scope } : null;
-            }),
-          )
-        ).filter((variableSet) => variableSet !== null);
+        const variableSets = await resolveVariableSetAttachments(
+          db,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+          },
+          payload.variableSetIds,
+        );
         return c.json(ResolveVariableSetAttachmentsResponse.parse({ variableSets }));
       });
     }
