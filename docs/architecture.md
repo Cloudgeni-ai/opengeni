@@ -635,6 +635,15 @@ metadata.
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension and its control-plane protocol; a leaf client, not session authority |
 
+The standalone `apps/api` entrypoint installs a one-shot fatal process
+boundary before configuration or dependency startup. Startup failures,
+unhandled promise rejections, and uncaught exceptions emit only reviewed
+structural diagnostics plus an opaque correlation id, drain accepted OTLP
+exports for a bounded interval, and then exit nonzero. Exception messages,
+stacks, enumerable fields, and arbitrary rejection values never cross the
+public telemetry boundary. Embedded API composition does not install process
+handlers because its host owns process lifecycle.
+
 ### 6.2 Packages
 
 | Path | Package | Owns |

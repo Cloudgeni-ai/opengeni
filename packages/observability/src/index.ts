@@ -340,6 +340,20 @@ const PUBLIC_CHANNEL_A_FAILURE_REASONS = new Set([
   "unexpected",
 ]);
 
+const PUBLIC_API_FATAL_PHASES = new Set(["startup", "running"]);
+const PUBLIC_API_FATAL_REASON_KINDS = new Set([
+  "bigint",
+  "boolean",
+  "error",
+  "function",
+  "null",
+  "number",
+  "object",
+  "string",
+  "symbol",
+  "undefined",
+]);
+
 /**
  * Public diagnostic values are protocol constants, never values inferred from
  * an exception's name, constructor, code, message, or enumerable properties.
@@ -347,6 +361,7 @@ const PUBLIC_CHANNEL_A_FAILURE_REASONS = new Set([
  * are omitted rather than copied through based on syntax.
  */
 const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
+  "ApiFatalOperationError",
   "OperationError",
   "CodexCheckpointOperationError",
   "CodexFleetShadowOperationError",
@@ -380,6 +395,9 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
 
 const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "agent_command_wake_failed",
+  "api_startup_failed",
+  "api_uncaught_exception",
+  "api_unhandled_rejection",
   "artifact_materializer_native_input_framing_failed",
   "artifact_materializer_native_snapshot_open_failed",
   "artifact_materializer_native_state_mismatch",
@@ -484,6 +502,7 @@ export class Observability {
   private readonly gauges = new Map<string, Gauge<string>>();
   private readonly histograms = new Map<string, Histogram<string>>();
   private readonly registrations = new Map<string, MetricRegistration>();
+  private readonly pendingExports = new Set<Promise<void>>();
   private readonly now: () => number;
   private readonly exporter: (
     url: string,
@@ -774,6 +793,13 @@ export class Observability {
     return await this.registry.metrics();
   }
 
+  /** Wait for every OTLP export accepted before or during this drain. */
+  async flush(): Promise<void> {
+    while (this.pendingExports.size > 0) {
+      await Promise.allSettled([...this.pendingExports]);
+    }
+  }
+
   private counter(name: string, help: string, labelNames: string[]): Counter<string> {
     const existing = this.counters.get(name);
     if (existing) {
@@ -882,15 +908,22 @@ export class Observability {
         },
       ],
     };
-    void this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)).catch(
-      () => {
+    let pendingExport: Promise<void>;
+    pendingExport = Promise.resolve()
+      .then(() =>
+        this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)),
+      )
+      .catch(() => {
         this.warn("OTLP span export failed", {
           errorClass: "TelemetryExportError",
           errorCode: "otlp_export_failed",
           origin: "observability",
         });
-      },
-    );
+      })
+      .finally(() => {
+        this.pendingExports.delete(pendingExport);
+      });
+    this.pendingExports.add(pendingExport);
   }
 }
 
@@ -1167,6 +1200,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
     return {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
+      ...projectApiFatalDiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
@@ -1178,6 +1212,18 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       return typeof value === "string" && pattern?.test(value) === true;
     }),
   );
+}
+
+function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "ApiFatalOperationError") return {};
+  const phase = attributes.phase;
+  const reasonKind = attributes.reasonKind;
+  return {
+    ...(typeof phase === "string" && PUBLIC_API_FATAL_PHASES.has(phase) ? { phase } : {}),
+    ...(typeof reasonKind === "string" && PUBLIC_API_FATAL_REASON_KINDS.has(reasonKind)
+      ? { reasonKind }
+      : {}),
+  };
 }
 
 function projectStartupDependencyAttributes(attributes: Attributes): Attributes {
