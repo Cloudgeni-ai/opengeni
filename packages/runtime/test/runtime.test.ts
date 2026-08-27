@@ -1328,6 +1328,44 @@ describe("runtime event normalization", () => {
     expect(Object.hasOwn(rawItem.action, "optional")).toBe(true);
   });
 
+  test("keeps native tool-search call and output events on one provider identity", () => {
+    const callId = "tool-search-provider-id";
+    const [created] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        type: "tool_search_call_item",
+        rawItem: {
+          type: "tool_search_call",
+          callId,
+          arguments: { query: "matching tools" },
+        },
+      },
+    } as any);
+    const [completed] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        type: "tool_search_output_item",
+        rawItem: {
+          type: "tool_search_output",
+          tools: [{ name: "matching_tool" }],
+          providerData: { call_id: callId },
+        },
+      },
+    } as any);
+
+    expect(created).toMatchObject({
+      type: "agent.toolCall.created",
+      payload: { id: callId, name: "tool_search" },
+    });
+    expect(completed).toEqual({
+      type: "agent.toolCall.output",
+      payload: {
+        id: callId,
+        output: { type: "text", text: "Disclosed tools: matching_tool" },
+      },
+    });
+  });
+
   test("normalizes tool outputs before durable event persistence", () => {
     const output = {
       type: "text",
