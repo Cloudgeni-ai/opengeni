@@ -980,11 +980,12 @@ describe("useSessionEvents", () => {
 
   test("compact forward paging advances by coalescedUntil and does not infer completeness from length", async () => {
     const listCalls: ListOptions[] = [];
+    const streamCalls: number[] = [];
     const client = fakeClient({
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         listCalls.push(options);
         if (options.before === Number.MAX_SAFE_INTEGER) {
-          return [event(21, "agent.message.delta", { text: "tip", coalescedUntil: 30 })];
+          return [event(21, "agent.message.delta", { text: "ef", coalescedUntil: 30 })];
         }
         if (options.after === 0) {
           return [
@@ -995,11 +996,16 @@ describe("useSessionEvents", () => {
         if (options.after === 10) {
           return [event(11, "agent.message.delta", { text: "cd", coalescedUntil: 20 })];
         }
+        if (options.after === 20) {
+          return [event(21, "agent.message.delta", { text: "ef", coalescedUntil: 30 })];
+        }
         return [];
       },
-      streamEvents: () =>
+      streamEvents: (_workspaceId, _sessionId, options = {}) =>
         (async function* () {
+          streamCalls.push(options.after ?? 0);
           // Keep the stream open contract without adding events.
+          yield* [] as SessionEvent[];
         })(),
     });
     const hook = await renderHook(
@@ -1020,6 +1026,20 @@ describe("useSessionEvents", () => {
       expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcd" })]),
     );
     expect(hook.result.current.hasNewer).toBe(true);
+
+    const caughtUp = await actRun(() => hook.result.current.loadNewer());
+    await flush(20);
+
+    expect(caughtUp).toBe(false);
+    expect(
+      listCalls.filter((call) => call.direction === "after").map((call) => call.after),
+    ).toEqual([0, 10, 20, 30]);
+    expect(buildTimeline(hook.result.current.events)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcdef" })]),
+    );
+    expect(hook.result.current.hasNewer).toBe(false);
+    expect(hook.result.current.lastSequence).toBe(30);
+    expect(streamCalls.at(-1)).toBe(30);
 
     await hook.unmount();
   });

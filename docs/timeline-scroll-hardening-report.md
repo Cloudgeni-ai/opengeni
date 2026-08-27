@@ -739,7 +739,7 @@ The branch is ready to merge only when:
 
 - Reproduction: return a compact event whose `sequence` is lower than `payload.coalescedUntil`, followed by another forward page.
 - Root cause: the forward cursor advanced by the compact event's first raw sequence and treated short compact pages as end-of-history.
-- Fix: advance by the maximum compact resume sequence and require an empty page to prove the end.
+- Fix: advance and retain every newest-window boundary by the maximum compact resume sequence, compare catch-up against that boundary, and require an empty page to prove the end.
 - Regression: `compact forward paging advances by coalescedUntil and does not infer completeness from length`.
 
 ### F5 — stock host wrappers erased navigation promise semantics

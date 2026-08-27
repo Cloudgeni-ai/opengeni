@@ -296,7 +296,7 @@ export function useSessionEvents(
       eventWindowRef.current = retained;
       setEventWindow(retained);
       oldestSequenceRef.current = retained.events[0]?.sequence ?? null;
-      newestSequenceRef.current = retained.events.at(-1)?.sequence ?? null;
+      newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
       if (retained.truncated) {
         hasOlderRef.current = true;
         setHasOlder(true);
@@ -328,7 +328,8 @@ export function useSessionEvents(
           const retained = boundBrowserSessionEventWindow(window.events);
           eventWindowRef.current = retained;
           oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
-          newestSequenceRef.current = retained.events.at(-1)?.sequence ?? window.newestSequence;
+          newestSequenceRef.current =
+            maxResumeSequenceOrNull(retained.events) ?? window.newestSequence;
           hasOlderRef.current = window.hasOlder || retained.truncated;
           hasNewerRef.current = false;
           lastSequenceRef.current = window.newestSequence;
@@ -489,8 +490,8 @@ export function useSessionEvents(
           if (retainedOldest === null || retainedOldest >= before) {
             throw new Error("@opengeni/react: loadOlder made no durable sequence progress");
           }
-          const retainedNewest = retained.events.at(-1)?.sequence ?? null;
-          const previousNewest = current.events.at(-1)?.sequence ?? null;
+          const retainedNewest = maxResumeSequenceOrNull(retained.events);
+          const previousNewest = maxResumeSequenceOrNull(current.events);
           eventWindowRef.current = retained;
           markCommitted();
           oldestSequenceRef.current = retainedOldest;
@@ -580,7 +581,7 @@ export function useSessionEvents(
       // Keep the oldest prefix — never the middle or tip.
       const retained = boundBrowserSessionEventWindow(window.events, { direction: "oldest" });
       const retainedOldest = retained.events[0]?.sequence ?? null;
-      const retainedNewest = retained.events.at(-1)?.sequence ?? null;
+      const retainedNewest = maxResumeSequenceOrNull(retained.events);
       eventWindowRef.current = retained;
       oldestSequenceRef.current = retainedOldest;
       newestSequenceRef.current = retainedNewest;
@@ -662,7 +663,7 @@ export function useSessionEvents(
         truncated: current.truncated || next.truncated || window.hasNewer,
       };
       const retainedOldest = retained.events[0]?.sequence ?? null;
-      const retainedNewest = retained.events.at(-1)?.sequence ?? null;
+      const retainedNewest = maxResumeSequenceOrNull(retained.events);
       if (retainedNewest === null || retainedNewest <= afterSequence) {
         throw new Error("@opengeni/react: loadNewer made no durable sequence progress");
       }
@@ -1368,8 +1369,12 @@ function isLogStart(event: SessionEvent): boolean {
   return event.type === "session.created" || event.sequence <= 1;
 }
 
-function maxResumeSequence(events: SessionEvent[]): number {
+function maxResumeSequence(events: readonly SessionEvent[]): number {
   return events.reduce((max, event) => Math.max(max, eventResumeSequence(event)), 0);
+}
+
+function maxResumeSequenceOrNull(events: readonly SessionEvent[]): number | null {
+  return events.length > 0 ? maxResumeSequence(events) : null;
 }
 
 function eventResumeSequence(event: SessionEvent): number {
