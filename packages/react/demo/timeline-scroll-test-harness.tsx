@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { startTransition, useCallback, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
@@ -11,6 +11,8 @@ type TimelineScrollHarness = {
   growRowsAbove: () => void;
   stream: () => void;
   prepend: () => void;
+  /** Production-like history scheduling without a test-only flushSync fence. */
+  prependDeferred: () => void;
   scroller: () => HTMLElement;
   visible: () => VisibleRow;
 };
@@ -87,6 +89,14 @@ function Harness() {
       ]),
     );
   }, [adjacentPrepend]);
+  const prependDeferred = useCallback(() => {
+    startTransition(() => {
+      setItems((current) => [
+        ...(adjacentPrepend ? range(1_000, 40) : range(900, 100)),
+        ...current,
+      ]);
+    });
+  }, [adjacentPrepend]);
   const stream = useCallback(() => {
     flushSync(() => {
       setStreamed(true);
@@ -106,13 +116,14 @@ function Harness() {
       growRowsAbove: () => flushSync(() => setGrown(true)),
       stream,
       prepend,
+      prependDeferred,
       scroller,
       visible,
     };
     return () => {
       delete window.timelineScrollHarness;
     };
-  }, [append, prepend, scroller, stream, visible]);
+  }, [append, prepend, prependDeferred, scroller, stream, visible]);
 
   return (
     <main style={{ padding: 32 }} data-og-theme="light">

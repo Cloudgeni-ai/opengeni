@@ -769,9 +769,12 @@ jobs:
         if: ${{ matrix.lane == 'interaction' }}
         run: bun scripts/run-browser-e2e.ts ./test/e2e/user-message-disclosure.browser.e2e.ts
 
-      - name: Timeline pagination browser regressions
+      - name: Timeline pagination and tip-follow browser regressions
         if: ${{ matrix.lane == 'interaction' }}
-        run: bun scripts/run-browser-e2e.ts ./test/e2e/timeline-scroll.browser.e2e.ts
+        run: |
+          bun scripts/run-browser-e2e.ts \
+            ./test/e2e/timeline-scroll.browser.e2e.ts \
+            ./test/e2e/timeline-tip-follow.browser.e2e.ts
 
       - name: Public realtime SDK demo browser acceptance
         if: ${{ matrix.lane == 'interaction' }}

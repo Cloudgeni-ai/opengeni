@@ -16,6 +16,7 @@ describe("timeline scroll ownership browser regression", () => {
   let page: Page;
   let baseUrl: string;
   let networkRequests = 0;
+  const browserErrors: string[] = [];
 
   beforeAll(async () => {
     const port = await freePort();
@@ -40,6 +41,13 @@ describe("timeline scroll ownership browser regression", () => {
       args: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
     page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    page.on("pageerror", (error) => browserErrors.push(`pageerror: ${error.message}`));
+    page.on("console", (message) => {
+      if (message.type() !== "error") return;
+      const location = message.location().url;
+      if (location.endsWith("/favicon.ico")) return;
+      browserErrors.push(`console: ${message.text()}`);
+    });
     page.on("request", () => {
       networkRequests += 1;
     });
@@ -49,7 +57,11 @@ describe("timeline scroll ownership browser regression", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await Promise.allSettled([browser?.close(), web?.stop()]);
+    try {
+      expect(browserErrors).toEqual([]);
+    } finally {
+      await Promise.allSettled([browser?.close(), web?.stop()]);
+    }
   });
 
   test("keeps the reader's row and pixel anchor through prepend, wheel, resize, and append", async () => {
@@ -173,6 +185,64 @@ describe("timeline scroll ownership browser regression", () => {
     expect(samples.every((sample) => Math.abs((sample.top ?? 0) - (before.top ?? 0)) < 1)).toBe(
       true,
     );
+  }, 30_000);
+
+  test("production-scheduled 100-row prepend avoids a browser long task", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-scroll-test.html`);
+    await page.waitForFunction(() => window.timelineScrollHarness !== undefined);
+    await page.locator('[data-timeline-row="row-1000"]').waitFor({ timeout: 15_000 });
+    await page.locator('[data-timeline-row="row-1040"]').evaluate((node) => {
+      node.scrollIntoView({ block: "start" });
+    });
+    await page.waitForTimeout(100);
+
+    const before = await visible(page);
+    const performance = await page.evaluate(
+      () =>
+        new Promise<{
+          longTasks: number[];
+          maxFrameIntervalMs: number;
+        }>((resolve) => {
+          const longTasks: number[] = [];
+          const frames: number[] = [];
+          const observer =
+            typeof PerformanceObserver === "undefined"
+              ? null
+              : new PerformanceObserver((list) => {
+                  for (const entry of list.getEntries()) longTasks.push(entry.duration);
+                });
+          try {
+            observer?.observe({ type: "longtask" });
+          } catch {
+            // Frame intervals remain the portable signal.
+          }
+          const sample = (timestamp: number) => {
+            frames.push(timestamp);
+            if (frames.length < 12) {
+              requestAnimationFrame(sample);
+              return;
+            }
+            observer?.takeRecords().forEach((entry) => longTasks.push(entry.duration));
+            observer?.disconnect();
+            const intervals = frames.slice(1).map((value, index) => value - frames[index]!);
+            resolve({
+              longTasks,
+              maxFrameIntervalMs: Math.max(0, ...intervals),
+            });
+          };
+          requestAnimationFrame(() => {
+            window.timelineScrollHarness!.prependDeferred();
+            requestAnimationFrame(sample);
+          });
+        }),
+    );
+    const after = await visible(page);
+
+    expect(after.id).toBe(before.id);
+    expect(after.top).toBeCloseTo(before.top ?? 0, 0);
+    expect(performance.longTasks).toEqual([]);
+    expect(performance.maxFrameIntervalMs).toBeLessThan(50);
   }, 30_000);
 
   test("preserves the anchor during every progressive prepend frame", async () => {
@@ -1352,6 +1422,7 @@ declare global {
       append: () => void;
       growRowsAbove: () => void;
       prepend: () => void;
+      prependDeferred: () => void;
       stream: () => void;
       visible: () => VisibleRow;
     };
