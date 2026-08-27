@@ -13,7 +13,7 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { resolveCatalogSettings, type ApiRouteDeps } from "@opengeni/core";
 import { Hono } from "hono";
 import postgres from "postgres";
 import { registerSuperGrokRoutes } from "../src/routes/supergrok";
@@ -161,6 +161,7 @@ beforeAll(async () => {
   registerSuperGrokRoutes(app, {
     db: client.db,
     settings,
+    resolveCatalogSettings: async () => await resolveCatalogSettings(client!.db, settings),
     githubStateSecret: STATE_SECRET,
     xaiFetch,
     managedAuth: null,
@@ -216,6 +217,7 @@ beforeAll(async () => {
   registerSuperGrokRoutes(managedApp, {
     db: client.db,
     settings: managedSettings,
+    resolveCatalogSettings: async () => await resolveCatalogSettings(client!.db, managedSettings),
     githubStateSecret: STATE_SECRET,
     xaiFetch,
     managedAuth: managedAuth as never,
