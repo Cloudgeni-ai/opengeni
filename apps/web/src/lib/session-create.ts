@@ -422,6 +422,7 @@ export function submissionFromSessionDraft(
 export function newSessionDraftOptionsFromSessionDraft(
   draft: SessionDraft,
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  effectiveVisibility: "private" | "workspace" = draft.visibility,
 ): NewSessionDraftOptions {
   const goal = goalFromDraft(draft);
   const permissions = draft.customMcpPermissions
@@ -436,7 +437,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   if (draft.compute.kind === "machine") {
     const workingDir = workingDirFromFolder(draft.compute.folder);
     return {
-      visibility: draft.visibility,
+      visibility: effectiveVisibility,
       ...(draft.compute.sandboxId ? { targetSandboxId: draft.compute.sandboxId } : {}),
       ...(workingDir ? { workingDir } : {}),
       ...(goal ? { goal } : {}),
@@ -446,7 +447,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   }
 
   return {
-    visibility: draft.visibility,
+    visibility: effectiveVisibility,
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
     ...(draft.variableSetIds.length
       ? {

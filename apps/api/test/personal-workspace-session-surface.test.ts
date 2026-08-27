@@ -989,20 +989,58 @@ describe("managed-human session surface inside their own personal workspace", ()
     });
   }, 180_000);
 
-  test("PUT /v1/workspaces/:id/new-session-draft works in the owner's own personal workspace", async () => {
+  test("persists and consumes the private create snapshot in the owner's own personal workspace", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
+    const text = "draft in my own private Personal workspace";
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
 
     const response = await human.app.request(
       `http://x/v1/workspaces/${human.personalWorkspaceId}/new-session-draft`,
       {
         method: "PUT",
-        headers: { cookie: human.cookie, "content-type": "application/json" },
-        body: JSON.stringify(draftBody),
+        headers,
+        body: JSON.stringify({
+          ...draftBody,
+          text,
+          options: { visibility: "private" },
+        }),
       },
     );
     expect(response.status).toBe(200);
-    expect((await response.json()) as { revision: number }).toMatchObject({ revision: 1 });
+    const saved = (await response.json()) as { revision: number };
+    expect(saved).toMatchObject({ revision: 1 });
+
+    const createdResponse = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          initialMessage: text,
+          resources: [],
+          tools: [],
+          model: draftBody.model,
+          reasoningEffort: draftBody.reasoningEffort,
+          latencyMode: draftBody.latencyMode,
+          visibility: "private",
+          expectedNewSessionDraftRevision: saved.revision,
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(createdResponse.status).toBe(202);
+    const created = (await createdResponse.json()) as { id: string };
+
+    const detail = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${created.id}`,
+      { headers: { cookie: human.cookie } },
+    );
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({
+      id: created.id,
+      tenancy: { visibility: "private", ownedByCurrentUser: true },
+    });
   }, 180_000);
 });
 

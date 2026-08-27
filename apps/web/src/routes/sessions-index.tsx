@@ -616,7 +616,11 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
-      options: newSessionDraftOptionsFromSessionDraft(draft, defaultFirstPartyMcpTools),
+      options: newSessionDraftOptionsFromSessionDraft(
+        draft,
+        defaultFirstPartyMcpTools,
+        newSessionCreateVisibility(personalWorkspace, draft.visibility),
+      ),
     }),
     [
       attachments.readyResources,
@@ -627,6 +631,7 @@ function SessionsIndexRouteContent({
       draft,
       defaultFirstPartyMcpTools,
       message,
+      personalWorkspace,
       persistedToolPolicy,
     ],
   );

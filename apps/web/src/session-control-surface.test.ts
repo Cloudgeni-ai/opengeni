@@ -88,6 +88,9 @@ describe("session control surface architecture", () => {
     expect(route).toContain("refreshPersonalResourceCatalogs");
     expect(route).toContain("canLoadVariableSetCatalog");
     expect(route).toContain("canResolveVariableSetAttachments");
+    expect(route).toContain(
+      "newSessionDraftOptionsFromSessionDraft(\n        draft,\n        defaultFirstPartyMcpTools,\n        newSessionCreateVisibility(personalWorkspace, draft.visibility),\n      )",
+    );
     expect(route).toContain("const selectedRigDefaultVariableSetIds =");
     expect(route).toContain("selectedRigDefaultVariableSetIds,");
     expect(route).toContain(

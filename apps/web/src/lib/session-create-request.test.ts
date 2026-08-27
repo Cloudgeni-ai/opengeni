@@ -446,9 +446,10 @@ describe("new-session draft option mapping", () => {
       variableSetId: variableSetIds.at(-1),
       personalResourceAttachment,
     });
+    const visibility = newSessionCreateVisibility(true, draft.visibility);
     const request = build([], [], {
       submission: { text: "start privately", ...submission.extras },
-      visibility: newSessionCreateVisibility(true, draft.visibility),
+      visibility,
     });
     expect(request).toMatchObject({
       visibility: "private",
@@ -456,8 +457,13 @@ describe("new-session draft option mapping", () => {
       variableSetId: variableSetIds.at(-1),
       personalResourceAttachment,
     });
-    const options = newSessionDraftOptionsFromSessionDraft(draft);
-    expect(options).toMatchObject({ variableSetIds, variableSetId: variableSetIds.at(-1) });
+    const options = newSessionDraftOptionsFromSessionDraft(draft, undefined, visibility);
+    expect(options).toMatchObject({
+      visibility: "private",
+      variableSetIds,
+      variableSetId: variableSetIds.at(-1),
+    });
+    expect(options.visibility).toBe(request.visibility);
     expect(sessionDraftFromNewSessionDraftOptions(options)).toMatchObject({
       variableSetIds,
       variableSetId: variableSetIds.at(-1),
