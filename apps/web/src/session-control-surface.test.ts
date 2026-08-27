@@ -19,6 +19,15 @@ describe("session control surface architecture", () => {
     expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
   });
 
+  test("makes the full chat viewport a file drop target", async () => {
+    const route = await source("routes/session.tsx");
+    expect(route).toContain("<ChatViewportFileDropTarget");
+    expect(route).toContain(
+      "enabled={!terminal && context.clientConfig.fileUploads.enabled === true}",
+    );
+    expect(route).toContain("onFiles={attachments.addFiles}");
+  });
+
   test("wires the authenticated retained screenshot loader into the production timeline", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("createSessionRetainedScreenshotLoader(");

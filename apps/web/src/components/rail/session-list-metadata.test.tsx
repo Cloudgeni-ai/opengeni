@@ -37,6 +37,13 @@ describe("RailTrailingMetadata", () => {
     expect(markup).toContain(">12 Aug</span>");
   });
 
+  test("runs the working spinner at 75% of its prior speed", () => {
+    const markup = renderToStaticMarkup(<RailTrailingMetadata summary={active} />);
+
+    expect(markup).toContain('style="animation-duration:1.333333s"');
+    expect(markup).toContain("motion-reduce:animate-none");
+  });
+
   test("reserves no trailing rail width when a row has no metadata", () => {
     expect(renderToStaticMarkup(<RailTrailingMetadata summary={neutral} />)).toBe("");
   });

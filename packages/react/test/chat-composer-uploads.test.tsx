@@ -87,6 +87,13 @@ function readyChip(name: string): FileAttachment {
   };
 }
 
+function readyPreviewChip(name: string): FileAttachment {
+  return {
+    ...readyChip(name),
+    previewUrl: `blob:${name}`,
+  };
+}
+
 async function mount(node: React.ReactElement): Promise<HTMLElement> {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -183,6 +190,21 @@ describe("ChatComposer attachments", () => {
       (b) => b.getAttribute("aria-label") === "Remove screenshot.png",
     );
     expect(remove).toBeTruthy();
+  });
+
+  test("renders an image attachment as a shared-lightbox preview trigger", async () => {
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer()}
+        attachments={makeAttachments({ attachments: [readyPreviewChip("screenshot.png")] })}
+      />,
+    );
+
+    const preview = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Preview screenshot.png"]',
+    );
+    expect(preview).not.toBeNull();
+    expect(preview?.querySelector('img[src="blob:screenshot.png"]')).not.toBeNull();
   });
 
   test("a managed-credit rejection is actionable and keeps the ready attachment visible", async () => {

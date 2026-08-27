@@ -52,6 +52,7 @@ import {
 } from "../lib/composer-responsive-context";
 import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from "../lib/format";
 import type { PickerModelRow } from "../model-policy";
+import { useLightboxOptional } from "../timeline/screenshot-lightbox";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
@@ -1633,6 +1634,7 @@ function AttachmentChips({
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
 }) {
+  const lightbox = useLightboxOptional();
   return (
     <div className="flex flex-wrap gap-2 px-3 py-2">
       {attachments.map((attachment) => {
@@ -1653,7 +1655,28 @@ function AttachmentChips({
                 : "border-og-border bg-og-surface-2",
             )}
           >
-            {attachment.previewUrl ? (
+            {attachment.previewUrl && lightbox ? (
+              <button
+                type="button"
+                className="size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
+                aria-label={`Preview ${attachment.name}`}
+                onClick={(event) => {
+                  lightbox.open(
+                    attachment.previewUrl!,
+                    attachment.name,
+                    event.currentTarget,
+                    "Attachment preview",
+                    attachment.name,
+                  );
+                }}
+              >
+                <img
+                  src={attachment.previewUrl}
+                  alt=""
+                  className="h-full w-full object-cover transition-opacity hover:opacity-80"
+                />
+              </button>
+            ) : attachment.previewUrl ? (
               <img
                 src={attachment.previewUrl}
                 alt=""

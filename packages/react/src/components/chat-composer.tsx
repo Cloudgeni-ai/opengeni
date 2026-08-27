@@ -5,6 +5,7 @@ import type { SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import type { SlashCommandContext } from "../hooks/use-slash-commands";
+import { LightboxProvider } from "../timeline/screenshot-lightbox";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import {
   Actions,
@@ -148,90 +149,94 @@ export function ChatComposer({
   const stackActions = hasControls && Boolean(actionsStart);
 
   return (
-    <Root controller={controller} responsiveBasis={responsiveBasis} className={className}>
-      <Frame>
-        <CommandPalette />
-        <Surface>
-          <PausedState />
-          <RestoredResources />
-          <Attachments />
-          {header}
-          {composer.annotations && composer.annotations.length > 0 ? (
-            <div className="px-3 pt-2 sm:px-4">
-              <TimelineAnnotationsChip
-                annotations={composer.annotations}
-                editable
-                focusAnnotationId={composer.annotationReviewTargetId}
-                onFocusConsumed={composer.clearAnnotationReviewTarget}
-                onUpdate={composer.updateAnnotation}
-                onRemove={composer.removeAnnotation}
-              />
-            </div>
-          ) : null}
-          <Input placeholder={placeholder} autoFocus={autoFocus} />
-          {controller.confirmState ? (
-            <Confirmation />
-          ) : (
-            <Footer
-              data-og-stack-actions={stackActions ? "" : undefined}
-              className={stackActions ? "max-sm:flex-nowrap sm:flex-wrap" : undefined}
-            >
-              <LayoutGroup id="og-composer-footer">
-                {hasControls ? (
-                  <Controls
-                    className={stackActions ? "min-w-0 max-sm:flex-1 sm:w-auto" : undefined}
-                  >
-                    {controlsLeading}
-                    <AttachButton className={attachButtonClassName} />
-                    {transcription ? (
-                      <ComposerTranscriptionControl
-                        {...transcription}
-                        suppressed={transcriptionSuppressed}
-                        className={[transcription.className, transcriptionClassName]
-                          .filter(Boolean)
-                          .join(" ")}
-                      />
-                    ) : null}
-                    {models ? (
-                      <motion.span
-                        layout
-                        transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
-                        className="inline-flex min-w-0"
-                      >
-                        <ModelPicker
-                          models={models}
-                          value={selectedModel}
-                          onChange={onSelectModel}
+    <LightboxProvider>
+      <Root controller={controller} responsiveBasis={responsiveBasis} className={className}>
+        <Frame>
+          <CommandPalette />
+          <Surface>
+            <PausedState />
+            <RestoredResources />
+            <Attachments />
+            {header}
+            {composer.annotations && composer.annotations.length > 0 ? (
+              <div className="px-3 pt-2 sm:px-4">
+                <TimelineAnnotationsChip
+                  annotations={composer.annotations}
+                  editable
+                  focusAnnotationId={composer.annotationReviewTargetId}
+                  onFocusConsumed={composer.clearAnnotationReviewTarget}
+                  onUpdate={composer.updateAnnotation}
+                  onRemove={composer.removeAnnotation}
+                />
+              </div>
+            ) : null}
+            <Input placeholder={placeholder} autoFocus={autoFocus} />
+            {controller.confirmState ? (
+              <Confirmation />
+            ) : (
+              <Footer
+                data-og-stack-actions={stackActions ? "" : undefined}
+                className={stackActions ? "max-sm:flex-nowrap sm:flex-wrap" : undefined}
+              >
+                <LayoutGroup id="og-composer-footer">
+                  {hasControls ? (
+                    <Controls
+                      className={stackActions ? "min-w-0 max-sm:flex-1 sm:w-auto" : undefined}
+                    >
+                      {controlsLeading}
+                      <AttachButton className={attachButtonClassName} />
+                      {transcription ? (
+                        <ComposerTranscriptionControl
+                          {...transcription}
+                          suppressed={transcriptionSuppressed}
+                          className={[transcription.className, transcriptionClassName]
+                            .filter(Boolean)
+                            .join(" ")}
                         />
-                      </motion.span>
-                    ) : null}
-                    {controlsStart ? (
-                      <motion.span
-                        layout
-                        transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
-                        className="inline-flex min-w-0 flex-1 items-center gap-1.5"
-                      >
-                        {controlsStart}
-                      </motion.span>
-                    ) : null}
-                  </Controls>
-                ) : (
-                  <Hint>{hint}</Hint>
-                )}
-                <Actions
-                  className={stackActions ? "max-sm:shrink-0 sm:w-auto sm:justify-end" : undefined}
-                >
-                  {actionsStart}
-                  <PauseButton />
-                  <SendButton />
-                </Actions>
-              </LayoutGroup>
-            </Footer>
-          )}
-        </Surface>
-      </Frame>
-      <Help />
-      <Status />
-    </Root>
+                      ) : null}
+                      {models ? (
+                        <motion.span
+                          layout
+                          transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
+                          className="inline-flex min-w-0"
+                        >
+                          <ModelPicker
+                            models={models}
+                            value={selectedModel}
+                            onChange={onSelectModel}
+                          />
+                        </motion.span>
+                      ) : null}
+                      {controlsStart ? (
+                        <motion.span
+                          layout
+                          transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
+                          className="inline-flex min-w-0 flex-1 items-center gap-1.5"
+                        >
+                          {controlsStart}
+                        </motion.span>
+                      ) : null}
+                    </Controls>
+                  ) : (
+                    <Hint>{hint}</Hint>
+                  )}
+                  <Actions
+                    className={
+                      stackActions ? "max-sm:shrink-0 sm:w-auto sm:justify-end" : undefined
+                    }
+                  >
+                    {actionsStart}
+                    <PauseButton />
+                    <SendButton />
+                  </Actions>
+                </LayoutGroup>
+              </Footer>
+            )}
+          </Surface>
+        </Frame>
+        <Help />
+        <Status />
+      </Root>
+    </LightboxProvider>
   );
 }

@@ -53,6 +53,7 @@ import {
 } from "@/components/session/banners";
 import { useRail } from "@/components/rail/rail-context";
 import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
+import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
@@ -1710,9 +1711,9 @@ function SessionChatPane(props: {
   );
 
   return (
-    <section
-      data-workspace-scroll-owner="self-managed"
-      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
+    <ChatViewportFileDropTarget
+      enabled={!terminal && context.clientConfig.fileUploads.enabled === true}
+      onFiles={attachments.addFiles}
     >
       {terminal ? (
         <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
@@ -2006,6 +2007,6 @@ function SessionChatPane(props: {
           />
         </div>
       </div>
-    </section>
+    </ChatViewportFileDropTarget>
   );
 }
