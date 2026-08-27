@@ -136,6 +136,8 @@ export type ChatComposerMessages = {
   removeRestoredResource: (index: number) => string;
   uploading: string;
   uploadFailed: string;
+  previewAttachment: (name: string) => string;
+  attachmentPreviewLabel: string;
   retryAttachment: (name: string) => string;
   retryUpload: string;
   removeAttachment: (name: string) => string;
@@ -199,6 +201,8 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   removeRestoredResource: (index) => `Remove restored resource ${index + 1}`,
   uploading: "Uploading",
   uploadFailed: "Upload failed",
+  previewAttachment: (name) => `Preview ${name}`,
+  attachmentPreviewLabel: "Attachment preview",
   retryAttachment: (name) => `Retry ${name}`,
   retryUpload: "Retry upload",
   removeAttachment: (name) => `Remove ${name}`,
@@ -1659,13 +1663,13 @@ function AttachmentChips({
               <button
                 type="button"
                 className="size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
-                aria-label={`Preview ${attachment.name}`}
+                aria-label={messages.previewAttachment(attachment.name)}
                 onClick={(event) => {
                   lightbox.open(
                     attachment.previewUrl!,
                     attachment.name,
                     event.currentTarget,
-                    "Attachment preview",
+                    messages.attachmentPreviewLabel,
                     attachment.name,
                   );
                 }}
