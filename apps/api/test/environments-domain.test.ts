@@ -71,3 +71,21 @@ describe("environment encryption guard", () => {
     expect(key.length).toBe(32);
   });
 });
+
+describe("variable set attachment metadata surface", () => {
+  test("uses attach/use authority without widening the metadata catalog permissions", async () => {
+    const source = await Bun.file(new URL("../src/routes/environments.ts", import.meta.url)).text();
+    const start = source.indexOf("app.post(`${prefix}/resolve-attachments`");
+    const end = source.indexOf("app.get(`${prefix}/:variableSetId`", start);
+    const resolver = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(resolver).toContain('requirePermission(grant, "variable-sets:attach")');
+    expect(resolver).toContain('requirePermission(grant, "variable-sets:use")');
+    expect(resolver).not.toContain('"variable-sets:list"');
+    expect(resolver).not.toContain('"secrets:list"');
+    expect(resolver).toContain("getVariableSet(");
+    expect(resolver).toContain("{ id: variableSet.id, scope: variableSet.scope }");
+  });
+});

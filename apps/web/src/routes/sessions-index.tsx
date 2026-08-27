@@ -37,6 +37,7 @@ import {
   type Rig,
   type SessionRealtimeModel,
   type VariableSet,
+  type VariableSetAttachmentMetadata,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -204,11 +205,32 @@ function SessionsIndexRouteContent({
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
-  const canAttachVariableSets =
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:attach") &&
-    hasWorkspacePermission(context.accessContext, workspaceId, "variable-sets:use");
+  const canAttachVariableSets = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "variable-sets:attach",
+  );
+  const canUseVariableSets = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "variable-sets:use",
+  );
+  const canListVariableSets = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "variable-sets:list",
+  );
+  const canListVariableSetSecrets = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "secrets:list",
+  );
+  const canLoadVariableSetCatalog =
+    canAttachVariableSets && canUseVariableSets && canListVariableSets && canListVariableSetSecrets;
+  const canResolveVariableSetAttachments =
+    canAttachVariableSets && canUseVariableSets && !canLoadVariableSetCatalog;
   const variableSets = useVariableSets({
-    enabled: fixedResourceCatalogEnabled && canAttachVariableSets,
+    enabled: fixedResourceCatalogEnabled && canLoadVariableSetCatalog,
   });
   const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
@@ -260,29 +282,117 @@ function SessionsIndexRouteContent({
   });
   const personalResourcesAvailable =
     personalOwnerScope !== null && (personalWorkspace || tenancyCapabilities?.activated === true);
-  const selectableVariableSets = selectableSessionVariableSets(variableSets.variableSets, {
-    canAttach: canAttachVariableSets,
-    canUse: canAttachVariableSets,
-    personalResourcesAvailable,
-  });
-  const selectableVariableSetIdsKey = selectableVariableSets
-    .map((variableSet) => variableSet.id)
-    .join("\u0000");
+  const selectableVariableSets = canLoadVariableSetCatalog
+    ? selectableSessionVariableSets(variableSets.variableSets, {
+        canAttach: canAttachVariableSets,
+        canUse: canUseVariableSets,
+        personalResourcesAvailable,
+      })
+    : [];
   const personalResourceEligibilitySettled =
     personalWorkspace || personalOwnerScope === null || tenancyCapabilities !== null;
   const selectableRigs = rigs.rigs.filter(
     (rig) => rig.scope !== "user" || personalResourcesAvailable,
   );
+  const selectedRig = selectableRigs.find((candidate) => candidate.id === draft.rigId);
+  const variableSetAttachmentIds = [
+    ...new Set([
+      ...draft.variableSetIds,
+      ...(selectedRig?.activeVersion?.defaultVariableSetIds ?? []),
+    ]),
+  ];
+  const variableSetAttachmentIdsKey = variableSetAttachmentIds.join("\u0000");
+  const variableSetAttachmentResolutionGeneration = useRef(0);
+  const [variableSetAttachmentResolution, setVariableSetAttachmentResolution] = useState<{
+    key: string;
+    variableSets: VariableSetAttachmentMetadata[];
+    error: Error | null;
+  }>({ key: "", variableSets: [], error: null });
+  const resolveVariableSetAttachments = useLatestCallback(async (): Promise<void> => {
+    const generation = ++variableSetAttachmentResolutionGeneration.current;
+    if (
+      !fixedResourceCatalogEnabled ||
+      !canResolveVariableSetAttachments ||
+      variableSetAttachmentIds.length === 0
+    ) {
+      setVariableSetAttachmentResolution({
+        key: variableSetAttachmentIdsKey,
+        variableSets: [],
+        error: null,
+      });
+      return;
+    }
+    setVariableSetAttachmentResolution({ key: "", variableSets: [], error: null });
+    try {
+      const result = await context.client.resolveVariableSetAttachments(workspaceId, {
+        variableSetIds: variableSetAttachmentIds,
+      });
+      if (variableSetAttachmentResolutionGeneration.current !== generation) return;
+      setVariableSetAttachmentResolution({
+        key: variableSetAttachmentIdsKey,
+        variableSets: result.variableSets,
+        error: null,
+      });
+    } catch (cause) {
+      if (variableSetAttachmentResolutionGeneration.current !== generation) return;
+      setVariableSetAttachmentResolution({
+        key: variableSetAttachmentIdsKey,
+        variableSets: [],
+        error: cause instanceof Error ? cause : new Error(String(cause)),
+      });
+    }
+  });
+  useEffect(() => {
+    void resolveVariableSetAttachments();
+  }, [
+    resolveVariableSetAttachments,
+    variableSetAttachmentIdsKey,
+    canResolveVariableSetAttachments,
+    fixedResourceCatalogEnabled,
+  ]);
+  const variableSetAttachmentResolutionCurrent =
+    variableSetAttachmentResolution.key === variableSetAttachmentIdsKey;
+  const resolvedVariableSetAttachments = variableSetAttachmentResolutionCurrent
+    ? variableSetAttachmentResolution.variableSets
+    : [];
+  const resolvedVariableSetIds = canLoadVariableSetCatalog
+    ? selectableVariableSets.map((variableSet) => variableSet.id)
+    : canResolveVariableSetAttachments
+      ? resolvedVariableSetAttachments.map((variableSet) => variableSet.id)
+      : [];
+  const resolvedVariableSetIdsKey = resolvedVariableSetIds.join("\u0000");
+  const variableSetResolutionLoading = canLoadVariableSetCatalog
+    ? variableSets.loading
+    : canResolveVariableSetAttachments
+      ? !variableSetAttachmentResolutionCurrent
+      : false;
+  const variableSetResolutionError = canLoadVariableSetCatalog
+    ? variableSets.error
+    : canResolveVariableSetAttachments && variableSetAttachmentResolutionCurrent
+      ? variableSetAttachmentResolution.error
+      : null;
+  const variableSetsSettled =
+    (canLoadVariableSetCatalog || canResolveVariableSetAttachments) &&
+    personalResourceEligibilitySettled &&
+    !variableSetResolutionLoading &&
+    variableSetResolutionError === null;
   const selectableRigIdsKey = selectableRigs.map((rig) => rig.id).join("\u0000");
   const selectedFixedResourceKey = [...draft.variableSetIds, `rig:${draft.rigId}`].join("\u0000");
   const fixedResourceSelection = reconcileNewSessionFixedResources({
     selectedVariableSetIds: draft.variableSetIds,
     selectedRigId: draft.rigId,
-    selectableVariableSetIds: selectableVariableSets.map((variableSet) => variableSet.id),
-    selectableRigIds: selectableRigs.map((rig) => rig.id),
-    variableSetsSettled:
-      personalResourceEligibilitySettled && !variableSets.loading && variableSets.error === null,
-    rigsSettled: personalResourceEligibilitySettled && !rigs.loading && rigs.error === null,
+    selectableVariableSetIds: fixedResourceCatalogEnabled
+      ? resolvedVariableSetIds
+      : draft.variableSetIds,
+    selectableRigIds: fixedResourceCatalogEnabled
+      ? selectableRigs.map((rig) => rig.id)
+      : draft.rigId
+        ? [draft.rigId]
+        : [],
+    variableSetsSettled: !fixedResourceCatalogEnabled || variableSetsSettled,
+    rigsSettled:
+      !fixedResourceCatalogEnabled ||
+      (personalResourceEligibilitySettled && !rigs.loading && rigs.error === null),
   });
   const fixedResourceCatalogError =
     draft.compute.kind === "sandbox" &&
@@ -290,22 +400,20 @@ function SessionsIndexRouteContent({
       selectedVariableSetIds: draft.variableSetIds,
       selectedRigId: draft.rigId,
       selectionResolved: fixedResourceSelection.selectionResolved,
-      variableSetCatalogFailed: variableSets.error !== null,
+      variableSetCatalogFailed: variableSetResolutionError !== null,
       rigCatalogFailed: rigs.error !== null,
     });
   useEffect(() => {
     setDraft((current) => {
+      if (current.compute.kind !== "sandbox") return current;
       const reconciled = reconcileNewSessionFixedResources({
         selectedVariableSetIds: current.variableSetIds,
         selectedRigId: current.rigId,
-        selectableVariableSetIds: selectableVariableSetIdsKey
-          ? selectableVariableSetIdsKey.split("\u0000")
+        selectableVariableSetIds: resolvedVariableSetIdsKey
+          ? resolvedVariableSetIdsKey.split("\u0000")
           : [],
         selectableRigIds: selectableRigIdsKey ? selectableRigIdsKey.split("\u0000") : [],
-        variableSetsSettled:
-          personalResourceEligibilitySettled &&
-          !variableSets.loading &&
-          variableSets.error === null,
+        variableSetsSettled,
         rigsSettled: personalResourceEligibilitySettled && !rigs.loading && rigs.error === null,
       });
       if (
@@ -328,11 +436,9 @@ function SessionsIndexRouteContent({
     rigs.loading,
     selectedFixedResourceKey,
     selectableRigIdsKey,
-    selectableVariableSetIdsKey,
-    variableSets.error,
-    variableSets.loading,
+    resolvedVariableSetIdsKey,
+    variableSetsSettled,
   ]);
-  const selectedRig = selectableRigs.find((candidate) => candidate.id === draft.rigId);
   const personalAttachmentVariableSetIds = [
     ...new Set([
       ...(selectedRig?.activeVersion?.defaultVariableSetIds ?? []),
@@ -341,7 +447,12 @@ function SessionsIndexRouteContent({
   ];
   const selectedPersonalVariableSets = personalAttachmentVariableSetIds.flatMap((variableSetId) => {
     const variableSet = selectableVariableSets.find((candidate) => candidate.id === variableSetId);
-    return variableSet?.scope === "user" ? [variableSet] : [];
+    if (variableSet?.scope === "user") return [{ id: variableSet.id, name: variableSet.name }];
+    return resolvedVariableSetAttachments.some(
+      (candidate) => candidate.id === variableSetId && candidate.scope === "user",
+    )
+      ? [{ id: variableSetId, name: "Personal Variable Set" }]
+      : [];
   });
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
   const fleet = useMachines({ pollIntervalMs: fleetPollMs });
@@ -394,7 +505,14 @@ function SessionsIndexRouteContent({
     const generation = ++personalResourceCatalogRefreshGeneration.current;
     setPersonalResourceCatalogRefreshPending(true);
     try {
-      await Promise.all([variableSets.refresh(), rigs.refresh()]);
+      await Promise.all([
+        canLoadVariableSetCatalog
+          ? variableSets.refresh()
+          : canResolveVariableSetAttachments
+            ? resolveVariableSetAttachments()
+            : Promise.resolve(),
+        rigs.refresh(),
+      ]);
     } finally {
       if (personalResourceCatalogRefreshGeneration.current === generation) {
         setPersonalResourceCatalogRefreshPending(false);

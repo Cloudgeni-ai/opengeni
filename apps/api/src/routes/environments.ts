@@ -1,5 +1,7 @@
 import {
   CreateVariableSetRequest,
+  ResolveVariableSetAttachmentsRequest,
+  ResolveVariableSetAttachmentsResponse,
   SetVariableSetVariableRequest,
   UpdateVariableSetRequest,
   VariableSetVariableName,
@@ -11,6 +13,7 @@ import {
   deleteVariableSet,
   deleteVariableSetVariable,
   encryptVariableSetValue,
+  getVariableSet,
   getVariableSetByName,
   listVariableSets,
   readVariableSetSecretAtomically,
@@ -134,6 +137,33 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
       return c.json(created, 201);
     });
+
+    if (prefix.endsWith("/variable-sets")) {
+      app.post(`${prefix}/resolve-attachments`, async (c) => {
+        const workspaceId = c.req.param("workspaceId")!;
+        const grant = await requireAccessGrant(c, deps, workspaceId);
+        requirePermission(grant, "variable-sets:attach");
+        requirePermission(grant, "variable-sets:use");
+        const payload = ResolveVariableSetAttachmentsRequest.parse(await c.req.json());
+        const variableSets = (
+          await Promise.all(
+            payload.variableSetIds.map(async (variableSetId) => {
+              const variableSet = await getVariableSet(
+                db,
+                {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  subjectId: grant.subjectId,
+                },
+                variableSetId,
+              );
+              return variableSet ? { id: variableSet.id, scope: variableSet.scope } : null;
+            }),
+          )
+        ).filter((variableSet) => variableSet !== null);
+        return c.json(ResolveVariableSetAttachmentsResponse.parse({ variableSets }));
+      });
+    }
 
     app.get(`${prefix}/:variableSetId`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;

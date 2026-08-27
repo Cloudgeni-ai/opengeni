@@ -78,12 +78,16 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain("loadPersonalResourceCatalog");
     expect(route).toContain("reconcileNewSessionFixedResources");
     expect(route).toContain("newSessionFixedResourceCatalogFailed");
+    expect(route).toContain('"variable-sets:list"');
+    expect(route).toContain('"secrets:list"');
+    expect(route).toContain("resolveVariableSetAttachments");
     expect(route).toContain("fixedResourceSelection.selectionResolved");
     expect(route).toContain("personalResourceSelectionIdentityKey");
     expect(route).toContain("recoverPersonalResourceAttachment(error, request)");
     expect(route).toContain("recoverNewSessionPersonalResourceAttachment");
     expect(route).toContain("refreshPersonalResourceCatalogs");
-    expect(route).toContain("Promise.all([variableSets.refresh(), rigs.refresh()])");
+    expect(route).toContain("canLoadVariableSetCatalog");
+    expect(route).toContain("canResolveVariableSetAttachments");
     expect(route).toContain("Couldn’t verify the selected Variable Set or Rig");
     expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
     expect(establishedControl).not.toContain("<fieldset");

@@ -286,6 +286,16 @@ export function selectableSessionVariableSets(
   );
 }
 
+export function newSessionVariableSetResolutionSource(input: {
+  canAttach: boolean;
+  canUse: boolean;
+  canListVariableSets: boolean;
+  canListSecrets: boolean;
+}): "catalog" | "attachment" | "denied" {
+  if (!input.canAttach || !input.canUse) return "denied";
+  return input.canListVariableSets && input.canListSecrets ? "catalog" : "attachment";
+}
+
 /**
  * Reconcile fixed resources restored from a durable new-session draft against
  * the scoped catalogs without discarding them while those catalogs are still

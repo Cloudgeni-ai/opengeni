@@ -9,6 +9,7 @@ import {
   loadPersonalResourceCatalog,
   newSessionFixedResourceCatalogFailed,
   newSessionPersonalResourceAttachment,
+  newSessionVariableSetResolutionSource,
   personalResourceSelectionIdentityKey,
   personalSelection,
   reconcileNewSessionFixedResources,
@@ -145,6 +146,41 @@ describe("personal resource attachment authority", () => {
         rigsSettled: true,
       }),
     ).toEqual({ variableSetIds: [], rigId: "", selectionResolved: false });
+  });
+
+  test("uses exact-id attachment resolution when metadata-list permissions are unavailable", () => {
+    expect(
+      newSessionVariableSetResolutionSource({
+        canAttach: true,
+        canUse: true,
+        canListVariableSets: true,
+        canListSecrets: true,
+      }),
+    ).toBe("catalog");
+    expect(
+      newSessionVariableSetResolutionSource({
+        canAttach: true,
+        canUse: true,
+        canListVariableSets: true,
+        canListSecrets: false,
+      }),
+    ).toBe("attachment");
+    expect(
+      newSessionVariableSetResolutionSource({
+        canAttach: true,
+        canUse: true,
+        canListVariableSets: false,
+        canListSecrets: true,
+      }),
+    ).toBe("attachment");
+    expect(
+      newSessionVariableSetResolutionSource({
+        canAttach: false,
+        canUse: true,
+        canListVariableSets: true,
+        canListSecrets: true,
+      }),
+    ).toBe("denied");
   });
 
   test("keys acknowledgement by typed resource identity rather than display name", () => {
