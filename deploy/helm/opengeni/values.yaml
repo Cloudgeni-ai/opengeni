@@ -97,6 +97,12 @@ config:
   OPENGENI_BILLING_MODE: disabled
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none
+  # Reviewed code/env catalog by default. Before changing this to "database",
+  # apply migration 0365 and upsert the singleton with model-catalog:upsert.
+  OPENGENI_MODEL_CATALOG_SOURCE: code
+  # Optional non-secret JSON values may be supplied here:
+  # OPENGENI_MODEL_COST_POLICY_JSON: '{"model-id":"free"}'
+  # OPENGENI_MODEL_NOTES_JSON: '{"model-id":"One-line agent guidance."}'
   OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
   OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
   OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
@@ -125,6 +131,8 @@ secret:
   # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
   # NATS, Temporal, sandbox, and object-storage secrets through this secret or
   # an ExternalSecret. Never commit real secrets in values.
+  # OPENGENI_OPENROUTER_API_KEY enables the deployment-managed reviewed
+  # OpenRouter catalog. It belongs here, never in config or catalog JSON.
   # Google Drive release-readiness configuration is demonstrated in
   # values.google-drive-readiness.example.yaml. When enabled, this Secret must
   # provide OPENGENI_INTEGRATIONS_STATE_SECRET,

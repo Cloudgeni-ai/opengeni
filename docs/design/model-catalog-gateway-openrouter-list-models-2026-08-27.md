@@ -1,4 +1,4 @@
-# Implementation dossier: catalog source, custom Gateway, managed OpenRouter, and `list_models`
+# Implementation specification: catalog source, custom Gateway, managed OpenRouter, and `list_models`
 
 Status: implementation specification captured on 2026-08-27.
 
@@ -6,7 +6,7 @@ Repository observation at capture time: this checkout already contains
 `0364_workspace_learning_policy_snapshot_lock_order.sql`. The implementation migration therefore
 starts at the next free ordinal (currently `0365`), subject to
 `bun run migration:renumber --next` against the eventual PR base. The original ordinal guidance
-below is retained as part of the supplied dossier.
+below is retained as part of the supplied specification.
 
 ## 1. Goal
 
@@ -589,7 +589,7 @@ A final symbol audit should cover every source caller of `configuredModels`,
 
 ### Specification decisions required before implementation
 
-1. **Exact deployment document schema.** The dossier names its conceptual contents but not its
+1. **Exact deployment document schema.** The specification names its conceptual contents but not its
    JSON contract. Define the schema version and exact fields for the built-in model list, registry
    providers, curated Gateway entries, OpenRouter entries, and notes. In particular, decide whether
    the deployment default `OPENGENI_OPENAI_MODEL` must be present in the document, whether it is
@@ -623,17 +623,18 @@ A final symbol audit should cover every source caller of `configuredModels`,
    connected. Either behavior can satisfy the backend contract, but the UI copy, empty state, and
    disabled/read-only behavior should be deliberate.
 
-### Current local-environment blockers
+### August 27, 2026 verification update
 
-- `OPENGENI_OPENROUTER_API_KEY` is not available, so a real OpenRouter request cannot currently be
-  tested. Mocked and fake-provider tests remain fully autonomous.
-- The code-expected `OPENGENI_VERCEL_AI_GATEWAY_API_KEY` is not set, but this workspace does expose
-  a generic `VERCEL_AI_GATEWAY_API_KEY`. It can be mapped ephemerally for a real Gateway check
-  without writing or printing it, subject to confirming that credential's intended use.
-- Dependencies are not installed and there is no Docker client. The repository's native stack path
-  is available in principle: NATS, Temporal, MinIO, browser binaries, and Playwright dependencies
-  are present or declared, while the native launcher resolves PostgreSQL through `pg_config`.
-  Provisioning and starting that stack is setup work, not a design blocker.
+- The OpenRouter credential was supplied through an encrypted Variable Set and was never written to
+  the repository or printed. A live Chat Completions request to the reviewed Nemotron starter
+  returned HTTP 200, emitted a native `tool_calls` finish, called `list_models`, and reported zero
+  provider cost for that request.
+- Repository dependencies are installed. Focused unit, contract, runtime, UI, browser, formatting,
+  lint, typecheck, build, documentation, and migration guards run locally without requiring the
+  secret to enter test output.
+- Docker is unavailable in this sandbox, so database suites that explicitly require the full Docker
+  stack remain a CI/full-stack concern. The new database integration coverage skips locally when a
+  PostgreSQL fixture cannot be acquired and runs normally when CI supplies one.
 
 ### Not blockers
 

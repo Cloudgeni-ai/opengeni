@@ -12628,6 +12628,65 @@ export const rigChanges = pgTable(
   }),
 );
 
+export const deploymentModelCatalog = pgTable(
+  "deployment_model_catalog",
+  {
+    singleton: boolean("singleton").primaryKey().notNull().default(true),
+    document: jsonb("document").$type<unknown>().notNull(),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    singletonCheck: check("deployment_model_catalog_singleton_chk", sql`${table.singleton}`),
+    documentCheck: check(
+      "deployment_model_catalog_document_chk",
+      sql`jsonb_typeof(${table.document}) = 'object'`,
+    ),
+    versionCheck: check("deployment_model_catalog_version_chk", sql`${table.version} > 0`),
+  }),
+);
+
+export const workspaceGatewayCustomModels = pgTable(
+  "workspace_gateway_custom_models",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    upstreamModelId: text("upstream_model_id").notNull(),
+    label: text("label"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccountFk: foreignKey({
+      name: "workspace_gateway_custom_models_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceUpstream: uniqueIndex("workspace_gateway_custom_models_workspace_upstream_uq").on(
+      table.workspaceId,
+      table.upstreamModelId,
+    ),
+    upstreamCheck: check(
+      "workspace_gateway_custom_models_upstream_chk",
+      sql`${table.upstreamModelId} ~ '^[!-~]{1,256}$'`,
+    ),
+    labelCheck: check(
+      "workspace_gateway_custom_models_label_chk",
+      sql`${table.label} is null or (octet_length(${table.label}) between 1 and 128 and ${table.label} !~ '[\r\n|]')`,
+    ),
+    actorCheck: check(
+      "workspace_gateway_custom_models_actor_chk",
+      sql`octet_length(${table.createdBySubjectId}) between 1 and 1024`,
+    ),
+  }),
+);
+
 export * from "./workspace-instruction-policies-schema";
 export * from "./company-profile-schema";
 export * from "./workspace-learning-policy-schema";

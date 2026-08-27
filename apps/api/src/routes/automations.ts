@@ -33,10 +33,13 @@ import {
 } from "@opengeni/db";
 import {
   automationRequestDigest,
+  assertWorkspaceModelPolicyAllows,
   buildAutomationAcceptedExecution,
+  canonicalConfiguredModel,
   requireAccessGrant,
   requireAutomationAdapter,
   requirePermission,
+  resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Hono } from "hono";
@@ -157,12 +160,26 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
       requirePermission(grant, permission);
     }
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
+    const model = canonicalConfiguredModel(catalogSettings, request.sessionTemplate.model) ?? null;
+    if (model) {
+      await assertWorkspaceModelPolicyAllows(deps.db, catalogSettings, workspaceId, model);
+    }
+    const normalizedRequest = {
+      ...request,
+      sessionTemplate: { ...request.sessionTemplate, model },
+    };
     return c.json(
       await createAutomationTrigger(deps.db, {
         accountId: grant.accountId,
         workspaceId,
         createdBySubjectId: grant.subjectId,
-        request,
+        request: normalizedRequest,
         adapterId: adapter.id,
       }),
       201,
@@ -194,12 +211,35 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         requirePermission(grant, permission);
       }
     }
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
+    const normalizedRequest = request.sessionTemplate
+      ? {
+          ...request,
+          sessionTemplate: {
+            ...request.sessionTemplate,
+            model: canonicalConfiguredModel(catalogSettings, request.sessionTemplate.model) ?? null,
+          },
+        }
+      : request;
+    if (normalizedRequest.sessionTemplate?.model) {
+      await assertWorkspaceModelPolicyAllows(
+        deps.db,
+        catalogSettings,
+        workspaceId,
+        normalizedRequest.sessionTemplate.model,
+      );
+    }
     try {
       const trigger = await updateAutomationTrigger(deps.db, {
         workspaceId,
         triggerId: c.req.param("triggerId"),
         subjectId: grant.subjectId,
-        request,
+        request: normalizedRequest,
       });
       if (!trigger)
         throw new HTTPException(404, {

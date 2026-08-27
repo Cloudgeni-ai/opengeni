@@ -10,6 +10,7 @@ import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
 import {
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
+  listWorkspaceGatewayCustomModels,
   workspaceCodexSubscriptionActive,
   loadWorkspaceVercelAiGatewayApiKey,
   type Database,
@@ -126,10 +127,14 @@ export function withXaiSubscriptionProvider(settings: Settings): Settings {
 
 export async function settingsWithWorkspaceGatewayCredential(
   db: Database,
+  accountId: string,
   workspaceId: string,
   settings: Settings,
 ): Promise<Settings> {
-  const catalogSettings = withWorkspaceGatewayCatalogProvider(settings);
+  const customModels = await listWorkspaceGatewayCustomModels(db, { accountId, workspaceId });
+  const catalogSettings = withWorkspaceGatewayCatalogProvider(settings, customModels);
   const apiKey = await loadWorkspaceVercelAiGatewayApiKey(db, settings, workspaceId);
-  return apiKey ? withWorkspaceGatewayCredential(catalogSettings, apiKey) : catalogSettings;
+  return apiKey
+    ? withWorkspaceGatewayCredential(catalogSettings, apiKey, customModels)
+    : catalogSettings;
 }

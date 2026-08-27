@@ -17,6 +17,8 @@ import {
   defaultSessionMcpServerIds,
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
+  resolveCatalogSettings,
+  resolveWorkspaceCatalogSettings,
   resolveSessionToolPolicy,
   scheduledSlackBotConnectionId,
   swapActiveSandbox,
@@ -67,7 +69,10 @@ import {
   withSessionActivityRlsContext,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
+import {
+  resolveFirstPartyMcpToolPolicy,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+} from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import {
   assertReusableSessionRevivable,
@@ -234,14 +239,28 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
     dispatchScheduledTaskRun: async (
       input: DispatchScheduledTaskRunInput,
     ): Promise<DispatchScheduledTaskRunResult> => {
-      const service = await services();
-      const { settings, db, bus, wakeSessionWorkflow } = service;
+      const baseService = await services();
       // Histories created before the manual-initiator workflow patch already
       // contain this activity command. Reject their incomplete wire input here
       // so replay consumes the recorded command and the retry loop settles.
       if (input.triggerType !== "scheduled" && !input.initiator) {
         return { action: "blocked", reason: "malformed_manual_trigger" };
       }
+      const deploymentSettings = (
+        await resolveCatalogSettings(baseService.db, baseService.settings)
+      ).settings;
+      const { db, bus, wakeSessionWorkflow } = baseService;
+      const settingsForTask = async (task: ScheduledTask) => {
+        const model = task.agentConfig.model ?? deploymentSettings.openaiModel;
+        return model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
+          ? (
+              await resolveWorkspaceCatalogSettings(db, baseService.settings, {
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+              })
+            ).settings
+          : deploymentSettings;
+      };
       const stableProducerKey = scheduledTaskRunProducerKey(input);
       const priorRun = await getScheduledTaskRunByProducerKey(db, {
         workspaceId: input.workspaceId,
@@ -275,6 +294,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           });
         }
         if (priorRun.status === "queued") {
+          const settings = await settingsForTask(acceptedExecution.task);
           try {
             return await recoverBoundScheduledTaskDispatch({
               db,
@@ -444,6 +464,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskRevisionAuthority?.subjectId ??
         taskPersonalResourceAuthoritySubjectId ??
         taskConnectionAuthoritySubjectId;
+      const settings = await settingsForTask(task);
       const model = task.agentConfig.model ?? settings.openaiModel;
       const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
       let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
@@ -727,12 +748,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       ) {
         throw new Error("scheduled personal-resource execution has no causal human");
       }
-      const admissionDenial = await agentRunAdmissionDenial(service, {
-        accountId: task.accountId,
-        workspaceId: task.workspaceId,
-        model: targetSessionExecution?.model ?? model,
-        requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
-      });
+      const admissionDenial = await agentRunAdmissionDenial(
+        { ...baseService, settings },
+        {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          model: targetSessionExecution?.model ?? model,
+          requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
+        },
+      );
       if (admissionDenial) {
         return { action: "blocked", reason: admissionDenial };
       }

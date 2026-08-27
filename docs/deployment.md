@@ -1782,6 +1782,10 @@ The runtime secret must provide values such as:
 - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` when dependencies need longer startup windows
 - optional `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS` (positive integer milliseconds, default `20000`): how long one HTTP-originated session/workspace mutation may wait to enter the workspace control prefix before the API answers the retryable 503 `WORKSPACE_CONTROL_BUSY`; the API validates it at boot and worker settlement never uses it. `generateRuntimeArtifacts` carries it into `runtime.env` only when set
 - `OPENGENI_OPENAI_API_KEY` or Azure OpenAI equivalents
+- optional `OPENGENI_OPENROUTER_API_KEY` for the deployment-managed reviewed
+  OpenRouter rail; keep it in the runtime Secret, never catalog JSON
+- optional `OPENGENI_MODEL_CATALOG_SOURCE=code|database` (default `code`),
+  `OPENGENI_MODEL_COST_POLICY_JSON`, and `OPENGENI_MODEL_NOTES_JSON`
 - `OPENGENI_OBJECT_STORAGE_BACKEND=s3-compatible` plus endpoint/access-key settings for local/self-contained modes
 - `OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob` plus Azure Blob connection string/account-key settings
 - `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORAGE_REGION`; prefer IRSA/EKS Pod Identity over static keys
@@ -1792,10 +1796,45 @@ The runtime secret must provide values such as:
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
 - optional paired `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET` and `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET` for managed social sign-in
 - `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
-- `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`
+- `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+### Deployment database model catalog cutover
+
+The default source remains the reviewed code/env catalog. Database mode is an
+operator-owned singleton, not a boot-time reconciliation loop:
+
+1. Apply migration `0365_model_catalog_and_gateway_custom_models.sql` while
+   API and workers still use `OPENGENI_MODEL_CATALOG_SOURCE=code`.
+2. Prepare a strict, secret-free schema-v1 JSON document. Membership and
+   optional one-line notes belong in the document; keys, enabled flags, billing,
+   cost policy, and pricing do not.
+3. Validate and upsert it with a migration/admin database credential:
+
+   ```bash
+   OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
+     bun run model-catalog:upsert -- --file ./model-catalog.json
+   ```
+
+4. Confirm the command reports the expected version, then roll every API and
+   worker with `OPENGENI_MODEL_CATALOG_SOURCE=database`.
+5. Verify `/v1/config/client`, one authenticated workspace model catalog, a
+   model picker, and the `list_models` tool before removing the old code-mode
+   deployment configuration.
+
+Database mode fails closed when the singleton is missing or invalid and never
+falls back to code. Rollback is the source flag: restoring `code` makes the
+singleton inert but leaves it available for inspection or correction. Catalog
+cost remains separately controlled by `OPENGENI_MODEL_COST_POLICY_JSON`; a
+model marked `credits` needs `OPENGENI_MODEL_PRICING_JSON` under managed
+billing/limits when no built-in price exists.
+
+Workspace custom Vercel AI Gateway slugs are not part of this singleton. They
+are admin-managed rows protected by FORCE RLS, overlaid only for that workspace,
+and become selectable only when the encrypted workspace Gateway connection and
+workspace policy are ready.
 
 ### Optional OpenSandbox Kubernetes provider
 

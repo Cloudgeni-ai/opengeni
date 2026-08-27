@@ -169,6 +169,9 @@ import type {
   ClientConfig,
   WorkspaceModelAccessPolicy,
   WorkspaceModelCatalogResponse,
+  WorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse,
+  CreateWorkspaceGatewayCustomModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -4042,6 +4045,39 @@ export class OpenGeniClient {
       undefined,
       {},
       options,
+    );
+  }
+
+  /** List workspace-owned unpinned Vercel AI Gateway model slugs. */
+  async listWorkspaceGatewayCustomModels(
+    workspaceId: string,
+  ): Promise<WorkspaceGatewayCustomModelsResponse> {
+    return await this.requestJson<WorkspaceGatewayCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/gateway-custom-models`,
+    );
+  }
+
+  /** Add one exact upstream Vercel AI Gateway slug. */
+  async createWorkspaceGatewayCustomModel(
+    workspaceId: string,
+    request: CreateWorkspaceGatewayCustomModelRequest,
+  ): Promise<WorkspaceGatewayCustomModel> {
+    return await this.requestJson<WorkspaceGatewayCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/gateway-custom-models`,
+      request,
+    );
+  }
+
+  /** Remove one workspace custom Gateway model by its stable row id. */
+  async deleteWorkspaceGatewayCustomModel(
+    workspaceId: string,
+    customModelId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/gateway-custom-models/${customModelId}`,
     );
   }
 

@@ -2300,6 +2300,42 @@ export const UpdateWorkspaceModelPolicyRequest = z.object({
 });
 export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
 
+export const CreateWorkspaceGatewayCustomModelRequest = z
+  .object({
+    upstreamModelId: z.string().regex(/^[!-~]{1,256}$/u),
+    label: z
+      .string()
+      .min(1)
+      .max(128)
+      .refine((value) => new TextEncoder().encode(value).byteLength <= 128, {
+        message: "label must be at most 128 UTF-8 bytes",
+      })
+      .refine((value) => !/[\r\n|]/u.test(value), {
+        message: "label must not contain newlines or the | field separator",
+      })
+      .optional(),
+  })
+  .strict();
+export type CreateWorkspaceGatewayCustomModelRequest = z.infer<
+  typeof CreateWorkspaceGatewayCustomModelRequest
+>;
+
+export const WorkspaceGatewayCustomModel = z.object({
+  id: z.string().uuid(),
+  upstreamModelId: z.string(),
+  label: z.string().nullable(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type WorkspaceGatewayCustomModel = z.infer<typeof WorkspaceGatewayCustomModel>;
+
+export const WorkspaceGatewayCustomModelsResponse = z.object({
+  models: z.array(WorkspaceGatewayCustomModel),
+});
+export type WorkspaceGatewayCustomModelsResponse = z.infer<
+  typeof WorkspaceGatewayCustomModelsResponse
+>;
+
 const turnInitiatorIdentityFields = {
   subjectId: z.string().min(1),
   /** Immutable display snapshot; never an authorization input. */
@@ -15559,6 +15595,11 @@ export const ModelBillingAttributionV1 =
   );
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
+export const ModelCostClassV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["free", "credits", "subscription", "workspace"]),
+);
+export type ModelCostClassV1 = z.infer<typeof ModelCostClassV1>;
+
 export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
 
 export const TurnExecutionModelSourceV1 =
@@ -15606,6 +15647,10 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       wireApi: z.enum(["responses", "chat"]),
       credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
+      // Additive so accepted turns created before deployment funding policy
+      // remain readable. New turns always freeze this separate workspace-facing
+      // cost fact; legacy readers fall back to their historical billing rule.
+      cost: ModelCostClassV1.optional(),
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
     })
     .strict()
@@ -15746,7 +15791,9 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),
-    source: z.enum(["opengeni", "codex", "supergrok", "workspace_gateway"]).optional(),
+    source: z
+      .enum(["opengeni", "codex", "supergrok", "workspace_gateway", "openrouter"])
+      .optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     // Additive normalized definition metadata. Optional so older server payloads
     // remain parseable; current servers project the complete V1 set.
@@ -15768,6 +15815,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
       .optional(),
     credentialSource: ModelCredentialSourceV1.optional(),
     billing: ModelBillingAttributionV1.optional(),
+    cost: ModelCostClassV1.optional(),
     capabilities: ModelCapabilitiesV1.optional(),
     pricing: ModelPricingScheduleV1.optional(),
     definitionVersion: z

@@ -3,6 +3,7 @@ import type { ResolvedModelProvider } from "@opengeni/config";
 import {
   GATEWAY_REQUEST_BODY_NORMALIZED_HEADER,
   normalizeVercelGatewayRequestBody,
+  type GatewayRequestPolicyLookup,
 } from "./model-provider-request-policy";
 
 /**
@@ -18,6 +19,7 @@ export function vercelGatewayRoutingFetch(
     "vercel-gateway-managed" | "vercel-gateway-workspace"
   >,
   inner: typeof fetch,
+  configuredPolicies?: GatewayRequestPolicyLookup,
 ): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (!isModelCallFetch(input)) {
@@ -37,7 +39,7 @@ export function vercelGatewayRoutingFetch(
           throw new Error("invalid body");
         }
         const body = parsed as Record<string, unknown>;
-        normalizeVercelGatewayRequestBody(body);
+        normalizeVercelGatewayRequestBody(body, configuredPolicies);
         nextInit = { ...nextInit, body: JSON.stringify(body) };
       } catch (error) {
         if (error instanceof Error && error.message.includes("approved catalogue")) throw error;

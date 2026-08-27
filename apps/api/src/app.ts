@@ -66,6 +66,7 @@ import {
   requireLiveAgentAttemptAuthorization,
   requirePermission,
   releaseManagedAuthRequestActorLease,
+  resolveCatalogSettings,
   validateManagedAuthRequestActorLease,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -358,6 +359,7 @@ export function createAppComposition(deps: AppDependencies): {
       : deps.transcriptionSegmenter;
   const routeDeps: ApiRouteDeps = {
     ...deps,
+    resolveCatalogSettings: () => resolveCatalogSettings(deps.db, deps.settings),
     observability,
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
@@ -766,10 +768,12 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
-    const codexCatalogSettings = deps.settings.codexSubscriptionEnabled
-      ? withCodexCatalogProvider(deps.settings)
-      : deps.settings;
-    const catalogSettings = deps.settings.supergrokSubscriptionEnabled
+    const resolvedCatalog = await resolveCatalogSettings(deps.db, deps.settings);
+    const baseCatalogSettings = resolvedCatalog.settings;
+    const codexCatalogSettings = baseCatalogSettings.codexSubscriptionEnabled
+      ? withCodexCatalogProvider(baseCatalogSettings)
+      : baseCatalogSettings;
+    const catalogSettings = baseCatalogSettings.supergrokSubscriptionEnabled
       ? withXaiSubscriptionCatalogProvider(codexCatalogSettings)
       : codexCatalogSettings;
     return c.json(
@@ -1379,11 +1383,14 @@ type ReadinessCheckResult = { ok: boolean; error?: string };
 function readinessChecks(deps: AppDependencies): ReadinessChecks {
   const configuredNatsCheck = deps.readinessChecks?.nats;
   return {
-    db:
-      deps.readinessChecks?.db ??
-      (async () => {
+    db: async () => {
+      if (deps.readinessChecks?.db) {
+        await deps.readinessChecks.db();
+      } else {
         await deps.db.execute(dbSql`select 1`);
-      }),
+      }
+      await resolveCatalogSettings(deps.db, deps.settings);
+    },
     nats: async () => {
       requireSessionEventDurableFanoutCapability(deps.bus);
       if (configuredNatsCheck) {

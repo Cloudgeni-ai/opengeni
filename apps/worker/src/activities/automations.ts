@@ -1,9 +1,11 @@
-import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import { resolveTurnExecutionPolicyV1, WORKSPACE_GATEWAY_MODEL_ID_PREFIX } from "@opengeni/config";
 import {
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   createAndStartSessionWithOutcome,
   recordWorkspaceUsage,
+  resolveCatalogSettings,
+  resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
 import {
   AutomationAuthorityRevokedError,
@@ -44,6 +46,8 @@ export function createAutomationActivities(
       input: DispatchAutomationRunInput,
     ): Promise<DispatchAutomationRunResult> => {
       const service = await services();
+      const deploymentCatalogSettings = (await resolveCatalogSettings(service.db, service.settings))
+        .settings;
       const run = await claim(service.db, input);
       if (!run) return { action: "not_found" };
       if (run.status === "dispatched") {
@@ -73,13 +77,20 @@ export function createAutomationActivities(
       }
 
       const template = accepted.sessionTemplate;
-      const model = canonicalConfiguredModel(
-        service.settings,
-        template.model ?? service.settings.openaiModel,
-      );
+      const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
+      const catalogSettings = requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
+        ? (
+            await resolveWorkspaceCatalogSettings(service.db, service.settings, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+            })
+          ).settings
+        : deploymentCatalogSettings;
+      const catalogService = { ...service, settings: catalogSettings };
+      const model = canonicalConfiguredModel(catalogSettings, requestedModel);
       if (!model) throw new Error("automation has no configured model");
-      await assertModelPolicy(service.db, service.settings, input.workspaceId, model);
-      const denial = await admit(service, {
+      await assertModelPolicy(service.db, catalogSettings, input.workspaceId, model);
+      const denial = await admit(catalogService, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         model,
@@ -94,8 +105,8 @@ export function createAutomationActivities(
         });
         throw new Error(`automation admission denied: ${denial}`);
       }
-      const reasoningEffort = template.reasoningEffort ?? service.settings.openaiReasoningEffort;
-      const sandboxBackend = template.sandboxBackend ?? service.settings.sandboxBackend;
+      const reasoningEffort = template.reasoningEffort ?? catalogSettings.openaiReasoningEffort;
+      const sandboxBackend = template.sandboxBackend ?? catalogSettings.sandboxBackend;
       if (sandboxBackend === "selfhosted") {
         await settle(service.db, {
           workspaceId: input.workspaceId,
@@ -105,7 +116,7 @@ export function createAutomationActivities(
         });
         return { action: "skipped", reason: "interactive_compute_not_allowed" };
       }
-      const turnExecutionPolicy = resolveTurnExecutionPolicyV1(service.settings, {
+      const turnExecutionPolicy = resolveTurnExecutionPolicyV1(catalogSettings, {
         modelId: model,
         requestedModelId: template.model,
         modelSource: template.model ? "explicit" : "deployment",
@@ -167,7 +178,7 @@ export function createAutomationActivities(
           subjectId: accepted.serviceSubjectId,
         });
         await recordUsage(
-          { db: service.db, settings: service.settings },
+          { db: service.db, settings: catalogSettings },
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,

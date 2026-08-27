@@ -7,11 +7,14 @@ import {
   ListWorkspaceMembersResponse,
   SetWorkspaceDefaultRigRequest,
   UpdateWorkspaceMemberRequest,
+  CreateWorkspaceGatewayCustomModelRequest,
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WorkspaceModelCatalogResponse,
+  WorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse,
   WorkspaceRealtimeModelCatalogResponse,
   WorkspaceInferenceControlRequest,
   Workspace,
@@ -36,6 +39,9 @@ import {
   normalizeWorkspaceMembershipPermissions,
   listWorkspaceControlEvents,
   listSharedWorkspacesForAccount,
+  listWorkspaceGatewayCustomModels,
+  createWorkspaceGatewayCustomModel,
+  deleteWorkspaceGatewayCustomModel,
   listWorkspacesForSubject,
   nestedPostgresSqlState,
   removeWorkspaceMember,
@@ -63,6 +69,7 @@ import {
   requireAccessContext,
   requireAccessGrant,
   requireFreshAccessGrant,
+  resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -83,6 +90,7 @@ import {
   SUPERGROK_REALTIME_MODEL_ID,
   canonicalizeConfiguredModelId,
   configuredStaticUsageLimits,
+  configuredGatewayUpstreamModelIds,
   type Settings,
 } from "@opengeni/config";
 
@@ -94,6 +102,22 @@ export function canonicalWorkspacePolicyModelIds(
     return null;
   }
   return [...new Set(modelIds.map((modelId) => canonicalizeConfiguredModelId(settings, modelId)))];
+}
+
+function projectWorkspaceGatewayCustomModel(model: {
+  id: string;
+  upstreamModelId: string;
+  label: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return WorkspaceGatewayCustomModel.parse({
+    id: model.id,
+    upstreamModelId: model.upstreamModelId,
+    label: model.label,
+    createdAt: model.createdAt.toISOString(),
+    updatedAt: model.updatedAt.toISOString(),
+  });
 }
 
 type WorkspaceMemberProjectionInput = Omit<WorkspaceMemberValue, "permissions"> & {
@@ -317,28 +341,103 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const [
+      resolvedCatalog,
       policy,
       codexSubscriptionActive,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive,
+      workspaceGatewayCustomModels,
     ] = await Promise.all([
+      deps.resolveCatalogSettings(),
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
+      listWorkspaceGatewayCustomModels(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+      }),
     ]);
     c.header("cache-control", "private, no-store");
     return c.json(
       WorkspaceModelCatalogResponse.parse(
         buildWorkspaceModelCatalog({
-          settings: deps.settings,
+          settings: resolvedCatalog.settings,
           policy,
           codexSubscriptionActive,
           xaiSubscriptionActive,
           workspaceGatewayConnectionActive,
+          workspaceGatewayCustomModels,
         }),
       ),
     );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const models = await listWorkspaceGatewayCustomModels(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      WorkspaceGatewayCustomModelsResponse.parse({
+        models: models.map(projectWorkspaceGatewayCustomModel),
+      }),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const parsed = CreateWorkspaceGatewayCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid Gateway custom model" });
+    }
+    const catalog = await deps.resolveCatalogSettings();
+    if (configuredGatewayUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)) {
+      throw new HTTPException(422, {
+        message: "Gateway model is already included in the deployment catalog",
+      });
+    }
+    try {
+      const model = await createWorkspaceGatewayCustomModel(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        upstreamModelId: parsed.data.upstreamModelId,
+        label: parsed.data.label ?? null,
+        createdBySubjectId: grant.subjectId,
+      });
+      return c.json(projectWorkspaceGatewayCustomModel(model), 201);
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "23505") {
+        throw new HTTPException(422, { message: "Gateway custom model already exists" });
+      }
+      throw error;
+    }
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/gateway-custom-models/:customModelId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const customModelId = c.req.param("customModelId");
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new HTTPException(422, { message: "invalid Gateway custom model id" });
+    }
+    const removed = await deleteWorkspaceGatewayCustomModel(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      customModelId,
+    });
+    if (!removed) throw new HTTPException(404, { message: "Gateway custom model not found" });
+    return c.body(null, 204);
   });
 
   app.get("/v1/workspaces/:workspaceId/realtime-model-catalog", async (c) => {
@@ -417,11 +516,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const payload = UpdateWorkspaceModelPolicyRequest.parse(await c.req.json());
+    const catalog = await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
     const policy = await upsertWorkspaceModelPolicy(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       allowedProviders: payload.allowedProviders ?? null,
-      allowedModels: canonicalWorkspacePolicyModelIds(deps.settings, payload.allowedModels),
+      allowedModels: canonicalWorkspacePolicyModelIds(catalog.settings, payload.allowedModels),
     });
     return c.json(policy);
   });

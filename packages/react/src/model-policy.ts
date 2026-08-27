@@ -144,6 +144,23 @@ export function labelReasoningEffort(effort: ReasoningEffort): string {
 }
 
 export function payerSummaryForModel(model: ClientModel): string {
+  if (model.cost === "free") {
+    return "Free in this deployment";
+  }
+  if (model.cost === "credits") {
+    return "OpenGeni credits";
+  }
+  if (model.cost === "subscription") {
+    return model.source === "supergrok"
+      ? "SuperGrok subscription · external billing"
+      : "Codex subscription · external billing";
+  }
+  if (model.cost === "workspace") {
+    return "Billed to your AI Gateway";
+  }
+
+  // Older client-config payloads do not carry `cost`; preserve their existing
+  // settlement-derived label until every deployment has rolled forward.
   const billing = model.billing;
   if (!billing) {
     return "Route unknown";

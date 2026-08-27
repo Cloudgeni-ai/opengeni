@@ -88,7 +88,10 @@ export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1
   xaiSubscription: boolean;
 } {
   return {
-    externallyBilled: policy.billing.metering === "external",
+    externallyBilled:
+      policy.cost === undefined
+        ? policy.billing.metering === "external"
+        : policy.cost !== "credits",
     codexSubscription:
       policy.providerId === "codex-subscription" &&
       policy.credentialSource.kind === "connected_subscription" &&

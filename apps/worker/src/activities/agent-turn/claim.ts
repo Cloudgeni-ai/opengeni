@@ -29,6 +29,7 @@ import {
 import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-telemetry-authority";
 import {
   assertSessionAllowsProductModel,
+  resolveCatalogSettings,
   resolveCodexAppsCredentialIdForRun,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
@@ -156,12 +157,14 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     acknowledgeLostAttemptOwnership,
   } = deps;
 
+  const deploymentCatalogSettings = (await resolveCatalogSettings(db, settings)).settings;
+
   const validatePendingSystemUpdateAuthority: NonNullable<
     ClaimSessionWorkForAttemptInput["validatePendingSystemUpdateAuthority"]
   > = async (tx, update) =>
     await validateIncidentTelemetrySystemUpdateAuthority({
       db: tx,
-      settings,
+      settings: deploymentCatalogSettings,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       update,
@@ -198,7 +201,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     input.workspaceId,
-    settings,
+    deploymentCatalogSettings,
     {
       ...(credentialSubjectId
         ? { subjectId: credentialSubjectId }
@@ -229,6 +232,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     : codexSettings;
   const capabilitySettings = await settingsWithWorkspaceGatewayCredential(
     db,
+    input.accountId,
     input.workspaceId,
     xaiSettings,
   );

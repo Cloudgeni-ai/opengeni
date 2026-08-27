@@ -1,9 +1,14 @@
 import {
   getScheduledVariableSetExpectedGenerationForAttempt,
+  getWorkspaceModelPolicy,
+  listWorkspaceGatewayCustomModels,
   persistAttemptToolCatalog,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
+  workspaceCodexSubscriptionActive,
+  workspaceVercelAiGatewayConnectionActive,
+  workspaceXaiSubscriptionActive,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -22,7 +27,11 @@ import { connectionTokenResolverForTurn } from "../mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "../api-integrations";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
-import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  configuredModelNotes,
+  type Settings,
+} from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { buildCodexTokenResolver } from "../codex-auth";
 import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
@@ -31,6 +40,7 @@ import {
   defaultSessionMcpServerIds,
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
+  resolveWorkspaceModelSelection,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
 } from "@opengeni/core";
@@ -65,6 +75,7 @@ import {
   shouldRequestMissingSessionTitle,
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
+import { createListModelsAttemptToolDefinition } from "./list-models";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -310,6 +321,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     toolResultSpill,
     turn,
     session,
+    capabilitySettings,
     installedApiIntegrations,
     codexAppsCredentialId,
     turnExecutionPolicy,
@@ -510,6 +522,45 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : [];
   const attemptToolDefinitions = [
+    createListModelsAttemptToolDefinition({
+      currentModelId: turnExecutionPolicy.productModelId,
+      load: async () => {
+        const [
+          policy,
+          codexSubscriptionActive,
+          xaiSubscriptionActive,
+          workspaceGatewayConnectionActive,
+          workspaceGatewayCustomModels,
+        ] = await Promise.all([
+          getWorkspaceModelPolicy(db, input.workspaceId),
+          workspaceCodexSubscriptionActive(db, capabilitySettings, input.workspaceId),
+          credentialSubjectId && capabilitySettings.supergrokSubscriptionEnabled
+            ? workspaceXaiSubscriptionActive(
+                db,
+                capabilitySettings,
+                input.workspaceId,
+                credentialSubjectId,
+              )
+            : false,
+          workspaceVercelAiGatewayConnectionActive(db, input.workspaceId),
+          listWorkspaceGatewayCustomModels(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          }),
+        ]);
+        return {
+          selections: resolveWorkspaceModelSelection({
+            settings: capabilitySettings,
+            policy,
+            codexSubscriptionActive,
+            xaiSubscriptionActive,
+            workspaceGatewayConnectionActive,
+            workspaceGatewayCustomModels,
+          }),
+          modelNotes: configuredModelNotes(capabilitySettings),
+        };
+      },
+    }),
     ...(titleToolPlan.promoteTitleTool
       ? [
           createSessionTitleAttemptToolDefinition({

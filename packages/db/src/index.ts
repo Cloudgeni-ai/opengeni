@@ -509,6 +509,7 @@ export {
 } from "./provision-roles";
 // Workspace Memory V1 pure domain surface (gates, render, canonical prompt text).
 export * from "./memory-domain";
+export * from "./model-catalog";
 
 import {
   dbBindingFor,

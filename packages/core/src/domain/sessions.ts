@@ -5,7 +5,6 @@ import {
   resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
-  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
@@ -1135,9 +1134,6 @@ export function canonicalConfiguredModel(
     settings.supergrokSubscriptionEnabled &&
     canonicalModel.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
   ) {
-    return canonicalModel;
-  }
-  if (canonicalModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return canonicalModel;
   }
   throw new HTTPException(422, { message: `model is not available: ${model}` });

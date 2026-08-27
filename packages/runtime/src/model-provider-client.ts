@@ -1,4 +1,4 @@
-import type { ResolvedModelProvider, Settings } from "@opengeni/config";
+import { configuredModels, type ResolvedModelProvider, type Settings } from "@opengeni/config";
 import OpenAI from "openai";
 import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
 import {
@@ -160,6 +160,13 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
   const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
+  const gatewayPolicies = gatewayProvider
+    ? new Map(
+        configuredModels(settings)
+          .filter((model) => model.providerId === provider.id)
+          .map((model) => [model.upstreamModelId, model.requestPolicy] as const),
+      )
+    : undefined;
   const cached = workspaceGateway ? undefined : providerClientCache.get(provider.id);
   if (cached) {
     return cached;
@@ -190,7 +197,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
             fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
           },
-          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
         )
       : provider.kind === "xai-subscription"
         ? // SuperGrok subscription uses one workspace-scoped request context.
@@ -208,7 +215,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
               fetch: xaiSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
           )
         : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
           // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
@@ -241,10 +248,11 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   ? vercelGatewayRoutingFetch(
                       provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
                       instrumentedModelFetch(provider.id, globalThis.fetch),
+                      gatewayPolicies,
                     )
                   : instrumentedModelFetch(provider.id, globalThis.fetch),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
           );
   if (!workspaceGateway) {
     providerClientCache.set(provider.id, client);

@@ -1449,6 +1449,14 @@ export function requiredRuntimeEnvVars(
   if (env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY) {
     vars.push("OPENGENI_VERCEL_AI_GATEWAY_API_KEY");
   }
+  for (const key of [
+    "OPENGENI_MODEL_CATALOG_SOURCE",
+    "OPENGENI_MODEL_COST_POLICY_JSON",
+    "OPENGENI_MODEL_NOTES_JSON",
+    "OPENGENI_OPENROUTER_API_KEY",
+  ] as const) {
+    if (env[key]) vars.push(key);
+  }
   if (runtimeDatabaseUrlRequired(contract)) {
     vars.push("OPENGENI_DATABASE_URL");
   }
@@ -2419,6 +2427,9 @@ function runtimeEnvValues(
       "OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS",
       env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh,max",
     ),
+    valueEnv("OPENGENI_MODEL_CATALOG_SOURCE", env.OPENGENI_MODEL_CATALOG_SOURCE),
+    valueEnv("OPENGENI_MODEL_COST_POLICY_JSON", env.OPENGENI_MODEL_COST_POLICY_JSON),
+    valueEnv("OPENGENI_MODEL_NOTES_JSON", env.OPENGENI_MODEL_NOTES_JSON),
     ...(inferredOpenAiProvider(env) === "azure"
       ? [
           env.OPENGENI_AZURE_OPENAI_BASE_URL
@@ -2441,6 +2452,9 @@ function runtimeEnvValues(
       : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
     ...(env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY
       ? [requiredEnv("OPENGENI_VERCEL_AI_GATEWAY_API_KEY", env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY)]
+      : []),
+    ...(env.OPENGENI_OPENROUTER_API_KEY
+      ? [requiredEnv("OPENGENI_OPENROUTER_API_KEY", env.OPENGENI_OPENROUTER_API_KEY)]
       : []),
   ];
 

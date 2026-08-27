@@ -91,6 +91,59 @@ describe("model-policy", () => {
     expect(payerSummaryForModel(model)).toBe("External provider · no OpenGeni credits");
   });
 
+  test("uses deployment cost before upstream settlement in the payer summary", () => {
+    const externallySettled = {
+      billing: { upstreamPayer: "deployment", metering: "external" },
+      source: "openrouter",
+    } as const;
+
+    expect(
+      payerSummaryForModel(
+        catalogModel({
+          id: "openrouter/model:free",
+          label: "OpenRouter model",
+          ...externallySettled,
+          cost: "free",
+        }),
+      ),
+    ).toBe("Free in this deployment");
+    expect(
+      payerSummaryForModel(
+        catalogModel({
+          id: "openrouter/model:free",
+          label: "OpenRouter model",
+          ...externallySettled,
+          cost: "credits",
+        }),
+      ),
+    ).toBe("OpenGeni credits");
+  });
+
+  test("uses explicit ownership cost labels independently of legacy billing metadata", () => {
+    expect(
+      payerSummaryForModel(
+        catalogModel({
+          id: "supergrok/grok",
+          label: "Grok",
+          source: "supergrok",
+          cost: "subscription",
+          billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+        }),
+      ),
+    ).toBe("SuperGrok subscription · external billing");
+    expect(
+      payerSummaryForModel(
+        catalogModel({
+          id: "workspace-gateway/model",
+          label: "Gateway model",
+          source: "workspace_gateway",
+          cost: "workspace",
+          billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+        }),
+      ),
+    ).toBe("Billed to your AI Gateway");
+  });
+
   test("projects curated shortLabel into picker rows", () => {
     const rows = projectPickerRows([
       catalogModel({

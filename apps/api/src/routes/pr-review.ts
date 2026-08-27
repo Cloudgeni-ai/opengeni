@@ -19,6 +19,7 @@ import {
   PR_REVIEW_AUTOMATION_TEMPLATE_ID,
   requireAccessGrant,
   requirePermission,
+  resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -385,10 +386,16 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw error;
       }
     }
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
     const model = payload.model
-      ? (canonicalConfiguredModel(settings, payload.model) ?? null)
+      ? (canonicalConfiguredModel(catalogSettings, payload.model) ?? null)
       : null;
-    if (model) await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
+    if (model) await assertWorkspaceModelPolicyAllows(db, catalogSettings, workspaceId, model);
     const template = getCapabilityPack(OPENGENI_PR_REVIEW_PACK_ID)?.automationTemplates?.find(
       (candidate) => candidate.id === PR_REVIEW_AUTOMATION_TEMPLATE_ID,
     );
@@ -441,13 +448,19 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     await requirePrReviewPackActive(db, workspaceId);
     const payload = UpdatePrReviewRepositoryBindingRequest.parse(await c.req.json());
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
     const model =
       payload.model === undefined
         ? undefined
         : payload.model === null
           ? null
-          : (canonicalConfiguredModel(settings, payload.model) ?? null);
-    if (model) await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
+          : (canonicalConfiguredModel(catalogSettings, payload.model) ?? null);
+    if (model) await assertWorkspaceModelPolicyAllows(db, catalogSettings, workspaceId, model);
     const binding = await updatePrReviewRepositoryBinding(db, {
       accountId: grant.accountId,
       workspaceId,

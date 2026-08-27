@@ -19,6 +19,7 @@ import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
+import type { ResolvedCatalogSettings } from "./model-catalog";
 import type {
   EditableArtifactAgentApplication,
   EditableArtifactDurableExportService,
@@ -225,6 +226,7 @@ export type AppDependencies = {
 export type ObjectStorageDependency = ReturnType<typeof createObjectStorage>;
 
 export type ApiRouteDeps = AppDependencies & {
+  resolveCatalogSettings: () => Promise<ResolvedCatalogSettings>;
   managedEmailTransport: ManagedEmailTransport;
   objectStorage: ObjectStorageDependency;
   githubStateSecret: string;

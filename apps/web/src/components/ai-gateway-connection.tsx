@@ -1,5 +1,6 @@
-import type { ConnectionMetadata } from "@opengeni/sdk";
-import { ChevronDownIcon, Loader2Icon, Trash2Icon } from "lucide-react";
+import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { ChevronDownIcon, Loader2Icon, PlusIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type SVGProps } from "react";
 import { toast } from "sonner";
 
@@ -34,17 +35,33 @@ function isGatewayConnection(connection: ConnectionMetadata): boolean {
   );
 }
 
-export function AiGatewayConnectionCard(props: {
+type AiGatewayConnectionCardProps = {
   workspaceId: string;
   canManage: boolean;
   onConnectionChange?: (() => void) | undefined;
-}) {
+};
+
+export function AiGatewayConnectionCard(props: AiGatewayConnectionCardProps) {
   const client = useAppContext().client;
+  return <AiGatewayConnectionCardWithClient {...props} client={client} />;
+}
+
+/** Isolated product fixture seam; production callers use AiGatewayConnectionCard. */
+export function AiGatewayConnectionCardWithClient(
+  props: AiGatewayConnectionCardProps & { client: OpenGeniBrowserClient },
+) {
+  const client = props.client;
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
+  const [customModels, setCustomModels] = useState<WorkspaceGatewayCustomModel[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [customModelsLoaded, setCustomModelsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [customModelsError, setCustomModelsError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
+  const [modelSlug, setModelSlug] = useState("");
+  const [modelBusy, setModelBusy] = useState(false);
+  const [removingModelId, setRemovingModelId] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
 
   const connection = useMemo(() => {
@@ -56,17 +73,41 @@ export function AiGatewayConnectionCard(props: {
     );
   }, [connections]);
   const connected = connection?.status === "active";
+  const normalizedModelSlug = modelSlug.trim();
+  const modelSlugValid = /^[!-~]{1,256}$/u.test(normalizedModelSlug);
+  const modelSlugExists = customModels.some(
+    (model) => model.upstreamModelId === normalizedModelSlug,
+  );
 
   const refresh = useCallback(async () => {
-    try {
-      setConnections(await client.listConnections(props.workspaceId));
+    const [connectionsResult, modelsResult] = await Promise.allSettled([
+      client.listConnections(props.workspaceId),
+      client.listWorkspaceGatewayCustomModels(props.workspaceId),
+    ]);
+    if (connectionsResult.status === "fulfilled") {
+      setConnections(connectionsResult.value);
       setError(null);
-    } catch (caught) {
+    } else {
       setConnections([]);
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setLoaded(true);
+      setError(
+        connectionsResult.reason instanceof Error
+          ? connectionsResult.reason.message
+          : String(connectionsResult.reason),
+      );
     }
+    setLoaded(true);
+    if (modelsResult.status === "fulfilled") {
+      setCustomModels(modelsResult.value.models);
+      setCustomModelsError(null);
+    } else {
+      setCustomModels([]);
+      setCustomModelsError(
+        modelsResult.reason instanceof Error
+          ? modelsResult.reason.message
+          : String(modelsResult.reason),
+      );
+    }
+    setCustomModelsLoaded(true);
   }, [client, props.workspaceId]);
 
   useEffect(() => {
@@ -126,6 +167,47 @@ export function AiGatewayConnectionCard(props: {
       });
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function addCustomModel() {
+    if (!modelSlugValid || modelSlugExists) return;
+    setModelBusy(true);
+    try {
+      const created = await client.createWorkspaceGatewayCustomModel(props.workspaceId, {
+        upstreamModelId: normalizedModelSlug,
+      });
+      setCustomModels((current) => [...current, created]);
+      setModelSlug("");
+      setCustomModelsError(null);
+      props.onConnectionChange?.();
+      toast.success("Gateway model added", {
+        description: connected
+          ? "It can now appear in this workspace's model picker."
+          : "It will become selectable after the Gateway is connected.",
+      });
+    } catch (caught) {
+      toast.error("Couldn't add Gateway model", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
+    } finally {
+      setModelBusy(false);
+    }
+  }
+
+  async function removeCustomModel(model: WorkspaceGatewayCustomModel) {
+    setRemovingModelId(model.id);
+    try {
+      await client.deleteWorkspaceGatewayCustomModel(props.workspaceId, model.id);
+      setCustomModels((current) => current.filter((candidate) => candidate.id !== model.id));
+      props.onConnectionChange?.();
+      toast.success("Gateway model removed");
+    } catch (caught) {
+      toast.error("Couldn't remove Gateway model", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
+    } finally {
+      setRemovingModelId(null);
     }
   }
 
@@ -202,6 +284,114 @@ export function AiGatewayConnectionCard(props: {
             Workspace admins manage this Vercel AI Gateway connection.
           </p>
         )}
+
+        <div className="grid gap-2.5 border-t border-border/70 pt-3">
+          <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+            <div className="grid gap-0.5">
+              <p className="text-xs font-medium text-fg">Models from your Gateway</p>
+              <p className="max-w-xl text-2xs leading-relaxed text-fg-subtle">
+                Add an exact Vercel model slug. OpenGeni uses the Gateway's routing and does not
+                inspect or pin a provider for custom entries.
+              </p>
+            </div>
+            <span className="text-2xs text-fg-subtle" aria-live="polite">
+              {!customModelsLoaded
+                ? "Loading…"
+                : `${customModels.length} ${customModels.length === 1 ? "model" : "models"}`}
+            </span>
+          </div>
+
+          {props.canManage ? (
+            <div className="grid gap-1.5">
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <Input
+                  value={modelSlug}
+                  onChange={(event) => setModelSlug(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void addCustomModel();
+                    }
+                  }}
+                  className="h-9 font-mono text-xs"
+                  placeholder="anthropic/claude-sonnet-4.6"
+                  aria-label="Vercel AI Gateway model slug"
+                  aria-describedby="gateway-model-slug-help"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={modelBusy || !modelSlugValid || modelSlugExists}
+                  onClick={addCustomModel}
+                >
+                  {modelBusy ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : (
+                    <PlusIcon className="size-3.5" />
+                  )}
+                  Add model
+                </Button>
+              </div>
+              <p id="gateway-model-slug-help" className="text-2xs text-fg-subtle">
+                {modelSlugExists
+                  ? "That slug is already configured for this workspace."
+                  : normalizedModelSlug && !modelSlugValid
+                    ? "Use the exact printable slug with no spaces."
+                    : connected
+                      ? "The model becomes selectable when workspace policy allows it."
+                      : "You can configure models now; they become selectable after you connect the Gateway."}
+              </p>
+            </div>
+          ) : null}
+
+          {customModelsError ? (
+            <p className="text-xs text-destructive">{customModelsError}</p>
+          ) : null}
+
+          {customModelsLoaded && customModels.length === 0 ? (
+            <div className="rounded-md bg-surface-2/55 px-3 py-2.5 text-2xs text-fg-subtle">
+              No custom model slugs yet. The curated Gateway models remain available separately.
+            </div>
+          ) : null}
+
+          {customModels.length > 0 ? (
+            <ul className="divide-y divide-border/70 rounded-md bg-surface-2/55 px-3">
+              {customModels.map((model) => (
+                <li key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-xs text-fg">{model.upstreamModelId}</p>
+                    <p className="mt-0.5 text-2xs text-fg-subtle">
+                      {connected
+                        ? "Ready through Your Gateway"
+                        : "Waiting for a Gateway connection"}
+                    </p>
+                  </div>
+                  {props.canManage ? (
+                    <Button
+                      type="button"
+                      size="icon-xs"
+                      variant="ghost"
+                      className="shrink-0 text-fg-subtle hover:text-destructive"
+                      disabled={removingModelId !== null}
+                      aria-label={`Remove ${model.upstreamModelId}`}
+                      onClick={() => void removeCustomModel(model)}
+                    >
+                      {removingModelId === model.id ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <Trash2Icon className="size-3.5" />
+                      )}
+                    </Button>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
       </div>
     </details>
   );

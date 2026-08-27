@@ -2,6 +2,8 @@ import {
   allowedFirstPartyMcpToolsForSession,
   configuredStaticUsageLimits,
   policyProviderIdForModel,
+  resolveModelProvider,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -28,6 +30,7 @@ import type {
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
 } from "./types";
+import { resolveCatalogSettings, resolveWorkspaceCatalogSettings } from "@opengeni/core";
 
 export function createGoalActivities(services: () => Promise<ControlActivityServices>) {
   async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
@@ -47,12 +50,14 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
   async function maybeContinueGoal(
     input: MaybeContinueGoalInput,
   ): Promise<MaybeContinueGoalResult> {
-    const { settings, db, bus } = await services();
+    const service = await services();
+    const { db, bus } = service;
     // Cheap pre-read: the common goal-less session skips the budget queries.
     const existingGoal = await getSessionGoal(db, input.workspaceId, input.sessionId);
     if (!existingGoal || existingGoal.status !== "active") {
       return { action: "none" };
     }
+    let settings = (await resolveCatalogSettings(db, service.settings)).settings;
     // Loaded before the budget check so the codex-billed predicate and the
     // synthesized turn use the SAME effective policy. An explicit per-turn
     // model can differ from the persisted session default; follow-up goal work
@@ -103,6 +108,14 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     ) {
       modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
     }
+    if (continuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
+      settings = (
+        await resolveWorkspaceCatalogSettings(db, service.settings, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+        })
+      ).settings;
+    }
     // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
     // so it must not be budget-paused for zero OpenGeni credits. This file uses
     // BASE settings (no codex overlay); the predicate does its own credential read.
@@ -112,6 +125,9 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       workspaceId: input.workspaceId,
       model: continuationModel,
     });
+    const resolvedModel = resolveModelProvider(settings, continuationModel)?.model;
+    const fundedWithoutCredits =
+      isCodexRun || (resolvedModel !== undefined && resolvedModel.cost !== "credits");
     // Budget exhaustion pauses the goal visibly instead of failing the
     // session. Computed up front and applied inside the locked decision so a
     // limits pause never consumes continuation budget.
@@ -120,7 +136,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       db,
       input.accountId,
       input.workspaceId,
-      isCodexRun,
+      fundedWithoutCredits,
     );
     const decision = await materializeGoalContinuation(db, {
       accountId: input.accountId,
@@ -269,13 +285,13 @@ async function goalRunBudgetBlocked(
   db: Database,
   accountId: string,
   workspaceId: string,
-  isCodexRun: boolean,
+  fundedWithoutCredits: boolean,
 ): Promise<string | null> {
-  // Codex-billed continuations are paid by the user's ChatGPT/Codex plan: skip
-  // the credit-balance gate and the monthly model-cost cap. The agent-run COUNT
-  // cap below is a volume quota (not a credit/cost gate) and is intentionally kept.
+  // Free, subscription, and workspace-funded continuations skip OpenGeni's
+  // credit-balance gate and monthly model-cost cap. The agent-run COUNT cap
+  // below is a volume quota (not a credit/cost gate) and remains enforced.
   if (
-    !isCodexRun &&
+    !fundedWithoutCredits &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
     const balance = await getBillingBalance(db, accountId);
@@ -285,7 +301,7 @@ async function goalRunBudgetBlocked(
   }
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
     const limits = configuredStaticUsageLimits(settings);
-    if (!isCodexRun && limits.maxMonthlyCostMicrosPerAccount) {
+    if (!fundedWithoutCredits && limits.maxMonthlyCostMicrosPerAccount) {
       const used = await sumUsageQuantity(db, {
         accountId,
         eventType: "model.cost",

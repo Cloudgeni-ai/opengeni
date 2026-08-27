@@ -302,12 +302,21 @@ Canonical: `packages/core/src/access/index.ts`,
 shapes, capability descriptors, and token envelopes. `@opengeni/config` owns
 settings parsing, defaults, validation, and derived runtime configuration.
 
+Model catalog membership, workspace selectability, and cost are separate
+authorities. A deployment selects one membership source (`code` or the
+operator-owned database singleton); workspace policy, connection readiness,
+and provider health decide selectability; deployment cost policy decides
+`free` versus `credits` independently of upstream settlement. Workspace custom
+Gateway rows are a workspace overlay, never deployment catalog or billing rows.
+The accepted turn policy freezes the resulting executable identity and cost.
+
 Documentation may explain why a contract exists, but it must not copy complete
 lists that can drift. Cross-boundary enum evolution is additive within a major
 release unless the whole release train takes a breaking change. Contract-parity
 tests pin intentional mirrors in clients and deployment code.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
+`packages/core/src/model-catalog.ts`, [`model-providers.md`](model-providers.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
@@ -706,6 +715,13 @@ lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
 still resolves through the current authorized catalog and the same execution
 fences. Approval-required tools remain approval-required regardless of access
 path.
+
+The closed always-visible local first-request set is `exec_command`,
+`write_stdin`, `apply_patch`, `view_image`, `load_skill`,
+`request_human_input`, and `list_models`. The last tool returns the current
+workspace's selectable model IDs and deployment-defined costs; it does not
+switch the session model. Other non-MCP function tools and non-eager MCP schemas
+remain behind progressive search.
 
 Before every follow-up provider request, the worker reconciles the SDK's
 complete prior history into durable call/result truth; the first request has no

@@ -552,8 +552,9 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch {
       valid = false;
     }
-    const catalog = valid
-      ? configuredModels(withXaiSubscriptionCatalogProvider(deps.settings))
+    const catalogSettings = valid ? (await deps.resolveCatalogSettings()).settings : null;
+    const catalog = catalogSettings
+      ? configuredModels(withXaiSubscriptionCatalogProvider(catalogSettings))
           .filter(
             (model) =>
               model.credentialSource.kind === "connected_subscription" &&

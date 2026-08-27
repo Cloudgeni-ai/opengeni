@@ -146,9 +146,10 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
-  test("an anonymous external provider bypasses the 0-credit gate without a connection", async () => {
+  test("an external provider bypasses credits only when deployment cost marks it free", async () => {
     const restoreBal = mockZeroBalance();
     const settings = billedSettings({
+      modelCostPolicyJson: JSON.stringify({ "opencode/x-preview-f-free": "free" }),
       modelProvidersJson: JSON.stringify([
         {
           kind: "anonymous",
@@ -182,6 +183,40 @@ describe("API edge credit gate — codex bypass", () => {
         quantity: 1,
         model: "opencode/x-preview-f-free",
       });
+    } finally {
+      restoreBal();
+    }
+  });
+
+  test("external upstream settlement alone does not bypass deployment credit pricing", async () => {
+    const restoreBal = mockZeroBalance();
+    const settings = billedSettings({
+      modelProvidersJson: JSON.stringify([
+        {
+          kind: "anonymous",
+          id: "opencode-zen",
+          label: "OpenCode Zen",
+          api: "chat",
+          baseUrl: "https://opencode.ai/zen/v1",
+          models: [
+            {
+              id: "opencode/x-preview-f-free",
+              upstreamModelId: "x-preview-f-free",
+              label: "OpenCode Ox Alpha",
+            },
+          ],
+        },
+      ]),
+    });
+    try {
+      const decision = await checkLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "agent_run:create",
+        quantity: 1,
+        model: "opencode/x-preview-f-free",
+      });
+      expect(decision).toMatchObject({ allowed: false, code: "insufficient_credits" });
     } finally {
       restoreBal();
     }

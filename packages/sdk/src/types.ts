@@ -3030,6 +3030,8 @@ export type ModelBillingAttributionV1 = {
   metering: "opengeni_credits" | "external";
 };
 
+export type ModelCostClassV1 = "free" | "credits" | "subscription" | "workspace";
+
 export type ModelPricingV1 = {
   inputMicrosPerMillionTokens: number;
   cachedInputMicrosPerMillionTokens?: number | undefined;
@@ -3062,7 +3064,7 @@ export type ClientModel = {
   provider: string;
   providerLabel: string;
   api: "responses" | "chat";
-  source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | undefined;
+  source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | "openrouter" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
   aliases?: string[] | undefined;
@@ -3082,6 +3084,7 @@ export type ClientModel = {
     | undefined;
   credentialSource?: ModelCredentialSourceV1 | undefined;
   billing?: ModelBillingAttributionV1 | undefined;
+  cost?: ModelCostClassV1 | undefined;
   capabilities?: ModelCapabilitiesV1 | undefined;
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion?: string | undefined;
@@ -3124,6 +3127,23 @@ export type WorkspaceModelCatalogModel = ClientModel & {
 
 export type WorkspaceModelCatalogResponse = {
   models: WorkspaceModelCatalogModel[];
+};
+
+export type WorkspaceGatewayCustomModel = {
+  id: string;
+  upstreamModelId: string;
+  label: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkspaceGatewayCustomModelsResponse = {
+  models: WorkspaceGatewayCustomModel[];
+};
+
+export type CreateWorkspaceGatewayCustomModelRequest = {
+  upstreamModelId: string;
+  label?: string | undefined;
 };
 
 /**

@@ -44,12 +44,13 @@ interface ConfiguredModel {
   };
   credentialSource:
     | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
-    | { kind: "connected_subscription"; provider: "codex" }
+    | { kind: "connected_subscription"; provider: "codex" | "xai" }
     | { kind: "workspace_connection"; mechanism: "api_key" };
   billing: {
     upstreamPayer: "deployment" | "workspace" | "connected_subscription";
     metering: "opengeni_credits" | "external";
   };
+  cost: "free" | "credits" | "subscription" | "workspace";
   capabilities: ModelCapabilitiesV1;
   pricing?: ModelPricingScheduleV1;
   definitionVersion: `sha256:${string}`;
@@ -59,6 +60,57 @@ interface ConfiguredModel {
 The built-in OpenAI or Azure provider remains configured by the existing flat
 settings. Additional providers are declared with
 `OPENGENI_MODEL_PROVIDERS_JSON`.
+
+## Deployment catalog source and cost policy
+
+Catalog membership, workspace selectability, upstream settlement, and
+workspace-facing cost are deliberately independent:
+
+- `OPENGENI_MODEL_CATALOG_SOURCE=code` (default) uses the reviewed code/env
+  catalog.
+- `OPENGENI_MODEL_CATALOG_SOURCE=database` reads exactly one secret-free
+  `deployment_model_catalog` row. Runtime is read-only and fails closed when the
+  singleton is absent or invalid.
+- Workspace policy, credential readiness, and health observations decide what
+  is selectable. Neither source stores an `enabled` flag.
+- `OPENGENI_MODEL_COST_POLICY_JSON` maps deployment product IDs to `free` or
+  `credits`. Omitted deployment models are `credits`. Connected subscriptions
+  and workspace Gateway models remain `subscription` and `workspace`.
+- `OPENGENI_MODEL_PRICING_JSON` is separate again. A managed deployment that
+  marks a model `credits` must provide a price when no reviewed built-in price
+  exists, even if OpenGeni settles that provider through an external account.
+
+Database documents use schema version 1 and contain only reviewed membership
+and optional line-safe notes:
+
+```json
+{
+  "schemaVersion": 1,
+  "builtInModels": ["gpt-5.6-sol", "gpt-5.6-luna"],
+  "registryProviders": [],
+  "gatewayModels": [],
+  "openrouterModels": [],
+  "modelNotes": {
+    "gpt-5.6-sol": "Use when the task is genuinely difficult."
+  }
+}
+```
+
+The strict document rejects keys, billing, pricing policy, enabled flags,
+bands, unknown note IDs, duplicate product IDs, and reserved provider IDs.
+Notes are at most 500 characters and cannot contain a newline or `|`.
+
+For a database-source cutover, apply migration 0365, validate and upsert the
+row with an admin/migration database credential, then roll API and workers with
+the source flag. Do not flip the flag before the row exists:
+
+```bash
+OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
+  bun run model-catalog:upsert -- --file ./model-catalog.json
+```
+
+The upsert increments `version` only when the normalized document changes. It
+never writes provider credentials or the separate cost policy.
 
 ## Registry configuration
 
@@ -128,6 +180,13 @@ derives both from the provider kind:
 not enable workspace BYOK; that requires a separately reviewed encrypted
 credential broker.
 
+The table describes credential and upstream-settlement identity, not the
+workspace-facing price. Deployment models—including anonymous and managed
+OpenRouter routes—default to `credits` unless
+`OPENGENI_MODEL_COST_POLICY_JSON` marks the exact product ID `free`. The picker
+may still group such a route under External while the payment sentence and
+`list_models` output show its deployment-defined cost.
+
 ### OpenCode Zen temporary free preview
 
 OpenCode Zen currently exposes an OpenAI-compatible endpoint at
@@ -160,9 +219,12 @@ rather than treating it as a permanent built-in or availability promise:
 ```
 
 Requests go from OpenGeni to OpenCode's `opencode.ai` service; this is not local
-inference. Anonymous routes are shown on the External rail, bypass OpenGeni
-credit debit, and still emit ordinary model-call/token telemetry plus a
-zero-cost audit marker. They remain subject to the upstream provider's changing
+inference. Anonymous routes are shown on the External rail. To make this
+temporary preview free to the workspace, set
+`OPENGENI_MODEL_COST_POLICY_JSON='{"opencode/x-preview-f-free":"free"}'`;
+external settlement alone does not bypass credits. A free route still emits
+ordinary model-call/token telemetry plus a zero-cost audit marker. It remains
+subject to the upstream provider's changing
 model catalogue, rate limits, retention policy, preview duration, and terms.
 Verify `GET /zen/v1/models` before enabling the route and remove or update the
 registry entry when keyless access or the model slug changes. OpenCode's
@@ -252,7 +314,7 @@ DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
 ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
 runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
-`load_skill`, `request_human_input`), and exact session MCP refs marked
+`load_skill`, `request_human_input`, `list_models`), and exact session MCP refs marked
 `eager: true`, never the deferred MCP catalogue or Browser/Computer/`generate_image`/
 `generate_video`/`get_video_generation_capabilities` schemas. A search result carries only bounded
 matching definitions. A valid `tool_invoke` call is renamed to the exact real authorized tool and
@@ -268,6 +330,69 @@ The key is stored in the encrypted workspace connection table, resolved only in
 the worker, and uses the same curated models and exact routes. These turns have
 `upstreamPayer: workspace` and `metering: external`, so OpenGeni never debits
 credits. The picker hides this rail until the connection is active.
+
+Admins may also add one exact Vercel model slug at a time in the same Settings
+card. The durable row stores only the workspace, slug, optional label, actor,
+and timestamps. Custom IDs are `workspace-gateway/<slug>`; they receive the
+reviewed generic text/function-calling Gateway capability envelope and no
+provider pin, route order, pricing form, or upstream `/models` discovery.
+Custom slugs may be prepared while disconnected, become selectable only after
+the workspace Gateway connection is active and policy allows them, and are
+available to session, automation, scheduled-task, and goal-continuation policy
+resolution through the same workspace-scoped catalog overlay.
+
+## Managed OpenRouter
+
+`OPENGENI_OPENROUTER_API_KEY` enables a deployment-managed OpenRouter provider
+at `https://openrouter.ai/api/v1`. It uses the generic OpenAI-compatible Chat
+Completions dispatcher, public `X-Title` / optional `HTTP-Referer` metadata, and
+deployment-owned credentials. No workspace OpenRouter connection exists.
+
+The reviewed code catalog currently ships one v1 starter:
+
+```text
+openrouter/nvidia/nemotron-3-super-120b-a12b:free
+```
+
+On August 27, 2026, OpenRouter advertised that slug with a 262,144-token context
+window, a 235,929-token completion ceiling, text input/output, function tools,
+tool choice, structured outputs, and reasoning controls. A live forced-function
+probe completed with `finish_reason=tool_calls`. OpenGeni therefore marks
+function calling and structured output runnable, while reasoning effort remains
+non-runnable until a reviewed effort vocabulary is mapped.
+
+OpenRouter membership is curated and production never mirrors `GET /models`.
+The v1 database schema accepts reviewed `:free` slugs only; a key does not make
+every upstream model visible, and workspace policy may hide the starter. The
+provider settles through the deployment's OpenRouter account and appears on the
+External picker rail, while `OPENGENI_MODEL_COST_POLICY_JSON` independently
+decides whether the workspace sees `free` or `credits`. The shipped default is
+`free`. If an operator changes it to `credits`, managed billing also requires a
+separate `OPENGENI_MODEL_PRICING_JSON` entry.
+
+The generic dispatch path can carry future reviewed OpenRouter chat models,
+but paid OpenRouter membership is intentionally not admitted by the v1 catalog
+contract. For example, GLM 5.3 Flash was metadata-probed on August 27, 2026 but
+is not shipped; adding it requires an explicit schema/catalog review, current
+tool probe, capability definition, cost policy, and pricing decision.
+
+## `list_models` agent tool
+
+`list_models` is an always-visible, read-only local function with strict empty
+arguments. It loads the current workspace catalog at execution time and uses
+the same membership, connection-readiness, workspace-policy, and provider-health
+decision as the human picker. Its result is one text string in catalog order:
+
+```text
+Current: gpt-5.6-sol
+- openrouter/nvidia/nemotron-3-super-120b-a12b:free | Nemotron 3 Super 120B | free | Good for bounded tool-driven work.
+- gpt-5.6-sol | GPT-5.6 Sol | credits
+```
+
+Each selectable line is `id | label | cost` with an optional final note. It
+never returns keys, URLs, upstream IDs, prices, capabilities, definition
+versions, or JSON. It does not switch the current session model; an agent uses
+an ID with `session_create`, while humans use the model picker.
 
 ### Secret-safe definition versions
 
@@ -403,7 +528,7 @@ Progressive disclosure is selected explicitly per resolved provider:
 
 Classification is origin, not transport. The same first-request set is eager on
 every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
-`apply_patch`, `view_image`, `load_skill`, `request_human_input`) plus MCP
+`apply_patch`, `view_image`, `load_skill`, `request_human_input`, `list_models`) plus MCP
 tools whose session `ToolRef.eager` is true. Every other function tool —
 deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
 `get_video_generation_capabilities`, and later first-party additions — is

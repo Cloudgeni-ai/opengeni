@@ -1,62 +1,44 @@
-import {
-  configuredModels,
-  configuredProviders,
-  withCodexCatalogProvider,
-  withXaiSubscriptionCatalogProvider,
-  withWorkspaceGatewayCatalogProvider,
-  type ConfiguredModel,
-  type Settings,
-} from "@opengeni/config";
+import { OPENROUTER_PROVIDER_ID, type ConfiguredModel } from "@opengeni/config";
 import {
   ClientModel,
   WorkspaceModelCatalogResponse,
-  evaluateWorkspaceModelPolicy,
-  type ModelAvailabilityV1,
-  type ModelCredentialReadinessV1,
   type WorkspaceModelCatalogResponse as WorkspaceModelCatalogResponseType,
-  type WorkspaceModelPolicyContract,
 } from "@opengeni/contracts";
+import { resolveWorkspaceModelSelection, type WorkspaceModelSelectionInput } from "@opengeni/core";
 
-export type ModelAvailabilityObservation = {
-  status: "available" | "degraded" | "unavailable";
-  reason: "not_entitled" | "provider_unhealthy" | null;
-  checkedAt: string;
-};
-
-export type ModelCredentialReadinessObservation =
-  | { status: "ready"; checkedAt: string }
-  | {
-      status: "not_ready";
-      reason: "prerequisites_missing" | "needs_reauth";
-      checkedAt: string;
-    }
-  | { status: "error"; reason: "resolver_error"; checkedAt: string };
-
-export const MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS = 5 * 60_000;
+export {
+  MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS,
+  type ModelAvailabilityObservation,
+  type ModelCredentialReadinessObservation,
+} from "@opengeni/core";
 
 /** Static, client-safe definition projection. No provider secret is reachable. */
 export function projectClientModel(model: ConfiguredModel): ClientModel {
   const anonymousProvider =
     model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none";
   const source =
-    model.credentialSource.kind === "connected_subscription"
-      ? model.credentialSource.provider === "xai"
-        ? "supergrok"
-        : "codex"
-      : model.credentialSource.kind === "workspace_connection"
-        ? "workspace_gateway"
-        : anonymousProvider
-          ? undefined
-          : "opengeni";
+    model.providerId === OPENROUTER_PROVIDER_ID
+      ? "openrouter"
+      : model.credentialSource.kind === "connected_subscription"
+        ? model.credentialSource.provider === "xai"
+          ? "supergrok"
+          : "codex"
+        : model.credentialSource.kind === "workspace_connection"
+          ? "workspace_gateway"
+          : anonymousProvider
+            ? undefined
+            : "opengeni";
   const publicProvider = anonymousProvider
     ? { provider: model.providerId, providerLabel: model.providerLabel }
-    : source === "codex"
-      ? { provider: "codex", providerLabel: "Codex" }
-      : source === "supergrok"
-        ? { provider: "supergrok", providerLabel: "SuperGrok" }
-        : source === "workspace_gateway"
-          ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
-          : { provider: "opengeni", providerLabel: "OpenGeni" };
+    : source === "openrouter"
+      ? { provider: "openrouter", providerLabel: "OpenRouter" }
+      : source === "codex"
+        ? { provider: "codex", providerLabel: "Codex" }
+        : source === "supergrok"
+          ? { provider: "supergrok", providerLabel: "SuperGrok" }
+          : source === "workspace_gateway"
+            ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
+            : { provider: "opengeni", providerLabel: "OpenGeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,
@@ -71,241 +53,11 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     aliases: model.aliases,
     executionLimits: model.executionLimits,
     billing: model.billing,
+    cost: model.cost,
     capabilities: model.capabilities,
     ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
     definitionVersion: model.definitionVersion,
   });
-}
-
-function modelDefinitionRunnable(model: ConfiguredModel): boolean {
-  return (
-    model.capabilities.inputModalities.includes("text") &&
-    model.capabilities.outputModalities.includes("text") &&
-    model.capabilities.transports.sse.runnable
-  );
-}
-
-function observedCredentialReadiness(input: {
-  observation: ModelCredentialReadinessObservation | undefined;
-  basis: "connection" | "resolver";
-  nowMs: number;
-  maxAgeMs: number;
-}): ModelCredentialReadinessV1 {
-  if (!input.observation) {
-    return {
-      status: "not_ready",
-      reason: "prerequisites_missing",
-      basis: input.basis,
-      checkedAt: null,
-    };
-  }
-  const checkedAtMs = Date.parse(input.observation.checkedAt);
-  if (!Number.isFinite(checkedAtMs)) {
-    return {
-      status: "error",
-      reason: "resolver_error",
-      basis: input.basis,
-      checkedAt: null,
-    };
-  }
-  const checkedAt = new Date(checkedAtMs).toISOString();
-  if (Math.abs(input.nowMs - checkedAtMs) > input.maxAgeMs) {
-    return {
-      status: "not_ready",
-      reason: "observation_stale",
-      basis: input.basis,
-      checkedAt,
-    };
-  }
-  if (input.observation.status === "ready") {
-    return { status: "ready", reason: null, basis: input.basis, checkedAt };
-  }
-  if (input.observation.status === "not_ready") {
-    return {
-      status: "not_ready",
-      reason:
-        input.observation.reason === "needs_reauth" ? "needs_reauth" : "prerequisites_missing",
-      basis: input.basis,
-      checkedAt,
-    };
-  }
-  return {
-    status: "error",
-    reason: "resolver_error",
-    basis: input.basis,
-    checkedAt,
-  };
-}
-
-function credentialReadinessFor(input: {
-  model: ConfiguredModel;
-  provider: ReturnType<typeof configuredProviders>[number] | undefined;
-  codexSubscriptionActive: boolean;
-  xaiSubscriptionActive: boolean;
-  workspaceGatewayConnectionActive: boolean;
-  observation: ModelCredentialReadinessObservation | undefined;
-  nowMs: number;
-  maxAgeMs: number;
-}): ModelCredentialReadinessV1 {
-  const source = input.model.credentialSource;
-  if (source.kind === "connected_subscription") {
-    const active =
-      source.provider === "xai" ? input.xaiSubscriptionActive : input.codexSubscriptionActive;
-    return active
-      ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
-      : {
-          status: "not_ready",
-          reason: "needs_reauth",
-          basis: "connection",
-          checkedAt: null,
-        };
-  }
-  if (source.kind === "workspace_connection") {
-    return input.workspaceGatewayConnectionActive
-      ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
-      : {
-          status: "not_ready",
-          reason: "needs_reauth",
-          basis: "connection",
-          checkedAt: null,
-        };
-  }
-  if (source.kind === "deployment" && source.mechanism === "none") {
-    return { status: "ready", reason: null, basis: "configuration", checkedAt: null };
-  }
-  if (source.kind === "deployment" && source.mechanism === "api_key") {
-    return input.provider?.apiKey
-      ? { status: "ready", reason: null, basis: "configuration", checkedAt: null }
-      : {
-          status: "not_ready",
-          reason: "missing_credential",
-          basis: "configuration",
-          checkedAt: null,
-        };
-  }
-  return observedCredentialReadiness({
-    observation: input.observation,
-    basis: "resolver",
-    nowMs: input.nowMs,
-    maxAgeMs: input.maxAgeMs,
-  });
-}
-
-function isXaiGrokModel(model: ConfiguredModel): boolean {
-  return model.providerId === "xai" && model.id.startsWith("xai/grok-");
-}
-
-function observationTimestamp(observation: ModelAvailabilityObservation | undefined): {
-  checkedAt: string | null;
-  checkedAtMs: number | null;
-} {
-  if (!observation || typeof observation.checkedAt !== "string") {
-    return { checkedAt: null, checkedAtMs: null };
-  }
-  const checkedAtMs = Date.parse(observation.checkedAt);
-  if (!Number.isFinite(checkedAtMs)) {
-    return { checkedAt: null, checkedAtMs: null };
-  }
-  return { checkedAt: new Date(checkedAtMs).toISOString(), checkedAtMs };
-}
-
-function xaiGrokAvailabilityFor(input: {
-  observation: ModelAvailabilityObservation | undefined;
-  nowMs: number;
-  maxAgeMs: number;
-}): ModelAvailabilityV1 {
-  const { checkedAt, checkedAtMs } = observationTimestamp(input.observation);
-  const freshSuccessfulObservation =
-    input.observation?.status === "available" &&
-    input.observation.reason === null &&
-    checkedAtMs !== null &&
-    checkedAtMs <= input.nowMs &&
-    input.nowMs - checkedAtMs <= input.maxAgeMs;
-
-  if (freshSuccessfulObservation) {
-    return {
-      status: "available",
-      selectable: true,
-      reason: null,
-      checkedAt,
-    };
-  }
-
-  return {
-    status: "unavailable",
-    selectable: false,
-    reason:
-      input.observation?.status === "unavailable"
-        ? (input.observation.reason ?? "provider_unhealthy")
-        : "provider_unhealthy",
-    checkedAt,
-  };
-}
-
-function availabilityFor(input: {
-  model: ConfiguredModel;
-  credentialReadiness: ModelCredentialReadinessV1;
-  policyAllowed: boolean;
-  observation?: ModelAvailabilityObservation | undefined;
-  nowMs: number;
-  maxAgeMs: number;
-}): ModelAvailabilityV1 {
-  if (!modelDefinitionRunnable(input.model)) {
-    return {
-      status: "unavailable",
-      selectable: false,
-      reason: "unsupported",
-      checkedAt: null,
-    };
-  }
-  if (input.credentialReadiness.status !== "ready") {
-    return {
-      status: "unavailable",
-      selectable: false,
-      reason:
-        input.credentialReadiness.reason === "missing_credential"
-          ? "missing_credential"
-          : input.credentialReadiness.reason === "needs_reauth"
-            ? "needs_reauth"
-            : "credential_not_ready",
-      checkedAt: input.credentialReadiness.checkedAt,
-    };
-  }
-  if (!input.policyAllowed) {
-    return {
-      status: "unavailable",
-      selectable: false,
-      reason: "policy_blocked",
-      checkedAt: null,
-    };
-  }
-  if (isXaiGrokModel(input.model)) {
-    return xaiGrokAvailabilityFor({
-      observation: input.observation,
-      nowMs: input.nowMs,
-      maxAgeMs: input.maxAgeMs,
-    });
-  }
-  if (!input.observation) {
-    // Credential readiness and policy are known-good, but no current
-    // provider-health observation is available. Unknown is intentionally
-    // selectable; the execution boundary rechecks all authoritative gates.
-    return { status: "unknown", selectable: true, reason: null, checkedAt: null };
-  }
-  if (input.observation.status === "unavailable") {
-    return {
-      status: "unavailable",
-      selectable: false,
-      reason: input.observation.reason ?? "provider_unhealthy",
-      checkedAt: input.observation.checkedAt,
-    };
-  }
-  return {
-    status: input.observation.status,
-    selectable: true,
-    reason: null,
-    checkedAt: input.observation.checkedAt,
-  };
 }
 
 /**
@@ -316,69 +68,14 @@ function availabilityFor(input: {
  * successful typed resolver observation; credential health and provider health
  * are separate inputs and neither is fabricated.
  */
-export function buildWorkspaceModelCatalog(input: {
-  settings: Settings;
-  policy: WorkspaceModelPolicyContract | null;
-  codexSubscriptionActive: boolean;
-  xaiSubscriptionActive?: boolean;
-  workspaceGatewayConnectionActive?: boolean;
-  credentialReadinessObservations?:
-    | Readonly<Record<string, ModelCredentialReadinessObservation>>
-    | undefined;
-  observations?: Readonly<Record<string, ModelAvailabilityObservation>> | undefined;
-  now?: Date | undefined;
-  credentialReadinessMaxAgeMs?: number | undefined;
-}): WorkspaceModelCatalogResponseType {
-  const codexSettings = input.settings.codexSubscriptionEnabled
-    ? withCodexCatalogProvider(input.settings)
-    : input.settings;
-  const xaiSettings = input.settings.supergrokSubscriptionEnabled
-    ? withXaiSubscriptionCatalogProvider(codexSettings)
-    : codexSettings;
-  const catalogSettings = withWorkspaceGatewayCatalogProvider(xaiSettings);
-  const providers = new Map(
-    configuredProviders(catalogSettings).map((provider) => [provider.id, provider]),
-  );
-  const requestedNowMs = input.now?.getTime();
-  const nowMs =
-    typeof requestedNowMs === "number" && Number.isFinite(requestedNowMs)
-      ? requestedNowMs
-      : Date.now();
-  const maxAgeMs =
-    typeof input.credentialReadinessMaxAgeMs === "number" &&
-    Number.isFinite(input.credentialReadinessMaxAgeMs) &&
-    input.credentialReadinessMaxAgeMs >= 0
-      ? input.credentialReadinessMaxAgeMs
-      : MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS;
-  const models = configuredModels(catalogSettings).map((model) => {
-    const provider = providers.get(model.providerId);
-    const policyAllowed = evaluateWorkspaceModelPolicy(input.policy, {
-      providerId: model.providerId,
-      modelId: model.id,
-    }).allowed;
-    const credentialReadiness = credentialReadinessFor({
-      model,
-      provider,
-      codexSubscriptionActive: input.codexSubscriptionActive,
-      xaiSubscriptionActive: input.xaiSubscriptionActive === true,
-      workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
-      observation: input.credentialReadinessObservations?.[model.definitionVersion],
-      nowMs,
-      maxAgeMs,
-    });
-    return {
-      ...projectClientModel(model),
-      credentialReadiness,
-      policyAllowed,
-      availability: availabilityFor({
-        model,
-        credentialReadiness,
-        policyAllowed,
-        observation: input.observations?.[model.definitionVersion],
-        nowMs,
-        maxAgeMs,
-      }),
-    };
-  });
+export function buildWorkspaceModelCatalog(
+  input: WorkspaceModelSelectionInput,
+): WorkspaceModelCatalogResponseType {
+  const models = resolveWorkspaceModelSelection(input).map((selection) => ({
+    ...projectClientModel(selection.model),
+    credentialReadiness: selection.credentialReadiness,
+    policyAllowed: selection.policyAllowed,
+    availability: selection.availability,
+  }));
   return WorkspaceModelCatalogResponse.parse({ models });
 }

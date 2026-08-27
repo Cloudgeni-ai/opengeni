@@ -227,6 +227,58 @@ describe("Vercel AI Gateway request fence", () => {
     expect(calls).toBe(0);
   });
 
+  test("configured workspace custom models remain unpinned and strip caller routing", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const policies = new Map([["anthropic/claude-sonnet-4.6", undefined]]);
+    const routed = vercelGatewayRoutingFetch(
+      "vercel-gateway-workspace",
+      (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch,
+      policies,
+    );
+
+    await routed("https://ai-gateway.vercel.sh/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "anthropic/claude-sonnet-4.6",
+        providerOptions: {
+          gateway: {
+            only: ["caller-chosen-provider"],
+            order: ["caller-chosen-provider"],
+            models: ["fallback/model"],
+          },
+          anthropic: { thinking: { type: "enabled", budgetTokens: 1_024 } },
+        },
+      }),
+    });
+
+    expect(captured?.providerOptions).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 1_024 } },
+    });
+  });
+
+  test("workspace Gateway rejects an unstored custom slug with the exact configured fence", async () => {
+    let calls = 0;
+    const routed = vercelGatewayRoutingFetch(
+      "vercel-gateway-workspace",
+      (async () => {
+        calls += 1;
+        return new Response("{}");
+      }) as typeof fetch,
+      new Map([["stored/custom-model", undefined]]),
+    );
+
+    await expect(
+      routed("https://ai-gateway.vercel.sh/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "unstored/custom-model" }),
+      }),
+    ).rejects.toThrow("approved catalogue");
+    expect(calls).toBe(0);
+  });
+
   test("cancels an upstream error body before returning the synthetic error", async () => {
     let cancelled = false;
     const routed = vercelGatewayRoutingFetch(

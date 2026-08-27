@@ -630,7 +630,13 @@ describe("deployment contract", () => {
         OPENGENI_DELEGATION_SECRET: "test-delegation-secret",
         OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
         OPENGENI_IMAGE_TAG: "test-sha",
+        OPENGENI_MODEL_CATALOG_SOURCE: "database",
+        OPENGENI_MODEL_COST_POLICY_JSON:
+          '{"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"free"}',
+        OPENGENI_MODEL_NOTES_JSON:
+          '{"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"Starter model."}',
         OPENGENI_OPENAI_API_KEY: "openai",
+        OPENGENI_OPENROUTER_API_KEY: "openrouter",
         OPENGENI_TEMPORAL_API_KEY: "temporal-api-key",
         OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: "cm9v\ndC1jYQ==",
       },
@@ -649,6 +655,14 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OBJECT_STORAGE_BACKEND=gcs");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PRODUCT_ACCESS_MODE=configured");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_DEPLOYMENT_REVISION=test-sha");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MODEL_CATALOG_SOURCE=database");
+    expect(artifacts.runtimeEnv).toContain(
+      'OPENGENI_MODEL_COST_POLICY_JSON={"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"free"}',
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      'OPENGENI_MODEL_NOTES_JSON={"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"Starter model."}',
+    );
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_OPENROUTER_API_KEY=openrouter");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_TLS_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_API_KEY=temporal-api-key");
     expect(artifacts.runtimeEnv).toContain(

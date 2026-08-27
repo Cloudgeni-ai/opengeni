@@ -59,17 +59,13 @@ export async function checkLimit(
         model: input.model,
       })
     : false;
-  const credentialFreeExternal = input.model
+  const catalogFundedWithoutCredits = input.model
     ? (() => {
         const resolved = resolveModelProvider(deps.settings, input.model);
-        return (
-          resolved?.model.billing.metering === "external" &&
-          resolved.model.credentialSource.kind === "deployment" &&
-          resolved.model.credentialSource.mechanism === "none"
-        );
+        return resolved !== undefined && resolved.model.cost !== "credits";
       })()
     : false;
-  const externallyBilled = codexBilled || credentialFreeExternal;
+  const externallyBilled = codexBilled || catalogFundedWithoutCredits;
   const creditDecision = await checkCreditBalance(deps, input, externallyBilled);
   if (!creditDecision.allowed) {
     return creditDecision;
