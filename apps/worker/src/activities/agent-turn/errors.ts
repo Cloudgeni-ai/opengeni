@@ -320,14 +320,33 @@ export function postClaimDatabaseRecoveryFailure(input: {
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  providerRecovery?: {
+    failureCode: string;
+    providerRecoveryCount: number;
+  };
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error);
   if (!code || input.executionGeneration < 1) return null;
+  if (
+    input.providerRecovery &&
+    (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
+      input.providerRecovery.providerRecoveryCount <= 0 ||
+      input.providerRecovery.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
+      !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode))
+  ) {
+    return null;
+  }
   const detail: PostClaimDatabaseRecoveryDetail = {
     turnId: input.turnId,
     triggerEventId: input.triggerEventId,
     executionGeneration: input.executionGeneration,
     code,
+    ...(input.providerRecovery
+      ? {
+          providerFailureCode: input.providerRecovery.failureCode,
+          providerRecoveryCount: input.providerRecovery.providerRecoveryCount,
+        }
+      : {}),
   };
   return ApplicationFailure.create({
     message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,

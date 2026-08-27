@@ -474,7 +474,13 @@ replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
 exhaustion evidence. This is an infrastructure retry budget, not a goal,
 continuation, model-call, or run-length cap; a later human/API prompt may retry as
-new accepted work. Every Steer commits a control wake revision, including when
+new accepted work. If an operational database outage interrupts the recovery
+checkpoint itself, the existing post-claim failure wire carries the immutable
+turn identity, classified provider cause, and exact next recovery count into the
+DB-only control lane. That lane accepts the checkpoint only when the identity
+still owns the attempt and the count is exactly one beyond durable turn metadata;
+ambiguous commits and stale replays therefore cannot reset the retry budget.
+Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes
 the new direction immediately.

@@ -189,6 +189,28 @@ export function createSessionStateActivities(
       turn.triggerEventId === postClaimRecovery.triggerEventId &&
       turn.executionGeneration === postClaimRecovery.executionGeneration,
     );
+    const providerRecoveryCount = postClaimIdentityMatches
+      ? postClaimRecovery?.providerRecoveryCount
+      : undefined;
+    const providerFailureCode = postClaimIdentityMatches
+      ? postClaimRecovery?.providerFailureCode
+      : undefined;
+    const hasProviderRecoveryCount = providerRecoveryCount !== undefined;
+    const hasProviderFailureCode = providerFailureCode !== undefined;
+    if (hasProviderRecoveryCount !== hasProviderFailureCode) {
+      return { action: "stale" };
+    }
+    if (
+      providerRecoveryCount !== undefined &&
+      (!Number.isSafeInteger(providerRecoveryCount) ||
+        providerRecoveryCount <= 0 ||
+        providerRecoveryCount !== providerRecoveryCountFromMetadata(turn.metadata ?? {}) + 1 ||
+        providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
+        typeof providerFailureCode !== "string" ||
+        !/^[a-z][a-z0-9_]{0,63}$/.test(providerFailureCode))
+    ) {
+      return { action: "stale" };
+    }
     const recoveredClaimCode = postClaimIdentityMatches
       ? postClaimRecovery!.code
       : input.preClaimFailure?.disposition === "retryable" &&
@@ -201,10 +223,17 @@ export function createSessionStateActivities(
         turnId: turn.id,
         triggerEventId: turn.triggerEventId,
         attemptId: input.attemptId,
-        reason: "claimed_attempt_database_failure",
+        reason: providerFailureCode ?? "claimed_attempt_database_failure",
+        ...(providerRecoveryCount !== undefined ? { providerRecoveryCount } : {}),
         detail: {
-          code: recoveredClaimCode,
+          code: providerFailureCode ?? recoveredClaimCode,
           retryable: true,
+          ...(providerRecoveryCount !== undefined
+            ? {
+                databaseFailureCode: recoveredClaimCode,
+                providerRecoveryCount,
+              }
+            : {}),
           recoverySource: "workflow_activity_failure",
         },
         fromStatuses: ["running"],

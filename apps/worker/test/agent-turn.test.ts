@@ -4775,10 +4775,26 @@ describe("transient provider error classifier", () => {
       retryOutcome: "exhausted",
       database: { table: "session_turns" },
     });
-    expect(postClaimDatabaseRecoveryFailure({ error: deadlock, ...identity })).toMatchObject({
+    expect(
+      postClaimDatabaseRecoveryFailure({
+        error: deadlock,
+        ...identity,
+        providerRecovery: {
+          failureCode: "mcp_transport_unavailable",
+          providerRecoveryCount: 2,
+        },
+      }),
+    ).toMatchObject({
       type: "OpenGeniPostClaimDatabaseRecovery",
       nonRetryable: true,
-      details: [{ ...identity, code: "db_deadlock" }],
+      details: [
+        {
+          ...identity,
+          code: "db_deadlock",
+          providerFailureCode: "mcp_transport_unavailable",
+          providerRecoveryCount: 2,
+        },
+      ],
     });
     expect(
       postClaimDatabaseRecoveryFailure({
@@ -4801,6 +4817,16 @@ describe("transient provider error classifier", () => {
     expect(postClaimDatabaseRecoveryFailure({ error: constraint, ...identity })).toBeNull();
     expect(
       postClaimDatabaseRecoveryFailure({ error: new Error("SECRET invariant"), ...identity }),
+    ).toBeNull();
+    expect(
+      postClaimDatabaseRecoveryFailure({
+        error: deadlock,
+        ...identity,
+        providerRecovery: {
+          failureCode: "unsafe provider code",
+          providerRecoveryCount: 2,
+        },
+      }),
     ).toBeNull();
   });
 

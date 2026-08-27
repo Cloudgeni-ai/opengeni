@@ -343,6 +343,8 @@ describe("Temporal workflow integration", () => {
                 triggerEventId: currentTurn.triggerEventId,
                 executionGeneration: 1,
                 code: "db_failure",
+                providerFailureCode: "mcp_transport_unavailable",
+                providerRecoveryCount: 2,
               },
             ],
           });
@@ -390,6 +392,8 @@ describe("Temporal workflow integration", () => {
             triggerEventId: turn.triggerEventId,
             executionGeneration: 1,
             code: "db_failure",
+            providerFailureCode: "mcp_transport_unavailable",
+            providerRecoveryCount: 2,
           },
         });
         expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
