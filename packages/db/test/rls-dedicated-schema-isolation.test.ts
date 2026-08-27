@@ -1697,6 +1697,70 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(policiesInPublic).toBe(0);
   });
 
+  test("0363 recovery objects remain FORCE-RLS and TEMP-shadow-safe in the dedicated schema", async () => {
+    if (!available) return;
+    const recoveryTables = [
+      "organization_recovery_policies",
+      "organization_recovery_policy_heads",
+      "organization_recovery_custodians",
+      "organization_recovery_custodian_acceptances",
+      "organization_recovery_operations",
+      "organization_recovery_approvals",
+      "organization_recovery_command_receipts",
+      "organization_recovery_events",
+      "organization_recovery_notification_outbox",
+      "organization_recovery_notification_attempts",
+    ];
+    const relations = await admin<
+      Array<{ name: string; schema: string; rlsEnabled: boolean; rlsForced: boolean }>
+    >`
+      select relation.relname as name, namespace.nspname as schema,
+        relation.relrowsecurity as "rlsEnabled", relation.relforcerowsecurity as "rlsForced"
+      from pg_class relation
+      join pg_namespace namespace on namespace.oid = relation.relnamespace
+      where relation.relname = any(${recoveryTables})
+        and namespace.nspname in (${SCHEMA}, 'public')
+      order by relation.relname`;
+    expect(relations).toHaveLength(recoveryTables.length);
+    expect(relations.every((relation) => relation.schema === SCHEMA)).toBe(true);
+    expect(relations.every((relation) => relation.rlsEnabled && relation.rlsForced)).toBe(true);
+
+    const routines = await admin<
+      Array<{ name: string; settings: string[] | null; securityDefiner: boolean }>
+    >`
+      select procedure.proname as name, procedure.proconfig as settings,
+        procedure.prosecdef as "securityDefiner"
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname like '%organization_recovery%'
+      order by procedure.proname`;
+    expect(routines.length).toBeGreaterThanOrEqual(9);
+    expect(
+      routines
+        .filter((routine) => routine.name !== "organization_recovery_append_only")
+        .every((routine) => routine.securityDefiner),
+    ).toBe(true);
+    expect(
+      routines.find((routine) => routine.name === "organization_recovery_append_only"),
+    ).toMatchObject({ securityDefiner: false });
+    expect(
+      routines.every((routine) =>
+        routine.settings?.includes(`search_path=pg_catalog, ${SCHEMA}, pg_temp`),
+      ),
+    ).toBe(true);
+
+    const [shadowResult] = await admin.begin(async (transactionSql) => {
+      await transactionSql`select set_config('search_path', ${SEARCH_PATH}, true)`;
+      await transactionSql`create temporary table organization_recovery_approvals (
+        poisoned boolean not null
+      ) on commit drop`;
+      return await transactionSql<Array<{ count: number }>>`
+        select organization_recovery_valid_approval_count(${crypto.randomUUID()}::uuid) as count`;
+    });
+    expect(shadowResult?.count).toBe(0);
+  });
+
   test("(E) the createDb handle is bound to the force strategy", async () => {
     if (!available) return;
     expect(rlsStrategyFor(db)).toBe("force");

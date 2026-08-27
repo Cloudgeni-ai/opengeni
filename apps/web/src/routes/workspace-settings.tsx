@@ -846,8 +846,10 @@ function MembersSectionContent({
       </div>
 
       <Notice title="Workspace access is managed from the organization">
-        The organization member list is the single place to assign named workspace roles. Personal
-        workspaces are never administered from this page.
+        This workspace is permanently owned by its organization. Hand off access within the same
+        organization by granting or revoking named workspace roles. Cross-organization transfer and
+        Personal workspace transfer are unsupported. Personal workspaces are never administered from
+        this page.
         {canManage ? (
           <Button asChild type="button" variant="secondary" size="sm" className="mt-2">
             <Link

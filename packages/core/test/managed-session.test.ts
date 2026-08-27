@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import * as coreRoot from "../src";
 import {
   getManagedAuthRequestActorAbortSignal,
+  getManagedAuthRequestActorAdmissionStamp,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
   installManagedAuthActorLeaseRuntimeForTest,
@@ -11,7 +12,7 @@ import {
   releaseManagedAuthRequestActorLease,
   validateManagedAuthRequestActorLease,
 } from "../src/managed-session";
-import { ManagedAuthActorChangeError } from "../src/managed-auth-session-sets";
+import { ManagedAuthActorChangeError, managedAuthSha256 } from "../src/managed-auth-session-sets";
 
 function validationDatabase(valid: boolean, onExecute?: () => void) {
   return {
@@ -85,7 +86,9 @@ function deterministicLeaseRuntime(monotonicNow: () => number) {
         callback,
         delayMs,
         cancelled: false,
-      } as Omit<ScheduledTask, "handle"> & { handle?: ReturnType<typeof setTimeout> };
+      } as Omit<ScheduledTask, "handle"> & {
+        handle?: ReturnType<typeof setTimeout>;
+      };
       task.handle = task as unknown as ReturnType<typeof setTimeout>;
       tasks.push(task as ScheduledTask);
       return task.handle;
@@ -103,7 +106,10 @@ function deterministicLeaseRuntime(monotonicNow: () => number) {
 
 function managedSessionAdapter() {
   const resolved = {
-    session: { id: selectedSession.authSessionId, userId: selectedSession.authUserId },
+    session: {
+      id: selectedSession.authSessionId,
+      userId: selectedSession.authUserId,
+    },
     user: {
       id: selectedSession.authUserId,
       email: selectedSession.email,
@@ -328,12 +334,46 @@ describe("getManagedSession", () => {
     const reader = response.body!.getReader();
     expect(new TextDecoder().decode((await reader.read()).value)).toBe(": heartbeat\n\n");
 
-    await expect(reauthorize()).resolves.toMatchObject({ user: { id: "auth-user-1" } });
+    await expect(reauthorize()).resolves.toMatchObject({
+      user: { id: "auth-user-1" },
+    });
     await expect(reauthorize()).rejects.toMatchObject({
       status: 409,
       message: "actor_change_required",
     });
     await reader.cancel();
+    expect(sequence.remaining).toHaveLength(0);
+  });
+
+  test("exposes verified actor evidence on a read without inventing a mutation lease", async () => {
+    const sequence = sequenceDatabase([[{ result: sessionSetSnapshot }]]);
+    let admission: ReturnType<typeof getManagedAuthRequestActorAdmissionStamp> = null;
+    let lease: ReturnType<typeof getManagedAuthRequestActorLeaseStamp> = null;
+    const app = new Hono().get("/", async (c) => {
+      const session = await getManagedSession(c, {} as never, {
+        db: sequence.db as never,
+        sessionSetMode: "broker",
+        sessionAdapter: managedSessionAdapter() as never,
+      });
+      admission = getManagedAuthRequestActorAdmissionStamp(c.req.raw);
+      lease = getManagedAuthRequestActorLeaseStamp(c.req.raw);
+      return c.json({ authenticated: session !== null });
+    });
+
+    const response = await app.request("/", {
+      headers: {
+        cookie: `opengeni.session_set=${authority}`,
+        "x-opengeni-actor-epoch": "7",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ authenticated: true });
+    expect(admission).toEqual({
+      authorityHash: managedAuthSha256(authority),
+      actorEpoch: "7",
+    });
+    expect(lease).toBeNull();
     expect(sequence.remaining).toHaveLength(0);
   });
 

@@ -37,6 +37,7 @@ export * from "./sandbox-types";
 export * from "./managed-auth-type";
 export {
   getManagedAuthRequestActorAbortSignal,
+  getManagedAuthRequestActorAdmissionStamp,
   getManagedAuthRequestActorEpoch,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
@@ -44,6 +45,7 @@ export {
   markManagedAuthRequestActorTransitionApplied,
   releaseManagedAuthRequestActorLease,
   validateManagedAuthRequestActorLease,
+  type ManagedAuthActorAdmissionStamp,
   type ManagedAuthActorMutationLeaseStamp,
 } from "./managed-session";
 export * from "./transcription";

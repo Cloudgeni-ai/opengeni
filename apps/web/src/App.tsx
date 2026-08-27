@@ -42,7 +42,13 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
-type OrganizationAdminSection = "overview" | "knowledge" | "people" | "retention" | "billing";
+type OrganizationAdminSection =
+  | "overview"
+  | "knowledge"
+  | "people"
+  | "recovery"
+  | "retention"
+  | "billing";
 type WorkspaceSettingsSection =
   | "general"
   | "members"
@@ -412,6 +418,7 @@ const workspaceOrganizationRoute = createRoute({
       search.section === "overview" ||
       search.section === "knowledge" ||
       search.section === "people" ||
+      search.section === "recovery" ||
       search.section === "retention" ||
       search.section === "billing"
         ? search.section

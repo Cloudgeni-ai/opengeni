@@ -149,6 +149,7 @@ import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
   registerManagedAuthSessionSetRoutes,
@@ -895,6 +896,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
+  registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerConnectionAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);

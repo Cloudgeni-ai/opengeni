@@ -47,6 +47,7 @@ import { losslessCodecVersion, losslessJsonb, losslessText } from "./lossless-co
 
 export * from "./editable-artifacts-schema";
 export * from "./managed-auth-session-set-schema";
+export * from "./organization-recovery-schema";
 
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {

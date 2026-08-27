@@ -5,6 +5,7 @@ import {
   CreditCardIcon,
   DatabaseIcon,
   LayoutDashboardIcon,
+  ShieldCheckIcon,
   UsersIcon,
 } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
@@ -23,6 +24,7 @@ const ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboardIcon },
   { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon },
   { id: "people", label: "People & invitations", icon: UsersIcon },
+  { id: "recovery", label: "Recovery", icon: ShieldCheckIcon },
   { id: "retention", label: "Retention", icon: DatabaseIcon },
   { id: "billing", label: "Billing", icon: CreditCardIcon },
 ];
@@ -40,6 +42,10 @@ const COPY: Record<OrganizationAdminSection, { title: string; description: strin
   people: {
     title: "People & invitations",
     description: "Manage organization membership, roles, invitations, and workspace access.",
+  },
+  recovery: {
+    title: "Organization recovery",
+    description: "Configure recovery custody and review protected co-owner promotion operations.",
   },
   retention: {
     title: "Retention",

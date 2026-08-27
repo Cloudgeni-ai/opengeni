@@ -55,6 +55,7 @@ export type {
   OAuthStartRequest,
   OAuthStartResponse,
   OrganizationPrivateSessionSettings,
+  OrganizationRecoveryOverview,
   CreateWorkspaceRequest,
   Document as IndexedDocument,
   DocumentAuthorityKind,

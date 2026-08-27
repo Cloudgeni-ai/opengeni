@@ -2,6 +2,13 @@
 
 OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
 
+Managed deployments using organization recovery must first complete the
+provider-neutral browser-slot rollout and then follow the migration,
+fake-provider conformance, rollback, and unsupported-operation contract in
+[`organization-recovery.md`](organization-recovery.md). Repository delivery does
+not enable an external recovery notification provider or perform a production
+mutation.
+
 ## Personal GitHub OAuth
 
 Personal GitHub is disabled by default. Managed staging and production must use

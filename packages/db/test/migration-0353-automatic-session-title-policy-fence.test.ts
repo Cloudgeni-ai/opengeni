@@ -944,6 +944,16 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // today's evaluator strict for every table that existed at that boundary,
     // while explicitly removing tables introduced by later migrations.
     const post0353RuntimeTables = new Set([
+      "organization_recovery_approvals",
+      "organization_recovery_command_receipts",
+      "organization_recovery_custodian_acceptances",
+      "organization_recovery_custodians",
+      "organization_recovery_events",
+      "organization_recovery_notification_attempts",
+      "organization_recovery_notification_outbox",
+      "organization_recovery_operations",
+      "organization_recovery_policies",
+      "organization_recovery_policy_heads",
       "pr_review_managed_github_authority_nonces",
       "pr_review_managed_github_routes",
       "remember_knowledge_memory_materializations",
@@ -986,6 +996,8 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "managed_auth_isolated_session_reap(integer)",
       "managed_auth_expired_session_set_reap(integer)",
       "managed_auth_session_set_operation_receipt(text, uuid, text, text)",
+      "get_organization_recovery_overview(uuid, text, jsonb, text, text)",
+      "organization_recovery_command(jsonb)",
     ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(

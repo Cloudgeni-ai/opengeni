@@ -440,6 +440,60 @@ describe("OpenGeniClient access + workspaces", () => {
     });
   });
 
+  test("organization recovery methods preserve resource and command operation identities", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const recoveryOperationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const commandOperationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const custodians: [string, string, string] = [
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+    ];
+    await client.getOrganizationRecovery(organizationId);
+    await client.configureOrganizationRecoveryPolicy(organizationId, {
+      custodianMembershipIds: custodians,
+      expectedPolicyRevision: 0,
+      operationId: commandOperationId,
+    });
+    await client.acceptOrganizationRecoveryCustody(organizationId, {
+      expectedPolicyRevision: 1,
+      operationId: commandOperationId,
+    });
+    await client.disableOrganizationRecoveryPolicy(organizationId, {
+      expectedPolicyRevision: 1,
+      operationId: commandOperationId,
+    });
+    await client.startOrganizationRecoveryOperation(organizationId, {
+      targetMembershipId: custodians[0],
+      expectedPolicyRevision: 1,
+      operationId: commandOperationId,
+    });
+    const command = { expectedOperationRevision: 2, operationId: commandOperationId };
+    await client.approveOrganizationRecoveryOperation(organizationId, recoveryOperationId, command);
+    await client.cancelOrganizationRecoveryOperation(organizationId, recoveryOperationId, command);
+    await client.executeOrganizationRecoveryOperation(organizationId, recoveryOperationId, command);
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/organizations/${organizationId}/recovery`,
+        `PUT /v1/organizations/${organizationId}/recovery/policy`,
+        `POST /v1/organizations/${organizationId}/recovery/policy/accept`,
+        `POST /v1/organizations/${organizationId}/recovery/policy/disable`,
+        `POST /v1/organizations/${organizationId}/recovery/operations`,
+        `POST /v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/approve`,
+        `POST /v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/cancel`,
+        `POST /v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/execute`,
+      ],
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      custodianMembershipIds: custodians,
+      expectedPolicyRevision: 0,
+      operationId: commandOperationId,
+    });
+    expect(JSON.parse(requests[7]!.body!)).toEqual(command);
+  });
+
   test("getAccessContext and workspace CRUD hit the expected endpoints", async () => {
     const { client, requests } = makeClient((request) => {
       if (request.url.endsWith("/v1/access/me")) {

@@ -59,6 +59,7 @@ import {
   resolveMemberSubjectId,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
+import { ApiHttpError } from "../http/api-error";
 import { sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
 import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-cleanup";
@@ -96,6 +97,14 @@ export function workspaceMembersResponse(members: readonly WorkspaceMemberProjec
       permissions: normalizeWorkspaceMembershipPermissions(member.permissions),
     })),
   });
+}
+
+export function workspaceUpdateRequestsAccountTransfer(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.prototype.hasOwnProperty.call(value, "accountId")
+  );
 }
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -164,7 +173,18 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const payload = UpdateWorkspaceRequest.parse(await c.req.json());
+    const body = await c.req.json();
+    if (workspaceUpdateRequestsAccountTransfer(body)) {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message:
+          "A workspace is permanently owned by one organization; use workspace grants for same-organization access handoff.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: "workspace_transfer_unsupported" },
+      });
+    }
+    const payload = UpdateWorkspaceRequest.parse(body);
     const workspace = await updateWorkspace(deps.db, workspaceId, {
       ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),
       ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),

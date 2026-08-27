@@ -552,6 +552,12 @@ async function grantAppRoleIfSchemaExists(
   ]
     .map(literal)
     .join(", ")}]`;
+  const organizationRecoveryRoutines = `ARRAY[${[
+    "get_organization_recovery_overview(uuid,text,jsonb,text,text)",
+    "organization_recovery_command(jsonb)",
+  ]
+    .map(literal)
+    .join(", ")}]`;
   await sql.unsafe(`
 DO $$
 DECLARE
@@ -1246,6 +1252,18 @@ BEGIN
       );
     END IF;
     FOREACH routine_signature IN ARRAY ${managedAuthSessionSetRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    FOREACH routine_signature IN ARRAY ${organizationRecoveryRoutines} LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format(
           'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',

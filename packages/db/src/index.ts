@@ -67880,6 +67880,7 @@ export * from "./interaction-revisions";
 export * from "./interaction-placement-loss";
 export * from "./canonical-human-identities";
 export * from "./managed-auth-session-sets";
+export * from "./organization-recovery";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
