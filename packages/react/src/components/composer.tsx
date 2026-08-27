@@ -946,6 +946,7 @@ export function Attachments() {
       messages={controller.messages}
       onRemove={controller.attachments.remove}
       onRetry={controller.attachments.retry}
+      onRetainPreview={controller.attachments.retainPreview}
     />
   );
 }
@@ -1636,11 +1637,13 @@ function AttachmentChips({
   messages,
   onRemove,
   onRetry,
+  onRetainPreview,
 }: {
   attachments: UseFileAttachmentsResult["attachments"];
   messages: ChatComposerMessages;
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
+  onRetainPreview: UseFileAttachmentsResult["retainPreview"];
 }) {
   const lightbox = useLightboxOptional();
   return (
@@ -1669,6 +1672,7 @@ function AttachmentChips({
                 className="size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
                 aria-label={messages.previewAttachment(attachment.name)}
                 onClick={(event) => {
+                  const releasePreview = onRetainPreview(attachment.id);
                   lightbox.open(
                     attachment.previewUrl!,
                     attachment.name,
@@ -1679,6 +1683,7 @@ function AttachmentChips({
                       download: messages.downloadAttachment(attachment.name),
                       close: messages.closeAttachmentPreview,
                     },
+                    releasePreview,
                   );
                 }}
               >

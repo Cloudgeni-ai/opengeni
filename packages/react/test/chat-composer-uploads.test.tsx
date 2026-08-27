@@ -73,6 +73,7 @@ function makeAttachments(
     addFromPaste: () => {},
     restoreReadyFiles: () => {},
     retry: () => {},
+    retainPreview: () => undefined,
     remove: () => {},
     removeReadyFiles: () => {},
     clear: () => {},
@@ -196,11 +197,19 @@ describe("ChatComposer attachments", () => {
   });
 
   test("renders an image attachment as a shared-lightbox preview trigger", async () => {
+    const attachment = readyPreviewChip("screenshot.png");
+    const retained: string[] = [];
     const container = await mount(
       <LightboxProvider>
         <ChatComposer
           composer={makeComposer()}
-          attachments={makeAttachments({ attachments: [readyPreviewChip("screenshot.png")] })}
+          attachments={makeAttachments({
+            attachments: [attachment],
+            retainPreview: (id) => {
+              retained.push(id);
+              return () => {};
+            },
+          })}
         />
       </LightboxProvider>,
     );
@@ -210,6 +219,11 @@ describe("ChatComposer attachments", () => {
     );
     expect(preview).not.toBeNull();
     expect(preview?.querySelector('img[src="blob:screenshot.png"]')).not.toBeNull();
+    await act(async () => {
+      preview?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(retained).toEqual([attachment.id]);
   });
 
   test("uses composer message overrides for all attachment preview accessible names", async () => {
@@ -237,6 +251,7 @@ describe("ChatComposer attachments", () => {
     expect(composerSource).toContain("messages.attachmentPreviewLabel,");
     expect(composerSource).toContain("download: messages.downloadAttachment(attachment.name),");
     expect(composerSource).toContain("close: messages.closeAttachmentPreview,");
+    expect(composerSource).toContain("const releasePreview = onRetainPreview(attachment.id);");
   });
 
   test("degrades an image attachment to a non-interactive thumbnail without a lightbox host", async () => {

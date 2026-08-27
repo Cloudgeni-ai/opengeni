@@ -1,6 +1,14 @@
 import { DownloadIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { Dialog } from "radix-ui";
 import { cn } from "../lib/cn";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
@@ -26,6 +34,7 @@ type LightboxController = {
     label?: string,
     downloadFilename?: string,
     controlLabels?: LightboxControlLabels,
+    releaseSource?: () => void,
   ) => void;
 };
 
@@ -51,6 +60,23 @@ export function useLightboxOptional(): LightboxController | null {
 }
 
 const NOOP: LightboxController = { open: () => {} };
+
+/** @internal Owns one optional retained lightbox source and releases it exactly once. */
+export function createLightboxSourceOwner() {
+  let releaseCurrent: (() => void) | null = null;
+  return {
+    replace(release?: (() => void) | undefined) {
+      const previous = releaseCurrent;
+      releaseCurrent = release ?? null;
+      previous?.();
+    },
+    release() {
+      const release = releaseCurrent;
+      releaseCurrent = null;
+      release?.();
+    },
+  };
+}
 
 /**
  * The app-level screenshot lightbox. Render once near the timeline; renderers
@@ -79,7 +105,14 @@ function LightboxRoot({ children }: { children: ReactNode }) {
     controlLabels?: LightboxControlLabels;
   } | null>(null);
   const [tokenSource, setTokenSource] = useState<HTMLElement | null>(null);
+  const sourceOwner = useMemo(() => createLightboxSourceOwner(), []);
   const portalStyle = usePortalTokenStyle(tokenSource);
+
+  const releaseCurrentSource = useCallback(() => {
+    sourceOwner.release();
+  }, [sourceOwner]);
+
+  useEffect(() => releaseCurrentSource, [releaseCurrentSource]);
 
   const open = useCallback(
     (
@@ -89,7 +122,9 @@ function LightboxRoot({ children }: { children: ReactNode }) {
       label = "Screenshot",
       downloadFilename?: string,
       controlLabels?: LightboxControlLabels,
+      releaseSource?: () => void,
     ) => {
+      sourceOwner.replace(releaseSource);
       setTokenSource(source ?? null);
       setState({
         src,
@@ -99,13 +134,14 @@ function LightboxRoot({ children }: { children: ReactNode }) {
         ...(controlLabels ? { controlLabels } : {}),
       });
     },
-    [],
+    [sourceOwner],
   );
 
   const close = useCallback(() => {
+    releaseCurrentSource();
     setState(null);
     setTokenSource(null);
-  }, []);
+  }, [releaseCurrentSource]);
 
   const controller = useMemo<LightboxController>(() => ({ open }), [open]);
 
