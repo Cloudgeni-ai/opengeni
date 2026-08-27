@@ -168,6 +168,11 @@ JSON escape expansion.
 - **No-op is not replay.** An already-paused task, a deduplicated memory write,
   or another mutation that commits no new state can return `unchanged` with the
   applicable non-replay idempotency status.
+- **Session control uses persistence truth on every caller shape.** Agent-bound
+  and sessionless/operator `session_pause` and `session_resume` calls both return
+  this v1 receipt. A fresh desired-state no-op is `unchanged`; only an exact
+  operation-receipt retry is `replayed`. The REST session-control body remains
+  its separate compatibility contract.
 - **Partial failure means partial commit.** The receipt says which stage failed,
   whether a retry is safe, and what resource identity remains authoritative. A
   scheduled-task database change followed by failed schedule synchronization is
