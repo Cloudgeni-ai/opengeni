@@ -1,5 +1,17 @@
 # @opengeni/react
 
+## 3.0.0
+
+### Major Changes
+
+- c525324: Add clickable composer attachment previews through the shared route-level lightbox with safe retained object-URL lifetimes, localized preview and lightbox control messages, full-chat file drag-and-drop affordances, and the updated reduced-motion-aware working indicator.
+
+### Patch Changes
+
+- c52c841: Show the timeline's Jump to latest control while a pinned session is catching up from meaningful pre-existing tip debt.
+- 3887ad2: Bound composer draft read retries and ignore unchanged soft-reload projections to prevent request feedback loops during reconnects and transient gateway failures.
+- 3a004ff: Preserve optional structured human-input answers, replay terminal settlements idempotently, and retain Slack replies when expiry or cancellation wins a response race.
+
 ## 2.6.0
 
 ### Minor Changes
