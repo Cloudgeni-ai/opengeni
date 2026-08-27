@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CreateRigRequest,
   ProposeRigChangeRequest,
+  RIG_SETUP_SCRIPT_MAX_CHARS,
   Rig,
   RigChange,
   RigChangeKind,
@@ -31,6 +32,20 @@ describe("rig contracts", () => {
     // Non-uuid default variable set ids are rejected.
     expect(
       CreateRigRequest.safeParse({ name: "dev", defaultVariableSetIds: ["not-a-uuid"] }).success,
+    ).toBe(false);
+  });
+
+  test("rig setup scripts accept 1 MiB and reject larger definitions", () => {
+    const maximum = "x".repeat(RIG_SETUP_SCRIPT_MAX_CHARS);
+    expect(CreateRigRequest.safeParse({ name: "large", setupScript: maximum }).success).toBe(true);
+    expect(
+      ProposeRigChangeRequest.safeParse({
+        kind: "definition_edit",
+        payload: { setupScript: maximum },
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateRigRequest.safeParse({ name: "too-large", setupScript: `${maximum}x` }).success,
     ).toBe(false);
   });
 

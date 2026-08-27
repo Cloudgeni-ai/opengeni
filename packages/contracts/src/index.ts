@@ -7939,6 +7939,10 @@ export const RigChange = z.object({
 });
 export type RigChange = z.infer<typeof RigChange>;
 
+// Rig setup payloads are transferred to sandboxes in bounded chunks. Keep the
+// public definition limit independent from provider command-argument ceilings.
+export const RIG_SETUP_SCRIPT_MAX_CHARS = 1024 * 1024;
+
 export const CreateRigRequest = z.object({
   // Omitted remains the compatibility workspace-owned creation path.
   scope: ResourceAuthorityScope.default("workspace"),
@@ -7946,7 +7950,7 @@ export const CreateRigRequest = z.object({
   description: z.string().max(2000).optional(),
   // Initial (version 1) content, inline.
   image: z.string().max(1024).optional(),
-  setupScript: z.string().max(131072).optional(),
+  setupScript: z.string().max(RIG_SETUP_SCRIPT_MAX_CHARS).optional(),
   checks: z.array(RigCheck).max(100).default([]),
   credentialHooks: z.array(z.string().min(1).max(200)).max(50).default([]),
   defaultVariableSetIds: z.array(z.string().uuid()).max(25).default([]),
@@ -8013,7 +8017,7 @@ export type RigSetupAppendPayload = z.infer<typeof RigSetupAppendPayload>;
 // fields inherit from the base version at promote time).
 export const RigDefinitionEditPayload = z.object({
   image: z.string().max(1024).nullish(),
-  setupScript: z.string().max(131072).nullish(),
+  setupScript: z.string().max(RIG_SETUP_SCRIPT_MAX_CHARS).nullish(),
   checks: z.array(RigCheck).max(100).optional(),
   credentialHooks: z.array(z.string().min(1).max(200)).max(50).optional(),
   defaultVariableSetIds: z.array(z.string().uuid()).max(25).optional(),
