@@ -1,5 +1,33 @@
 # @opengeni/worker-bundle
 
+## 0.22.5
+
+### Patch Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+- 3dfec4a: Checkpoint complete tool-call history before any follow-up model request reaches its provider dispatch boundary.
+- a521e65: Preserve provider-reported tool-search call identities across durable receipts, runtime events, and replay sanitization.
+- Updated dependencies [a7912ea]
+- Updated dependencies [d7ab403]
+- Updated dependencies [9ef491b]
+- Updated dependencies [5d4edd4]
+- Updated dependencies [986f5fe]
+- Updated dependencies [03d1c6e]
+- Updated dependencies [f6375f2]
+- Updated dependencies [6e12f3a]
+- Updated dependencies [a521e65]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+  - @opengeni/core@2.5.0
+  - @opengeni/db@3.5.0
+  - @opengeni/github@0.6.0
+  - @opengeni/documents@0.8.3
+  - @opengeni/runtime@1.4.1
+  - @opengeni/storage@0.2.109
+  - @opengeni/codemode@0.4.16
+  - @opengeni/events@0.4.1
+  - @opengeni/observability@0.8.7
+
 ## 0.22.4
 
 ### Patch Changes
