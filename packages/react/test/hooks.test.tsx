@@ -3241,6 +3241,42 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("same-revision soft reloads do not republish decoded draft state", async () => {
+    let reads = 0;
+    const authoritative: ComposerDraft = {
+      revision: 7,
+      text: "settled draft",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return { ...authoritative, resources: [] };
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+    const firstProjection = hook.result.current.draft;
+    expect(firstProjection?.revision).toBe(7);
+
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "edit" })]);
+    await flush();
+
+    expect(reads).toBe(2);
+    expect(hook.result.current.draft).toBe(firstProjection);
+    await hook.unmount();
+  });
+
   test("rerenders do not reload drafts outside target, explicit, or event triggers", async () => {
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const reads: string[] = [];
@@ -3888,6 +3924,33 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.error?.message).toBe(
       "OpenGeni is temporarily unavailable — retry. Reference: edge-503-safe.",
     );
+    await hook.unmount();
+  });
+
+  test("retryable draft hydrate failures stay bounded across client identity churn", async () => {
+    let reads = 0;
+    const failingClient = () =>
+      fakeClient({
+        getComposerDraft: async () => {
+          reads += 1;
+          throw gatewayError(503);
+        },
+      });
+    const hook = await renderHook(
+      (client: ReturnType<typeof failingClient>) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      failingClient(),
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    for (let index = 0; index < 10; index += 1) {
+      await hook.rerender(failingClient());
+    }
+    await flush();
+
+    expect(reads).toBe(1);
+    expect(hook.result.current.error).toMatchObject({ status: 503, retryable: true });
     await hook.unmount();
   });
 
