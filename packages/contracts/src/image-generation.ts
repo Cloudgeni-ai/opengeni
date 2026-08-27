@@ -16,7 +16,10 @@ const WorkspaceImagePathSchema = z
   // without sending unsupported regex syntax to model providers.
   .refine((path) => path.split("/").every((segment) => segment !== "." && segment !== ".."), {
     message: "Sandbox image paths cannot contain dot segments",
-  });
+  })
+  .describe(
+    "Absolute /workspace path to a PNG, JPEG, or WebP image. Convert SVG or other formats before using them as image-generation references.",
+  );
 
 /** One ordered, workspace-owned input used to guide or edit an image. */
 export const ImageGenerationReferenceSchema = z.discriminatedUnion("kind", [
@@ -49,7 +52,10 @@ export const GenerateImageToolInput = z
       .array(ImageGenerationReferenceSchema)
       .max(IMAGE_GENERATION_MAX_REFERENCES)
       .optional()
-      .default([]),
+      .default([])
+      .describe(
+        "Ordered image references. Every sandbox path, File, or artifact must resolve to PNG, JPEG, or WebP bytes.",
+      ),
   })
   .strict();
 export type GenerateImageToolInput = z.infer<typeof GenerateImageToolInput>;

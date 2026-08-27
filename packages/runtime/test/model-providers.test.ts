@@ -1885,6 +1885,8 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       (candidate) => candidate.type === "function" && candidate.name === "generate_image",
     );
     if (!tool || tool.type !== "function") throw new Error("generate_image tool missing");
+    expect(tool.description).toContain("PNG, JPEG, or WebP");
+    expect(tool.description).toContain("convert SVG or other formats first");
     const serializedParameters = JSON.stringify(tool.parameters);
     expect(serializedParameters).not.toContain("(?!");
     expect(serializedParameters).not.toContain("(?=");

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { resolveImageGenerationReferences } from "../src/activities/image-generation-references";
+import {
+  ImageGenerationReferenceError,
+  resolveImageGenerationReferences,
+  resolveImageGenerationReferencesForTool,
+} from "../src/activities/image-generation-references";
 
 const PNG_1X1 = Uint8Array.from(
   Buffer.from(
@@ -33,17 +37,55 @@ describe("image generation references", () => {
     expect(references[0]?.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  test("fails before provider execution when sandbox bytes are not an image", async () => {
-    await expect(
-      resolveImageGenerationReferences({
+  test("classifies SVG as unsupported before provider execution", async () => {
+    try {
+      await resolveImageGenerationReferences({
         db: {} as never,
         objectStorage: {} as never,
         accountId: "00000000-0000-4000-8000-000000000000",
         workspaceId: "11111111-1111-4111-8111-111111111111",
         subjectId: "user:image-reference-authority",
-        references: [{ kind: "sandbox_path", path: "/workspace/not-an-image.txt" }],
-        readSandboxFile: async () => new TextEncoder().encode("not an image"),
-      }),
-    ).rejects.toThrow();
+        references: [{ kind: "sandbox_path", path: "/workspace/logo.svg" }],
+        readSandboxFile: async () =>
+          new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
+      });
+      throw new Error("Expected SVG reference rejection");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ImageGenerationReferenceError);
+      expect((error as ImageGenerationReferenceError).code).toBe("unsupported_reference_media");
+      expect((error as Error).message).toContain("PNG, JPEG, or WebP");
+    }
+  });
+
+  test("returns a model-readable failed tool result when a sandbox reference is unavailable", async () => {
+    const resolution = await resolveImageGenerationReferencesForTool({
+      db: {} as never,
+      objectStorage: {} as never,
+      accountId: "00000000-0000-4000-8000-000000000000",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      subjectId: "user:image-reference-authority",
+      references: [{ kind: "sandbox_path", path: "/workspace/missing.png" }],
+      readSandboxFile: async () => {
+        throw new Error("Sandbox image reference is unavailable");
+      },
+    });
+
+    expect(resolution).toEqual({
+      status: "rejected",
+      result: {
+        isError: true,
+        status: "rejected",
+        code: "reference_unavailable",
+        message:
+          "The sandbox image reference could not be read. Verify that the file still exists in the current workspace.",
+        operationCreated: false,
+        content: [
+          {
+            type: "text",
+            text: "Image generation was not started: The sandbox image reference could not be read. Verify that the file still exists in the current workspace.",
+          },
+        ],
+      },
+    });
   });
 });
