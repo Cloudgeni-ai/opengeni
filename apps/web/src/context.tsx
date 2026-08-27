@@ -110,6 +110,10 @@ import {
   type WorkspaceOperationIdentity,
   type WorkspaceTransitionIdentity,
 } from "@/lib/workspace-transition";
+import {
+  reusablePersonalGitHubAuthority,
+  type PersonalGitHubAuthorityCache,
+} from "@/lib/personal-github-authority";
 import type {
   AccessContext,
   AuthSession,
@@ -576,8 +580,9 @@ export function RootRouteComponent() {
   const [selectedPersonalGitHubRepoRefs, setSelectedPersonalGitHubRepoRefs] = useState<
     Record<string, string>
   >({});
-  const [personalGitHubAuthority, setPersonalGitHubAuthority] =
-    useState<McpConnectionAuthoritySelection | null>(null);
+  const [personalGitHubAuthorityCache, setPersonalGitHubAuthorityCache] =
+    useState<PersonalGitHubAuthorityCache | null>(null);
+  const personalGitHubAuthority = personalGitHubAuthorityCache?.authority ?? null;
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
@@ -717,7 +722,7 @@ export function RootRouteComponent() {
     setPersonalGitHubRepositories([]);
     setPersonalGitHubSelection(null);
     setPersonalGitHubCatalogReady(false);
-    setPersonalGitHubAuthority(null);
+    setPersonalGitHubAuthorityCache(null);
     setWorkspaceMcpServers([]);
     setWorkspaceCapabilityCatalog([]);
     setWorkspaceMcpCatalogReady(false);
@@ -1487,11 +1492,18 @@ export function RootRouteComponent() {
       try {
         const status = await client.personalGitHubStatus(workspaceId);
         if (signal?.aborted || !ownsRefresh()) return;
+        const connection = status.connection;
         setPersonalGitHubStatus(status);
-        setPersonalGitHubAuthority((current) =>
-          current && current.connectionId === status.connection?.id ? current : null,
+        setPersonalGitHubAuthorityCache((current) =>
+          connection &&
+          reusablePersonalGitHubAuthority(current, {
+            connectionId: connection.id,
+            connectionVersion: connection.version,
+          })
+            ? current
+            : null,
         );
-        if (!status.enabled || status.connection?.status !== "active") {
+        if (!status.enabled || connection?.status !== "active") {
           setPersonalGitHubRepositories([]);
           setPersonalGitHubSelection(null);
           setSelectedPersonalGitHubRepoIds(new Set());
@@ -1503,11 +1515,10 @@ export function RootRouteComponent() {
         let cursor: number | undefined;
         let selection: PersonalGitHubRepositorySelectionState | null = null;
         do {
-          const page = await client.listPersonalGitHubRepositories(
-            workspaceId,
-            status.connection.id,
-            { ...(cursor ? { cursor } : {}), limit: 100 },
-          );
+          const page = await client.listPersonalGitHubRepositories(workspaceId, connection.id, {
+            ...(cursor ? { cursor } : {}),
+            limit: 100,
+          });
           repositories.push(...page.repositories);
           selection = page.selection;
           cursor = page.nextCursor ?? undefined;
@@ -1515,6 +1526,16 @@ export function RootRouteComponent() {
         if (signal?.aborted || !ownsRefresh()) return;
         setPersonalGitHubRepositories(repositories);
         setPersonalGitHubSelection(selection);
+        setPersonalGitHubAuthorityCache((current) =>
+          selection &&
+          reusablePersonalGitHubAuthority(current, {
+            connectionId: connection.id,
+            connectionVersion: connection.version,
+            connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+          })
+            ? current
+            : null,
+        );
         setSelectedPersonalGitHubRepoIds(
           (current) =>
             new Set(
@@ -1615,12 +1636,15 @@ export function RootRouteComponent() {
       toast.error("Connect your GitHub account before selecting its repositories");
       return null;
     }
-    if (
-      personalGitHubAuthority?.connectionId === connection.id &&
-      personalGitHubAuthority.userDelegation.context === context
-    ) {
-      return personalGitHubAuthority;
-    }
+    const cached = reusablePersonalGitHubAuthority(personalGitHubAuthorityCache, {
+      connectionId: connection.id,
+      connectionVersion: connection.version,
+      ...(personalGitHubSelection
+        ? { connectionAuthorityGeneration: personalGitHubSelection.connectionAuthorityGeneration }
+        : {}),
+      context,
+    });
+    if (cached) return cached;
     try {
       const response = await client.issueUserResourceGrant(workspaceId, connection.authorityId, {
         scope: "user",
@@ -1634,7 +1658,7 @@ export function RootRouteComponent() {
         connectionId: connection.id,
         userDelegation: response.grant.delegation,
       } satisfies McpConnectionAuthoritySelection;
-      setPersonalGitHubAuthority(authority);
+      setPersonalGitHubAuthorityCache({ authority, connectionVersion: connection.version });
       return authority;
     } catch (error) {
       toast.error("Couldn't allow your GitHub identity here", {
