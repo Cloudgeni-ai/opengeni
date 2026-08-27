@@ -19,19 +19,24 @@ export type CreateEmbeddedSessionClientOptions = {
     | undefined;
 };
 
-function bindRequiredMethod<K extends keyof EmbeddedSessionClientLike>(
-  base: EmbeddedSessionClientLike,
-  overrides: Partial<EmbeddedSessionClientLike>,
-  key: K,
-): NonNullable<EmbeddedSessionClientLike[K]> {
-  const override = overrides[key];
-  const value = override ?? base[key];
-  if (typeof value !== "function") {
-    throw new TypeError(`Embedded session client method is required: ${String(key)}`);
-  }
-  const receiver = override === undefined ? base : overrides;
-  return value.bind(receiver) as NonNullable<EmbeddedSessionClientLike[K]>;
-}
+const requiredMethods = [
+  "getSession",
+  "listEvents",
+  "streamEvents",
+  "getComposerDraft",
+  "saveComposerDraft",
+  "submitComposerDraft",
+  "sendMessage",
+  "steerMessage",
+  "getQueue",
+  "moveQueueItem",
+  "editQueueItem",
+  "steerQueueItem",
+  "deleteQueueItem",
+  "pauseSession",
+  "resumeSession",
+  "sendApprovalDecision",
+] as const satisfies readonly (keyof EmbeddedSessionClientLike)[];
 
 /**
  * Build the exact client required by `@opengeni/react/session` from a full SDK
@@ -44,24 +49,15 @@ export function createEmbeddedSessionClient(
   options: CreateEmbeddedSessionClientOptions = {},
 ): EmbeddedSessionClientLike {
   const overrides = options.overrides ?? {};
-  const client: EmbeddedSessionClientLike = {
-    getSession: bindRequiredMethod(base, overrides, "getSession"),
-    listEvents: bindRequiredMethod(base, overrides, "listEvents"),
-    streamEvents: bindRequiredMethod(base, overrides, "streamEvents"),
-    getComposerDraft: bindRequiredMethod(base, overrides, "getComposerDraft"),
-    saveComposerDraft: bindRequiredMethod(base, overrides, "saveComposerDraft"),
-    submitComposerDraft: bindRequiredMethod(base, overrides, "submitComposerDraft"),
-    sendMessage: bindRequiredMethod(base, overrides, "sendMessage"),
-    steerMessage: bindRequiredMethod(base, overrides, "steerMessage"),
-    getQueue: bindRequiredMethod(base, overrides, "getQueue"),
-    moveQueueItem: bindRequiredMethod(base, overrides, "moveQueueItem"),
-    editQueueItem: bindRequiredMethod(base, overrides, "editQueueItem"),
-    steerQueueItem: bindRequiredMethod(base, overrides, "steerQueueItem"),
-    deleteQueueItem: bindRequiredMethod(base, overrides, "deleteQueueItem"),
-    pauseSession: bindRequiredMethod(base, overrides, "pauseSession"),
-    resumeSession: bindRequiredMethod(base, overrides, "resumeSession"),
-    sendApprovalDecision: bindRequiredMethod(base, overrides, "sendApprovalDecision"),
-  };
+  const client = {} as EmbeddedSessionClientLike;
+  for (const key of requiredMethods) {
+    const override = overrides[key];
+    const method = override ?? base[key];
+    if (typeof method !== "function") {
+      throw new TypeError(`Embedded session client method is required: ${key}`);
+    }
+    client[key] = method.bind(override === undefined ? base : overrides) as never;
+  }
 
   const inferenceOverride = overrides.setWorkspaceInferenceState;
   const inferenceBase = base.setWorkspaceInferenceState;

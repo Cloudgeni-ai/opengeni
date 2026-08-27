@@ -5,6 +5,7 @@ import {
   appendSessionEvents,
   createDb,
   createSession,
+  SessionCommandIdempotencyError,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
   type Database,
@@ -407,12 +408,12 @@ describe("established-session composer drafts", () => {
         },
         { additionalResources: [hostRepository] },
       ),
-    ).rejects.toMatchObject({ status: 409 });
+    ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
 
     await expect(
       submitComposerDraftForRequest(deps, grant, workspaceId, session.id, input, {
         additionalResources: [{ ...hostRepository, ref: "changed" }],
       }),
-    ).rejects.toMatchObject({ status: 409 });
+    ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
   }, 180_000);
 });

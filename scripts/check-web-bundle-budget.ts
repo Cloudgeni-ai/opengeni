@@ -226,7 +226,13 @@ const budgets = {
   // gzip aggregate to the first whole-KiB envelope that preserves the existing
   // 1.5-KiB platform-skew allowance over that maximum; every file-count,
   // initial, per-file, lazy-chunk, and CSS cap stays fixed.
-  directSessionRaw: 2132 * kib,
+  // The generic embedded-session client constructor adds receiver-safe host
+  // overrides and one native composer-submit projection to the public session
+  // entry. The exact Bun 1.3.14 Linux/x64 production graph measures 2,183,914
+  // raw bytes. Advance only this aggregate to the first whole-KiB envelope
+  // retaining one KiB of headroom; gzip, file-count, initial, per-file,
+  // lazy-chunk, and CSS caps remain fixed.
+  directSessionRaw: 2134 * kib,
   directSessionGzip: 598 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
