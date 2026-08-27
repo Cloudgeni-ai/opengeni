@@ -332,6 +332,26 @@ shared major version are the compatibility mechanism.
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, and `packages/sdk/test/contract-parity.test.ts`.
 
+### 3.11 Work discovery remains advisory and permission-first
+
+Compact related-work discovery is a read projection over already-authorized
+sessions, durable semantic titles, active goals, and bounded typed work claims.
+Workspace/private-session rules, exact live-attempt validation, Slack-private
+scope, and optional embedding-host list narrowing run before lifecycle filters,
+matching, ranking, counts, cursors, or ancestor labels. A hidden session cannot
+influence even aggregate discovery output.
+
+Work claims are non-exclusive evidence. They do not reserve a repository,
+transfer ownership, grant access, or trigger control. Exact-attempt mutation is
+CAS- and operation-id-fenced; terminal goal/session lifecycle settles active
+evidence while retaining immutable revisions. Search never includes opening
+prompts, instructions, resources, tools, files, or full history, and no agent is
+required to search before working.
+
+Canonical: `packages/contracts/src/work-claims.ts`,
+`packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, and
+[`work-discovery.md`](work-discovery.md).
+
 ---
 
 ## 4. System architecture
@@ -1002,6 +1022,7 @@ This index intentionally routes at subsystem granularity. Use
 | Authentication or workspace grants | `packages/core/src/access/index.ts`, `apps/api/src/http/auth.ts` | [`../SECURITY.md`](../SECURITY.md) |
 | Managed browser login actors or session sets | `packages/contracts/src/managed-auth-session-sets.ts`, `packages/core/src/managed-auth-session-sets.ts`, `apps/api/src/routes/managed-auth-session-sets.ts` | [`browser-login-session-sets.md`](browser-login-session-sets.md) |
 | Agent access to peer sessions | `packages/core/src/session-authorization.ts`, `packages/db/src/session-control.ts` | [`agent-session-authority.md`](agent-session-authority.md) |
+| Advisory work discovery or durable work claims | `packages/contracts/src/work-claims.ts`, `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, `apps/api/src/` | [`work-discovery.md`](work-discovery.md), [`agent-session-authority.md`](agent-session-authority.md) |
 | Schema, repository, RLS, or migration | `packages/db/src/`, `packages/db/drizzle/` | [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) |
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |

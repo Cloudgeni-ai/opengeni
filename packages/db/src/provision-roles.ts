@@ -6,6 +6,7 @@ import {
   RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
   RUNTIME_READ_UPDATE_TABLES,
+  WORK_CLAIM_CAPABILITY_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -482,6 +483,7 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadUpdateTables = `ARRAY[${RUNTIME_READ_UPDATE_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertTables = `ARRAY[${RUNTIME_READ_INSERT_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
+  const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
     "list_self_organization_memberships(text)",
     "list_self_organization_invitations(text)",
@@ -997,6 +999,22 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Migration 0365 creates the advisory work-claim mutation capabilities
+    -- before a custom runtime role may exist. Re-converge their exact grants
+    -- for migrate-then-provision installs without exposing claim history or
+    -- the write-capability ledger to direct runtime DML.
+    FOREACH routine_signature IN ARRAY ${workClaimCapabilityRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     IF to_regprocedure(
       format(
         '%I.workspace_instruction_policy_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',

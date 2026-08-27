@@ -321,6 +321,15 @@ filter is agent-monitoring only: REST event pages (which the browser composer
 uses to reconcile an outcome-unknown Send by `clientEventId`), SSE, and forensic
 reads stay byte-identical, and stored events are never rewritten.
 
+Related-work search is another compact projection over this same durable state,
+not a new run-lifecycle input. It searches semantic titles, active goals, and
+bounded typed work claims only after ordinary authorization/host narrowing; it
+never searches opening prompts or makes a claim control the turn, goal, queue,
+or worker. Terminal goal/session lifecycle settles active claim evidence while
+Pause and recovery preserve it. See
+[`work-discovery.md`](work-discovery.md) for the complete authority, ranking,
+mutation, and rollout contract.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
