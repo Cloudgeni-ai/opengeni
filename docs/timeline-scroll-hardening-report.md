@@ -797,7 +797,7 @@ The branch is ready to merge only when:
 - Reproduction: after correcting the test to serve a dedicated production bundle, an unthrottled transition-scheduled 100-row prepend still produced repeated 54–83 ms long tasks. The stricter final fixture recreates every retained projected item, matching the live host's fresh projection identities.
 - Root cause: every projection produced fresh group wrappers, so row memoization could not retain settled suffixes; the global bulk-animation context woke all consumers; and every newly mounted closed copy tooltip published its trigger through React state. A sampled production CPU profile attributed about 25 ms to per-row locale formatter construction and showed material garbage collection. The anchor fallback also retained offsets for the entire window although it reads only the first group.
 - Fix: reuse prior group objects only when recursively render-equivalent, keep changed streaming/tool values invalidating immediately, memoize the complete keyed group shell, split mount-time and live entrance gates per durable group, retain only the first-group anchor offset, reuse one `Intl.DateTimeFormat`, and publish tooltip portal sources only when the tooltip opens (including controlled/default-open compatibility).
-- Regressions: direct-item and raw-event prepends prove retained message render callbacks do not run again; same-key streaming still invalidates immediately; a closed copy tooltip stays at two profiler commits instead of the reverted three; the exact production fixture passed three unthrottled and three 4× CPU-throttled repetitions. Reintroducing mount-time tooltip publication made the same production-shaped gate fail with a 67 ms long task.
+- Regressions: direct-item and raw-event prepends prove retained message render callbacks do not run again; same-key streaming still invalidates immediately; consumer-owned cyclic payloads fail closed instead of taking down the timeline; a closed copy tooltip stays at two profiler commits instead of the reverted three; the exact production fixture passed three unthrottled and three 4× CPU-throttled repetitions. Reintroducing mount-time tooltip publication made the same production-shaped gate fail with a 67 ms long task.
 
 ## 26. Falsified or harness-limited candidates
 
@@ -813,12 +813,13 @@ The branch is ready to merge only when:
 ## 27. Final verification evidence
 
 - Repository-pinned Bun: 1.4.0 (`34cbb9a40`).
-- Targeted timeline/unit/host matrix: 517 tests across 12 files, zero failures.
+- Targeted timeline/unit/host/bundle-policy matrix: 521 tests across 13 files, zero failures.
 - Tip-follow Chromium suite: 13/13 in the final strict console/page-error run; the cadence/responsive/stress matrix had also passed three prior repetitions.
 - Timeline scroll/history Chromium suite: 33/33 in the final strict console/page-error run; the full matrix had also passed three prior repetitions before the final performance-source hardening.
 - Responsive coverage: mobile DPR 3, tablet DPR 2 with reduced motion, desktop fractional DPR 1.25.
 - Stress coverage: seeded 60-operation mixed trace with bounded operation log, frame/long-task/DOM/overflow assertions, frozen-page resume, keyboard, wheel, and coarse-pointer paths.
 - Performance coverage: a dedicated production-bundle transition-scheduled 100-row prepend with fresh retained projection objects produced no Long Task entries and kept the maximum sampled frame interval below 50 ms in three consecutive unthrottled and three consecutive 4× CPU-throttled repetitions. The urgent-scheduling revert produced 680 ms and 389 ms long tasks; the closed-tooltip mount-publication revert produced a 67 ms long task in the final fixture.
+- Bundle compatibility: after compacting the retained-group comparator and shared render props, repeated exact current-main Linux/x64 Bun 1.4 builds measured 2,201,665–2,201,700 raw / 617,112–617,126 gzip bytes across 31 direct-session files. Calibrating from the high observations leaves 1,948 raw bytes and 2,394 gzip bytes of policy headroom; initial, per-file, file-count, lazy-chunk, and CSS caps remain unchanged.
 - Browser hygiene: zero uncaught page errors or unexpected console errors; the demo-only missing favicon request is the sole exact allowlisted resource miss.
 - CI workflow ownership: the retained execution graph and exact browser-gate contract pass, including the combined pagination/tip-follow interaction command.
 - No merge, publish, staging deployment, or production mutation was performed.

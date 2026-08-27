@@ -15,5 +15,5 @@ export function wholeKibEnvelope(
 }
 
 /** Exact current-main merged Linux/x64 Bun 1.4 direct-session measurement. */
-export const DIRECT_SESSION_RAW_MEASUREMENT = 2_192_748;
+export const DIRECT_SESSION_RAW_MEASUREMENT = 2_201_700;
 export const DIRECT_SESSION_RAW_BUDGET = wholeKibEnvelope(DIRECT_SESSION_RAW_MEASUREMENT);

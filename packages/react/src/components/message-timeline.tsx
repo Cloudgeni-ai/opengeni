@@ -4,6 +4,7 @@ import type {
   SessionEvent,
   SessionStatus,
 } from "@opengeni/sdk";
+import { dequal } from "dequal/lite";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
@@ -835,6 +836,36 @@ export function MessageTimeline({
       beginChange: beginUserMessageDisclosureChange,
     }),
     [beginUserMessageDisclosureChange],
+  );
+  const timelineGroupEntryContext = useMemo<TimelineGroupEntryContext>(
+    () => ({
+      userMessageDisclosureContext,
+      behavior: {
+        renderMessageText,
+        onOpenSession,
+        onMemoryClick,
+        onReconnect,
+        resolveProviderLogo,
+        toolRegistry,
+        loadRetainedScreenshot,
+        loadRetainedArtifact,
+        loadVideoArtifactPlayback,
+        turnSummary,
+      },
+    }),
+    [
+      loadRetainedArtifact,
+      loadRetainedScreenshot,
+      loadVideoArtifactPlayback,
+      onMemoryClick,
+      onOpenSession,
+      onReconnect,
+      renderMessageText,
+      resolveProviderLogo,
+      toolRegistry,
+      turnSummary,
+      userMessageDisclosureContext,
+    ],
   );
 
   const requestOlderIfUnderfilled = useCallback(
@@ -1712,17 +1743,7 @@ export function MessageTimeline({
                             liveEntranceEnabled={
                               group.kind === "activity" ? !bulkRender : undefined
                             }
-                            userMessageDisclosureContext={userMessageDisclosureContext}
-                            renderMessageText={renderMessageText}
-                            onOpenSession={onOpenSession}
-                            onMemoryClick={onMemoryClick}
-                            onReconnect={onReconnect}
-                            resolveProviderLogo={resolveProviderLogo}
-                            toolRegistry={toolRegistry}
-                            loadRetainedScreenshot={loadRetainedScreenshot}
-                            loadRetainedArtifact={loadRetainedArtifact}
-                            loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-                            turnSummary={turnSummary}
+                            context={timelineGroupEntryContext}
                           />
                         );
                       })}
@@ -1917,80 +1938,9 @@ type KeyedTimelineGroup = {
   entranceEnabled: boolean;
 };
 
-/**
- * Timeline projections are plain acyclic data in normal operation, but the
- * public pre-projected-item API can carry consumer-owned `unknown` payloads.
- * Compare arrays and plain records recursively, retain callback identity, and
- * fail closed for newly-created class instances or other exotic objects. The
- * seen-pair table also keeps a malformed cyclic consumer payload bounded.
- */
-function timelineRenderValueEqual(
-  previous: unknown,
-  next: unknown,
-  seenPairs: WeakMap<object, WeakSet<object>> = new WeakMap(),
-): boolean {
-  if (Object.is(previous, next)) {
-    return true;
-  }
-  if (
-    previous === null ||
-    next === null ||
-    typeof previous !== "object" ||
-    typeof next !== "object"
-  ) {
-    return false;
-  }
-
-  const previousIsArray = Array.isArray(previous);
-  if (previousIsArray !== Array.isArray(next)) {
-    return false;
-  }
-
-  let matchingNextValues = seenPairs.get(previous);
-  if (matchingNextValues?.has(next)) {
-    return true;
-  }
-  if (!matchingNextValues) {
-    matchingNextValues = new WeakSet();
-    seenPairs.set(previous, matchingNextValues);
-  }
-  matchingNextValues.add(next);
-
-  if (previousIsArray) {
-    const previousValues = previous as unknown[];
-    const nextValues = next as unknown[];
-    return (
-      previousValues.length === nextValues.length &&
-      previousValues.every((value, index) =>
-        timelineRenderValueEqual(value, nextValues[index], seenPairs),
-      )
-    );
-  }
-
-  const previousPrototype = Object.getPrototypeOf(previous);
-  if (
-    previousPrototype !== Object.getPrototypeOf(next) ||
-    (previousPrototype !== Object.prototype && previousPrototype !== null)
-  ) {
-    return false;
-  }
-
-  const previousRecord = previous as Record<string, unknown>;
-  const nextRecord = next as Record<string, unknown>;
-  const previousKeys = Object.keys(previousRecord);
-  if (previousKeys.length !== Object.keys(nextRecord).length) {
-    return false;
-  }
-  return previousKeys.every(
-    (key) =>
-      Object.prototype.hasOwnProperty.call(nextRecord, key) &&
-      timelineRenderValueEqual(previousRecord[key], nextRecord[key], seenPairs),
-  );
-}
-
 function timelineGroupsRenderEqual(previous: TimelineGroup, next: TimelineGroup): boolean {
   try {
-    return timelineRenderValueEqual(previous, next);
+    return dequal(previous, next);
   } catch {
     // Consumer-owned `unknown` payloads may be proxies/getters. Equality is an
     // optimization only; a hostile comparator surface must fall back to the
@@ -2151,7 +2101,15 @@ type TimelineGroupEntryProps = {
   nextGroup?: TimelineGroup | undefined;
   entranceEnabled: boolean;
   liveEntranceEnabled?: boolean | undefined;
+  context: TimelineGroupEntryContext;
+};
+
+type TimelineGroupEntryContext = {
   userMessageDisclosureContext: UserMessageDisclosureContextValue;
+  behavior: TimelineGroupBehaviorProps;
+};
+
+type TimelineGroupBehaviorProps = {
   renderMessageText: MessageTimelineProps["renderMessageText"];
   onOpenSession: MessageTimelineProps["onOpenSession"];
   onMemoryClick: MessageTimelineProps["onMemoryClick"];
@@ -2175,18 +2133,9 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
   nextGroup,
   entranceEnabled,
   liveEntranceEnabled,
-  userMessageDisclosureContext,
-  renderMessageText,
-  onOpenSession,
-  onMemoryClick,
-  onReconnect,
-  resolveProviderLogo,
-  toolRegistry,
-  loadRetainedScreenshot,
-  loadRetainedArtifact,
-  loadVideoArtifactPlayback,
-  turnSummary,
+  context,
 }: TimelineGroupEntryProps) {
+  const { behavior, userMessageDisclosureContext } = context;
   const contextCompactionCount =
     group.kind === "turn"
       ? (group.contextCompactionCount ?? 0)
@@ -2199,34 +2148,11 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
   return (
     <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
       <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
-        <TimelineGroupRenderBoundary
-          resetKeys={[
-            group,
-            renderMessageText,
-            onOpenSession,
-            onMemoryClick,
-            onReconnect,
-            resolveProviderLogo,
-            toolRegistry,
-            loadRetainedScreenshot,
-            loadRetainedArtifact,
-            loadVideoArtifactPlayback,
-            turnSummary,
-          ]}
-        >
+        <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
           <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
             <TimelineGroupView
+              {...behavior}
               group={group}
-              renderMessageText={renderMessageText}
-              onOpenSession={onOpenSession}
-              onMemoryClick={onMemoryClick}
-              onReconnect={onReconnect}
-              resolveProviderLogo={resolveProviderLogo}
-              toolRegistry={toolRegistry}
-              loadRetainedScreenshot={loadRetainedScreenshot}
-              loadRetainedArtifact={loadRetainedArtifact}
-              loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-              turnSummary={turnSummary}
               foldLiveCluster={isAgentProgress(nextGroup)}
               trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
               contextCompactionCount={

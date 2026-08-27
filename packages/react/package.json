@@ -118,6 +118,7 @@
     "@fontsource-variable/noto-sans-jp": "5.2.10",
     "@opengeni/sdk": "workspace:*",
     "clsx": "^2.1.1",
+    "dequal": "2.0.3",
     "lucide-react": "^1.8.0",
     "motion": "^12.0.0",
     "radix-ui": "^1.4.3",

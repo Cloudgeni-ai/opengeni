@@ -331,6 +331,21 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("consumer-owned cyclic payloads fail closed during settled-group comparison", async () => {
+    const firstRaw: Record<string, unknown> = {};
+    firstRaw.self = firstRaw;
+    const first = { ...userItem("cyclic", "first value"), raw: firstRaw } as TimelineItem;
+    const nextRaw: Record<string, unknown> = {};
+    nextRaw.self = nextRaw;
+    const next = { ...userItem("cyclic", "next value"), raw: nextRaw } as TimelineItem;
+
+    const r = await renderComponent(<MessageTimeline items={[first]} />);
+    await r.rerender(<MessageTimeline items={[next]} />);
+
+    expect(r.container.textContent).toContain("next value");
+    await r.unmount();
+  });
+
   test("streaming updates keep the full history mounted", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {

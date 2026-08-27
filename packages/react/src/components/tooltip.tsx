@@ -10,7 +10,6 @@
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import {
   createContext,
-  useCallback,
   useContext,
   useLayoutEffect,
   useMemo,
@@ -42,34 +41,30 @@ function Tooltip({ children, ...props }: ComponentProps<typeof TooltipPrimitive.
   const sourceRef = useRef<HTMLElement | null>(null);
   const sourcePublishedRef = useRef(false);
   const [source, setSource] = useState<HTMLElement | null>(null);
-  const ref = useCallback((node: HTMLElement | null) => {
+  const ref = useRef((node: HTMLElement | null) => {
     sourceRef.current = node;
-    if (sourcePublishedRef.current) {
-      setSource((current) => (current === node ? current : node));
-    }
-  }, []);
-  const sourceContext = useMemo(() => ({ source, ref }), [ref, source]);
-  const publishCurrentSource = useCallback(() => {
-    sourcePublishedRef.current = true;
-    setSource((current) => (current === sourceRef.current ? current : sourceRef.current));
-  }, []);
-  const publishSourceOnOpen = useCallback(
-    (open: boolean) => {
-      if (open) {
-        publishCurrentSource();
-      }
-      onOpenChange?.(open);
-    },
-    [onOpenChange, publishCurrentSource],
-  );
+    if (sourcePublishedRef.current) setSource(node);
+  }).current;
   useLayoutEffect(() => {
     if (rootProps.open === true || rootProps.defaultOpen === true) {
-      publishCurrentSource();
+      sourcePublishedRef.current = true;
+      setSource(sourceRef.current);
     }
-  }, [publishCurrentSource, rootProps.defaultOpen, rootProps.open]);
+  }, [rootProps.defaultOpen, rootProps.open]);
+  const sourceContext = useMemo(() => ({ source, ref }), [ref, source]);
   return (
     <TooltipSourceContext.Provider value={sourceContext}>
-      <TooltipPrimitive.Root data-slot="tooltip" onOpenChange={publishSourceOnOpen} {...rootProps}>
+      <TooltipPrimitive.Root
+        data-slot="tooltip"
+        onOpenChange={(open) => {
+          if (open) {
+            sourcePublishedRef.current = true;
+            setSource(sourceRef.current);
+          }
+          onOpenChange?.(open);
+        }}
+        {...rootProps}
+      >
         {children}
       </TooltipPrimitive.Root>
     </TooltipSourceContext.Provider>
