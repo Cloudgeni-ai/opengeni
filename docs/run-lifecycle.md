@@ -371,6 +371,9 @@ The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
 policy and preference-descriptor snapshots reconstructed from lifecycle events
 as of the turn's immutable `created_at`, not from mutable heads at claim time.
+Service-only turns have no human preference scope and skip the preference
+snapshot capability entirely; service continuations carrying a frozen causal
+human and legacy subject turns still snapshot that human's applicable entries.
 The session's normalized policy role is independent of workspace membership and
 memory roles. Service-initiated goal continuations and compactions may preserve
 the causal human in `initiating_human_subject_id` solely for personal
