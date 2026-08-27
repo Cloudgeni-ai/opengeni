@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { CrossSlotDeepLinkRecovery } from "@/components/cross-slot-deep-link-recovery";
 import {
   resolveAuthorizedWorkspaceFallback,
   type RouteRecoveryLocation,
@@ -43,7 +44,7 @@ export function WorkspaceUnavailableRoute(props: {
     );
   }
   if (fallback) return <LoadingPanel label="Opening an accessible workspace" />;
-  return (
+  const unavailable = (
     <ProblemPanel
       title="Workspace unavailable"
       description="You don't have access to this workspace. It may no longer exist, and no authorized equivalent destination was found."
@@ -54,4 +55,5 @@ export function WorkspaceUnavailableRoute(props: {
       }
     />
   );
+  return <CrossSlotDeepLinkRecovery path={location.pathname} fallback={unavailable} />;
 }

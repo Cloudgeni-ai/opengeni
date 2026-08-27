@@ -11,7 +11,7 @@ import {
 
 export type RigProviderImageDefinition = Pick<
   RigVersion,
-  "image" | "setupScript" | "checks" | "credentialHooks" | "defaultVariableSetIds"
+  "setupScript" | "checks" | "credentialHooks" | "defaultVariableSetIds"
 >;
 
 function sha256(value: string): string {
@@ -42,10 +42,9 @@ export function rigProviderImageContentHash(input: {
 }): string {
   return sha256(
     stableJson({
-      version: 1,
+      version: 2,
       backend: input.backend,
       sourceImage: input.sourceImage,
-      image: input.definition.image,
       setupScript: input.definition.setupScript,
       checks: input.definition.checks,
       credentialHooks: input.definition.credentialHooks,

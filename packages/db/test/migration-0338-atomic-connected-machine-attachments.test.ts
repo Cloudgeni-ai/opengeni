@@ -48,9 +48,9 @@ describe("migration 0338 atomic Connected Machine attachments", () => {
     expect(source).toContain("ALTER TABLE enrollments FORCE ROW LEVEL SECURITY");
     expect(source).not.toContain("CREATE TEMP");
     expect(migratorSource).toContain(
-      'ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machine_attachments.sql"',
+      'MIGRATION_APPLICATION_ROLES_SETTING = "opengeni.migration_application_roles"',
     );
-    expect(migratorSource).toContain("!applied.has(ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION)");
+    expect(migratorSource).toContain("source.includes(MIGRATION_APPLICATION_ROLES_SETTING)");
   });
 
   test("attaches a selected personal machine once and reuses it on turn recovery", async () => {

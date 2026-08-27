@@ -22,6 +22,7 @@ import { useState, type ReactNode } from "react";
 
 import { STATUS_META, StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { formatWaitingSince } from "@/lib/format";
+import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -127,8 +128,7 @@ function SubagentRow({
   onNavigate?: (() => void) | undefined;
 }) {
   const [open, setOpen] = useState(false);
-  const title =
-    node.session.title?.trim() || node.session.initialMessage?.trim() || "Untitled session";
+  const title = sessionDisplayTitle(node.session);
   const paused = node.session.effectiveControl.state === "paused";
   const tone = paused ? "waiting" : sessionStatusTone(node.session.status);
   const live = !paused && isLiveStatus(node.session.status);
@@ -351,5 +351,5 @@ function BreadcrumbLink({
 }
 
 function lineageLabel(session: SessionSummary): string {
-  return session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
+  return sessionDisplayTitle(session);
 }

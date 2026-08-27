@@ -140,7 +140,7 @@ describe("useFixedResourceScopes", () => {
       },
     } as unknown as OpenGeniCoreClient;
     const hook = await renderHook(
-      () => useFixedResourceScopes(client, workspaceId, variableSetId, rigId),
+      () => useFixedResourceScopes(client, workspaceId, [variableSetId], rigId),
       undefined,
     );
     await flush();
@@ -148,7 +148,7 @@ describe("useFixedResourceScopes", () => {
       `variable_set:${workspaceId}:${variableSetId}`,
       `rig:${workspaceId}:${rigId}`,
     ]);
-    expect(hook.result.current).toEqual(["organization", "workspace"]);
+    expect(hook.result.current).toEqual([["organization"], "workspace"]);
     await hook.unmount();
   });
 
@@ -161,15 +161,15 @@ describe("useFixedResourceScopes", () => {
     } as unknown as OpenGeniCoreClient;
     const hook = await renderHook(
       ({ routedWorkspaceId }: { routedWorkspaceId: string }) =>
-        useFixedResourceScopes(client, routedWorkspaceId, variableSetId, null),
+        useFixedResourceScopes(client, routedWorkspaceId, [variableSetId], null),
       { routedWorkspaceId: workspaceId },
     );
     await flush();
-    expect(hook.result.current[0]).toBe("user");
+    expect(hook.result.current[0]).toEqual(["user"]);
     await hook.rerender({ routedWorkspaceId: personalWorkspaceId });
-    expect(hook.result.current[0]).toBeNull();
+    expect(hook.result.current[0]).toEqual([null]);
     await flush();
-    expect(hook.result.current[0]).toBeNull();
+    expect(hook.result.current[0]).toEqual([null]);
     await hook.unmount();
   });
 });

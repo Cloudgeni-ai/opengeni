@@ -259,6 +259,7 @@ export type DocumentSearchInput = {
   limit?: number | undefined;
   mode?: DocumentSearchMode | undefined;
   sourceKinds?: KnowledgeSourceKind[] | undefined;
+  authorityKinds?: DocumentAuthorityKind[] | undefined;
   aclTags?: string[] | undefined;
   access?: DocumentAccessFilter | undefined;
 };
@@ -1160,7 +1161,10 @@ export async function getDocumentDefaultCollectionBackfillAudit(
         operationsNextCursor: operationTail
           ? encodeDocumentMigrationAuditCursor(
               ["backfill-operations", input.accountId, input.runId],
-              { timestamp: operationTail.createdAt, id: operationTail.operationId },
+              {
+                timestamp: operationTail.createdAt,
+                id: operationTail.operationId,
+              },
             )
           : null,
         receiptsHasMore,
@@ -1283,9 +1287,14 @@ function decodeDocumentMigrationAuditCursor(
     ) {
       throw new Error("cursor payload");
     }
-    return { timestamp: typeof parsed.t === "string" ? parsed.t : null, id: parsed.i };
+    return {
+      timestamp: typeof parsed.t === "string" ? parsed.t : null,
+      id: parsed.i,
+    };
   } catch (error) {
-    throw new Error("invalid document migration audit cursor", { cause: error });
+    throw new Error("invalid document migration audit cursor", {
+      cause: error,
+    });
   }
 }
 
@@ -1436,7 +1445,9 @@ function decodeDocumentAuthorityReclassificationCursor(
     }
     return { createdAt: parsed.t, operationId: parsed.i };
   } catch (error) {
-    throw new Error("invalid document authority receipt cursor", { cause: error });
+    throw new Error("invalid document authority receipt cursor", {
+      cause: error,
+    });
   }
 }
 
@@ -1888,7 +1899,11 @@ export function encodeDocumentIndexCheckpoint(input: {
 
 export function decodeDocumentIndexCheckpoint(
   value: string,
-  scope: { accountId: string; workspaceId: string; initiatingSubjectId: string },
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    initiatingSubjectId: string;
+  },
 ): bigint {
   try {
     if (!value || value.length > DOCUMENT_INDEX_CHECKPOINT_MAX_CHARS) {
@@ -2262,7 +2277,11 @@ async function curateDroppedDocument(
   const bases = await listDocumentBases(db, document.workspaceId);
   const candidates: DocumentCurationCandidateBase[] = bases
     .filter((base) => base.id !== document.baseId)
-    .map((base) => ({ id: base.id, name: base.name, description: base.description }));
+    .map((base) => ({
+      id: base.id,
+      name: base.name,
+      description: base.description,
+    }));
   const input: DocumentCurationInput = {
     text: parsed.text.slice(0, DOCUMENT_CURATION_MAX_INPUT_CHARS),
     filename: file.filename,
@@ -2454,6 +2473,7 @@ export async function searchEffectiveDocuments(
       limit: input.limit,
       mode: input.mode,
       sourceKinds: input.sourceKinds,
+      authorityKinds: input.authorityKinds,
       aclTags: input.aclTags,
       // Construct the lower-level access filter here instead of spreading the
       // caller input, so an untyped/legacy access override is always ignored.
@@ -2496,6 +2516,7 @@ export async function searchEffectiveKnowledge(
       ...(input.baseIds ? { baseIds: input.baseIds } : {}),
       ...(input.mode ? { mode: input.mode } : {}),
       ...(input.sourceKinds ? { sourceKinds: input.sourceKinds } : {}),
+      ...(input.authorityKinds ? { authorityKinds: input.authorityKinds } : {}),
       ...(input.aclTags ? { aclTags: input.aclTags } : {}),
       access,
     },
@@ -2539,6 +2560,9 @@ export async function searchEffectiveKnowledge(
               ranked.map((result) => result.chunkId),
             ),
             eq(schema.documents.status, "ready"),
+            ...(input.authorityKinds?.length
+              ? [inArray(schema.documents.authorityKind, input.authorityKinds)]
+              : []),
             ...documentAccessConditions(input.workspaceId, access),
           ),
         ),
@@ -3074,7 +3098,10 @@ export async function browseEffectiveKnowledge(
     async (scopedDb) => {
       if (parent) {
         const [authorizedParent] = await scopedDb
-          .select({ id: schema.documents.id, indexSequence: schema.documents.indexSequence })
+          .select({
+            id: schema.documents.id,
+            indexSequence: schema.documents.indexSequence,
+          })
           .from(schema.documents)
           .where(
             and(
@@ -3086,7 +3113,10 @@ export async function browseEffectiveKnowledge(
           )
           .limit(1);
         if (!authorizedParent) {
-          return selectKnowledgeBrowseRecords({ entries: [], hasMoreAfterEntries: false });
+          return selectKnowledgeBrowseRecords({
+            entries: [],
+            hasMoreAfterEntries: false,
+          });
         }
         if (authorizedParent.indexSequence === null) {
           throw new Error("ready knowledge document is missing its index revision");
@@ -3203,7 +3233,11 @@ export function encodeKnowledgeBrowseCursor(
   if (position < 0n) throw new Error("knowledge browse cursor position is invalid");
   const version = knowledgeBrowseCursorVersion(scope);
   return Buffer.from(
-    JSON.stringify({ v: version, s: knowledgeBrowseCursorScope(scope), q: position.toString() }),
+    JSON.stringify({
+      v: version,
+      s: knowledgeBrowseCursorScope(scope),
+      q: position.toString(),
+    }),
     "utf8",
   ).toString("base64url");
 }
@@ -3283,7 +3317,10 @@ function parseKnowledgeRecordId(value: string): {
       value,
     );
   if (!match) throw new Error("invalid knowledge record id");
-  return { kind: match[1] as "document" | "document_chunk", id: match[2]!.toLowerCase() };
+  return {
+    kind: match[1] as "document" | "document_chunk",
+    id: match[2]!.toLowerCase(),
+  };
 }
 
 function knowledgeDocumentRecord(
@@ -3886,6 +3923,9 @@ function documentSearchConditions(input: DocumentSearchInput, embeddingModel?: s
   }
   if (input.sourceKinds?.length) {
     conditions.push(inArray(schema.documents.sourceKind, input.sourceKinds));
+  }
+  if (input.authorityKinds?.length) {
+    conditions.push(inArray(schema.documents.authorityKind, input.authorityKinds));
   }
   const aclTags = cleanStringArray(input.aclTags);
   if (aclTags.length > 0) {

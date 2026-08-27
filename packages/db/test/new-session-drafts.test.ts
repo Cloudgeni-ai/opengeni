@@ -365,6 +365,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const channelId = crypto.randomUUID();
     const targetSandboxId = crypto.randomUUID();
     const workingDir = "/workspace/opengeni";
+    const variableSetIds = [crypto.randomUUID(), crypto.randomUUID()];
     await saveDraft(exact, 0, {
       text: "private prompt",
       resources: [
@@ -390,7 +391,8 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         sandboxBackend: "selfhosted",
         targetSandboxId,
         workingDir,
-        variableSetId: crypto.randomUUID(),
+        variableSetIds,
+        variableSetId: variableSetIds[1],
         rigId: crypto.randomUUID(),
         goal: { text: "do not retain", successCriteria: "never" },
         firstPartyMcpPermissions: ["sessions:create"],
@@ -425,7 +427,8 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       sandboxBackend: "selfhosted",
       targetSandboxId,
       workingDir,
-      variableSetId: expect.any(String),
+      variableSetIds,
+      variableSetId: variableSetIds[1],
       rigId: expect.any(String),
       toolsProvided: true,
       selectionHistory: {

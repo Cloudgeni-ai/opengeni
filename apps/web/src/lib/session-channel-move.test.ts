@@ -1,14 +1,22 @@
 import { describe, expect, test } from "bun:test";
+import { OpenGeniCoreClient } from "@opengeni/sdk/core";
 
 import {
   applySessionChannelMove,
   beginSessionChannelMove,
   commitSessionChannelMove,
+  readSessionChannelMovePoint,
   reconcileSessionChannelMovePointRead,
   reconcileSessionChannelMoves,
   rollbackSessionChannelMove,
   type SessionChannelMoveOverrides,
 } from "./session-channel-move";
+import {
+  authoritativeSessionContinuationChannels,
+  emptySessionContinuation,
+  mergeSessionContinuation,
+  reconcileRetainedSessionContinuationChannel,
+} from "./session-pagination";
 import { buildRailForest, channelRailSections } from "./sessions-group";
 import type { Session } from "../types";
 
@@ -58,6 +66,61 @@ function sectionSessionIds(sessions: readonly Session[]): Record<string, string[
 }
 
 describe("optimistic session channel moves", () => {
+  test("queues the post-write point read behind an active pre-write fresh generation", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    let releasePreWriteFresh!: () => void;
+    let markPreWriteFreshStarted!: () => void;
+    let writeCommitted = false;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const preWriteFreshGate = new Promise<void>((resolve) => {
+      releasePreWriteFresh = resolve;
+    });
+    const preWriteFreshStarted = new Promise<void>((resolve) => {
+      markPreWriteFreshStarted = resolve;
+    });
+    const client = new OpenGeniCoreClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        const channelId = writeCommitted ? "channel-new" : "channel-old";
+        if (request === 1) await initialGate;
+        if (request === 2) {
+          markPreWriteFreshStarted();
+          await preWriteFreshGate;
+        }
+        return new Response(
+          JSON.stringify(
+            session({
+              id: "session-1",
+              channelId,
+            }),
+          ),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    const initial = client.getSession("workspace-1", "session-1");
+    const preWriteFresh = client.getSession("workspace-1", "session-1", { fresh: true });
+    releaseInitial();
+    await preWriteFreshStarted;
+
+    writeCommitted = true;
+    const postWrite = readSessionChannelMovePoint(client, "workspace-1", "session-1");
+    await Bun.sleep(1);
+    expect(requests).toBe(2);
+
+    releasePreWriteFresh();
+    expect((await initial).channelId).toBe("channel-old");
+    expect((await preWriteFresh).channelId).toBe("channel-old");
+    expect((await postWrite).channelId).toBe("channel-new");
+    expect(requests).toBe(3);
+  });
+
   test("moves the row to the destination immediately without leaving an old-folder duplicate", () => {
     const original = session({ id: "session-1" });
     const overrides = beginSessionChannelMove(new Map(), original.id, "channel-new", 1);
@@ -69,7 +132,7 @@ describe("optimistic session channel moves", () => {
     });
   });
 
-  test("keeps a committed destination over a stale refetch until the server confirms it", () => {
+  test("retires a committed destination after an exact point read confirms it", () => {
     const stale = session({ id: "session-1", channelId: "channel-old" });
     let overrides: SessionChannelMoveOverrides = beginSessionChannelMove(
       new Map(),
@@ -81,22 +144,72 @@ describe("optimistic session channel moves", () => {
 
     const afterStaleRefetch = reconcileSessionChannelMoves(overrides, [stale]);
     expect(afterStaleRefetch).toBe(overrides);
-    expect(
-      reconcileSessionChannelMovePointRead(
-        afterStaleRefetch,
-        stale.id,
-        1,
-        session({ id: stale.id, channelId: "channel-new" }),
-      ),
-    ).toBe(afterStaleRefetch);
-    expect(applySessionChannelMove(stale, afterStaleRefetch.get(stale.id)).channelId).toBe(
-      "channel-new",
+    const afterPointRead = reconcileSessionChannelMovePointRead(
+      afterStaleRefetch,
+      stale.id,
+      1,
+      session({ id: stale.id, channelId: "channel-new" }),
     );
+    expect(afterPointRead.size).toBe(0);
 
     const authoritative = session({ id: stale.id, channelId: "channel-new" });
-    const reconciled = reconcileSessionChannelMoves(afterStaleRefetch, [authoritative]);
+    const reconciled = reconcileSessionChannelMoves(afterPointRead, [authoritative]);
     expect(reconciled.size).toBe(0);
     expect(applySessionChannelMove(authoritative, reconciled.get(stale.id))).toBe(authoritative);
+  });
+
+  test("a display-only retained row cannot confirm and release a committed move", () => {
+    const retainedA = session({ id: "session-1", channelId: "channel-old" });
+    const movedB = { ...retainedA, channelId: "channel-new" } as Session;
+    const pageGeneration = 3;
+    const pageOneReadGeneration = 1;
+    const newerRootReadGeneration = 2;
+    let continuation = mergeSessionContinuation(
+      emptySessionContinuation(pageGeneration),
+      pageGeneration,
+      pageGeneration,
+      { sessions: [retainedA], nextCursor: null },
+      10,
+      pageOneReadGeneration,
+      "root",
+      pageOneReadGeneration,
+    );
+
+    // A newer page-one read omits the old row, so it stays visible but loses
+    // channel authority. Context B may patch that display row after the write.
+    expect(
+      authoritativeSessionContinuationChannels(
+        continuation,
+        pageGeneration,
+        11,
+        newerRootReadGeneration,
+      ),
+    ).toEqual([]);
+    continuation = reconcileRetainedSessionContinuationChannel(
+      continuation,
+      pageGeneration,
+      11,
+      movedB,
+      newerRootReadGeneration,
+    );
+    expect(continuation.sessions[0]?.channelId).toBe("channel-new");
+
+    let overrides = beginSessionChannelMove(new Map(), retainedA.id, "channel-new", 1);
+    overrides = commitSessionChannelMove(overrides, retainedA.id, "channel-new", 1);
+    const authority = authoritativeSessionContinuationChannels(
+      continuation,
+      pageGeneration,
+      11,
+      newerRootReadGeneration,
+    ).map(([authoritative]) => authoritative);
+    const afterDisplayPatch = reconcileSessionChannelMoves(overrides, authority);
+
+    expect(afterDisplayPatch).toBe(overrides);
+    // A late pre-write detail A and a failed post-write probe leave the move
+    // fence in place, so the visible projection remains B.
+    expect(applySessionChannelMove(retainedA, afterDisplayPatch.get(retainedA.id)).channelId).toBe(
+      "channel-new",
+    );
   });
 
   test("lets an exact post-write read supersede a move that another client changed again", () => {
@@ -106,7 +219,8 @@ describe("optimistic session channel moves", () => {
 
     const movedAgain = session({ id: stale.id, channelId: "channel-latest" });
     const superseded = reconcileSessionChannelMovePointRead(overrides, stale.id, 1, movedAgain);
-    expect(applySessionChannelMove(stale, superseded.get(stale.id)).channelId).toBe(
+    expect(superseded.size).toBe(0);
+    expect(applySessionChannelMove(movedAgain, superseded.get(stale.id)).channelId).toBe(
       "channel-latest",
     );
 

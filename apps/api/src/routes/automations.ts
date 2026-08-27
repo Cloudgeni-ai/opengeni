@@ -278,7 +278,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     const bytes = new TextEncoder().encode(stableJson(request));
     return c.json(
-      await acceptEvent(deps, source, {
+      await acceptAutomationEvent(deps, source, {
         deliveryKey:
           request.deliveryId ?? `manual:${automationRequestDigest(source.adapterId, bytes)}`,
         requestDigest: automationRequestDigest(source.adapterId, bytes),
@@ -335,7 +335,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const requestDigest = automationRequestDigest(source.adapterId, rawBody);
     try {
-      const result = await acceptEvent(deps, source, {
+      const result = await acceptAutomationEvent(deps, source, {
         deliveryKey: adapter.deliveryKey({
           headers: c.req.raw.headers,
           requestDigest,
@@ -357,7 +357,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
-async function acceptEvent(
+export async function acceptAutomationEvent(
   deps: ApiRouteDeps,
   source: AutomationSourceSecret,
   input: {

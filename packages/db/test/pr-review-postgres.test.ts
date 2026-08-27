@@ -23,7 +23,10 @@ import {
   PrReviewDispatchAuthorityError,
   recordAutomationEvent,
   resolvePrReviewGitCredential,
+  resolveManagedGitHubPrReviewRoute,
+  syncManagedGitHubPrReviewInstallation,
   updateAutomationTrigger,
+  updatePackInstallationStatus,
   updatePrReviewRepositoryBinding,
   type DbClient,
 } from "../src";
@@ -386,5 +389,181 @@ describe("PR Review Pack persistence", () => {
     expect(
       await listPrReviewRepositoryBindings(client.db, grant.accountId, grant.workspaceId),
     ).toHaveLength(1);
+
+    const authorityNonce = `lens-${crypto.randomUUID()}`;
+    const authorityCheckedAt = new Date();
+    const authorityExpiresAt = new Date(authorityCheckedAt.getTime() + 10 * 60_000);
+    const managed = await syncManagedGitHubPrReviewInstallation(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      installationId: 303,
+      providerAccountLogin: "example",
+      providerAccountType: "Organization",
+      githubActorId: 404,
+      authorityKind: "organization_owner",
+      authorityCheckedAt,
+      authorityExpiresAt,
+      authorityNonce,
+      appId: "lens-app-1",
+      webhookSecretEncrypted: "encrypted-lens-webhook",
+      repositories: [githubRepository(505, 303, "example/repository")],
+      createdBySubjectId: grant.subjectId,
+      packInstallationId: installation.id,
+      packConnectorId: "github",
+      packTemplateId: "review-pull-request",
+      adapterId: "source-control.pull-request.v1",
+      eventTypes: ["pull_request.review_requested"],
+      configuration: {},
+      sessionTemplate,
+    });
+    expect(managed.registration).toMatchObject({
+      credentialKind: "managed_github_app",
+      installationId: "303",
+      providerAccountLogin: "example",
+      providerAccountType: "Organization",
+      webhookPath: "/v1/webhooks/pr-review/github",
+      hasCredential: true,
+    });
+    expect(
+      await resolveManagedGitHubPrReviewRoute(client.db, {
+        installationId: "303",
+        providerRepositoryId: "505",
+      }),
+    ).toMatchObject({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sourceId: managed.registration.sourceId,
+    });
+    await expect(
+      syncManagedGitHubPrReviewInstallation(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        installationId: 303,
+        providerAccountLogin: "example",
+        providerAccountType: "Organization",
+        githubActorId: 404,
+        authorityKind: "organization_owner",
+        authorityCheckedAt,
+        authorityExpiresAt,
+        authorityNonce,
+        appId: "lens-app-1",
+        webhookSecretEncrypted: "encrypted-lens-webhook",
+        repositories: [githubRepository(505, 303, "example/repository")],
+        createdBySubjectId: grant.subjectId,
+        packInstallationId: installation.id,
+        packConnectorId: "github",
+        packTemplateId: "review-pull-request",
+        adapterId: "source-control.pull-request.v1",
+        eventTypes: ["pull_request.review_requested"],
+        configuration: {},
+        sessionTemplate,
+      }),
+    ).rejects.toThrow("authorization was already used");
+
+    const resynchronized = await syncManagedGitHubPrReviewInstallation(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      installationId: 303,
+      providerAccountLogin: "example",
+      providerAccountType: "Organization",
+      githubActorId: 404,
+      authorityKind: "organization_owner",
+      authorityCheckedAt: new Date(),
+      authorityExpiresAt: new Date(Date.now() + 10 * 60_000),
+      authorityNonce: `lens-${crypto.randomUUID()}`,
+      appId: "lens-app-1",
+      webhookSecretEncrypted: "encrypted-lens-webhook",
+      repositories: [githubRepository(606, 303, "example/next")],
+      createdBySubjectId: grant.subjectId,
+      packInstallationId: installation.id,
+      packConnectorId: "github",
+      packTemplateId: "review-pull-request",
+      adapterId: "source-control.pull-request.v1",
+      eventTypes: ["pull_request.review_requested"],
+      configuration: {},
+      sessionTemplate,
+    });
+    expect(
+      resynchronized.repositories.map((repository) => repository.providerRepositoryId),
+    ).toEqual(["606"]);
+    expect(
+      await resolveManagedGitHubPrReviewRoute(client.db, {
+        installationId: "303",
+        providerRepositoryId: "505",
+      }),
+    ).toBeNull();
+    expect(
+      await resolveManagedGitHubPrReviewRoute(client.db, {
+        installationId: "303",
+        providerRepositoryId: "606",
+      }),
+    ).not.toBeNull();
+    await expect(
+      syncManagedGitHubPrReviewInstallation(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        installationId: 303,
+        providerAccountLogin: "example",
+        providerAccountType: "Organization",
+        githubActorId: 404,
+        authorityKind: "organization_owner",
+        authorityCheckedAt,
+        authorityExpiresAt,
+        authorityNonce,
+        appId: "lens-app-1",
+        webhookSecretEncrypted: "encrypted-lens-webhook",
+        repositories: [githubRepository(505, 303, "example/repository")],
+        createdBySubjectId: grant.subjectId,
+        packInstallationId: installation.id,
+        packConnectorId: "github",
+        packTemplateId: "review-pull-request",
+        adapterId: "source-control.pull-request.v1",
+        eventTypes: ["pull_request.review_requested"],
+        configuration: {},
+        sessionTemplate,
+      }),
+    ).rejects.toThrow("authorization was already used");
+
+    await updatePackInstallationStatus(client.db, grant.workspaceId, pack.id, "disabled");
+    await expect(
+      syncManagedGitHubPrReviewInstallation(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        installationId: 303,
+        providerAccountLogin: "example",
+        providerAccountType: "Organization",
+        githubActorId: 404,
+        authorityKind: "organization_owner",
+        authorityCheckedAt: new Date(),
+        authorityExpiresAt: new Date(Date.now() + 10 * 60_000),
+        authorityNonce: `lens-${crypto.randomUUID()}`,
+        appId: "lens-app-1",
+        webhookSecretEncrypted: "encrypted-lens-webhook",
+        repositories: [githubRepository(606, 303, "example/next")],
+        createdBySubjectId: grant.subjectId,
+        packInstallationId: installation.id,
+        packConnectorId: "github",
+        packTemplateId: "review-pull-request",
+        adapterId: "source-control.pull-request.v1",
+        eventTypes: ["pull_request.review_requested"],
+        configuration: {},
+        sessionTemplate,
+      }),
+    ).rejects.toThrow("Pack is not active");
   }, 60_000);
 });
+
+function githubRepository(id: number, installationId: number, fullName: string) {
+  return {
+    id,
+    installationId,
+    fullName,
+    name: fullName.split("/").at(-1)!,
+    private: true,
+    htmlUrl: `https://github.com/${fullName}`,
+    cloneUrl: `https://github.com/${fullName}.git`,
+    defaultBranch: "main",
+    accountLogin: fullName.split("/")[0]!,
+    accountType: "Organization",
+  };
+}

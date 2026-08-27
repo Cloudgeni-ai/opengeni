@@ -10,12 +10,14 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/accounts.ts",
     "src/core.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
     "src/automations.ts",
     "src/pr-review.ts",
     "src/organization-private-session-settings.ts",
+    "src/organization-user-setup.ts",
     "src/realtime.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifacts-worker.ts",

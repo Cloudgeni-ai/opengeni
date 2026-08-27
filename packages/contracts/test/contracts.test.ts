@@ -14,6 +14,8 @@ import {
   ClientModel,
   WorkspaceModelCatalogResponse,
   ClientSessionEvent,
+  CompleteOrganizationUserSetupRequest,
+  CompleteSelfServiceOrganizationSetupRequest,
   CreateCapabilityCatalogItemRequest,
   CreateKnowledgeMemoryRequest,
   CreateSocialConnectionRequest,
@@ -46,6 +48,7 @@ import {
   ModelCredentialSourceV1,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
+  OrganizationInvitation,
   RequestHumanInputToolInput,
   RepositoryResourceRef,
   TURN_EXECUTION_POLICY_METADATA_KEY,
@@ -72,6 +75,7 @@ import {
   sessionSystemUpdateBatchHistoryItem,
   numberTimelineAnnotations,
   UpdateSessionMcpApprovalPolicyRequest,
+  SelfServiceOrganizationOnboardingStatus,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
@@ -96,6 +100,7 @@ import {
   UpdateScheduledTaskRequest,
   GoalSpec,
   UpdateSessionGoalRequest,
+  UpdateSessionVariableSetsRequest,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
@@ -115,6 +120,57 @@ describe("API key descriptions", () => {
 });
 
 describe("contracts", () => {
+  test("bounds the two managed onboarding paths without accepting organization intent at signup", () => {
+    expect(
+      CompleteSelfServiceOrganizationSetupRequest.parse({
+        organizationName: "Northwind Research",
+        operationId: "10000000-0000-4000-8000-000000000001",
+      }),
+    ).toEqual({
+      organizationName: "Northwind Research",
+      operationId: "10000000-0000-4000-8000-000000000001",
+    });
+    expect(
+      CompleteOrganizationUserSetupRequest.safeParse({
+        token: "a".repeat(32),
+        name: "Invited teammate",
+        password: "password1234",
+        operationId: "10000000-0000-4000-8000-000000000002",
+      }).success,
+    ).toBe(true);
+    expect(
+      CompleteOrganizationUserSetupRequest.safeParse({
+        token: "too-short",
+        name: "Invited teammate",
+        password: "password1234",
+        operationId: "10000000-0000-4000-8000-000000000002",
+      }).success,
+    ).toBe(false);
+    expect(SelfServiceOrganizationOnboardingStatus.parse({ state: "invitation_pending" })).toEqual({
+      state: "invitation_pending",
+    });
+    expect(SelfServiceOrganizationOnboardingStatus.parse({ state: "unavailable" })).toEqual({
+      state: "unavailable",
+    });
+    expect(
+      OrganizationInvitation.parse({
+        id: "10000000-0000-4000-8000-000000000003",
+        organizationId: "10000000-0000-4000-8000-000000000004",
+        organizationName: "Northwind Research",
+        targetEmail: "invitee@example.test",
+        targetName: null,
+        initialWorkspaceIds: [],
+        role: "member",
+        status: "pending",
+        revision: 1,
+        expiresAt: "2026-08-25T00:00:00.000Z",
+        acceptedMembershipId: null,
+        createdAt: "2026-08-24T00:00:00.000Z",
+        updatedAt: "2026-08-24T00:00:00.000Z",
+      }).organizationName,
+    ).toBe("Northwind Research");
+  });
+
   test("validates Stripe billing portal sessions", () => {
     const accountId = "00000000-0000-4000-8000-000000000001";
     expect(CreateBillingPortalRequest.parse({ accountId })).toEqual({
@@ -653,6 +709,40 @@ describe("contracts", () => {
       CreateSessionRequest.parse({ initialMessage: "private work", visibility: "private" })
         .visibility,
     ).toBe("private");
+  });
+
+  test("normalizes ordered Variable Set selections and rejects ambiguous precedence", () => {
+    const first = "00000000-0000-4000-8000-000000000011";
+    const last = "00000000-0000-4000-8000-000000000012";
+    expect(
+      CreateSessionRequest.parse({ initialMessage: "inspect", variableSetId: last }),
+    ).toMatchObject({ variableSetIds: [last], variableSetId: last });
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "inspect",
+        variableSetIds: [first, last],
+        variableSetId: last,
+      }),
+    ).toMatchObject({ variableSetIds: [first, last], variableSetId: last });
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "inspect",
+        variableSetIds: [first, last],
+        variableSetId: first,
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "inspect",
+        variableSetIds: [first, first],
+      }).success,
+    ).toBe(false);
+    expect(UpdateSessionVariableSetsRequest.parse({ variableSetIds: [first, last] })).toEqual({
+      variableSetIds: [first, last],
+    });
+    expect(
+      UpdateSessionVariableSetsRequest.safeParse({ variableSetIds: [last, last] }).success,
+    ).toBe(false);
   });
 
   test("normalizes immutable session policy roles without accepting membership-shaped paths", () => {
@@ -1330,6 +1420,7 @@ describe("contracts", () => {
     );
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
     expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
+    expect(payload.managedAuthSessionSetMode).toBe("legacy");
     // models defaults to [] for back-compat (callers reading only allowedModels
     // are unaffected when the host hasn't populated the richer list).
     expect(payload.models).toEqual([]);
@@ -2020,12 +2111,14 @@ describe("contracts", () => {
         limit: 50,
         mode: "hybrid",
         sourceKinds: ["repository"],
+        authorityKinds: ["organization"],
       }),
     ).toEqual({
       query: "network policy",
       limit: 50,
       mode: "hybrid",
       sourceKinds: ["repository"],
+      authorityKinds: ["organization"],
     });
     expect(
       DocumentSearchResponse.parse({

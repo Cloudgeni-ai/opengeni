@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { CrossSlotDeepLinkRecovery } from "@/components/cross-slot-deep-link-recovery";
 import { useAppContext } from "@/context";
 import {
   authorizedSessionReadWorkspaceIds,
@@ -58,7 +59,7 @@ export function SessionUnavailableRoute(props: { workspaceId: string; sessionId:
   ]);
 
   if (state === "resolving") return <LoadingPanel label="Looking for this session" />;
-  return (
+  const unavailable = (
     <ProblemPanel
       title={state === "error" ? "Session unavailable" : "Session not found"}
       description={
@@ -74,5 +75,10 @@ export function SessionUnavailableRoute(props: { workspaceId: string; sessionId:
         ) : undefined
       }
     />
+  );
+  return state === "not-found" ? (
+    <CrossSlotDeepLinkRecovery path={window.location.pathname} fallback={unavailable} />
+  ) : (
+    unavailable
   );
 }

@@ -2,6 +2,13 @@
 
 OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
 
+Managed deployments using organization recovery must first complete the
+provider-neutral browser-slot rollout and then follow the migration,
+fake-provider conformance, rollback, and unsupported-operation contract in
+[`organization-recovery.md`](organization-recovery.md). Repository delivery does
+not enable an external recovery notification provider or perform a production
+mutation.
+
 ## Personal GitHub OAuth
 
 Personal GitHub is disabled by default. Managed staging and production must use
@@ -413,6 +420,133 @@ on the invitation and organization membership writer tables. A live listed
 session rejects the cutover with SQLSTATE `55000`. After commit, never restart
 a pre-0314 image; remain in maintenance and fix forward.
 
+### Post-sign-in organization setup cutover (0348)
+
+`0348_named_signup_and_user_setup.sql` is a drained application protocol
+cutover. It moves self-service organization creation out of Better Auth signup
+and behind the first verified managed-cookie sign-in, and adds the invitation
+bound one-time account setup bearer. Old API binaries and old authentication
+hooks still synthesize a `better-auth:user` fallback organization and a
+`Default workspace`, and old browser clients do not speak the Personal-only
+setup contract. Before applying 0348:
+
+1. stop every API, control worker, and turn worker using the target database;
+2. supply the exact old/new runtime login list through
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or
+   `applicationDatabaseRoles` for a programmatic migration);
+3. prove those roles have zero other sessions in `pg_stat_activity`;
+4. apply 0348 from the exact new image and require it in `schema_migrations`;
+5. start only that same image generation and complete readiness checks before
+   reopening admission.
+
+The migration checks the explicit role list before and after exclusive locks on
+`auth_users`, `auth_identities`, `managed_accounts`, the invitation tables, the
+organization membership table, `workspaces`, and `workspace_memberships`. A
+live listed session rejects the cutover with SQLSTATE `55000`. After commit,
+never restart a pre-0348 image; remain in maintenance and fix forward.
+
+Two operator-visible consequences follow the commit. `POST /v1/organizations`
+becomes the one-time setup entry point rather than an organization factory: a
+human who already holds an organization membership can no longer create a
+second organization through it. And `OPENGENI_API_CONTRACT_REVISION` advances,
+so every mutating client must be on the new bundle before admission reopens.
+
+No backfill is required. A human left holding a legacy `better-auth:user`
+fallback organization whose organization membership was never anchored is
+adopted by the setup lifecycle on their next sign-in - it reuses that exact
+account, names it from the one-shot signup intent, and creates the owner
+membership plus canonical Personal workspace against it - so no operator SQL is
+needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
+`OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
+checked before the invitation row commits and reported as `503`.
+
+### Browser login session-set rollout (0362)
+
+`0362_managed_auth_session_sets.sql` is rolling and deliberately activation-free.
+It backfills exact Better Auth login-binding stamps, installs hash-only/FORCE-RLS
+browser session-set authority, and leaves
+`OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`. Apply it with the owner migration
+job and provision the restricted runtime routines before deploying the matching
+API/web generation. Do not change the mode as part of migration or PR merge.
+
+`dual` and `broker` require a fresh deployment authorization, one canonical HTTPS
+web/API origin, consistent Better Auth signing/origin/cookie configuration, the
+same mode on every API replica, and the complete real PostgreSQL/Better Auth plus
+Chromium/Firefox/WebKit `accounts` acceptance lane. `dual` is the measured
+coexistence state; `broker` is a later all-replica cutover. Never mix modes or
+restart an arbitrary old image after broker activation. The complete rollout,
+rollback, self-hosting, header/proxy, and security contract is
+[`browser-login-session-sets.md`](browser-login-session-sets.md).
+
+### Durable invited-user email delivery (0351)
+
+Migration 0351 is rolling and additive. Before inviting users, configure
+`OPENGENI_RESEND_API_KEY` and `OPENGENI_EMAIL_FROM`; production managed-mode
+configuration validation requires the provider key. Embedded hosts may bind an
+equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
+does not relax the deployment preflight today. Keep
+`OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
+bearers are stable HMAC identities and the browser receives them only in the
+email URL fragment.
+
+The API records a durable attempt and `provider_started` marker before provider
+I/O. A clear refusal is shown as `failed`; a network timeout, server ambiguity,
+or released provider-started claim is shown as `outcome_unknown`. Do not repair
+either state with database DML or by crafting a new email. Resend keeps an
+idempotency key for 24 hours. Its adapter declares that guarantee and a keyed
+provider-account scope; the database persists the resulting absolute safe-until
+fence at the first provider boundary. People & invitations offers a retry for a
+clear failure and for an ambiguous outcome only while that immutable provider-
+specific fence remains open; retries never extend an unresolved fence and reuse
+the exact delivery id, provider scope/key, bearer digest, effective
+`OPENGENI_EMAIL_FROM`, and frozen safe payload. When the fence closes the state
+becomes `reconciliation_required`: inspect Resend/provider history and do not
+resend. A retry that fails before provider I/O cannot downgrade an older
+unresolved outcome to an ordinary failure.
+After confirming provider state, revoke the old invitation before deliberately
+creating a new one if access is still required.
+
+`Delivery not started` is the recoverable crash boundary between the committed
+invitation and its first journal claim. Use its `Send invitation` control; the
+server resolves the original immutable invite receipt, preserves the creator
+binding, and creates the missing journal. Expired pre-provider claims project
+as failed/retryable rather than staying pending. Do not insert or update journal
+rows manually.
+Revoking the invitation is authoritative even if an earlier provider call later
+reports success, and revocation closes the active claim/attempt. The database
+never stores the setup bearer or rendered email body.
+
+Embedded `ManagedEmailTransport` implementations must declare a bounded sender,
+a stable non-secret scope that changes with provider, provider account, or
+idempotency policy, and a conservative integer retention in seconds. API
+composition validates this metadata before accepting invitations. Changing the
+scope while an outcome is unresolved is intentionally refused and requires
+operator reconciliation.
+
+Repository onboarding readiness is proven by the curated `onboarding` CI lane,
+which uses a bounded process-local transport and writes only safe screenshots
+and summarized JSON evidence. That green result proves application behavior,
+the real migration/runtime-role boundary, and provider-neutral delivery
+semantics. It does **not** prove that Resend or another external provider is
+configured, that staging has received a message, or that production is ready.
+
+Provider and environment acceptance are separate, ordered gates:
+
+1. configure `OPENGENI_RESEND_API_KEY`, `OPENGENI_EMAIL_FROM`,
+   `OPENGENI_PUBLIC_BASE_URL`, and `OPENGENI_BETTER_AUTH_SECRET` through the
+   environment's secret authority, never repository files or evidence;
+2. in an explicitly authorized non-production environment, send an invitation
+   through the configured provider and retain provider-side idempotency plus
+   delivery evidence without retaining the setup bearer or rendered body;
+3. prove the exact candidate in staging, including signup, verification,
+   invitation setup, sign-in/password reset, initial shared grants, revocation,
+   readiness, logs, and bounded alerts; and
+4. promote or run production acceptance only under the repository's existing
+   exact-candidate release authority and a fresh deployment authorization.
+
+A merge, green repository CI run, local Docker result, or provider-free capture
+must never be interpreted as authorization to mutate staging or production.
+
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one
@@ -519,6 +653,17 @@ For each subsequent activation:
    after all source-table locks; do not move the boundary earlier, because future
    greenfield provisioning writes its complete graph before taking the same
    fence and the reversed order would deadlock.
+
+   Migration 0349 implements that greenfield side. After at least one operator
+   activation is committed, an ordinary eligible self-service signup
+   automatically appends its version-1 activation receipt, deterministic
+   greenfield evidence, and enabled private-session setting/event in the same
+   transaction as its owner + Personal-workspace graph and setup receipt. There
+   is no second operator command for that newly inserted organization. A signup
+   that wins the boundary before the first committed witness stays unactivated,
+   as do every 0348 adopted legacy account and all existing organizations; run
+   this drained operator procedure for those organizations. Never hand-insert a
+   greenfield evidence or activation row to bypass that distinction.
 
    Migration 0303 created `session_tenancy_activations` with `FORCE ROW LEVEL
    SECURITY` and a `FOR SELECT`-only policy, so under this exact
@@ -729,16 +874,32 @@ Current profiles:
 - `preview-branch`: operator-managed branch preview variable set shape.
 - `self-contained-kubernetes`: Kubernetes-hosted dependencies for demos or air-gapped evaluation.
 
-## Local Docker Compose
+## Local Development Stack
 
-`bun run dev` is the primary local Docker Compose path. It starts Postgres,
-NATS, Temporal, Garage, migrations, imports the fingerprinted reviewed
-integrations catalog, builds the sandbox image, and starts the API, control and
-turn workers, artifact materializer, artifact outbox dispatcher, and web. The
-two artifact roles receive distinct generated least-privilege database logins
-and independently selected health ports (defaults `9465` and `9466`). Their
-ignored local values are written to `.env.runtime`, not `.env`. Set
+`bun run dev` is the primary full local path. `OPENGENI_DEV_BACKEND=auto`
+prefers Docker only when its daemon answers a bounded server probe, then falls
+back to native PostgreSQL, NATS, Temporal, and pinned MinIO processes. Set
+`OPENGENI_DEV_BACKEND=docker` or `native` to require one path. The native path
+is Linux-only, changes a copied Docker sandbox default to the credentials-free
+in-process local provider, and preserves explicit remote sandbox providers.
+
+Both infrastructure paths run migrations, import the fingerprinted reviewed
+integrations catalog, and start the API, control and turn workers, Connected
+Machines relay, artifact materializer, artifact outbox dispatcher, and web.
+Docker additionally builds the local sandbox image when that sandbox backend is
+selected. The two artifact roles receive distinct generated least-privilege
+database logins and independently selected health ports (defaults `9465` and
+`9466`). Ignored local values, including the resolved infrastructure and
+sandbox backends, are written to `.env.runtime`, not `.env`. Set
 `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
+
+Native dependencies remain running after `Ctrl-C`, matching Compose's warm
+restart behavior. `bun run dev:down` stops only the infrastructure recorded for
+this worktree. `bun run dev:clean -- --yes` also removes its PostgreSQL/object
+storage data and `.env.runtime`. On a mode-0700 sandbox repository mount, the
+unprivileged PostgreSQL server stores its exact hashed project cluster under
+`/var/tmp/opengeni-native-postgres`; clean removes that directory without
+loosening repository permissions.
 
 The script prepares one canonical current-host development artifact bundle only
 when its exact source/toolchain fingerprint or native receipt is absent or
@@ -755,7 +916,15 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices. The MinIO opt-in uses `OPENGENI_MINIO_HOST_PORT` and `OPENGENI_MINIO_CONSOLE_HOST_PORT`.
+When a common host port is already occupied, `bun run dev` auto-selects a nearby
+free port and rewrites the in-memory runtime URLs for that run. Set
+`OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`,
+`OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`,
+`OPENGENI_TEMPORAL_UI_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`,
+`OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or
+`OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local choices.
+MinIO uses `OPENGENI_MINIO_HOST_PORT` and
+`OPENGENI_MINIO_CONSOLE_HOST_PORT`.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure
@@ -812,6 +981,12 @@ live `main` stay mergeable). Drop `Current-base source admission` from the
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
 required by the manually dispatched `.github/workflows/release-candidate.yml`.
+Once trusted CI admits the exact Version PR head and its generating `main` base,
+later commits on `main` do not invalidate that run. The immutable head, its
+single parent, deterministic version tree, automation identity, and retained
+controller remain fenced; ordinary protected-branch movement is not a release
+freeze. A regenerated Version PR head still supersedes and cancels CI for the
+older head.
 
 Ordinary candidate and operator admission bind the **merged associated PR**, not
 a later GitHub `APPROVE` or structured PASS body on the exact head:
@@ -2012,6 +2187,7 @@ helm upgrade --install opengeni deploy/helm/opengeni \
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
+- Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`.

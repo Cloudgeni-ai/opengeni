@@ -1,5 +1,64 @@
 # @opengeni/worker-bundle
 
+## 0.22.4
+
+### Patch Changes
+
+- 76d6396: Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, custom-role and old-image rolling-compatible least-privilege database posture, and UI projections that never use raw initial prompts as display names. Durable title fanout now requires a versioned subscriber-recovery capability: managed NATS and supported embedded brokers coalesce one Postgres catch-up after reconnect, while legacy buses without that contract fail readiness/worker startup before durable rows can be acknowledged.
+- b5071cf: Require every Rig to layer setup and checks on the deployment-managed platform sandbox, reject new explicit Rig image overrides, keep provider-native image ids out of durable lease identity, and verify Browser, Terminal, and Computer services before publishing a Rig provider image.
+- Updated dependencies [76d6396]
+- Updated dependencies [b5071cf]
+  - @opengeni/contracts@2.5.0
+  - @opengeni/db@3.4.0
+  - @opengeni/events@0.4.0
+  - @opengeni/runtime@1.4.0
+  - @opengeni/core@2.4.0
+  - @opengeni/codemode@0.4.15
+  - @opengeni/config@0.20.1
+  - @opengeni/documents@0.8.2
+  - @opengeni/github@0.5.5
+  - @opengeni/observability@0.8.6
+  - @opengeni/storage@0.2.108
+
+## 0.22.3
+
+### Patch Changes
+
+- 8fabf12: Send first-party function tools through the Chat Completions tool transport for
+  Chat-based providers, including OpenCode, instead of encoding them as
+  Responses-only hosted tools.
+- Updated dependencies [8fabf12]
+- Updated dependencies [8fabf12]
+  - @opengeni/db@3.3.1
+  - @opengeni/core@2.3.1
+  - @opengeni/documents@0.8.1
+  - @opengeni/events@0.3.126
+
+## 0.22.2
+
+### Patch Changes
+
+- Updated dependencies [47b88d3]
+- Updated dependencies [d47da57]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [ba29352]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+- Updated dependencies [c10f396]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/core@2.3.0
+  - @opengeni/db@3.3.0
+  - @opengeni/documents@0.8.0
+  - @opengeni/config@0.20.0
+  - @opengeni/runtime@1.3.2
+  - @opengeni/codemode@0.4.14
+  - @opengeni/events@0.3.125
+  - @opengeni/github@0.5.4
+  - @opengeni/observability@0.8.5
+  - @opengeni/storage@0.2.107
+
 ## 0.22.1
 
 ### Patch Changes

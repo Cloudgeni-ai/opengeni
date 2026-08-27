@@ -10,6 +10,7 @@ import {
 const workspace = {
   id: "ba07f804-5df7-453f-941c-8ce3e21e4923",
   accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  kind: "shared",
   name: "Artifacts",
   slug: null,
   externalSource: null,

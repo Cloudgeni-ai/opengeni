@@ -292,6 +292,36 @@ export function githubAppMissingSettings(settings: Settings): string[] {
   return Object.entries(required).flatMap(([name, value]) => (value && value.trim() ? [] : [name]));
 }
 
+export function prReviewGitHubAppMissingSettings(settings: Settings): string[] {
+  const required: Record<string, string | undefined> = {
+    OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: settings.githubAppManifestStateSecret,
+    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: settings.environmentsEncryptionKey,
+    OPENGENI_PR_REVIEW_GITHUB_APP_ID: settings.prReviewGithubAppId,
+    OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID: settings.prReviewGithubClientId,
+    OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET: settings.prReviewGithubClientSecret,
+    OPENGENI_PR_REVIEW_GITHUB_APP_SLUG: settings.prReviewGithubAppSlug,
+    OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET: settings.prReviewGithubWebhookSecret,
+    OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY: settings.prReviewGithubAppPrivateKey,
+  };
+  return Object.entries(required).flatMap(([name, value]) => (value && value.trim() ? [] : [name]));
+}
+
+/** Project the separately configured review App onto the ordinary GitHub App
+ * authority client. This keeps its OAuth, signing, webhook, and installation
+ * identity disjoint from the platform GitHub App while reusing the same
+ * personal-owner / organization-owner proof implementation. */
+export function settingsForPrReviewGitHubApp(settings: Settings): Settings {
+  return {
+    ...settings,
+    githubAppId: settings.prReviewGithubAppId,
+    githubClientId: settings.prReviewGithubClientId,
+    githubClientSecret: settings.prReviewGithubClientSecret,
+    githubAppSlug: settings.prReviewGithubAppSlug,
+    githubWebhookSecret: settings.prReviewGithubWebhookSecret,
+    githubAppPrivateKey: settings.prReviewGithubAppPrivateKey,
+  };
+}
+
 export type GitHubAppSigningSettings = Pick<Settings, "githubAppId" | "githubAppPrivateKey">;
 
 function githubAppTokenMissingSettings(settings: GitHubAppSigningSettings): string[] {
@@ -869,6 +899,7 @@ export async function createGitHubAppInstallationTokenWithSigningSettings(
   input: {
     installationId: number;
     repositoryIds: number[];
+    permissions?: Record<string, "read" | "write">;
   },
 ): Promise<GitHubAppInstallationToken> {
   const missing = githubAppTokenMissingSettings(settings);
@@ -896,6 +927,7 @@ export async function createGitHubAppInstallationTokenWithSigningSettings(
   return await createInstallationToken(jwt, {
     installationId: input.installationId,
     repositoryIds,
+    ...(input.permissions ? { permissions: input.permissions } : {}),
   });
 }
 

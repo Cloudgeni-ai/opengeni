@@ -19,6 +19,7 @@ const migrationUrl = new URL(
 const runtimePostureUrl = new URL("../src/runtime-posture.ts", import.meta.url);
 const provisionRolesUrl = new URL("../src/provision-roles.ts", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+const currentRuntimeApplicationName = "opengeni-lossless-v1-session-variable-sets-v1";
 
 async function acquireMigrationTestDatabase(label: string) {
   const blank = await acquireBlankTestDatabase(label);
@@ -329,6 +330,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           max: 1,
           prepare: false,
           onnotice: () => undefined,
+          connection: { application_name: currentRuntimeApplicationName },
         });
         const [posture] = await admin<
           Array<{
@@ -589,6 +591,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         max: 1,
         prepare: false,
         onnotice: () => undefined,
+        connection: { application_name: currentRuntimeApplicationName },
       });
       const ids = await createFixture(admin, blank.databaseUrl, "session");
       await setRuntimeScope(app, ids);

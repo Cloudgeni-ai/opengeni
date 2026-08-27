@@ -61,11 +61,14 @@ export function computerToolModeForTurn(
   return "function-image";
 }
 
-/** Gateway models do not advertise OpenAI's hosted apply_patch/view_image tool types. */
+/** Chat wires and Gateway models do not advertise OpenAI's hosted sandbox tool types. */
 export function structuredToolTransportForTurn(
-  resolvedModel: { provider: { kind: RegistryProviderKind } } | null,
+  resolvedModel: {
+    provider: { kind: RegistryProviderKind; api: ModelProviderApi };
+  } | null,
 ): boolean {
   if (!resolvedModel) return true;
+  if (resolvedModel.provider.api === "chat") return false;
   return ![
     "codex-subscription",
     "xai-subscription",

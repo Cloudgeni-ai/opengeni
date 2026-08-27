@@ -29,7 +29,14 @@ describe("source hygiene", () => {
       .filter((file) => file.length > 0 && existsSync(join(repoRoot, file)));
     expect(files.length).toBeGreaterThan(100);
 
-    const binaryFiles = files.filter((file) => readFileSync(join(repoRoot, file)).includes(0));
+    const binaryFiles = files.filter((file) => {
+      try {
+        return readFileSync(join(repoRoot, file)).includes(0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+        throw error;
+      }
+    });
     expect(binaryFiles).toEqual([]);
   }, 30_000);
 });

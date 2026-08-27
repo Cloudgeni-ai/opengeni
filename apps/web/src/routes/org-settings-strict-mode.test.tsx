@@ -64,6 +64,7 @@ const context = {
     {
       id: workspaceId,
       accountId,
+      kind: "shared",
       name: "Strict workspace",
       slug: null,
       externalSource: null,

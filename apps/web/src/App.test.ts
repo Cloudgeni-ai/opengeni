@@ -31,6 +31,7 @@ import {
   visualTreeDepth,
 } from "./lib/session-rail";
 import {
+  authoritativeSessionBranchChannels,
   beginSessionBranchRequest,
   commitSessionBranchPage,
   failSessionBranchRequest,
@@ -38,6 +39,7 @@ import {
   sessionBranchSummaryDecision,
   upsertSessionBranchChild,
 } from "./lib/session-branch-cache";
+import { SessionChannelProjectionAuthority } from "./lib/session-pins";
 import {
   buildPinnedRailSections,
   buildRailForest,
@@ -446,6 +448,7 @@ describe("rail session grouping", () => {
         "manager",
         {
           sessions: [cached],
+          channelGenerations: new Map(),
           nextCursor: null,
           loading: false,
           failed: false,
@@ -476,6 +479,36 @@ describe("rail session grouping", () => {
       "sibling",
       "worker",
     ]);
+  });
+
+  test("a later child-page read owns fresh channel filing over older detail", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const branchOwner = {};
+    const detail = railSession({
+      id: "worker-channel",
+      parentSessionId: "manager-channel",
+      channelId: "channel-a",
+    });
+    const detailGeneration = authority.beginRead();
+    authority.recordRead(detail, detailGeneration);
+
+    const branchGeneration = authority.beginRead();
+    const moved = { ...detail, channelId: "channel-b" };
+    let pages = commitSessionBranchPage(
+      new Map(),
+      "manager-channel",
+      { sessions: [moved], nextCursor: null },
+      { readGeneration: branchGeneration },
+    );
+    pages = upsertSessionBranchChild(pages, detail);
+    const evidence = authoritativeSessionBranchChannels(pages.get("manager-channel")!);
+    authority.replaceOwner(branchOwner, evidence);
+
+    expect(evidence).toEqual([[moved, branchGeneration]]);
+    expect(pages.get("manager-channel")?.sessions[0]?.channelId).toBe("channel-b");
+    expect(authority.project(moved, branchGeneration).channelId).toBe("channel-b");
+    expect(authority.owns(moved)).toBe(true);
+    expect(authority.owns(detail)).toBe(false);
   });
 
   test("page-one invalidation preserves paginated children and an active child", () => {
@@ -895,6 +928,7 @@ describe("organization helpers", () => {
     return {
       id,
       accountId,
+      kind: "shared",
       name: id,
       slug: null,
       externalSource: null,
@@ -1717,6 +1751,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
     return {
       deploymentRevision: "rev-1",
       apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      managedAuthSessionSetMode: "legacy",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
@@ -2677,6 +2712,7 @@ describe("workspace switcher helpers", () => {
       createdAt: "2026-06-11T08:00:00.000Z",
       updatedAt: "2026-06-11T08:00:00.000Z",
       ...patch,
+      kind: patch.kind ?? "shared",
     };
   }
 });

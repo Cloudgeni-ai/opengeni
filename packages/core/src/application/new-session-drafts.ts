@@ -103,18 +103,32 @@ async function hydrateNewSessionDraft(
   }
 
   const options = { ...mapped.options };
-  if (options.variableSetId) {
-    if (
-      !hasPermission(grant.permissions, "variable-sets:attach") ||
-      !hasPermission(grant.permissions, "variable-sets:use") ||
-      !(await getVariableSet(
-        deps.db,
-        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-        options.variableSetId,
-      ))
-    ) {
+  const variableSetIds = options.variableSetIds ?? [];
+  if (variableSetIds.length > 0) {
+    const selectionsAuthorized =
+      hasPermission(grant.permissions, "variable-sets:attach") &&
+      hasPermission(grant.permissions, "variable-sets:use") &&
+      (
+        await Promise.all(
+          variableSetIds.map((variableSetId) =>
+            getVariableSet(
+              deps.db,
+              { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+              variableSetId,
+            ),
+          ),
+        )
+      ).every(Boolean);
+    if (selectionsAuthorized) {
+      options.variableSetIds = variableSetIds;
+      options.variableSetId = variableSetIds[variableSetIds.length - 1];
+    } else {
+      delete options.variableSetIds;
       delete options.variableSetId;
     }
+  } else {
+    delete options.variableSetIds;
+    delete options.variableSetId;
   }
   if (options.rigId) {
     const rig = await getRig(deps.db, workspaceId, options.rigId);

@@ -5,23 +5,47 @@ const adminSource = await Bun.file(`${import.meta.dir}/components/organization-a
 const shellSource = await Bun.file(
   `${import.meta.dir}/components/settings/organization-settings-shell.tsx`,
 ).text();
+const recoverySource = await Bun.file(
+  `${import.meta.dir}/components/organization-recovery.tsx`,
+).text();
+const normalizedRecoverySource = recoverySource.replace(/\s+/gu, " ");
+const workspaceSettingsSource = await Bun.file(
+  `${import.meta.dir}/routes/workspace-settings.tsx`,
+).text();
 const tenancyDocs = await Bun.file(
   `${import.meta.dir}/../../../docs/organization-tenancy.md`,
 ).text();
 
 describe("organization administration surface", () => {
-  test("routes accessible overview, people, retention, and billing sections", () => {
+  test("routes accessible overview, knowledge, people, recovery, retention, and billing sections", () => {
     expect(routeSource).toContain("<OrganizationSettingsShell");
     expect(shellSource).toContain('aria-label="Organization settings"');
     expect(shellSource).toContain('aria-current={selected ? "page" : undefined}');
-    for (const section of ["overview", "people", "retention", "billing"]) {
+    for (const section of ["overview", "knowledge", "people", "recovery", "retention", "billing"]) {
       expect(shellSource).toContain(`id: "${section}"`);
     }
+    expect(routeSource).toContain('section === "knowledge"');
+    expect(routeSource).toContain('section === "recovery"');
+    expect(routeSource).toContain("OrganizationRecoverySection");
+    expect(routeSource).toContain("OrganizationKnowledgePrompt");
+    expect(routeSource).toContain("canManageOrganizationKnowledge");
+    expect(routeSource).toContain('"account:admin"');
+    expect(routeSource).toContain("Organization identity is read-only for you");
+    expect(recoverySource).toContain("overview.eligibleMembers");
+    expect(recoverySource).not.toContain("listOrganizationAdministrationMembers");
+    expect(normalizedRecoverySource).toContain("including organization administration and");
+    expect(normalizedRecoverySource).toContain("billing management");
+    expect(normalizedRecoverySource).toContain("No Personal content, workspace ownership");
+    expect(normalizedRecoverySource).toContain("Recovery unavailable");
+    expect(normalizedRecoverySource).toContain("A current owner must rotate the policy");
+    expect(workspaceSettingsSource).toContain("permanently owned by its organization");
+    expect(workspaceSettingsSource).toContain("Cross-organization transfer");
+    expect(workspaceSettingsSource).toContain("granting or revoking named workspace roles");
   });
 
   test("uses only lifecycle APIs and never links a member personal workspace", () => {
     for (const method of [
-      "listOrganizationMembers",
+      "listOrganizationAdministrationMembers",
       "listOrganizationInvitationsForOrganization",
       "createOrganizationInvitation",
       "revokeOrganizationInvitation",
@@ -29,9 +53,8 @@ describe("organization administration surface", () => {
       "acceptOrganizationInvitation",
       "updateOrganizationMember",
       "updateOrganizationWorkspace",
-      "addOrganizationWorkspaceMember",
-      "updateOrganizationWorkspaceMember",
-      "removeOrganizationWorkspaceMember",
+      "putOrganizationWorkspaceMember",
+      "revokeOrganizationWorkspaceMember",
       "getOrganizationRetentionPolicy",
       "updateOrganizationRetentionPolicy",
     ]) {
@@ -47,7 +70,8 @@ describe("organization administration surface", () => {
     expect(adminSource).toContain("member.name?.trim()");
     expect(adminSource).toContain("member.email");
     expect(adminSource).toContain("Add organization member");
-    expect(adminSource).toContain("Workspace administrator");
+    expect(adminSource).toContain("Custom permissions…");
+    expect(adminSource).toContain("Personal content stays personal");
     expect(adminSource).not.toContain(".addWorkspaceMember(");
     expect(adminSource).not.toContain(".removeWorkspaceMember(");
     expect(adminSource).toContain("props.onAuthorityChanged()");
@@ -70,7 +94,9 @@ describe("organization administration surface", () => {
     expect(adminSource).toContain(
       "The authoritative policy was refreshed. Review it and submit a new action.",
     );
-    expect(adminSource).not.toContain("retryOrganization");
+    expect(adminSource).toContain("async function retryInvitationDelivery");
+    expect(adminSource).toContain("onClick={() => void retryInvitationDelivery(invite)}");
+    expect(adminSource.match(/retryOrganizationUserSetupDelivery\(/g)?.length).toBe(1);
   });
 
   test("wires reads and mutations to independent lanes and invalidates on unmount", () => {
@@ -90,7 +116,21 @@ describe("organization administration surface", () => {
   test("documents the bounded organization and workspace control plane", () => {
     expect(tenancyDocs).toContain("bounded organization\nadministration surface");
     expect(tenancyDocs).toContain("reads and mutations use independent operation lanes");
-    expect(tenancyDocs).toContain("Provider email delivery remains a\nnon-goal");
+    expect(tenancyDocs).toContain("The lifecycle therefore **adopts** that exact\naccount");
+    expect(tenancyDocs).toContain(
+      "durable email\ndelivery outcome/retry reconciliation are active",
+    );
+    expect(tenancyDocs).not.toContain(
+      "This phase has no durable delivery outcome, retry, or reconciliation\nstate",
+    );
+    expect(tenancyDocs).not.toContain(
+      "Durable email delivery outcome/retry reconciliation and automatic scheduling",
+    );
+    expect(tenancyDocs).not.toContain("Provider email delivery remains a\nnon-goal");
+    expect(tenancyDocs).not.toContain("- provider invitation email delivery;");
+    expect(tenancyDocs).not.toContain(
+      "no organization membership, fallback\naccount, or bound invitation",
+    );
     expect(tenancyDocs).toContain("0332_organization_shared_workspace_control_plane.sql");
     expect(tenancyDocs).not.toContain("member-management\nUI remain deferred");
   });

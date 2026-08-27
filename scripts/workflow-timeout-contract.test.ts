@@ -41,6 +41,8 @@ const EXPECTED_CAPS = [
   ["ci.yml", "test-suite", "Recovery integration regressions", 5, "run"],
   ["ci.yml", "browser-acceptance", "Session pin browser acceptance", 4, "run"],
   ["ci.yml", "browser-acceptance", "Responsive knowledge surfaces browser acceptance", 6, "run"],
+  ["ci.yml", "browser-acceptance", "Organization onboarding lifecycle acceptance", 8, "run"],
+  ["ci.yml", "browser-acceptance", "Browser account session-set acceptance", 14, "run"],
   ["ci.yml", "browser-acceptance", "Workbench browser acceptance", 4, "run"],
   ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
   ["ci.yml", "e2e-shards", "Install pinned browser runtimes", 17, "action"],
@@ -55,7 +57,7 @@ const EXPECTED_JOB_BUDGETS = {
   "ci.yml:integration-shards": { stepCaps: 31, needed: 32, jobCap: 40 },
   "ci.yml:e2e-shards": { stepCaps: 30, needed: 31, jobCap: 35 },
   "ci.yml:test-suite": { stepCaps: 18, needed: 19, jobCap: 30 },
-  "ci.yml:browser-acceptance": { stepCaps: 31, needed: 32, jobCap: 35 },
+  "ci.yml:browser-acceptance": { stepCaps: 53, needed: 54, jobCap: 60 },
   "ci.yml:package-contracts": { stepCaps: 38, needed: 39, jobCap: 55 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
 } as const;
@@ -77,7 +79,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 13 run plus 3 action steps use static native caps", async () => {
+  test("all jobs and the exact 15 run plus 3 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -117,7 +119,7 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(13);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(15);
     expect(capped.filter((row) => row[4] === "action")).toHaveLength(3);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);
@@ -135,7 +137,7 @@ describe("workflow timeout contract", () => {
     );
     expect(callers).toHaveLength(3);
     expect(callers.find(({ job }) => job === "browser-acceptance")?.step.with?.browsers).toBe(
-      "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}",
+      "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );
 
     const action = Bun.YAML.parse(await readFile(playwrightActionPath, "utf8")) as {

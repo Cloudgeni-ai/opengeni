@@ -110,9 +110,9 @@ export type CompanyProfileContent = z.infer<typeof CompanyProfileContent>;
 /**
  * The same profile, bounded for an **agent** author. The human `account:admin`
  * route keeps `CompanyProfileContent` and its wider limits; this is the shape
- * the first-party `company_profile_propose` tool accepts, because the profile is
- * the largest always-on prompt surface in the product and a model left to its
- * own judgement fills every field to the ceiling.
+ * persisted by the first-party `company_profile_propose` tool. The current tool
+ * accepts only identity and mission and writes empty compatibility lists, but
+ * the validator must still read historical revisions without rewriting them.
  */
 export const AgentAuthoredCompanyProfileContent = CompanyProfileContent.superRefine(
   (value, context) => {

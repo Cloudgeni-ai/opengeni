@@ -224,7 +224,8 @@ function ChangePayload({
   // definition_edit: summarize which fields the next version would change.
   const payload = change.payload as Record<string, unknown>;
   const touched: string[] = [];
-  if (typeof payload.image === "string" || payload.image === null) touched.push("base image");
+  if (typeof payload.image === "string" || payload.image === null)
+    touched.push("legacy base image (ignored)");
   if (typeof payload.setupScript === "string" || payload.setupScript === null)
     touched.push("setup script");
   if (Array.isArray(payload.checks)) touched.push(`checks (${payload.checks.length})`);

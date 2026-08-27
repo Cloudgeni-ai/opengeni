@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  AddOrganizationWorkspaceMemberRequest,
+  PutOrganizationWorkspaceMemberRequest,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
   ListManagedOrganizationMembershipsResponse,
@@ -51,22 +51,32 @@ describe("organization tenancy foundation contracts", () => {
     ).toBe(false);
   });
 
-  test("assigns an existing organization membership to a shared workspace", () => {
+  test("assigns server-owned named roles or explicit advanced permissions", () => {
     expect(
-      AddOrganizationWorkspaceMemberRequest.parse({
-        organizationMembershipId: ids.membership,
+      PutOrganizationWorkspaceMemberRequest.parse({
         role: "admin",
-        permissions: ["workspace:admin"],
+        expectedUpdatedAt: null,
+        operationId: ids.authority,
       }),
     ).toEqual({
-      organizationMembershipId: ids.membership,
       role: "admin",
-      permissions: ["workspace:admin"],
+      expectedUpdatedAt: null,
+      operationId: ids.authority,
     });
     expect(
-      AddOrganizationWorkspaceMemberRequest.safeParse({
-        organizationMembershipId: "user@example.test",
+      PutOrganizationWorkspaceMemberRequest.safeParse({
+        role: "custom",
         permissions: ["workspace:read"],
+        expectedUpdatedAt: null,
+        operationId: ids.authority,
+      }).success,
+    ).toBe(true);
+    expect(
+      PutOrganizationWorkspaceMemberRequest.safeParse({
+        role: "admin",
+        permissions: ["workspace:admin"],
+        expectedUpdatedAt: null,
+        operationId: ids.authority,
       }).success,
     ).toBe(false);
   });

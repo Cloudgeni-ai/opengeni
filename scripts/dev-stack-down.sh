@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Stop, and optionally remove, ONLY this checkout / git worktree's local OpenGeni
-# stack: the Compose project that `bun run dev` (scripts/dev-stack.sh) created,
-# the sandbox containers attached to that project's network, and (with --clean)
-# that project's data volumes plus its source-tagged sandbox image references.
+# stack: the Docker Compose or native infrastructure project that `bun run dev`
+# created and, with --clean, that project's data plus generated runtime file.
 #
-#   bun run dev:down          stop + remove this worktree's containers/network
-#   bun run dev:clean         ... and its volumes, sandbox image tags, .env.runtime
+#   bun run dev:down          stop this worktree's dependency infrastructure
+#   bun run dev:clean         ... and its data, sandbox image tags, .env.runtime
 #
 # It never prunes unrelated images, volumes, networks, build caches, or another
 # worktree's stack. Host dev processes are not managed here; `bun run dev` is a
@@ -16,9 +15,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/dev-stack-down.sh [--clean] [--yes]
 
-  --clean   Also remove this worktree's Compose volumes (Postgres/Garage/MinIO
-            data), its source-tagged sandbox image references, and .env.runtime.
-  --yes,-y  Do not prompt before removing volumes (implied when stdin is not a TTY).
+  --clean   Also remove this worktree's Postgres/object-storage data, its
+            source-tagged Docker sandbox image references, and .env.runtime.
+  --yes,-y  Do not prompt before removing data (implied when stdin is not a TTY).
 EOF
 }
 
@@ -61,11 +60,49 @@ if [ -f .env.runtime ]; then
   fi
 fi
 export COMPOSE_PROJECT_NAME
+runtime_backend=""
+if [ -f .env.runtime ]; then
+  runtime_backend="$(sed -n 's/^OPENGENI_DEV_BACKEND=//p' .env.runtime | tail -1)"
+fi
+if [ -n "$runtime_backend" ]; then
+  OPENGENI_DEV_BACKEND="$runtime_backend"
+else
+  # No recorded run exists. Resolve the requested/default backend so an
+  # explicit native cleanup still works before the first successful startup.
+  # shellcheck disable=SC1091
+  . ./scripts/dev-stack-backend.sh
+  OPENGENI_DEV_BACKEND="$(opengeni_resolve_dev_backend)"
+fi
+export OPENGENI_DEV_BACKEND
+
+echo "OpenGeni worktree stack: project=${COMPOSE_PROJECT_NAME} backend=${OPENGENI_DEV_BACKEND} (${mode})"
+
+if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
+  if [ "$mode" = "clean" ]; then
+    if [ "$assume_yes" != "1" ] && [ -t 0 ]; then
+      printf 'Remove native project %s including its Postgres/MinIO data? [y/N] ' "$COMPOSE_PROJECT_NAME"
+      read -r answer
+      case "$answer" in
+      y | Y | yes | YES) ;;
+      *)
+        echo "Aborted; nothing removed."
+        exit 1
+        ;;
+      esac
+    fi
+    bash scripts/dev-native-infra.sh down --clean
+    rm -f .env.runtime
+    echo "  removed .env.runtime; the next 'bun run dev' starts from a fresh database."
+  else
+    bash scripts/dev-native-infra.sh down
+  fi
+  echo "Done."
+  exit 0
+fi
+
 # docker-compose.yml interpolates these; the real values no longer matter for
 # stopping, but an unset config path would make Compose reject the file.
 export OPENGENI_NATS_CONFIG_FILE="${OPENGENI_NATS_CONFIG_FILE:-$(pwd)/deploy/nats/local-development.conf}"
-
-echo "OpenGeni worktree stack: compose project=${COMPOSE_PROJECT_NAME} (${mode})"
 
 # Sandbox containers (started by the Agents SDK, labelled openai-agents-sandbox)
 # join ${COMPOSE_PROJECT_NAME}_default and would otherwise keep the Compose

@@ -218,21 +218,26 @@ describe("embedded dedicated-schema isolation", () => {
       const app = postgres(APP_URL, { max: 1 });
       try {
         await app.unsafe(`SET search_path = "opengeni", "opengeni_private", "public"`);
-        await app`SELECT set_config('opengeni.account_id', ${account!.id}, false)`;
-        await app`SELECT set_config('opengeni.workspace_id', ${workspace!.id}, false)`;
-        const inserted = await app<{ id: string }[]>`
-          INSERT INTO session_mcp_servers (
-            account_id, workspace_id, session_id, server_id, name, url, headers_encrypted
-          )
-          VALUES (
-            ${account!.id}, ${workspace!.id}, ${sessionId}, 'grant-test', 'Grant test',
-            'https://mcp.example.test', '{}'::jsonb
-          )
-          RETURNING id`;
-        expect(inserted).toHaveLength(1);
-        const defaultGrantInserted = await app<{ id: string }[]>`
-          INSERT INTO default_privilege_probe (note) VALUES ('default grants include sequences') RETURNING id`;
-        expect(defaultGrantInserted).toHaveLength(1);
+        await app.begin(async (tx) => {
+          await tx`SELECT set_config('opengeni.account_id', ${account!.id}, true)`;
+          await tx`SELECT set_config('opengeni.workspace_id', ${workspace!.id}, true)`;
+          await tx`SELECT set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+          const inserted = await tx<{ id: string }[]>`
+            INSERT INTO session_mcp_servers (
+              account_id, workspace_id, session_id, server_id, name, url, headers_encrypted
+            )
+            VALUES (
+              ${account!.id}, ${workspace!.id}, ${sessionId}, 'grant-test', 'Grant test',
+              'https://mcp.example.test', '{}'::jsonb
+            )
+            RETURNING id`;
+          expect(inserted).toHaveLength(1);
+          const defaultGrantInserted = await tx<{ id: string }[]>`
+            INSERT INTO default_privilege_probe (note)
+            VALUES ('default grants include sequences')
+            RETURNING id`;
+          expect(defaultGrantInserted).toHaveLength(1);
+        });
       } finally {
         await app.end();
       }

@@ -418,6 +418,29 @@ describe("successful-create selection history", () => {
 });
 
 describe("new-session draft option mapping", () => {
+  test("preserves ordered Variable Set precedence through create and draft persistence", () => {
+    const variableSetIds = [
+      "00000000-0000-4000-8000-000000000011",
+      "00000000-0000-4000-8000-000000000013",
+    ];
+    const draft = {
+      ...emptySessionDraft(),
+      variableSetIds,
+      variableSetId: variableSetIds.at(-1)!,
+    };
+    const submission = submissionFromSessionDraft(draft);
+    expect(submission.extras).toMatchObject({
+      variableSetIds,
+      variableSetId: variableSetIds.at(-1),
+    });
+    const options = newSessionDraftOptionsFromSessionDraft(draft);
+    expect(options).toMatchObject({ variableSetIds, variableSetId: variableSetIds.at(-1) });
+    expect(sessionDraftFromNewSessionDraftOptions(options)).toMatchObject({
+      variableSetIds,
+      variableSetId: variableSetIds.at(-1),
+    });
+  });
+
   test("round-trips managed compute, goal, and exact custom permissions", () => {
     const draft = {
       ...emptySessionDraft(),

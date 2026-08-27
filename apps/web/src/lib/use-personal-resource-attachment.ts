@@ -64,44 +64,54 @@ export type PersonalResourceAttachmentController = Readonly<{
 export function useFixedResourceScopes(
   client: OpenGeniCoreClient,
   workspaceId: string | null,
-  variableSetId: string | null,
+  variableSetIds: readonly string[],
   rigId: string | null,
   enabled = true,
-): readonly [ResourceAuthorityScope | null, ResourceAuthorityScope | null] {
+): readonly [readonly (ResourceAuthorityScope | null)[], ResourceAuthorityScope | null] {
+  const variableSetIdsKey = variableSetIds.join("\u0000");
+  const requestedVariableSetIds = useMemo(
+    () => (variableSetIdsKey ? variableSetIdsKey.split("\u0000") : []),
+    [variableSetIdsKey],
+  );
   const identity =
-    !enabled || workspaceId === null || (variableSetId === null && rigId === null)
+    !enabled || workspaceId === null || (requestedVariableSetIds.length === 0 && rigId === null)
       ? null
-      : [workspaceId, variableSetId ?? "", rigId ?? ""].join(":");
+      : [workspaceId, variableSetIdsKey, rigId ?? ""].join(":");
   const [resolved, setResolved] = useState<
-    readonly [string, ResourceAuthorityScope | null, ResourceAuthorityScope | null] | null
+    | readonly [string, readonly (ResourceAuthorityScope | null)[], ResourceAuthorityScope | null]
+    | null
   >(null);
 
   useEffect(() => {
     if (identity === null || workspaceId === null) return;
     let current = true;
     void Promise.all([
-      variableSetId
-        ? client
+      Promise.all(
+        requestedVariableSetIds.map((variableSetId) =>
+          client
             .getVariableSet(workspaceId, variableSetId)
             .then((resource) => resource.scope)
-            .catch(() => null)
-        : null,
+            .catch(() => null),
+        ),
+      ),
       rigId
         ? client
             .getRig(workspaceId, rigId)
             .then((resource) => resource.scope)
             .catch(() => null)
         : null,
-    ]).then(([variableSetScope, rigScope]) => {
+    ]).then(([variableSetScopes, rigScope]) => {
       if (!current) return;
-      setResolved([identity, variableSetScope, rigScope]);
+      setResolved([identity, variableSetScopes, rigScope]);
     });
     return () => {
       current = false;
     };
-  }, [client, identity, rigId, variableSetId, workspaceId]);
+  }, [client, identity, requestedVariableSetIds, rigId, workspaceId]);
 
-  return resolved?.[0] === identity ? [resolved[1], resolved[2]] : [null, null];
+  return resolved?.[0] === identity
+    ? [resolved[1], resolved[2]]
+    : [requestedVariableSetIds.map(() => null), null];
 }
 
 export function usePersonalResourceAttachment(input: {
@@ -224,8 +234,13 @@ export function usePersonalResourceAttachment(input: {
   // to clear prior owner state before hiding it from a connected-machine send.
   const selected = personalSelection(scope ? catalog : null, input.fixed);
   const fixedIdentity = [
-    input.fixed.variableSetId ?? "",
-    input.fixed.variableSetScope ?? "unknown",
+    (
+      input.fixed.variableSetIds ??
+      (input.fixed.variableSetId === null ? [] : [input.fixed.variableSetId])
+    ).join(","),
+    (input.fixed.variableSetScopes ?? [input.fixed.variableSetScope ?? null])
+      .map((variableSetScope) => variableSetScope ?? "unknown")
+      .join(","),
     input.fixed.rigId ?? "",
     input.fixed.rigScope ?? "unknown",
     input.fixed.connectedMachine?.enrollmentId ?? "",
@@ -267,13 +282,14 @@ export function usePersonalResourceAttachment(input: {
       : (input.createVisibility ?? "workspace");
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
   const fixedResourceCount =
-    Number(input.fixed.variableSetId !== null) +
+    (input.fixed.variableSetIds?.length ?? Number(input.fixed.variableSetId !== null)) +
     Number(input.fixed.rigId !== null) +
     Number(input.fixed.connectedMachine !== null);
   const positivelyPersonal =
     sourceLost ||
     selected.personalResourceCount > 0 ||
-    (input.fixed.variableSetId !== null && input.fixed.variableSetScope === "user") ||
+    (input.fixed.variableSetScopes?.some((variableSetScope) => variableSetScope === "user") ??
+      (input.fixed.variableSetId !== null && input.fixed.variableSetScope === "user")) ||
     (input.fixed.rigId !== null && input.fixed.rigScope === "user") ||
     input.fixed.connectedMachine !== null;
   const closureError = selected.closureUnverified

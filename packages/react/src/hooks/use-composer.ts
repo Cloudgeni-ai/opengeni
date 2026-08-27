@@ -1984,10 +1984,12 @@ export function useComposer(
         },
         canRetry: true,
       };
-      replaceOptimisticSends((current) => [...current, operation]);
-      queueMicrotask(processOptimisticSends);
-      setError(null);
-      onSubmitted?.(sendText, input);
+      // The local submission acknowledgement owns the composer before any
+      // host callback or queued processor can observe it. Hosts commonly use
+      // onSubmitted to remove attachment/repository state, and those updates
+      // may synchronously re-render the controlled composer. Clear the refs
+      // first so that handoff cannot re-project the submitted text as the next
+      // draft. The immutable operation above still owns the exact retry input.
       if (explicit === undefined) {
         valueRef.current = "";
         annotationsRef.current = [];
@@ -1998,6 +2000,10 @@ export function useComposer(
         setAnnotationReviewTargetId(null);
         setRestoredResources([]);
       }
+      replaceOptimisticSends((current) => [...current, operation]);
+      queueMicrotask(processOptimisticSends);
+      setError(null);
+      onSubmitted?.(sendText, input);
       return true;
     },
     [
@@ -2529,9 +2535,17 @@ export function useComposer(
     setError(null);
     setDraftConflict(null);
   }, [targetKey]);
+  // `valueRef` is the synchronous composer authority. React state exists to
+  // schedule renders, but a concurrent autosave settlement can render the
+  // previous state lane after a newer input event has already updated the ref.
+  // Projecting that stale state into a controlled textarea rewrites the old
+  // draft for one commit, which moves the caret and can briefly resurrect a
+  // submitted message. Never let an incidental render outrank the latest
+  // local lifecycle decision.
+  const visibleValue = identityMatches ? valueRef.current : "";
 
   return {
-    value: identityMatches ? value : "",
+    value: visibleValue,
     setValue: updateValue,
     annotations: identityMatches ? annotations : [],
     addAnnotation,
@@ -2561,7 +2575,7 @@ export function useComposer(
       sendBlockedRef.current?.() !== true &&
       annotationsComplete &&
       (hasPendingOperation ||
-        value.trim().length > 0 ||
+        visibleValue.trim().length > 0 ||
         hasReadyResources ||
         annotations.length > 0),
     pause,

@@ -15,8 +15,11 @@
  *   retrieved on demand behind the exact attempt's retrieval handle. Its length
  *   is therefore retrieval cost, not standing prompt cost, which is why it gets
  *   more room rather than less.
- * - A company profile is the largest always-on surface: every field is
- *   mandatory prompt context in every session across the whole organization.
+ * - Organization identity and mission are always-on context for root sessions
+ *   across the whole organization. Historical company-profile list fields stay
+ *   in the storage contract for compatibility; nonempty values on an already-
+ *   active historical revision remain composed with an explicit compatibility
+ *   label until an organization owner replaces the profile.
  * - Knowledge is retrieval evidence and never joins the always-composed prefix.
  *
  * These caps deliberately bind only agent-authored writes. The human-facing
@@ -38,10 +41,10 @@ export const AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS = 1_200;
 /** `identity` and `mission`: a couple of sentences, not a positioning document. */
 export const AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS = 400;
 
-/** One product, customer, goal, or constraint: a phrase or a single sentence. */
+/** Legacy company-profile list entry bound; retained for stored-revision compatibility. */
 export const AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS = 200;
 
-/** Whole canonical profile, mandatory in every session across the organization. */
+/** Whole canonical compatibility profile; current agent tools submit only identity and mission. */
 export const AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES = 4_096;
 
 export const AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE =
@@ -51,19 +54,17 @@ export const AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE =
   "imperative, no numbered procedure. Split unrelated rules into separate entries.";
 
 export const AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE =
-  "A workspace preference is durable Company Brain content that agents retrieve on demand, so its length is " +
+  "A Skill is durable Agent Knowledge that agents retrieve on demand, so its length is " +
   "retrieval cost rather than standing prompt cost: only its short title and description are composed into " +
   `every session prompt. Keep it under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters: state the ` +
   "preference plainly, no numbered procedure and no examples. Put procedure in a Document or Skill and " +
   "reference it instead.";
 
 export const AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE =
-  "Every company-profile field is mandatory prompt context in every session across the organization. Keep " +
-  `identity and mission under ${AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS} characters each, each list ` +
-  `entry under ${AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS}, and the whole profile under ` +
-  `${AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES} UTF-8 bytes: one concise statement per field, no ` +
-  "numbered procedure and no marketing copy. Longer source material belongs in organization Documents and is " +
-  "retrieved as evidence.";
+  "Organization identity and mission are mandatory prompt context in every root session across the " +
+  `organization. Keep each under ${AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS} characters: one concise ` +
+  "descriptive statement, no products, customers, goals, constraints, procedure, or marketing copy. Those " +
+  "details belong in organization Documents and are retrieved as evidence when relevant.";
 
 /**
  * Lane-agnostic guidance for the one `remember` content field, whose schema

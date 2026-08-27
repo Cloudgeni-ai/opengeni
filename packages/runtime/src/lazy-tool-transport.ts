@@ -173,6 +173,7 @@ export class LazyToolRuntime {
     private readonly mcpServerIds: ReadonlySet<string>,
     private readonly toolPreparationReady?: Promise<void>,
     private readonly deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
+    private readonly preparationIndependentToolNames: ReadonlySet<string> = new Set(),
   ) {
     this.controlTools =
       transport !== "generic_dispatch"
@@ -280,6 +281,7 @@ export class LazyToolRuntime {
       if (!isFunctionTool(tool)) continue;
       this.functionTools.set(tool.name, tool);
       if (ALWAYS_VISIBLE_BASE_TOOL_NAMES.has(tool.name)) continue;
+      if (this.preparationIndependentToolNames.has(tool.name)) continue;
       // Origin, not transport: deferred MCP plus every non-MCP function tool
       // outside the base set. ToolRef.eager still decides the MCP arm.
       const lazy =
@@ -323,14 +325,20 @@ export class LazyToolRuntime {
     return this.functionTools.get(name);
   }
 
-  requiresPreparationForFunctionCall(_name: string): boolean {
+  requiresPreparationForFunctionCall(name: string): boolean {
     // Deferred preparation is one attempt-wide authority boundary, not only a
     // schema-discovery dependency. Keep the stable always-visible base tool
-    // schemas on the first request, but make every actual function call join
-    // the exact shared promise before Runner can dispatch it. This prevents an
-    // eager tool such as exec_command from launching an out-of-process Codemode
-    // client before the attempt catalog has been persisted and activated.
-    return this.toolPreparationReady !== undefined && !this.preparationSettled;
+    // schemas on the first request, but make every ordinary function call join
+    // the exact shared promise before Runner can dispatch it. The only
+    // exceptions are exact attempt-local names supplied by the host. This
+    // prevents an eager tool such as exec_command from launching an
+    // out-of-process Codemode client before the attempt catalog has been
+    // persisted and activated.
+    return (
+      !this.preparationIndependentToolNames.has(name) &&
+      this.toolPreparationReady !== undefined &&
+      !this.preparationSettled
+    );
   }
 
   wrapModel(model: Model): Model {
@@ -448,12 +456,14 @@ export function installLazyToolRuntime(
   mcpServerIds: ReadonlySet<string>,
   toolPreparationReady?: Promise<void>,
   deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
+  preparationIndependentToolNames: ReadonlySet<string> = new Set(),
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
     mcpServerIds,
     toolPreparationReady,
     deferredMcpServerIds,
+    preparationIndependentToolNames,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;

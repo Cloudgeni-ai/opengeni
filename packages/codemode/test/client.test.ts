@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
 import {
   CodemodeClient,
   CodemodeOperationError,
@@ -142,9 +143,7 @@ describe("CodemodeClient", () => {
       requests.every(({ authorization }) => authorization === "Bearer exact-attempt-token"),
     ).toBe(true);
     expect(
-      requests.every(
-        ({ apiContract }) => apiContract === "2026-08-atomic-session-fork-visibility-v1",
-      ),
+      requests.every(({ apiContract }) => apiContract === OPENGENI_API_CONTRACT_REVISION),
     ).toBe(true);
     expect(requests[1]!.body).toMatchObject({ operationId, identity: definition.identity });
   });

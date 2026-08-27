@@ -535,13 +535,15 @@ async function resolvePackRig(
       image: null,
     };
   }
-  const image = rig.activeVersion.image ?? null;
-  const status =
-    pack.sandboxImage && image !== pack.sandboxImage
-      ? "mismatch"
-      : pack.rig?.requireVerified && rig.activeVersionHealth?.checkHealth !== "passing"
-        ? "unverified"
-        : "ready";
+  // Explicit Rig images are disabled: a selected Rig always composes on the
+  // deployment platform base. Historical image values remain stored but are
+  // neither effective runtime truth nor a valid v2 Pack compatibility target.
+  const image = null;
+  const status = pack.sandboxImage
+    ? "mismatch"
+    : pack.rig?.requireVerified && rig.activeVersionHealth?.checkHealth !== "passing"
+      ? "unverified"
+      : "ready";
   return {
     required,
     status,
@@ -561,7 +563,7 @@ function packRigBlocker(rig: PackRigResolution, legacyImage: string | null): str
     return "Verify the selected compute environment before installing this Pack";
   }
   if (legacyImage) {
-    return `The selected compute environment must use the Pack's previous image ${legacyImage}; the Pack will not replace workspace compute`;
+    return `This Pack requires the retired explicit sandbox image ${legacyImage}; Rig-bound Packs currently must use the deployment-managed platform sandbox`;
   }
   return "The selected compute environment does not satisfy this Pack's requirement";
 }
