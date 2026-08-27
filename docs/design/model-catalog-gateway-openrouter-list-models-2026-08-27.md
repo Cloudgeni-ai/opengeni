@@ -22,7 +22,10 @@ plus, per workspace, slugs the admin typed for Your Gateway.
 
 Enabled means existing policy, connections, and key readiness. It is not stored on catalog rows.
 
-Billing is derived from provider kind. It is not stored on catalog rows.
+Billing has two separate facts: upstream settlement/credential attribution and the cost exposed to
+the workspace. Provider kind can derive the former; the deployment explicitly defines the latter.
+The `list_models` cost must not be inferred from provider identity or from what the deployment pays
+upstream. Billing policy is not stored on catalog membership rows.
 
 - Local/self-host: today's `getSettings()` (env plus code constants). Default.
 - Managed: `OPENGENI_MODEL_CATALOG_SOURCE=database` reads one row. No boot reseed. No Settings UI.
@@ -45,7 +48,8 @@ Billing is derived from provider kind. It is not stored on catalog rows.
 - OpenRouter v1 is curated `:free` only. Reserved provider ID: `openrouter`. Host JSON must not
   declare that ID.
 - OpenRouter billing is a reserved derived kind, internal and not a host-JSON kind: deployment API
-  key plus `metering: external`. It is not API-key to credits.
+  key plus `metering: external`. It is not API-key to credits. This describes upstream settlement
+  and credit-debit behavior; it does not intrinsically make the product-facing cost `free`.
 - `list_models`: empty args, one UTF-8 string, always-visible local function. Notes are optional
   per-ID free text on the catalog document.
 - `docs/model-providers.md` is updated in the same change.
@@ -82,10 +86,12 @@ These were wrong or missing in earlier drafts and are now decisions.
   `source: "opengeni"` and provider `OpenGeni`. OpenRouter must get `source: "openrouter"` and its
   own provider label. The picker rail stays External through existing billing
   (`metering: external`, `upstreamPayer: deployment`). Extend `ClientModel.source`.
-- `cost: free` is OpenRouter-only. Do not map every deployment-plus-external row to free; anonymous
-  host JSON also has that billing. Closed words: `free` is the reserved OpenRouter kind, `credits`
-  is `opengeni_credits`, `subscription` is a connected subscription, and `workspace` is Your
-  Gateway.
+- `cost: free` is a deployment-defined workspace-facing price, not an OpenRouter property and not
+  an inference from `upstreamPayer`, `metering`, provider kind, or upstream price. A deployment may
+  mark OpenRouter or any other product model free regardless of what it pays behind the scenes.
+  Closed output words remain `free`, `credits`, `subscription`, and `workspace`; the deployment
+  billing policy determines `free` versus `credits`, while connected-subscription and Your Gateway
+  models retain their truthful ownership labels.
 - Notes break a line if they contain newlines or the field separator. Zod requirements: at most 500
   characters, no `\n` or `\r`, and no `|`. Render with `|` separators. Reject on the document; do
   not truncate at render time.
@@ -125,6 +131,11 @@ Environment variables:
 The deployment document contains the built-in allow-list, registry providers, curated Gateway
 table, curated OpenRouter `:free` slugs, and `modelNotes: { [productId]: string }`. It contains no
 keys, billing, enabled flags, or band objects.
+
+The deployment's workspace-facing model-cost policy is a separate billing input. It determines
+which deployment-catalog product IDs render as `free` versus `credits` independently of provider
+identity and upstream settlement. Its exact code/env and managed-database representation must be
+defined before implementation without putting billing onto catalog membership rows.
 
 Overlay call sites that must use `resolveCatalogSettings` in database mode; complete this list in
 the PR if another caller appears:
@@ -377,14 +388,16 @@ Do not ship OpenRouter as API-key credits. Do not ship database mode without fai
 - AC28: OpenRouter rows use `metering: external` and `upstreamPayer: deployment`, render on the
   External picker rail, and create no credit debit.
 - AC29: Host JSON using provider ID `openrouter` fails boot.
-- AC30: Selectable OpenRouter lines use cost `free`.
+- AC30: The managed starter deployment policy marks its curated OpenRouter lines `free`; that label
+  comes from deployment billing policy, not from the OpenRouter provider ID or settlement kind.
 - AC31: There is no OpenRouter custom HTTP/UI.
 - AC32: The database document contains slugs and notes, never the key.
 - AC33: `projectClientModel` and `ClientModel.source` expose `openrouter`, not `opengeni`, for
   OpenRouter rows. Provider label is not `OpenGeni`.
 - AC34: `getSettings()` does not query the catalog table. Database mode uses
   `resolveCatalogSettings`.
-- AC35: Cost `free` applies only to the reserved OpenRouter kind.
+- AC35: Cost `free` applies exactly to product IDs the deployment billing policy marks free,
+  regardless of provider kind or upstream settlement. Provider identity alone never produces it.
 - AC36: Starter OpenRouter models are tool-capable, or the table is empty.
 - AC37: The tool description and `Current:` line make clear that calling it does not change the
   session model.
@@ -447,7 +460,7 @@ Connect Gateway, add a known slug, select it under Your Gateway, and perform one
 | Overlay miss causes API/worker disagreement | Section 6 call-site list plus claim test |
 | Custom still throws at the fence | AC11 |
 | Database auto-seed | AC5 |
-| Credits applied to free models | Reserved kind plus AC28/AC35 |
+| Credits applied to free models | Explicit deployment cost policy plus AC28/AC35 |
 | Band UI returns | AC19 |
 | Note breaks a line | AC20 |
 | Text-only `:free` model | AC36 |
@@ -491,8 +504,9 @@ Merge when AC1-AC37 pass across the listed tests, typecheck, migration guards, a
 Reviewer sentence:
 
 > Code versus DB defines the list; policy and connections decide who can use it; custom is
-> type-a-Gateway-slug; OpenRouter `:free` is our key on External; `list_models` is one string of
-> selectable models plus optional notes, and it does not change this session.
+> type-a-Gateway-slug; OpenRouter `:free` uses our key on External and the deployment decides its
+> workspace-facing cost; `list_models` is one string of selectable models plus optional notes, and
+> it does not change this session.
 
 ## 23. Implementation and UX quality bar
 
@@ -526,8 +540,9 @@ features:
    code/env construction or a database singleton as its membership source.
 2. Overlay workspace-local Gateway slugs only after the deployment catalog is resolved, while
    retaining the existing workspace Gateway connection as the credential/readiness boundary.
-3. Inject a reserved OpenRouter-free provider only when the deployment key exists, deriving
-   external billing and a distinct client source from that internal provider kind.
+3. Inject a reserved OpenRouter provider only when the deployment key exists, deriving external
+   upstream settlement and a distinct client source from that internal provider kind while taking
+   the workspace-facing `free`/`credits` label from deployment billing policy.
 4. Reuse the exact authenticated workspace-catalog selectability result to expose a stable local
    `list_models` tool whose schema is constant and whose dynamic output is plain text.
 
@@ -583,11 +598,12 @@ A final symbol audit should cover every source caller of `configuredModels`,
    `apiKey` and an `apiKeyEnv` name. The database document must reject inline key material. Confirm
    that a non-secret `apiKeyEnv` reference is allowed, or define a separate provider-to-env binding
    contract.
-3. **Anonymous-provider `list_models` cost word.** Existing anonymous host JSON is
-   `upstreamPayer: deployment` plus `metering: external`, but `free` is explicitly OpenRouter-only.
-   The closed words currently provide no legal cost for an anonymous selectable model. Add a word
-   such as `external`, or explicitly exclude anonymous models from the tool; exclusion would
-   conflict with “all selectable.”
+3. **Deployment model-cost policy representation.** `free` is now explicitly a deployment-defined
+   workspace-facing price independent of provider identity and upstream settlement. Define the
+   exact code/env and managed-database authority for mapping deployment-catalog product IDs to
+   `free` versus `credits`, including validation for unknown IDs and the behavior of an omitted
+   entry. Keep it separate from catalog membership rows. Anonymous deployment routes then use that
+   same policy instead of receiving an OpenRouter-specific or inferred label.
 4. **Custom-model delete contract.** The collection path is specified, but the target is not.
    Choose either `DELETE .../gateway-custom-models/:customModelId`, a request body containing the
    exact upstream ID, or another unambiguous contract. Also define the optional label's length and
