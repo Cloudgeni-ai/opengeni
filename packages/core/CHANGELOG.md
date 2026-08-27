@@ -1,5 +1,14 @@
 # @opengeni/core
 
+## 2.5.1
+
+### Patch Changes
+
+- Updated dependencies [da0c2d2]
+  - @opengeni/db@3.5.1
+  - @opengeni/documents@0.8.4
+  - @opengeni/events@0.4.2
+
 ## 2.5.0
 
 ### Minor Changes
