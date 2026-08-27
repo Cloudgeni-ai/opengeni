@@ -82,6 +82,7 @@ requires both attachment permissions; removing one requires
 | Method and path                                                                   | Permission(s)                                    | Notes                                                                                                                        |
 | --------------------------------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
 | `GET /v1/workspaces/:workspaceId/variable-sets`                                   | `variable-sets:list` + `secrets:list`            | Variable sets with variable metadata, never plaintext values.                                                                |
+| `POST /v1/workspaces/:workspaceId/variable-sets/resolve-attachments`              | `variable-sets:attach` + `variable-sets:use`      | Resolve only caller-supplied ids to accessible `{ id, scope }` pairs. Inaccessible ids are omitted; names, variable metadata, and values are never returned. |
 | `POST /v1/workspaces/:workspaceId/variable-sets`                                  | `variable-sets:write`; plus `secrets:write` when initial values are present; organization scope also requires `account:admin` | Create with `scope: organization | workspace | user` (omission defaults to workspace). 409 on duplicate active name within the owner scope. |
 | `GET /v1/workspaces/:workspaceId/variable-sets/:variableSetId`                    | `variable-sets:read` + `secrets:list`            | Metadata only.                                                                                                               |
 | `GET /v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name`    | `variable-sets:read` + literal `secrets:read`    | Return one exact plaintext value and metadata; read and metadata-only audit commit atomically.                               |
@@ -113,15 +114,18 @@ Attachment points:
   worker and provide the exact old/new runtime login list through
   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; never restart a pre-0306
   image after it commits.
-  The new-session browser uses the ordinary target-workspace scoped resource
-  metadata as its choice catalog, so inaccessible resources are absent and a
-  second personal-authority status request cannot block an otherwise valid
-  selection. A selected personal resource receives session-lifetime authority
-  automatically; workspace-visible creation keeps the required warning
-  acknowledgement inline with the resource selector. Established-session
-  Send/Steer still presents the explicit duration choice because that command
-  can intentionally grant authority for one message, the session, or future
-  work in the workspace.
+  The new-session browser uses ordinary target-workspace scoped metadata as its
+  choice catalog only when the grant holds both `variable-sets:list` and
+  `secrets:list`. An attach/use-only grant never calls that catalog: restored
+  ids and selected Rig defaults go through exact attachment resolution, which
+  returns only accessible `{ id, scope }` pairs and omits inaccessible ids.
+  This keeps inaccessible choices absent, preserves create-by-id authority, and
+  prevents a metadata request from blocking an otherwise valid selection. A
+  selected personal resource receives session-lifetime authority automatically;
+  workspace-visible creation keeps the required warning acknowledgement inline
+  with the resource selector. Established-session Send/Steer still presents the
+  explicit duration choice because that command can intentionally grant
+  authority for one message, the session, or future work in the workspace.
 - `POST`/`PATCH /v1/workspaces/:id/scheduled-tasks` accept `variableSetId` (null detaches on update). Setting or changing a non-null attachment requires both permissions; detaching requires `variable-sets:attach`. Changing the attachment of a task with a live reusable session returns 409 because the task's accepted execution snapshot must remain stable; explicitly reconfigure the quiescent target session or recreate the task instead.
 - Organization- and workspace-scoped Variable Sets on scheduled runs materialize under the exact fenced service turn (`scheduler`) and do not invent an initiating human. User-scoped Variable Sets remain different: they require the frozen causal human and exact personal-resource grant described next. This distinction applies identically to standalone database decryption and a host-provided `sandboxSecrets` credential boundary.
 - When the selected Variable Set, Rig, or one of the Rig version's defaults is personal, scheduled-task acceptance freezes the causal human plus exact membership/resource/grant generations. Each occurrence revalidates and copies that immutable authority before dispatch; task edits, current Rig defaults, the current API user, and workspace defaults are never fallback authority. `once` grants belong to one admitted occurrence across recovery attempts. A rolling upgrade pauses legacy tasks that lack this ledger, and an explicit resume converts them before dispatch; old-writer authority-free runs are rejected in PostgreSQL. Only identifiers and generations are stored in this ledger; plaintext still crosses only the ordinary materialization/read boundaries described above.

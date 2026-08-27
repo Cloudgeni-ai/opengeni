@@ -279,6 +279,10 @@ const budgets = {
   // entry. The exact merged Bun 1.4 Linux/x64 graph measures 2,198,390 raw
   // bytes. Advance only the policy-derived raw envelope to 2,148 KiB, retaining
   // 1,162 bytes of headroom; every other cap remains fixed.
+  // Exact-ID Variable Set attachment resolution keeps attach/use-only grants
+  // out of the metadata catalog while adding one narrow browser request. The
+  // merged graph measures 2,199,854 raw bytes; advance only this raw envelope
+  // to 2,150 KiB, retaining 1,746 bytes of headroom.
   directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 603 * kib,
   directSessionFiles: 31,
