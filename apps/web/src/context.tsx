@@ -6,7 +6,12 @@ import {
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
-import type { CreateSessionRequest, SessionEvent } from "@opengeni/sdk";
+import type {
+  CreateSessionRequest,
+  McpConnectionAuthoritySelection,
+  PersonalGitHubRepositorySelectionInput,
+  SessionEvent,
+} from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import type { BrowserAccountTransition } from "@opengeni/react/accounts";
@@ -116,6 +121,9 @@ import type {
   GitHubRepository,
   LatencyMode,
   ResourceRef,
+  PersonalGitHubConnectionStatusResponse,
+  PersonalGitHubRepositoryCatalogItem,
+  PersonalGitHubRepositorySelectionState,
   Session,
   SlackUserLinkAccessRequest,
   ToolRef,
@@ -218,6 +226,16 @@ export type AppContextValue = {
   githubStatusFailed: boolean;
   /** True once the current workspace's repository catalog has completed its first load. */
   githubCatalogReady: boolean;
+  personalGitHubStatus: PersonalGitHubConnectionStatusResponse | null;
+  personalGitHubRepositories: PersonalGitHubRepositoryCatalogItem[];
+  personalGitHubSelection: PersonalGitHubRepositorySelectionState | null;
+  personalGitHubCatalogReady: boolean;
+  personalGitHubBusy: boolean;
+  selectedPersonalGitHubRepoIds: Set<string>;
+  setSelectedPersonalGitHubRepoIds: Dispatch<SetStateAction<Set<string>>>;
+  selectedPersonalGitHubRepoRefs: Record<string, string>;
+  setSelectedPersonalGitHubRepoRefs: Dispatch<SetStateAction<Record<string, string>>>;
+  personalGitHubAuthority: McpConnectionAuthoritySelection | null;
   githubAppOpen: boolean;
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
@@ -285,6 +303,22 @@ export type AppContextValue = {
     workspaceId: string,
     signal?: AbortSignal,
     options?: { sync?: boolean },
+  ) => Promise<void>;
+  refreshPersonalGitHub: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
+  connectPersonalGitHub: (workspaceId: string) => Promise<void>;
+  reconnectPersonalGitHub: (workspaceId: string) => Promise<void>;
+  disconnectPersonalGitHub: (workspaceId: string) => Promise<boolean>;
+  savePersonalGitHubRepositories: (
+    workspaceId: string,
+    repositories: PersonalGitHubRepositorySelectionInput[],
+  ) => Promise<boolean>;
+  ensurePersonalGitHubAuthority: (
+    workspaceId: string,
+    context?: "user_private" | "workspace_shared",
+  ) => Promise<McpConnectionAuthoritySelection | null>;
+  togglePersonalGitHubRepository: (
+    workspaceId: string,
+    repository: PersonalGitHubRepositoryCatalogItem,
   ) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
@@ -527,6 +561,23 @@ export function RootRouteComponent() {
   const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
   const [githubStatusFailed, setGithubStatusFailed] = useState(false);
   const [githubCatalogReady, setGithubCatalogReady] = useState(false);
+  const [personalGitHubStatus, setPersonalGitHubStatus] =
+    useState<PersonalGitHubConnectionStatusResponse | null>(null);
+  const [personalGitHubRepositories, setPersonalGitHubRepositories] = useState<
+    PersonalGitHubRepositoryCatalogItem[]
+  >([]);
+  const [personalGitHubSelection, setPersonalGitHubSelection] =
+    useState<PersonalGitHubRepositorySelectionState | null>(null);
+  const [personalGitHubCatalogReady, setPersonalGitHubCatalogReady] = useState(false);
+  const [personalGitHubBusy, setPersonalGitHubBusy] = useState(false);
+  const [selectedPersonalGitHubRepoIds, setSelectedPersonalGitHubRepoIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [selectedPersonalGitHubRepoRefs, setSelectedPersonalGitHubRepoRefs] = useState<
+    Record<string, string>
+  >({});
+  const [personalGitHubAuthority, setPersonalGitHubAuthority] =
+    useState<McpConnectionAuthoritySelection | null>(null);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
@@ -558,6 +609,7 @@ export function RootRouteComponent() {
   // deselections survive subsequent catalog refreshes.
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
+  const personalGitHubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
   const mcpCatalogRequests = useRef(new Map<string, Promise<CapabilityCatalogResponse>>());
   // Stable CREATE idempotency key for the in-flight session create. Generated
@@ -661,6 +713,11 @@ export function RootRouteComponent() {
     setGithubStatusFailed(false);
     setGithubRepos([]);
     setGithubCatalogReady(false);
+    setPersonalGitHubStatus(null);
+    setPersonalGitHubRepositories([]);
+    setPersonalGitHubSelection(null);
+    setPersonalGitHubCatalogReady(false);
+    setPersonalGitHubAuthority(null);
     setWorkspaceMcpServers([]);
     setWorkspaceCapabilityCatalog([]);
     setWorkspaceMcpCatalogReady(false);
@@ -689,6 +746,7 @@ export function RootRouteComponent() {
       // Fence late non-abortable catalog/status responses before clearing the
       // projections they would otherwise be able to repopulate.
       githubRefreshId.current += 1;
+      personalGitHubRefreshId.current += 1;
       mcpRefreshId.current += 1;
       pendingCreateAttempt.current = null;
       resetSessionView();
@@ -698,6 +756,8 @@ export function RootRouteComponent() {
       setNextRepoId(1);
       setSelectedRepoIds(new Set());
       setSelectedRepoRefs({});
+      setSelectedPersonalGitHubRepoIds(new Set());
+      setSelectedPersonalGitHubRepoRefs({});
       setSelectedCapabilityToolIds(new Set());
       previousCapabilityToolIds.current = new Set();
       appliedWorkspaceToolDefaultsKey.current = null;
@@ -706,6 +766,7 @@ export function RootRouteComponent() {
       setBusy(false);
       setRepoBusy(false);
       setGithubAppBusy(false);
+      setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
       setWorkspaceStateOwnerId(workspaceId);
     },
@@ -970,8 +1031,27 @@ export function RootRouteComponent() {
       : toolMcpServers.map((server) => server.id);
   }, [configuredWorkspaceToolDefaults, toolMcpServers]);
   const currentResources = useMemo(
-    () => buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs),
-    [manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs],
+    () =>
+      buildResources(
+        manualRepos,
+        githubRepos,
+        selectedRepoIds,
+        selectedRepoRefs,
+        personalGitHubRepositories,
+        selectedPersonalGitHubRepoIds,
+        selectedPersonalGitHubRepoRefs,
+        personalGitHubSelection?.credentialBindingId ?? null,
+      ),
+    [
+      manualRepos,
+      githubRepos,
+      selectedRepoIds,
+      selectedRepoRefs,
+      personalGitHubRepositories,
+      selectedPersonalGitHubRepoIds,
+      selectedPersonalGitHubRepoRefs,
+      personalGitHubSelection?.credentialBindingId,
+    ],
   );
 
   useEffect(() => {
@@ -1391,6 +1471,210 @@ export function RootRouteComponent() {
     [client],
   );
 
+  const refreshPersonalGitHub = useCallback(
+    async (workspaceId: string, signal?: AbortSignal): Promise<void> => {
+      const acceptedTransition = workspaceTransitionIdentity.current;
+      if (!ownsWorkspaceTransition(acceptedTransition, acceptedTransition, workspaceId)) return;
+      const refreshId = personalGitHubRefreshId.current + 1;
+      personalGitHubRefreshId.current = refreshId;
+      const ownsRefresh = () =>
+        ownsWorkspaceTransition(
+          workspaceTransitionIdentity.current,
+          acceptedTransition,
+          workspaceId,
+        ) && personalGitHubRefreshId.current === refreshId;
+      setPersonalGitHubBusy(true);
+      try {
+        const status = await client.personalGitHubStatus(workspaceId);
+        if (signal?.aborted || !ownsRefresh()) return;
+        setPersonalGitHubStatus(status);
+        setPersonalGitHubAuthority((current) =>
+          current && current.connectionId === status.connection?.id ? current : null,
+        );
+        if (!status.enabled || status.connection?.status !== "active") {
+          setPersonalGitHubRepositories([]);
+          setPersonalGitHubSelection(null);
+          setSelectedPersonalGitHubRepoIds(new Set());
+          setSelectedPersonalGitHubRepoRefs({});
+          setPersonalGitHubCatalogReady(true);
+          return;
+        }
+        const repositories: PersonalGitHubRepositoryCatalogItem[] = [];
+        let cursor: number | undefined;
+        let selection: PersonalGitHubRepositorySelectionState | null = null;
+        do {
+          const page = await client.listPersonalGitHubRepositories(
+            workspaceId,
+            status.connection.id,
+            { ...(cursor ? { cursor } : {}), limit: 100 },
+          );
+          repositories.push(...page.repositories);
+          selection = page.selection;
+          cursor = page.nextCursor ?? undefined;
+        } while (cursor !== undefined && repositories.length < 1_000);
+        if (signal?.aborted || !ownsRefresh()) return;
+        setPersonalGitHubRepositories(repositories);
+        setPersonalGitHubSelection(selection);
+        setSelectedPersonalGitHubRepoIds(
+          (current) =>
+            new Set(
+              [...current].filter((id) =>
+                repositories.some((repo) => repo.repositoryId === id && repo.selectedAccess),
+              ),
+            ),
+        );
+        setPersonalGitHubCatalogReady(true);
+      } catch (error) {
+        if (signal?.aborted || !ownsRefresh() || isAbortError(error)) return;
+        setPersonalGitHubCatalogReady(true);
+        toast.error("Your GitHub account is unavailable", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (ownsRefresh()) setPersonalGitHubBusy(false);
+      }
+    },
+    [client],
+  );
+
+  async function beginPersonalGitHubOAuth(workspaceId: string, reconnect: boolean): Promise<void> {
+    const connection = personalGitHubStatus?.connection;
+    try {
+      const result =
+        reconnect && connection
+          ? await client.reconnectPersonalGitHub(workspaceId, connection.id, {
+              returnPath: `/workspaces/${workspaceId}/capabilities`,
+            })
+          : await client.startPersonalGitHubOAuth(workspaceId, {
+              returnPath: `/workspaces/${workspaceId}/capabilities`,
+            });
+      window.location.assign(result.authorizationUrl);
+    } catch (error) {
+      toast.error("Couldn't open GitHub sign-in", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async function disconnectPersonalGitHub(workspaceId: string): Promise<boolean> {
+    const connection = personalGitHubStatus?.connection;
+    if (!connection) return true;
+    setPersonalGitHubBusy(true);
+    try {
+      await client.disconnectPersonalGitHub(workspaceId, connection.id, {
+        expectedVersion: connection.version,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      await refreshPersonalGitHub(workspaceId);
+      toast.success("Your GitHub account was disconnected");
+      return true;
+    } catch (error) {
+      toast.error("Couldn't disconnect your GitHub account", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    } finally {
+      setPersonalGitHubBusy(false);
+    }
+  }
+
+  async function savePersonalGitHubRepositories(
+    workspaceId: string,
+    repositories: PersonalGitHubRepositorySelectionInput[],
+  ): Promise<boolean> {
+    const connection = personalGitHubStatus?.connection;
+    const selection = personalGitHubSelection;
+    if (!connection || !selection) return false;
+    setPersonalGitHubBusy(true);
+    try {
+      await client.replacePersonalGitHubRepositorySelections(workspaceId, connection.id, {
+        expectedConnectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: selection.selectionGeneration,
+        idempotencyKey: crypto.randomUUID(),
+        repositories,
+      });
+      await refreshPersonalGitHub(workspaceId);
+      toast.success("GitHub repository access updated");
+      return true;
+    } catch (error) {
+      toast.error("Couldn't update GitHub repository access", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    } finally {
+      setPersonalGitHubBusy(false);
+    }
+  }
+
+  async function ensurePersonalGitHubAuthority(
+    workspaceId: string,
+    context: "user_private" | "workspace_shared" = "workspace_shared",
+  ): Promise<McpConnectionAuthoritySelection | null> {
+    const connection = personalGitHubStatus?.connection;
+    if (!connection?.authorityId || connection.status !== "active") {
+      toast.error("Connect your GitHub account before selecting its repositories");
+      return null;
+    }
+    if (
+      personalGitHubAuthority?.connectionId === connection.id &&
+      personalGitHubAuthority.userDelegation.context === context
+    ) {
+      return personalGitHubAuthority;
+    }
+    try {
+      const response = await client.issueUserResourceGrant(workspaceId, connection.authorityId, {
+        scope: "user",
+        resourceKind: "connection",
+        mode: "always",
+        context,
+        workspaceSharedAcknowledged: context === "workspace_shared",
+      });
+      const authority = {
+        serverId: "github:personal",
+        connectionId: connection.id,
+        userDelegation: response.grant.delegation,
+      } satisfies McpConnectionAuthoritySelection;
+      setPersonalGitHubAuthority(authority);
+      return authority;
+    } catch (error) {
+      toast.error("Couldn't allow your GitHub identity here", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
+  async function togglePersonalGitHubRepository(
+    workspaceId: string,
+    repository: PersonalGitHubRepositoryCatalogItem,
+  ): Promise<void> {
+    if (selectedPersonalGitHubRepoIds.has(repository.repositoryId)) {
+      setSelectedPersonalGitHubRepoIds((current) => {
+        const next = new Set(current);
+        next.delete(repository.repositoryId);
+        return next;
+      });
+      return;
+    }
+    if (!repository.selectedAccess) return;
+    if (!(await ensurePersonalGitHubAuthority(workspaceId))) return;
+    setSelectedRepoIds(
+      (current) =>
+        new Set(
+          [...current].filter(
+            (id) =>
+              githubRepos.find((candidate) => candidate.id === id)?.fullName.toLowerCase() !==
+              repository.fullName.toLowerCase(),
+          ),
+        ),
+    );
+    setSelectedPersonalGitHubRepoIds((current) => new Set(current).add(repository.repositoryId));
+    setSelectedPersonalGitHubRepoRefs((current) => ({
+      ...current,
+      [repository.repositoryId]: current[repository.repositoryId] ?? repository.defaultBranch,
+    }));
+  }
+
   const refreshWorkspaceMcpServers = useCallback(
     async (workspaceId: string, signal?: AbortSignal) => {
       const refreshId = mcpRefreshId.current + 1;
@@ -1471,6 +1755,27 @@ export function RootRouteComponent() {
       const selectedTools = sessionTools
         ? [...sessionTools]
         : buildOpenGeniUiTools(submission.tools, selectedCapabilityToolIds);
+      const includesPersonalGitHub = currentResources.some(
+        (resource) =>
+          resource.kind === "repository" && resource.connectionType === "github_personal",
+      );
+      if (includesPersonalGitHub && !personalGitHubAuthority) {
+        toast.error("Your GitHub identity is still being prepared", {
+          description: "Select the repository again, then send when it is ready.",
+        });
+        return null;
+      }
+      const effectiveSubmission: TurnSubmission = includesPersonalGitHub
+        ? {
+            ...submission,
+            connectionAuthorities: [
+              ...(submission.connectionAuthorities ?? []).filter(
+                (authority) => authority.serverId !== "github:personal",
+              ),
+              personalGitHubAuthority!,
+            ],
+          }
+        : submission;
       const freshIdempotencyKey = crypto.randomUUID();
       const attempt = prepareCreateSessionAttempt({
         pending: pendingCreateAttempt.current,
@@ -1479,7 +1784,7 @@ export function RootRouteComponent() {
         freshIdempotencyKey,
         request: buildCreateSessionRequest({
           currentResources,
-          submission,
+          submission: effectiveSubmission,
           instructions: options?.instructions,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
@@ -1738,6 +2043,18 @@ export function RootRouteComponent() {
       }
       return next;
     });
+    if (!selectedRepoIds.has(repo.id)) {
+      const personal = personalGitHubRepositories.find(
+        (candidate) => candidate.fullName.toLowerCase() === repo.fullName.toLowerCase(),
+      );
+      if (personal) {
+        setSelectedPersonalGitHubRepoIds((current) => {
+          const next = new Set(current);
+          next.delete(personal.repositoryId);
+          return next;
+        });
+      }
+    }
     setSelectedRepoRefs((current) => ({
       ...current,
       [repo.id]: current[repo.id] ?? repo.defaultBranch,
@@ -1954,6 +2271,16 @@ export function RootRouteComponent() {
   const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
   const contextDisconnectGitHubInstallation = useLatestCallback(disconnectGitHubInstallation);
   const contextToggleGitHubRepository = useLatestCallback(toggleGitHubRepository);
+  const contextConnectPersonalGitHub = useLatestCallback((workspaceId: string) =>
+    beginPersonalGitHubOAuth(workspaceId, false),
+  );
+  const contextReconnectPersonalGitHub = useLatestCallback((workspaceId: string) =>
+    beginPersonalGitHubOAuth(workspaceId, true),
+  );
+  const contextDisconnectPersonalGitHub = useLatestCallback(disconnectPersonalGitHub);
+  const contextSavePersonalGitHubRepositories = useLatestCallback(savePersonalGitHubRepositories);
+  const contextEnsurePersonalGitHubAuthority = useLatestCallback(ensurePersonalGitHubAuthority);
+  const contextTogglePersonalGitHubRepository = useLatestCallback(togglePersonalGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
   const preparePendingSlackLink = useCallback(
     async (workspaceId: string) =>
@@ -2013,6 +2340,16 @@ export function RootRouteComponent() {
           githubStatus,
           githubStatusFailed,
           githubCatalogReady,
+          personalGitHubStatus,
+          personalGitHubRepositories,
+          personalGitHubSelection,
+          personalGitHubCatalogReady,
+          personalGitHubBusy,
+          selectedPersonalGitHubRepoIds,
+          setSelectedPersonalGitHubRepoIds,
+          selectedPersonalGitHubRepoRefs,
+          setSelectedPersonalGitHubRepoRefs,
+          personalGitHubAuthority,
           githubAppOpen,
           setGithubAppOpen,
           githubOrg,
@@ -2047,6 +2384,13 @@ export function RootRouteComponent() {
           updateSessionPin: contextUpdateSessionPin,
           deleteWorkspace: contextDeleteWorkspace,
           refreshGitHub,
+          refreshPersonalGitHub,
+          connectPersonalGitHub: contextConnectPersonalGitHub,
+          reconnectPersonalGitHub: contextReconnectPersonalGitHub,
+          disconnectPersonalGitHub: contextDisconnectPersonalGitHub,
+          savePersonalGitHubRepositories: contextSavePersonalGitHubRepositories,
+          ensurePersonalGitHubAuthority: contextEnsurePersonalGitHubAuthority,
+          togglePersonalGitHubRepository: contextTogglePersonalGitHubRepository,
           refreshWorkspaceMcpServers,
           startGitHubAppManifestFlow: contextStartGitHubAppManifestFlow,
           disconnectGitHubInstallation: contextDisconnectGitHubInstallation,
@@ -2069,15 +2413,21 @@ export function RootRouteComponent() {
     contextAddManualRepository,
     contextCreateWorkspace,
     contextDeleteWorkspace,
+    contextConnectPersonalGitHub,
+    contextDisconnectPersonalGitHub,
+    contextEnsurePersonalGitHubAuthority,
     contextForgetAccessKey,
     contextHandleManagedSignOut,
     contextRenameWorkspace,
+    contextReconnectPersonalGitHub,
+    contextSavePersonalGitHubRepositories,
     contextSetWorkspaceInferenceControl,
     contextSetWorkspaceDefaultRig,
     contextDisconnectGitHubInstallation,
     contextStartGitHubAppManifestFlow,
     contextStartSession,
     contextToggleGitHubRepository,
+    contextTogglePersonalGitHubRepository,
     contextUpdateSessionPin,
     contextUpdateSessionTitle,
     contextUpdateWorkspaceSettings,
@@ -2088,6 +2438,14 @@ export function RootRouteComponent() {
     githubRepos,
     githubStatus,
     githubStatusFailed,
+    personalGitHubStatus,
+    personalGitHubRepositories,
+    personalGitHubSelection,
+    personalGitHubCatalogReady,
+    personalGitHubBusy,
+    selectedPersonalGitHubRepoIds,
+    selectedPersonalGitHubRepoRefs,
+    personalGitHubAuthority,
     githubCatalogReady,
     inspectorOpen,
     invalidSlackLinkQueryWorkspaceId,
@@ -2104,6 +2462,7 @@ export function RootRouteComponent() {
     reasoningEffort,
     revalidatePrincipalAccess,
     refreshGitHub,
+    refreshPersonalGitHub,
     refreshWorkspace,
     refreshWorkspaceMcpServers,
     repoBusy,

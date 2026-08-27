@@ -9,12 +9,12 @@ export type ManagedHumanPersonalWorkspaceProvisioning = {
 };
 
 /**
- * Converge the deterministic managed-human personal workspace, its inference
+ * Converge the deterministic human personal workspace, its inference
  * control row, and the organization-membership anchor through the exact 0219
  * `ensure_managed_human_personal_workspace` lifecycle seam.
  *
- * This is the single implementation of that preparation. The Better Auth
- * managed-access hook and the operator membership backfill driver both call it,
+ * This is the single implementation of that preparation. Better Auth managed
+ * access, local single-user access, and the operator membership backfill call it,
  * so neither owns a second copy of the deterministic personal-workspace
  * identity. All authority - account binding, owner-membership proof, workspace
  * identity, control-row validation, membership status - stays inside the

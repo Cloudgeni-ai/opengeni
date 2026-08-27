@@ -279,8 +279,15 @@ const budgets = {
   // entry. The exact merged Bun 1.4 Linux/x64 graph measures 2,198,390 raw
   // bytes. Advance only the policy-derived raw envelope to 2,148 KiB, retaining
   // 1,162 bytes of headroom; every other cap remains fixed.
+  // Personal GitHub identity selection adds the exact connection-authority and
+  // repository-resource projection to create and follow-up session surfaces.
+  // The exact Linux/x64 Bun 1.4 graph measures 2,210,048 raw / 618,646 gzip
+  // bytes. Advance only these direct-session aggregates: raw through the shared
+  // policy envelope and gzip to 606 KiB, preserving the established 1.5-KiB
+  // platform-skew allowance. Initial, file-count, lazy-chunk, CSS, and unrelated
+  // per-file caps remain fixed.
   directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
-  directSessionGzip: 603 * kib,
+  directSessionGzip: 606 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

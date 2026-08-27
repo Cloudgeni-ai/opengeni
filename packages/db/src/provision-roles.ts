@@ -1643,6 +1643,11 @@ BEGIN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
+    IF to_regprocedure(format('%I.issue_self_local_connection_use_grant(uuid,uuid,uuid,text,boolean)', ${literal(schema)}))
+      IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
     IF to_regprocedure(format('%I.resolve_connection_use_authority(uuid,uuid,uuid,jsonb)', ${literal(schema)}))
       IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_connection_authorities(uuid) FROM PUBLIC', ${literal(schema)});

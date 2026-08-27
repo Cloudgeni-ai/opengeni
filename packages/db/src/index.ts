@@ -1451,6 +1451,21 @@ export async function bootstrapWorkspace(
         })
         .where(eq(schema.workspaceMemberships.id, membership.id));
     }
+    if (
+      input.accountExternalSource === "opengeni:local" &&
+      input.accountExternalId === "default" &&
+      input.subjectId === "dev"
+    ) {
+      await setRlsContext(tx as unknown as Database, {
+        accountId: account.id,
+        workspaceId: null,
+      });
+      await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
+      await ensureManagedHumanPersonalWorkspace(tx as unknown as Database, {
+        accountId: account.id,
+        subjectId: input.subjectId,
+      });
+    }
     // Access refreshes must retain workspaces created or granted after the
     // default workspace. Restore account-scoped RLS before listing them.
     await setRlsContext(tx as unknown as Database, {
@@ -55612,10 +55627,6 @@ function personalConnectionDelegationsForSameSessionSuccessor(
   // grants may be re-admitted under the live DB fences; once remains bound to
   // its original accepted turn and is never copied forward.
   return delegations.filter((delegation) => {
-    // This phase freezes personal GitHub authority only for explicit human/API
-    // work. Goal, child-result, recovery, and other machine-input inheritance
-    // require the later lifecycle's fresh live repository recheck.
-    if (delegation.connectionType === "github_personal") return false;
     const authority = delegation.userDelegation;
     if (!authority) return true;
     if (authority.mode === "once") return false;

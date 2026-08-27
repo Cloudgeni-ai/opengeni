@@ -6,6 +6,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   issueSelfUserResourceGrant,
+  issueSelfLocalConnectionUseGrant,
   listSelfUserResourceAuthorities,
   revokeSelfUserResourceGrant,
   sessionTenancyProductActivated,
@@ -14,7 +15,10 @@ import {
 import { requirePermission, type AccessGrantAuthorization } from "../access";
 import type { AppDependencies } from "../dependencies";
 import { requireSessionAuthorization } from "../session-authorization";
-import { requireCanonicalManagedHuman } from "./session-tenancy";
+import {
+  requireCanonicalManagedHuman,
+  SessionTenancyManagedHumanRequiredError,
+} from "./session-tenancy";
 
 type UserResourceGrantDependencies = Pick<AppDependencies, "db" | "sessionAuthorization">;
 
@@ -53,7 +57,15 @@ function requireOwnerAuthority(
   workspaceId: string,
   permissions: readonly Permission[],
 ): void {
-  requireCanonicalManagedHuman(authorization, workspaceId);
+  if (!authorization.canonicalLocalHumanSession) {
+    requireCanonicalManagedHuman(authorization, workspaceId);
+  } else if (
+    !authorization.contextIntegrity ||
+    authorization.authenticatedSubjectId !== authorization.grant.subjectId ||
+    authorization.grant.workspaceId !== workspaceId
+  ) {
+    throw new SessionTenancyManagedHumanRequiredError();
+  }
   for (const permission of permissions) requirePermission(authorization.grant, permission);
 }
 
@@ -90,6 +102,23 @@ export async function issueManagedHumanUserResourceGrant(
 ) {
   const modePermissions: Permission[] =
     request.mode === "session" ? ["sessions:control"] : ["sessions:create"];
+  if (authorization.canonicalLocalHumanSession) {
+    requireOwnerAuthority(authorization, workspaceId, [
+      ...ISSUE_PERMISSIONS[request.resourceKind],
+      "sessions:create",
+    ]);
+    if (request.resourceKind !== "connection" || request.mode !== "always") {
+      throw new SessionTenancyManagedHumanRequiredError();
+    }
+    return await issueSelfLocalConnectionUseGrant(deps.db, {
+      accountId: authorization.grant.accountId,
+      workspaceId,
+      subjectId: authorization.grant.subjectId,
+      authorityId,
+      context: request.context,
+      workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
+    });
+  }
   await requireOwnerProductGate(deps, authorization, workspaceId, [
     ...ISSUE_PERMISSIONS[request.resourceKind],
     ...modePermissions,

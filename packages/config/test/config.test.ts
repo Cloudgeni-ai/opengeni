@@ -471,10 +471,13 @@ describe("personal GitHub OAuth settings", () => {
     ).toThrow(/must be configured together/);
   });
 
-  test("requires managed integrations, state signing, encryption, and a distinct client", () => {
-    expect(() =>
+  test("supports local mode and requires integrations, signing, encryption, and a distinct client", () => {
+    expect(
       withEnv({ ...enabled, OPENGENI_PRODUCT_ACCESS_MODE: "local" }, () => getSettings()),
-    ).toThrow(/requires OPENGENI_PRODUCT_ACCESS_MODE=managed/);
+    ).toMatchObject({
+      productAccessMode: "local",
+      githubPersonalOauthEnabled: true,
+    });
     expect(() =>
       withEnv({ ...enabled, OPENGENI_INTEGRATIONS_ENABLED: "false" }, () => getSettings()),
     ).toThrow(/OPENGENI_INTEGRATIONS_ENABLED=true/);
