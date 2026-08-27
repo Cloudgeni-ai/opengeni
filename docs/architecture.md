@@ -182,7 +182,10 @@ projections use the same protocol-JSON boundary as canonical history before
 strict lossless storage. JavaScript-only `undefined` object properties are
 omitted without mutating the SDK item; undefined array entries and every other
 non-JSON graph still fail with an exact path. The database codec remains strict
-and never silently repairs arbitrary callers. Completed pending tool receipts
+and never silently repairs arbitrary callers. An empty Responses terminal is
+reconstructed from observed `output_item.done` events in numeric
+`output_index` order; provider index gaps do not create synthetic history items,
+while duplicate indices remain invalid. Completed pending tool receipts
 retain the model-facing SDK result item separately from the exact
 `agent.toolCall.output` audit value, allowing worker-death recovery to publish
 the same complete event projection as the live path without exposing its extra

@@ -1695,6 +1695,10 @@ truth. Every provider path first awaits a mandatory reconciliation of the SDK's
 complete prior history at the follow-up request boundary. A provider can
 therefore consume a completed tool batch only after its call/result pair is
 replay-safe; the first request has no prior model/tool history to append.
+When a Responses terminal omits its output array, completed stream items are
+reassembled by numeric `output_index`; sparse provider positions are compacted
+to the observed items rather than treated as missing output, while duplicate
+indices still fail closed.
 For generic providers, an attempt-local async context then awaits the durable
 `started` checkpoint at the literal pre-fetch boundary; request bytes cannot
 reach the wire first. Model-preparation `started` is durable before
