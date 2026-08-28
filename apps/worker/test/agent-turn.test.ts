@@ -985,6 +985,33 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     ).toBeNull();
   });
 
+  test("settles native tool_search identity retained only in providerData", () => {
+    const callId = "call_native_search_1";
+    const call = {
+      id: "tsc_provider_item_1",
+      type: "tool_search_call",
+      status: "in_progress",
+      arguments: { query: "mail" },
+      providerData: { call_id: callId, execution: "client" },
+    };
+    const result = interruptedToolCallResult({
+      callType: "tool_search_call",
+      callId,
+      callItem: call,
+      reason: "worker_shutdown",
+    });
+
+    expect(result).toEqual({
+      type: "tool_search_output",
+      providerData: { call_id: callId, execution: "client" },
+      status: "incomplete",
+      tools: [],
+    });
+    const pair = [call, result!] as Array<Record<string, unknown>>;
+    expect(ModelItem.array().parse(pair)).toEqual(pair);
+    expect(sanitizeHistoryItemsForModel(pair)).toEqual(pair);
+  });
+
   test("never persists a function_call_result whose function_call was pruned mid-batch", () => {
     // Reproduces the live orphan: a parallel tool-call batch where the SDK's
     // computed history is non-monotonic across reconciles, then an abnormal
