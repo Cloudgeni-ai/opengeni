@@ -50,7 +50,7 @@ describe("session event cursor foundation", () => {
 
   test("starts newly inserted sessions before their first durable event", async () => {
     const migration = await readFile(
-      join(repo, "packages/db/drizzle/0373_session_event_cursors.sql"),
+      join(repo, "packages/db/drizzle/0374_session_event_cursors.sql"),
       "utf8",
     );
     const initializer = migration.slice(
