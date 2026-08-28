@@ -617,6 +617,9 @@ test("every long-lived SSE surface closes when its current workspace authority i
       { ...revoked(), pollIntervalMs: 100 },
     ),
   ]);
+  for (const response of responses) {
+    expect(response.headers.get("connection")).toBe("close");
+  }
   const readers = responses.map((response) => response.body!.getReader());
   await Promise.all(
     readers.map(async (reader) => {

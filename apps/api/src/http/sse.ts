@@ -463,7 +463,13 @@ export async function sseSessionStream(
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
+      // A clean authorization close must also retire the HTTP/1 transport.
+      // Reusing that socket can leave Chromium accounting the ended SSE as an
+      // active per-origin connection while a replacement document is already
+      // dispatching finite reads. HTTP/2 front doors strip this hop-by-hop
+      // header; direct Bun/self-hosted HTTP/1 clients receive an unambiguous
+      // connection end after the stream's terminal chunk.
+      Connection: "close",
       ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
@@ -637,7 +643,7 @@ export async function sseWorkspaceControlStream(
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
+      Connection: "close",
       ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
@@ -763,7 +769,7 @@ export async function sseWorkspaceLiveStream(
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
+      Connection: "close",
       ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
@@ -850,7 +856,7 @@ export async function sseWorkspaceInteractionRevisionStream(
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
+      Connection: "close",
       ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
