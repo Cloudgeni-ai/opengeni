@@ -228,6 +228,7 @@ const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
 ]);
 
 const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
+  ["late-old-epoch-primary-settled-before-old-release", new Set(["late-old-epoch-alpha-to-beta"])],
   ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
 ]);
 
@@ -2317,6 +2318,48 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/auth/get-session`,
       }),
     ).toBeNull();
+    const lateOldActorBootstrapRead = {
+      ...crossTabBootstrapRead,
+      dispatchPhase: "late-old-epoch-alpha-to-beta",
+      responsePhase: "late-old-epoch-primary-settled-before-old-release",
+    };
+    expect(requestFailureProblem(lateOldActorBootstrapRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        dispatchPhase: "late-old-epoch-setup-beta-to-alpha",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        responsePhase: "responsive-evidence-bootstrap",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        failure: "NS_ERROR_NET_RESET",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        method: "POST",
+      }),
+    ).toContain("POST");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        url: `${publicOrigin}/v1/config/other`,
+      }),
+    ).toContain("/v1/config/other");
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
