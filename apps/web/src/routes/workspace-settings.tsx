@@ -832,7 +832,7 @@ function MemoryPreferenceRow({
     <PreferenceToggleRow
       icon={<BrainCircuitIcon className="size-3.5 text-brand" />}
       label="Workspace memory"
-      description="Durable facts agents carry across sessions — manage them in Memory."
+      description="Let agents autonomously save and correct durable facts, incidents, decisions, and outcomes across sessions."
       checked={enabled}
       disabled={saving || !canManage}
       saving={saving}

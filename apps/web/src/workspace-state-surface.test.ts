@@ -83,7 +83,7 @@ describe("Agent Knowledge surface", () => {
     expect(organization).toContain("Organization identity");
     expect(organization).toContain("Open documents");
     expect(workspaceSettings).toContain("WorkspaceLearningAdministration");
-    expect(workspaceSettings).toContain("manage them in Memory");
+    expect(workspaceSettings).toContain("Let agents autonomously save and correct durable facts");
     expect(workspaceSettings).not.toContain("editable on Documents");
     expect(learning).toContain("Learning & autonomy");
     expect(memory).toContain('preference: "Legacy preference"');
@@ -101,9 +101,9 @@ describe("Agent Knowledge surface", () => {
     expect(prompt).toContain("fact, decision, incident, bug fix, or outcome");
     expect(prompt).toContain("Describe a reusable skill");
     expect(prompt).toContain("one-sentence always-visible summary");
-    expect(remember).toContain(
-      "lane=knowledge for a fact, decision, incident, bug fix, or outcome",
-    );
+    expect(remember).toContain("use it instead for ordinary durable facts");
+    expect(remember).toContain("independent of Learning mode");
+    expect(remember).toContain("lane=knowledge only when memory_save is unavailable");
     expect(remember).toContain("lane=preference creates a Skill");
     expect(governance).toContain("Use this only for a minimal universal rule");
     expect(governance).toContain("workspace Skill proposal");

@@ -110,6 +110,12 @@ and governed-change undo remain API/SDK operations on the `/learning` routes
 with no web UI. Rollback and undo remain destination-native compensating
 lifecycle operations rather than history mutation.
 
+Workspace Memory is deliberately outside this policy. When the separate
+`memoryEnabled` workspace setting is true, exact live agent attempts may use
+`memory_save` and `memory_correct` autonomously in every Learning mode. Learning
+mode continues to govern derived Skills and instruction proposals, not the
+shared agent Memory mechanism.
+
 Destination ownership remains:
 
 - Documents/RAG: evidence and retrieval only.
@@ -121,7 +127,8 @@ Destination ownership remains:
 
 The controller deliberately does not implement:
 
-- automatic Memory or company-profile mutation;
+- Memory mutation through the learning controller (agent Memory writes use the
+  separate `memoryEnabled` gate) or company-profile mutation;
 - Personal or Organization scope expansion;
 - explicit session command/tool integration;
 - runtime prompt composition or automatic snapshot installation;

@@ -15,16 +15,16 @@ notes plus governed Knowledge and Ways-of-working proposals.
 
 | Destination               | Purpose                                                         | Authority                                                                | Model access                                                                                                                     | Current status                                                                                                                                |
 | ------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Remembered Memory         | User-confirmed facts, decisions, incidents, fixes, and outcomes | Reviewed scoped-Knowledge claim plus the canonical workspace Memory gate | `memory_search`; bounded prompt inclusion depends on workspace mode                                                              | Explicit `remember lane=knowledge` preserves claim/evidence provenance, then materializes the exact confirmed text as active Memory           |
+| Workspace Memory          | Agent-retained facts, decisions, incidents, fixes, and outcomes | Canonical workspace Memory gate                                           | `memory_search`; never standing prompt context                                                                                    | `memory_save` and `memory_correct` write active Memory autonomously whenever workspace Memory is enabled                                      |
 | Scoped Knowledge evidence | Inferred or sourced facts and normalized claims                 | Documents/scoped-knowledge authority                                     | Permission-first Document retrieval where surfaced; normalized claims are governance evidence, not a standalone retrieval corpus | Workspace-local claim proposal/correction and rooted Task-note promotion use the append-only review/relation lifecycle                        |
 | Workspace instructions    | Minimal, always-on workspace rules                              | Existing instruction-policy heads                                        | Bounded body is always composed                                                                                                  | Workspace-local Knowledge-backed inactive proposal adapters plus atomic rooted Task-note promotion implemented; activation remains human-only |
 | Skills                    | Reusable conditional how-to guidance                            | Existing preference-registry heads                                       | Bounded descriptors by default; full bodies on demand                                                                            | Workspace-local Knowledge-backed inactive proposal adapters plus atomic rooted Task-note promotion implemented; activation remains human-only |
 | Task notes                | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility                 | Explicit `task_notes_list`; never prompt-injected                                                                                | Create/list/archive implemented by migration 0239; atomic correction/revert lineage by migration 0260                                         |
-| Workspace Memory          | Existing and explicitly confirmed `knowledge_memories` records  | Existing Memory selector authority                                       | `memory_search`; prompt inclusion depends on workspace mode                                                                      | Generic agent write tools are retired; the reviewed `remember lane=knowledge` confirmation is the bounded write path                          |
+| Reviewed Knowledge        | User-requested reviewed facts when autonomous Memory is unavailable | Reviewed scoped-Knowledge claim plus confirmation-to-Memory materialization | `memory_search` after confirmation                                                                                              | `remember lane=knowledge` remains a human-confirmed fallback and preserves claim/evidence provenance                                           |
 
-One item should have one canonical destination. A request to remember a specific
-incident uses `remember lane=knowledge`, with compact content that can be found
-later through `memory_search`. It does not become a Skill or workspace
+One item should have one canonical destination. A specific incident uses
+`memory_save` when workspace Memory is enabled, with compact content that can be
+found later through `memory_search`. It does not become a Skill or workspace
 instruction. A conditional procedure
 belongs in Skills. A universal rule that must apply in every turn belongs in
 Workspace instructions and should use the shortest wording that fully states
@@ -147,11 +147,12 @@ authority, a different learning-policy source, or replacement evidence bytes.
 ## Explicit user-directed remember
 
 `remember` (`apps/api/src/mcp/remember.ts`, router
-`packages/core/src/domain/remember.ts`) is the one tool for "remember this for
-the workspace". Its lane is the Agent Knowledge destination (`preference` for
-a Skill, `instruction_policy` for Workspace instructions, or `knowledge` for
-remembered facts, decisions, incidents, fixes, and outcomes); v1 supports the
-workspace scope only. The
+`packages/core/src/domain/remember.ts`) is the tool for governed Knowledge, a
+Skill, or a workspace instruction. Ordinary facts, decisions, incidents, fixes,
+and confirmed outcomes use autonomous `memory_save` whenever that tool is
+available. The `knowledge` lane remains the reviewed fallback when autonomous
+Memory is unavailable; `preference` creates a Skill and `instruction_policy`
+creates a Workspace instruction. V1 supports the workspace scope only. The
 content becomes one exact task note (the evidence, expiring after 90 days), the
 note is promoted through the learning-policy router above with full user
 confidence, and the receipt is one of:
@@ -266,8 +267,10 @@ from substituting for the content the human approved. A failed Memory write
 therefore rolls back approval rather than leaving a write-only claim. The
 returned activation names the resulting `memoryId`;
 correction or archival uses the Memory lifecycle, not Learning & autonomy
-history. Knowledge is never approved or materialized automatically, even under
-the `automatic` learning mode.
+history. Reviewed Knowledge is never approved or materialized automatically,
+even under the `automatic` learning mode. This does not apply to agent-only
+Workspace Memory writes, which are governed solely by the workspace Memory
+toggle.
 
 `task_note_promote_knowledge` accepts an active, unexpired version-one note from
 the exact caller's root tree plus normalized entity/predicate metadata. The note
