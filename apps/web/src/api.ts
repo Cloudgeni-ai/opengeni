@@ -38,6 +38,9 @@ type ManagedActorRequest = {
   abortActor: (reason: DOMException) => void;
 };
 const managedActorRequests = new Set<ManagedActorRequest>();
+let managedActorForegroundRequestCount = 0;
+let managedActorForegroundIdle: Promise<void> | null = null;
+let resolveManagedActorForegroundIdle: (() => void) | null = null;
 const managedActorMutationListeners = new Set<() => void>();
 const managedActorInvalidationListeners = new Set<() => void>();
 let managedActorMutationCount = 0;
@@ -48,6 +51,40 @@ function abortManagedActorRequests(reason: DOMException): void {
   for (const managedRequest of [...managedActorRequests]) {
     managedRequest.abortActor(reason);
   }
+}
+
+function beginManagedActorForegroundRequest(): () => void {
+  if (managedActorForegroundRequestCount === 0) {
+    managedActorForegroundIdle = new Promise<void>((resolve) => {
+      resolveManagedActorForegroundIdle = resolve;
+    });
+  }
+  managedActorForegroundRequestCount += 1;
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    managedActorForegroundRequestCount = Math.max(0, managedActorForegroundRequestCount - 1);
+    if (managedActorForegroundRequestCount !== 0) return;
+    const resolve = resolveManagedActorForegroundIdle;
+    resolveManagedActorForegroundIdle = null;
+    managedActorForegroundIdle = null;
+    resolve?.();
+  };
+}
+
+async function waitForManagedActorForegroundIdle(signal: AbortSignal): Promise<void> {
+  const pendingIdle = managedActorForegroundIdle;
+  if (pendingIdle === null) return;
+  if (signal.aborted) throw signal.reason;
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    void pendingIdle.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", abort);
+    });
+  });
+  await waitForManagedActorForegroundIdle(signal);
 }
 
 export function handleManagedActorPageHide(persisted: boolean): void {
@@ -197,9 +234,11 @@ export async function managedActorFetch(
   if (tracksMutation) updateManagedActorMutationCount(1);
   let responseOwnsCleanup = false;
   let cleaned = false;
+  let endForegroundRequest = () => {};
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
+    endForegroundRequest();
     managedActorRequests.delete(actorRequest);
     inputSignal?.removeEventListener("abort", abortFromCaller);
     if (tracksMutation) updateManagedActorMutationCount(-1);
@@ -213,15 +252,35 @@ export async function managedActorFetch(
     init,
     headers,
   );
+  const boundedHttp1Sse = cleanCloseDelayMs > 0;
+  if (isForegroundApiRequest(input, init, headers, boundedHttp1Sse)) {
+    endForegroundRequest = beginManagedActorForegroundRequest();
+  }
   if (acceptedEpoch && init.credentials !== "omit" && !headers.has(MANAGED_ACTOR_EPOCH_HEADER)) {
     headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
   }
+  let preHeaderTimer: ReturnType<typeof setTimeout> | null = null;
   try {
+    if (boundedHttp1Sse) {
+      await waitForManagedActorForegroundIdle(controller.signal);
+      preHeaderTimer = setTimeout(() => {
+        controller.abort(
+          new DOMException(
+            "The bounded HTTP/1 stream did not receive response headers in time",
+            "AbortError",
+          ),
+        );
+      }, nativeLifetimeMs);
+    }
     const response = await fetch(transportInput, {
       ...init,
       headers,
       signal: controller.signal,
     });
+    if (preHeaderTimer !== null) {
+      clearTimeout(preHeaderTimer);
+      preHeaderTimer = null;
+    }
     if (
       acceptedEpoch !== null &&
       response.headers.get(MANAGED_ACTOR_STATE_HEADER)?.toLowerCase() === "changed"
@@ -258,6 +317,7 @@ export async function managedActorFetch(
         statusText: response.statusText,
         headers: response.headers,
       });
+      endForegroundRequest();
     }
     // Before headers—and through a finite response drain—actor rotation aborts the
     // native fetch. A detached finite body no longer owns a network resource,
@@ -292,6 +352,7 @@ export async function managedActorFetch(
       detachedResponse ? 0 : nativeLifetimeMs,
     );
   } finally {
+    if (preHeaderTimer !== null) clearTimeout(preHeaderTimer);
     if (!responseOwnsCleanup) cleanup();
   }
 }
@@ -322,6 +383,27 @@ function browserSseTransportInput(
     HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS,
     HTTP1_BROWSER_SSE_NATIVE_LIFETIME_MS,
   ];
+}
+
+function isForegroundApiRequest(
+  input: string | URL | Request,
+  init: RequestInit,
+  headers: Headers,
+  boundedHttp1Sse: boolean,
+): boolean {
+  if (boundedHttp1Sse || headers.get("accept")?.toLowerCase().includes("text/event-stream")) {
+    return false;
+  }
+  try {
+    const raw = typeof Request !== "undefined" && input instanceof Request ? input.url : input;
+    const base = typeof window === "undefined" ? "http://opengeni.local" : window.location.href;
+    return (
+      new URL(String(raw), base).pathname.startsWith("/v1/") &&
+      !new Set(["HEAD", "OPTIONS"]).has(requestMethod(input, init))
+    );
+  } catch {
+    return false;
+  }
 }
 
 function observedApiProtocol(): string | null {

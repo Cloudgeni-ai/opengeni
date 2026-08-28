@@ -456,15 +456,16 @@ function isExpectedBoundedHttp1NativeSeam(input: {
       input.failure.trim(),
     );
   const elapsedMs = input.failedAt - input.startedAt;
-  // The browser-owned seam fires at nine seconds. Allow only the request-start
-  // offset plus bounded scheduling jitter; the two-second logical reconnect
-  // grace does not extend the native request's cancellation deadline.
+  // The browser-owned body and pre-header seams fire at eleven seconds. Allow
+  // only the request-start offset plus bounded scheduling jitter; the
+  // four-second logical reconnect grace does not extend the native request's
+  // cancellation deadline.
   return (
     isStream &&
     isCancellation &&
     url.searchParams.get("transport") === "http1-bounded" &&
-    elapsedMs >= 8_000 &&
-    elapsedMs <= 13_000
+    elapsedMs >= 10_000 &&
+    elapsedMs <= 15_000
   );
 }
 
@@ -774,6 +775,15 @@ function observeBrowser(page: Page): BrowserProblems {
       })
     ) {
       problems.boundedHttp1NativeSeams += 1;
+      // WebKit can additionally surface the exact canceled request as a page
+      // access-control error. Preserve the URL, phase, and timestamp so the
+      // page-error gate can require the same strict one-to-one correlation as
+      // actor-transition cancellations instead of broadly allowing CORS text.
+      problems.acceptedRequestFailures.push({
+        failedAt,
+        pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
+        responsePhase,
+      });
       return;
     }
     const check = (async () => {
@@ -2786,15 +2796,15 @@ describe("provider-neutral browser account acceptance", () => {
 
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
     const expected = {
-      failedAt: 9_100,
+      failedAt: 11_100,
       failure: "net::ERR_ABORTED",
       method: "GET",
       startedAt: 100,
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`,
     };
     expect(isExpectedBoundedHttp1NativeSeam(expected)).toBe(true);
-    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 7_999 })).toBe(false);
-    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 13_101 })).toBe(false);
+    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 10_099 })).toBe(false);
+    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 15_101 })).toBe(false);
     expect(
       isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "net::ERR_CONNECTION_RESET" }),
     ).toBe(false);
