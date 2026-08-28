@@ -429,14 +429,15 @@ function isExpectedBoundedHttp1NativeSeam(input: {
     /ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|cancelled|canceled/iu.test(input.failure) &&
     !/NET_RESET|CONNECTION_RESET/iu.test(input.failure);
   const elapsedMs = input.failedAt - input.startedAt;
-  // The browser-owned seam fires at nine seconds. Allow bounded scheduling
-  // jitter while rejecting eager cancellations and genuinely stuck requests.
+  // The browser-owned seam fires at nine seconds. Allow only the request-start
+  // offset plus bounded scheduling jitter; the two-second logical reconnect
+  // grace does not extend the native request's cancellation deadline.
   return (
     isStream &&
     isCancellation &&
     url.searchParams.get("transport") === "http1-bounded" &&
     elapsedMs >= 8_000 &&
-    elapsedMs <= 25_000
+    elapsedMs <= 13_000
   );
 }
 
@@ -2712,7 +2713,7 @@ describe("provider-neutral browser account acceptance", () => {
     };
     expect(isExpectedBoundedHttp1NativeSeam(expected)).toBe(true);
     expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 7_999 })).toBe(false);
-    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 25_101 })).toBe(false);
+    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 13_101 })).toBe(false);
     expect(
       isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "net::ERR_CONNECTION_RESET" }),
     ).toBe(false);
