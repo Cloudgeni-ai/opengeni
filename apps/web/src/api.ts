@@ -242,8 +242,13 @@ export async function managedActorFetch(
     abortTarget = finiteJsonResponse
       ? (reason) => actorBodyController.abort(reason)
       : (reason) => {
-          actorBodyController.abort(reason);
+          // Queue the native abort before publishing the wrapper abort. The
+          // wrapper's abort handler queues reader cancellation, so Chromium
+          // sees the fetch signal first and cannot detach an SSE reader while
+          // leaving its HTTP/1 transport alive. Both remain deferred until
+          // after the downstream AbortError state is synchronously recorded.
           abortNativeTransport?.(reason);
+          actorBodyController.abort(reason);
         };
     responseOwnsCleanup = true;
     return managedActorTrackedResponse(
@@ -294,10 +299,12 @@ function managedActorTrackedResponse(
     const reason = signal.reason ?? new DOMException("The browser account changed", "AbortError");
     actorAbortReason = reason;
     settle();
-    void reader
-      .cancel(reason)
-      .catch(() => undefined)
-      .finally(releaseReader);
+    queueMicrotask(() => {
+      void reader
+        .cancel(reason)
+        .catch(() => undefined)
+        .finally(releaseReader);
+    });
   };
   // Keep actor-abort rejection consumer-owned. WebKit can report a stream
   // error raised directly inside the abort event as an unhandled page error
@@ -339,6 +346,10 @@ function managedActorTrackedResponse(
       async cancel(reason) {
         const ownsSettlement = settle();
         if (ownsSettlement) abortNativeTransport?.(reason);
+        // Let a queued native fetch abort run before detaching its reader. In
+        // Chromium the inverse order can leave the HTTP/1 request open even
+        // though the JavaScript ReadableStream has been cancelled.
+        if (ownsSettlement && abortNativeTransport) await Promise.resolve();
         try {
           await reader.cancel(reason);
         } finally {

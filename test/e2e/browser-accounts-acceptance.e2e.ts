@@ -307,7 +307,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
   const pathname = new URL(input.url).pathname;
   const isConnectionReset = /NET_RESET|CONNECTION_RESET/iu.test(input.failure);
   const isCancellation =
-    /ERR_ABORTED|NS_BINDING_ABORTED|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
+    /ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
       input.failure,
     );
   const isActorOwnedRead =
@@ -952,12 +952,13 @@ function optionalWebKitReauthenticationAccessControlPageError(
   engine: EngineName,
 ): string[] {
   if (engine !== "webkit") return [];
-  // WebKit can surface one read from the deliberately replaced document as a
-  // page error in addition to its request-cancellation event. The endpoint is
-  // timing-dependent, so accept it only when the independent request ledger
-  // already proved exactly one cancellation of that URL immediately before
-  // the error. Consume that evidence one-to-one; duplicate, late, concurrent,
-  // or stale cancellations keep the strict page-error ledger red.
+  // WebKit can surface reads from the deliberately replaced document as page
+  // errors in addition to their request-cancellation events. Native-first
+  // transport teardown can expose more than one of those errors, so require a
+  // bijection: every page error must have exactly one same-phase, exact-URL
+  // cancellation immediately before it, and no cancellation may authorize a
+  // second error. Duplicate, late, concurrent, or stale evidence keeps the
+  // strict page-error ledger red.
   const candidates = problems.pageErrorEvidence.flatMap((pageError) => {
     const failureIndex = correlatedWebKitReauthenticationFailureIndex(
       pageError,
@@ -965,11 +966,17 @@ function optionalWebKitReauthenticationAccessControlPageError(
     );
     return failureIndex === null ? [] : [{ failureIndex, message: pageError.message }];
   });
-  if (candidates.length !== 1) return [];
-  const [candidate] = candidates;
-  if (!candidate) return [];
-  problems.acceptedRequestFailures.splice(candidate.failureIndex, 1);
-  return [candidate.message];
+  const failureIndexes = candidates.map(({ failureIndex }) => failureIndex);
+  if (
+    candidates.length !== problems.pageErrorEvidence.length ||
+    new Set(failureIndexes).size !== failureIndexes.length
+  ) {
+    return [];
+  }
+  for (const failureIndex of [...failureIndexes].sort((left, right) => right - left)) {
+    problems.acceptedRequestFailures.splice(failureIndex, 1);
+  }
+  return candidates.map(({ message }) => message);
 }
 
 async function expectAndConsumeActorTransitionResponse(
@@ -2022,6 +2029,7 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_ABORT" })).toBeNull();
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" })).toContain(
       "/sessions",
     );
@@ -2307,6 +2315,27 @@ describe("provider-neutral browser account acceptance", () => {
         "webkit",
       ),
     ).toEqual([]);
+    const secondAcceptedWebKitCancellation = {
+      ...acceptedWebKitCancellation,
+      pathnameAndSearch:
+        "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/queue",
+    };
+    const secondCorrelatedWebKitPageError = {
+      message:
+        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/queue due to access control checks.",
+      observedAt: 175,
+    };
+    const bijectiveWebKitFailures = [acceptedWebKitCancellation, secondAcceptedWebKitCancellation];
+    expect(
+      optionalWebKitReauthenticationAccessControlPageError(
+        {
+          acceptedRequestFailures: bijectiveWebKitFailures,
+          pageErrorEvidence: [correlatedWebKitPageError, secondCorrelatedWebKitPageError],
+        },
+        "webkit",
+      ),
+    ).toEqual([correlatedWebKitPageError.message, secondCorrelatedWebKitPageError.message]);
+    expect(bijectiveWebKitFailures).toEqual([]);
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
