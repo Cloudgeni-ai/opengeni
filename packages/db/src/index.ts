@@ -338,6 +338,7 @@ import {
   evaluateSessionControl,
   evaluateSessionControls,
   evaluateSessionDiscoveryControls,
+  evaluateSessionWriteAdmissionControl,
   lockSessionEventWriteRows,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
@@ -34296,16 +34297,19 @@ async function lockTurnAttemptWriteFenceTx(
   if (!workspace || !session || !turn || !attempt) {
     return { allowed: false, reason: "not_found", ...base };
   }
-  const effectiveControl = await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
-    workspaceControl: locks.control ?? undefined,
-  });
+  const effectiveControl = await evaluateSessionWriteAdmissionControl(
+    tx,
+    input.workspaceId,
+    input.sessionId,
+    {
+      workspaceControl: locks.control ?? undefined,
+    },
+  );
   if (effectiveControl.state === "paused") {
     return {
       allowed: false,
       reason:
-        effectiveControl.primaryBlocker?.kind === "workspace"
-          ? "workspace_paused"
-          : "session_paused",
+        effectiveControl.primaryBlockerKind === "workspace" ? "workspace_paused" : "session_paused",
       ...base,
     };
   }
