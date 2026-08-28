@@ -909,6 +909,8 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       leaseTtlMs: 45_000,
     });
     expect(committed.committed).toBe(true);
+    expect(committed.lease).not.toBeNull();
+    const warmLeaseEpoch = committed.lease!.leaseEpoch;
 
     const specHash = `sha256:${"a".repeat(64)}`;
     const ownerClaimId = crypto.randomUUID();
@@ -916,7 +918,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
-      expectedLeaseEpoch: acquired.lease.leaseEpoch,
+      expectedLeaseEpoch: warmLeaseEpoch,
       expectedInstanceId: instanceId,
       specHash,
       holderId: "shared-preparation-owner",
@@ -930,7 +932,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
-      expectedLeaseEpoch: acquired.lease.leaseEpoch,
+      expectedLeaseEpoch: warmLeaseEpoch,
       expectedInstanceId: instanceId,
       specHash,
       holderId: "shared-preparation-owner",
@@ -944,7 +946,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         accountId,
         workspaceId,
         sandboxGroupId: groupId,
-        expectedLeaseEpoch: acquired.lease.leaseEpoch,
+        expectedLeaseEpoch: warmLeaseEpoch,
         expectedInstanceId: instanceId,
         specHash,
         holderId: "shared-preparation-owner",
@@ -957,7 +959,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
-      expectedLeaseEpoch: acquired.lease.leaseEpoch,
+      expectedLeaseEpoch: warmLeaseEpoch,
       expectedInstanceId: instanceId,
       specHash,
       holderId: "shared-preparation-owner",
@@ -969,7 +971,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       accountId,
       workspaceId,
       sandboxGroupId: groupId,
-      expectedLeaseEpoch: acquired.lease.leaseEpoch,
+      expectedLeaseEpoch: warmLeaseEpoch,
       expectedInstanceId: instanceId,
       specHash,
       holderId: "shared-preparation-owner",
