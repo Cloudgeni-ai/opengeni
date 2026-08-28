@@ -15757,6 +15757,16 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
     }),
+    sites: z
+      .object({
+        enabled: z.boolean(),
+      })
+      .default({ enabled: false }),
+    advancedDeployments: z
+      .object({
+        enabled: z.boolean(),
+      })
+      .default({ enabled: false }),
     // Native voice-input capability. Provider/model/credentials stay server-private;
     // clients only learn whether a deployment can transcribe and the hard ceilings.
     voiceInput: ClientVoiceInputConfig.default({
@@ -15909,3 +15919,5 @@ export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
 export * from "./agent-authored-durable-text";
+export * from "./internal-applications";
+export * from "./sites";

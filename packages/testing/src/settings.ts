@@ -68,6 +68,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     workDiscoveryHumanAdvisoriesEnabled: true,
     workDiscoveryAutomaticNudgesEnabled: false,
     environmentsEncryptionKey: undefined,
+    sitesEnabled: false,
+    advancedDeploymentsEnabled: false,
     integrationsEnabled: false,
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,

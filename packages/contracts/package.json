@@ -54,6 +54,14 @@
       "types": "./src/video-generation.ts",
       "default": "./src/video-generation.ts"
     },
+    "./internal-applications": {
+      "types": "./src/internal-applications.ts",
+      "default": "./src/internal-applications.ts"
+    },
+    "./sites": {
+      "types": "./src/sites.ts",
+      "default": "./src/sites.ts"
+    },
     "./canonical-human-identities": {
       "types": "./src/canonical-human-identities.ts",
       "default": "./src/canonical-human-identities.ts"

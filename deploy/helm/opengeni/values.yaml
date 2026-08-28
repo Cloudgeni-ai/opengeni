@@ -99,6 +99,11 @@ config:
   OPENGENI_USAGE_LIMITS_MODE: none
   OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
   OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
+  # Independent preview gates. Sites host governed static SPAs through the
+  # shared runtime gateway; Advanced Deployments may mutate external compute.
+  # Both API and web surfaces stay invisible until explicitly enabled.
+  OPENGENI_SITES_ENABLED: "false"
+  OPENGENI_ADVANCED_DEPLOYMENTS_ENABLED: "false"
   OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
   OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
   OPENGENI_OBJECT_STORAGE_REGION: us-east-1

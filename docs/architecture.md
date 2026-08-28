@@ -740,6 +740,7 @@ handlers because its host owns process lifecycle.
 | `packages/artifact-kernel-wasm-spreadsheet` | `@opengeni/artifact-kernel-wasm-spreadsheet` | Lazy spreadsheet WASM kernel distribution |
 | `packages/agent-proto` | `@opengeni/agent-proto` | Generated TypeScript side of the Connected Machine wire protocol |
 | `packages/sdk` | `@opengeni/sdk` | Framework-neutral API client, event streaming, and transport helpers |
+| `packages/site-runtime` | `@opengeni/site-runtime` | Zero-network, credential-free browser facade over the authenticated Site shell MessageChannel |
 | `packages/react` | `@opengeni/react` | React hooks and styled session, composer, artifact, and machine surfaces |
 | `packages/observability` | `@opengeni/observability` | Structured logs, traces, metrics, and Prometheus exposition |
 | `packages/deployment` | `@opengeni/deployment` | Typed deployment profiles, preflight, plans, and generated runtime artifacts |
@@ -750,6 +751,8 @@ handlers because its host owns process lifecycle.
 | Path | Package | Owns |
 | --- | --- | --- |
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Executable standalone-product integration reference with a server-side SDK proxy, authenticated product MCP, React embedding, and independent event streams |
+| `deploy/examples/sites/sintef-local-data` | — | Closed-environment static Site and local-data reference |
+| `deploy/examples/internal-applications/sintef` | — | Advanced Kubernetes deployment and target-authority reference |
 
 ### 6.4 Rust agent and relay
 
@@ -876,6 +879,35 @@ Canonical: [`../packages/sdk/README.md`](../packages/sdk/README.md),
 [`../packages/react/README.md`](../packages/react/README.md),
 [`embedding-workbench.md`](embedding-workbench.md), and
 [`embedding.md`](embedding.md).
+
+### 7.7 Sites and Advanced Deployments
+
+OpenGeni Sites are the default generated-application lane. A Site is a
+`static_spa` release that binds one exact workspace HTML-artifact version to an
+immutable capability manifest. The authenticated parent shell loads that
+release into an opaque-origin `allow-scripts` iframe with a network-disabled
+CSP, then exposes only bounded `ai.start`, `ai.send`, and `ai.cancel` operations
+over a page-lifetime MessageChannel. Generated code receives no OpenGeni,
+provider, Connection, Variable Set, object-storage, or generic fetch
+credential. The gateway rechecks the current human grant and release ceiling,
+creates an ordinary durable OpenGeni session, freezes approval policy before
+the first message, and keeps platform approvals, SSE/replay, usage, and audit
+on their existing authorities.
+
+Advanced Deployments are a separate `external_deployment` lane for arbitrary
+backend code and customer-owned infrastructure. Their immutable application,
+bundle, data-source, target, deployment, operation, and event records drive a
+governed plan/approve/apply/observe/reconcile/rollback/retire protocol. The
+Kubernetes provider resolves control credentials just in time and applies
+digest-pinned, secret-reference-only resources. Sites never provision per-app
+compute, while enabling Advanced Deployments grants no Site runtime access.
+Both surfaces are independently disabled by default.
+
+Canonical: [`sites.md`](sites.md), [`internal-applications.md`](internal-applications.md),
+`packages/contracts/src/sites.ts`, `packages/db/src/sites.ts`,
+`apps/api/src/routes/sites.ts`, `packages/site-runtime`,
+`packages/core/src/domain/internal-applications.ts`, and
+`apps/api/src/routes/internal-applications.ts`.
 
 ---
 
@@ -1099,6 +1131,8 @@ This index intentionally routes at subsystem granularity. Use
 | Documents, RAG, or Knowledge retrieval | `packages/documents/`, `apps/api/src/routes/documents.ts` | [`knowledge-retrieval.md`](knowledge-retrieval.md), [`scoped-knowledge.md`](scoped-knowledge.md) |
 | Agent Knowledge, Memory, preferences, instructions, organization identity, or learning | `packages/db/src/`, `packages/runtime/src/workspace-governance.ts` | [`workspace-state.md`](workspace-state.md) and the linked authority doc |
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
+| OpenGeni Sites or the browser runtime gateway | `packages/contracts/src/sites.ts`, `packages/db/src/sites.ts`, `apps/api/src/routes/sites.ts`, `packages/site-runtime/`, `apps/web/src/routes/sites.tsx` | [`sites.md`](sites.md) and §7.7 |
+| Advanced application deployments | `packages/core/src/domain/internal-applications.ts`, `packages/db/src/internal-applications.ts`, `apps/api/src/routes/internal-applications.ts` | [`internal-applications.md`](internal-applications.md) and §7.7 |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |

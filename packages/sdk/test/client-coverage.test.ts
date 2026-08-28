@@ -2284,3 +2284,103 @@ describe("OpenGeniClient error handling for new endpoints", () => {
     expect((error as OpenGeniApiError).body).toBe("");
   });
 });
+
+describe("OpenGeniClient internal application endpoints", () => {
+  test("covers the complete internal-application control and runtime surface", async () => {
+    const { client, requests } = makeClient((request) => {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith("/internal-applications")) return jsonResponse({ applications: [] });
+      if (path.endsWith("/internal-application-data-sources"))
+        return jsonResponse({ dataSources: [] });
+      if (path.endsWith("/internal-application-targets")) return jsonResponse({ targets: [] });
+      if (path.endsWith("/bundles")) return jsonResponse({ bundles: [] });
+      if (path.endsWith("/internal-application-deployments"))
+        return jsonResponse({ deployments: [] });
+      if (path.endsWith("/operations")) return jsonResponse({ operations: [] });
+      if (path.endsWith("/events")) return jsonResponse({ events: [] });
+      return jsonResponse({});
+    });
+    await client.listInternalApplications(WORKSPACE_ID);
+    await client.createInternalApplication(WORKSPACE_ID, {} as never);
+    await client.getInternalApplication(WORKSPACE_ID, SESSION_ID);
+    await client.updateInternalApplication(WORKSPACE_ID, SESSION_ID, {} as never);
+    await client.listInternalApplicationDataSources(WORKSPACE_ID);
+    await client.putInternalApplicationDataSource(WORKSPACE_ID, SESSION_ID, {} as never);
+    await client.listInternalApplicationTargets(WORKSPACE_ID);
+    await client.putInternalApplicationTarget(WORKSPACE_ID, SESSION_ID, {} as never);
+    await client.listInternalApplicationBundles(WORKSPACE_ID, SESSION_ID);
+    await client.registerInternalApplicationBundle(WORKSPACE_ID, SESSION_ID, {} as never);
+    await client.createInternalApplicationBuildSession(WORKSPACE_ID, SESSION_ID, {
+      operationId: TURN_A,
+      expectedApplicationRevision: 1,
+    });
+    await client.listInternalApplicationDeployments(WORKSPACE_ID, SESSION_ID);
+    await client.planInternalApplicationDeployment(WORKSPACE_ID, {
+      operationId: TURN_A,
+      applicationId: SESSION_ID,
+      expectedApplicationRevision: 1,
+      bundleId: TURN_B,
+      targetId: WORKSPACE_ID,
+      expectedTargetRevision: 1,
+      environment: "development",
+    });
+    await client.applyInternalApplicationDeployment(WORKSPACE_ID, {
+      operationId: TURN_B,
+      planOperationId: TURN_A,
+      expectedPlanDigest: `sha256:${"a".repeat(64)}`,
+    });
+    await client.approveInternalApplicationDeploymentPlan(WORKSPACE_ID, TURN_A, {
+      expectedPlanDigest: `sha256:${"a".repeat(64)}`,
+    });
+    await client.observeInternalApplicationDeployment(WORKSPACE_ID, SESSION_ID, {
+      operationId: TURN_A,
+    });
+    await client.rollbackInternalApplicationDeployment(WORKSPACE_ID, SESSION_ID, {
+      operationId: TURN_B,
+      expectedDeploymentRevision: 2,
+    });
+    await client.retireInternalApplicationDeployment(WORKSPACE_ID, SESSION_ID, {
+      operationId: TURN_A,
+      expectedDeploymentRevision: 3,
+    });
+    await client.listInternalApplicationDeploymentOperations(WORKSPACE_ID, SESSION_ID);
+    await client.listInternalApplicationEvents(WORKSPACE_ID, SESSION_ID);
+    await client.getInternalApplicationOperation(WORKSPACE_ID, TURN_A);
+    await client.reconcileInternalApplicationDeploymentOperation(WORKSPACE_ID, TURN_A, {
+      operationId: TURN_B,
+      expectedDeploymentRevision: 4,
+    });
+    await client.createInternalApplicationAiSession(WORKSPACE_ID, SESSION_ID, {
+      operationId: TURN_A,
+      initialMessage: "Summarize this record",
+    });
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/internal-applications`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-applications`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/internal-applications/${SESSION_ID}`,
+        `PATCH /v1/workspaces/${WORKSPACE_ID}/internal-applications/${SESSION_ID}`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/internal-application-data-sources`,
+        `PUT /v1/workspaces/${WORKSPACE_ID}/internal-application-data-sources/${SESSION_ID}`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/internal-application-targets`,
+        `PUT /v1/workspaces/${WORKSPACE_ID}/internal-application-targets/${SESSION_ID}`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/internal-applications/${SESSION_ID}/bundles`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-applications/${SESSION_ID}/bundles`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-applications/${SESSION_ID}/build/sessions`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/internal-application-deployments`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-application-deployments/plan`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-application-deployments/apply`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-application-operations/${TURN_A}/approve`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-application-deployments/${SESSION_ID}/observe`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-application-deployments/${SESSION_ID}/rollback`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-application-deployments/${SESSION_ID}/retire`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/internal-application-deployments/${SESSION_ID}/operations`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/internal-applications/${SESSION_ID}/events`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/internal-application-operations/${TURN_A}`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-application-operations/${TURN_A}/reconcile`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/internal-applications/${SESSION_ID}/ai/sessions`,
+      ],
+    );
+    expect(new URL(requests[11]!.url).searchParams.get("applicationId")).toBe(SESSION_ID);
+  });
+});

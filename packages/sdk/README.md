@@ -168,6 +168,87 @@ management. It does not expose standalone `once`, custom expiry, scheduled or
 cross-workspace authority, or an atomic create-session-and-attach workflow.
 Revocation prevents future reads but cannot retract output already shared.
 
+## OpenGeni Sites
+
+The artifact-aware client (`@opengeni/sdk/artifacts`) owns the authenticated
+Site management and gateway API:
+
+```ts
+import { OpenGeniClient } from "@opengeni/sdk/artifacts";
+
+const client = new OpenGeniClient({ baseUrl: apiUrl, apiKey });
+const published = await client.publishSite(workspaceId, artifactId, {
+  operationId: crypto.randomUUID(),
+  expectedCurrentReleaseId: null,
+  artifactVersionId,
+  manifest,
+  reason: "Initial reviewed release",
+});
+
+const runtime = await client.createSiteRuntimeSession(workspaceId, published.site.id, {
+  operationId: crypto.randomUUID(),
+  initialMessage: "Summarize the approved evidence",
+});
+```
+
+It also exposes `listSites`, `getSite`, `rollbackSite`, `archiveSite`,
+`getSiteUsage`, and `sendSiteRuntimeMessage`. These methods are for trusted
+authenticated hosts and automation. Generated static Site code instead uses
+the credential-free `@opengeni/site-runtime` package:
+
+```ts
+import { connect } from "@opengeni/site-runtime";
+
+const site = await connect();
+const receipt = await site.ai.start({ message: "Analyze the approved local data" });
+site.onEvent(({ sessionId, event }) => {
+  if (sessionId === receipt.sessionId) render(event);
+});
+```
+
+That package contains no network client. It talks only through the
+page-lifetime MessageChannel injected by the authenticated OpenGeni Site shell.
+The immutable release and current user grant bound model, instructions, tools,
+integrations, approvals, access, and budget. See
+[`docs/sites.md`](../../docs/sites.md).
+
+## Advanced deployment application runtime
+
+When the deployment enables the Advanced Deployments preview, a deployed app
+can start a durable session through its frozen model policy. The app should use
+a dedicated workspace API key with only `sessions:create`, `sessions:read`, and
+`sessions:control`; Kubernetes supplies it through a Secret reference.
+
+```ts
+const runtime = await client.createInternalApplicationAiSession(
+  workspaceId,
+  applicationId,
+  {
+    operationId: crypto.randomUUID(),
+    initialMessage: "Explain the selected approved record",
+    modelContext: JSON.stringify(record),
+  },
+);
+
+for await (const event of client.streamEvents(workspaceId, runtime.sessionId)) {
+  // Render normal durable session events in the application's own interface.
+}
+```
+
+`modelContext` is retained ordinary model-visible content. Supply only the exact
+data the application intends to enter session history. The runtime endpoint
+requires an active deployment, restricts model selection to the application
+revision's allowlist, and selects no first-party tools by default. See
+[`docs/internal-applications.md`](../../docs/internal-applications.md).
+
+Internal teams can start the generation side through
+`createInternalApplicationBuildSession`, then use the ordinary session APIs for
+files, progress, tools, approvals, steering, and preview. The same client owns
+the catalog and deployment lifecycle, including immutable bundle registration,
+plan/approve/apply, operation/event reads, observe, outcome reconciliation,
+rollback, and retirement. Every route remains unavailable while the independent
+Advanced Deployments feature flag is off.
+
 ## Scheduled connection authority
 
 Agent schedules may carry explicit personal Connection authority. The public
@@ -366,7 +447,9 @@ mistake a partial page for the complete workspace catalog.
 The initial web renderer supports semantic HTML, inline CSS, CSS-only
 interactions, and inline SVG. It removes JavaScript, event handlers, forms,
 embeds, external URLs, and other active or navigation-capable markup before
-rendering. Executable artifacts require a later, stronger isolation boundary.
+rendering. Executable artifacts become active only through a reviewed Site
+release, whose shell adds the stricter opaque-origin runtime, network-disabled
+CSP, typed MessageChannel, and immutable capability manifest described above.
 
 ```ts
 let cursor: string | undefined;

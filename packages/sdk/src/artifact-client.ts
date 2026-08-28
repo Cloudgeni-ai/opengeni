@@ -22,9 +22,100 @@ import type {
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
 } from "./workspace-artifacts";
+import type {
+  ArchiveSiteRequest,
+  CreateSiteRuntimeSessionRequest,
+  PublishSiteRequest,
+  RollbackSiteRequest,
+  SendSiteRuntimeMessageRequest,
+  SiteDetailResponse,
+  SiteListResponse,
+  SiteMutationResponse,
+  SiteRuntimeSessionReceipt,
+  SiteUsageResponse,
+} from "./sites";
 
 /** Public SDK client. Optional operator and artifact operations stay out of the console core. */
 export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
+  async listSites(workspaceId: string): Promise<SiteListResponse> {
+    return await this.requestJson("GET", `/v1/workspaces/${workspaceId}/sites`);
+  }
+
+  async getSite(workspaceId: string, siteId: string): Promise<SiteDetailResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sites/${encodeURIComponent(siteId)}`,
+    );
+  }
+
+  async publishSite(
+    workspaceId: string,
+    siteId: string,
+    request: PublishSiteRequest,
+  ): Promise<SiteMutationResponse> {
+    return await this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sites/${encodeURIComponent(siteId)}/releases`,
+      request,
+    );
+  }
+
+  async rollbackSite(
+    workspaceId: string,
+    siteId: string,
+    request: RollbackSiteRequest,
+  ): Promise<SiteMutationResponse> {
+    return await this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sites/${encodeURIComponent(siteId)}/rollback`,
+      request,
+    );
+  }
+
+  async archiveSite(
+    workspaceId: string,
+    siteId: string,
+    request: ArchiveSiteRequest,
+  ): Promise<SiteDetailResponse> {
+    return await this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sites/${encodeURIComponent(siteId)}/archive`,
+      request,
+    );
+  }
+
+  async getSiteUsage(workspaceId: string, siteId: string): Promise<SiteUsageResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sites/${encodeURIComponent(siteId)}/usage`,
+    );
+  }
+
+  async createSiteRuntimeSession(
+    workspaceId: string,
+    siteId: string,
+    request: CreateSiteRuntimeSessionRequest,
+  ): Promise<SiteRuntimeSessionReceipt> {
+    return await this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sites/${encodeURIComponent(siteId)}/runtime/sessions`,
+      request,
+    );
+  }
+
+  async sendSiteRuntimeMessage(
+    workspaceId: string,
+    siteId: string,
+    runtimeSessionId: string,
+    request: SendSiteRuntimeMessageRequest,
+  ): Promise<unknown> {
+    return await this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sites/${encodeURIComponent(siteId)}/runtime/sessions/${encodeURIComponent(runtimeSessionId)}/messages`,
+      request,
+    );
+  }
+
   async createEditableArtifact(
     workspaceId: string,
     request: CreateEditableArtifactResourceRequest,

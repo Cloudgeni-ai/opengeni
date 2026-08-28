@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, Ref } from "react";
 
 export const PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX = [
   "allow-downloads",
@@ -17,6 +17,9 @@ export type PublishedHtmlArtifactFrameProps = {
   title: string;
   className?: string;
   style?: CSSProperties;
+  iframeRef?: Ref<HTMLIFrameElement>;
+  onLoad?: () => void;
+  sandbox?: string;
 };
 
 /**
@@ -27,12 +30,14 @@ export type PublishedHtmlArtifactFrameProps = {
 export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProps) {
   return (
     <iframe
+      ref={props.iframeRef}
       title={props.title}
-      sandbox={PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX}
+      sandbox={props.sandbox ?? PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX}
       referrerPolicy="no-referrer"
       srcDoc={props.html}
       className={props.className}
       style={props.style}
+      onLoad={props.onLoad}
     />
   );
 }

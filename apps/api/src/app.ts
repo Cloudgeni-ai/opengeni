@@ -172,6 +172,8 @@ import {
 } from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
 import { registerConnectionAuthorityRoutes } from "./routes/connection-authorities";
+import { registerInternalApplicationRoutes } from "./routes/internal-applications";
+import { registerSiteRoutes } from "./routes/sites";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
@@ -792,6 +794,14 @@ export function createAppComposition(deps: AppDependencies): {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
+        sites: {
+          // Some embedding hosts build Settings values programmatically across
+          // additive releases; absent means the same safe disabled posture.
+          enabled: deps.settings.sitesEnabled ?? false,
+        },
+        advancedDeployments: {
+          enabled: deps.settings.advancedDeploymentsEnabled ?? false,
+        },
         voiceInput: {
           available: (await transcription?.available()) ?? false,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
@@ -1001,6 +1011,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerConnectionAuthorityRoutes(app, routeDeps);
+  registerInternalApplicationRoutes(app, routeDeps);
+  registerSiteRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
@@ -1658,6 +1670,26 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/site-auth-connections\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/site-auth-connections/:siteAuthConnectionId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sites\/[^/]+\/runtime\/sessions\/[^/]+\/messages$/,
+    label: "/v1/workspaces/:workspaceId/sites/:siteId/runtime/sessions/:runtimeSessionId/messages",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sites\/[^/]+\/runtime\/sessions$/,
+    label: "/v1/workspaces/:workspaceId/sites/:siteId/runtime/sessions",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sites\/[^/]+\/(releases|rollback|archive|usage)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/sites/:siteId/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sites\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/sites/:siteId",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sites$/,
+    label: "/v1/workspaces/:workspaceId/sites",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/site-auth-connections$/,

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  filterWorkspaceItemsByFeatures,
   PRIMARY_WORKSPACE_ITEMS,
   WORKSPACE_CONFIG_GROUPS,
   isWorkspaceConfigPath,
@@ -29,6 +30,8 @@ describe("workspace rail destinations", () => {
       "/workspaces/$workspaceId/state",
       "/workspaces/$workspaceId/schedules",
       "/workspaces/$workspaceId/artifacts",
+      "/workspaces/$workspaceId/sites",
+      "/workspaces/$workspaceId/applications",
     ]);
     expect(settingsTargets.filter((target) => primaryTargets.includes(target))).toEqual([]);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/schedules", "ws-1")).toBe(false);
@@ -36,5 +39,24 @@ describe("workspace rail destinations", () => {
     expect(isWorkspaceConfigPath("/workspaces/ws-1/documents", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/state", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/settings", "ws-1")).toBe(true);
+  });
+
+  test("keeps both independent surfaces absent by default", () => {
+    const labels = filterWorkspaceItemsByFeatures(PRIMARY_WORKSPACE_ITEMS).map(
+      (item) => item.label,
+    );
+    expect(labels).not.toContain("Sites");
+    expect(labels).not.toContain("Advanced deployments");
+  });
+
+  test("shows each surface only under its own feature gate", () => {
+    const labels = (sites: boolean, advanced: boolean) =>
+      filterWorkspaceItemsByFeatures(PRIMARY_WORKSPACE_ITEMS, sites, advanced).map(
+        (item) => item.label,
+      );
+    expect(labels(true, false)).toContain("Sites");
+    expect(labels(true, false)).not.toContain("Advanced deployments");
+    expect(labels(false, true)).not.toContain("Sites");
+    expect(labels(false, true)).toContain("Advanced deployments");
   });
 });

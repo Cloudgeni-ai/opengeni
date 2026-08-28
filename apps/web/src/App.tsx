@@ -77,6 +77,11 @@ const LazyVariableSetsRoute = lazyRouteComponent(
   "VariableSetsRoute",
 );
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
+const LazyInternalApplicationsRoute = lazyRouteComponent(
+  () => import("@/routes/internal-applications"),
+  "InternalApplicationsRoute",
+);
+const LazySitesRoute = lazyRouteComponent(() => import("@/routes/sites"), "SitesRoute");
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
 const LazyPriorityRoute = lazyRouteComponent(() => import("@/routes/priority"), "PriorityRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
@@ -279,6 +284,26 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+const workspaceInternalApplicationsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "applications",
+  component: InternalApplications,
+});
+const workspaceSitesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "sites",
+  component: Sites,
+});
+const workspaceSiteDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "sites/$siteId",
+  component: SiteDetail,
+});
+const workspaceSiteRunRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "sites/$siteId/run",
+  component: SiteRun,
+});
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
@@ -463,6 +488,10 @@ const routeTree = rootRoute.addChildren([
     workspaceRigsRoute,
     workspaceRigDetailRoute,
     workspaceMachinesRoute,
+    workspaceInternalApplicationsRoute,
+    workspaceSitesRoute,
+    workspaceSiteDetailRoute,
+    workspaceSiteRunRoute,
     workspaceInsightsRoute,
     workspacePriorityRoute,
     workspacePacksRoute,
@@ -575,6 +604,23 @@ function RigDetail() {
 function Machines() {
   const { workspaceId } = workspaceMachinesRoute.useParams();
   return <LazyMachinesRoute workspaceId={workspaceId} />;
+}
+
+function InternalApplications() {
+  const { workspaceId } = workspaceInternalApplicationsRoute.useParams();
+  return <LazyInternalApplicationsRoute workspaceId={workspaceId} />;
+}
+
+function Sites() {
+  return <LazySitesRoute {...workspaceSitesRoute.useParams()} />;
+}
+
+function SiteDetail() {
+  return <LazySitesRoute {...workspaceSiteDetailRoute.useParams()} />;
+}
+
+function SiteRun() {
+  return <LazySitesRoute {...workspaceSiteRunRoute.useParams()} run />;
 }
 
 function Insights() {
