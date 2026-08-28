@@ -456,15 +456,16 @@ function isExpectedBoundedHttp1NativeSeam(input: {
       input.failure.trim(),
     );
   const elapsedMs = input.failedAt - input.startedAt;
-  // The browser-owned seam fires at nine seconds. Allow only the request-start
-  // offset plus bounded scheduling jitter; the two-second logical reconnect
-  // grace does not extend the native request's cancellation deadline.
+  // The browser-owned body and pre-header seams fire at eleven seconds. Allow
+  // only the request-start offset plus bounded scheduling jitter; the
+  // four-second logical reconnect grace does not extend the native request's
+  // cancellation deadline.
   return (
     isStream &&
     isCancellation &&
     url.searchParams.get("transport") === "http1-bounded" &&
-    elapsedMs >= 8_000 &&
-    elapsedMs <= 13_000
+    elapsedMs >= 10_000 &&
+    elapsedMs <= 15_000
   );
 }
 
@@ -774,6 +775,15 @@ function observeBrowser(page: Page): BrowserProblems {
       })
     ) {
       problems.boundedHttp1NativeSeams += 1;
+      // WebKit can additionally surface the exact canceled request as a page
+      // access-control error. Preserve the URL, phase, and timestamp so the
+      // page-error gate can require the same strict one-to-one correlation as
+      // actor-transition cancellations instead of broadly allowing CORS text.
+      problems.acceptedRequestFailures.push({
+        failedAt,
+        pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
+        responsePhase,
+      });
       return;
     }
     const check = (async () => {
@@ -1087,8 +1097,7 @@ function correlatedWebKitReauthenticationFailureIndex(
   const matchingFailureIndexes = acceptedRequestFailures.flatMap((failure, index) =>
     failure.responsePhase === "slot-revocation-reauthentication" &&
     failure.pathnameAndSearch === pathnameAndSearch &&
-    failure.failedAt <= pageError.observedAt &&
-    pageError.observedAt - failure.failedAt <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+    Math.abs(pageError.observedAt - failure.failedAt) <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
       ? [index]
       : [],
   );
@@ -1104,9 +1113,10 @@ function optionalWebKitReauthenticationAccessControlPageError(
   // errors in addition to their request-cancellation events. Native-first
   // transport teardown can expose more than one of those errors, so require a
   // bijection: every page error must have exactly one same-phase, exact-URL
-  // cancellation immediately before it, and no cancellation may authorize a
-  // second error. Duplicate, late, concurrent, or stale evidence keeps the
-  // strict page-error ledger red.
+  // cancellation inside the same bounded delivery window, and no cancellation
+  // may authorize a second error. Playwright delivers renderer page errors and
+  // request failures independently, so either callback can arrive first.
+  // Duplicate, late, concurrent, or stale evidence keeps the strict ledger red.
   const candidates = problems.pageErrorEvidence.flatMap((pageError) => {
     const failureIndex = correlatedWebKitReauthenticationFailureIndex(
       pageError,
@@ -2587,6 +2597,14 @@ describe("provider-neutral browser account acceptance", () => {
       correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
         { ...acceptedWebKitCancellation, failedAt: 151 },
       ]),
+    ).toBe(0);
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+        {
+          ...acceptedWebKitCancellation,
+          failedAt: 150 + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS + 1,
+        },
+      ]),
     ).toBeNull();
     expect(
       correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
@@ -2786,15 +2804,15 @@ describe("provider-neutral browser account acceptance", () => {
 
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
     const expected = {
-      failedAt: 9_100,
+      failedAt: 11_100,
       failure: "net::ERR_ABORTED",
       method: "GET",
       startedAt: 100,
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`,
     };
     expect(isExpectedBoundedHttp1NativeSeam(expected)).toBe(true);
-    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 7_999 })).toBe(false);
-    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 13_101 })).toBe(false);
+    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 10_099 })).toBe(false);
+    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 15_101 })).toBe(false);
     expect(
       isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "net::ERR_CONNECTION_RESET" }),
     ).toBe(false);

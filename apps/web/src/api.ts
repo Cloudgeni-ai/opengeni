@@ -23,13 +23,14 @@ const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 const boundedHttp1SseTransport = "http1-bounded";
-const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 2_000;
+const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 4_000;
 const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
-// The API normally closes bounded HTTP/1 streams after five seconds. Keep a
+// New APIs close bounded HTTP/1 streams after one second. Keep a longer
 // browser-owned backstop as well: a server/runtime adapter can acknowledge a
 // Web Stream close without retiring Chromium's native request, and one such
 // orphan per tab is enough to exhaust the shared per-origin connection pool.
-const HTTP1_BROWSER_SSE_NATIVE_LIFETIME_MS = 9_000;
+// Eleven seconds also preserves rolling compatibility with older five-second APIs.
+const HTTP1_BROWSER_SSE_NATIVE_LIFETIME_MS = 11_000;
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 let managedActorEpoch: string | null = null;
 let managedActorRevision = 0;
@@ -37,6 +38,9 @@ type ManagedActorRequest = {
   abortActor: (reason: DOMException) => void;
 };
 const managedActorRequests = new Set<ManagedActorRequest>();
+let managedActorForegroundRequestCount = 0;
+let managedActorForegroundIdle: Promise<void> | null = null;
+let resolveManagedActorForegroundIdle: (() => void) | null = null;
 const managedActorMutationListeners = new Set<() => void>();
 const managedActorInvalidationListeners = new Set<() => void>();
 let managedActorMutationCount = 0;
@@ -47,6 +51,40 @@ function abortManagedActorRequests(reason: DOMException): void {
   for (const managedRequest of [...managedActorRequests]) {
     managedRequest.abortActor(reason);
   }
+}
+
+function beginManagedActorForegroundRequest(): () => void {
+  if (managedActorForegroundRequestCount === 0) {
+    managedActorForegroundIdle = new Promise<void>((resolve) => {
+      resolveManagedActorForegroundIdle = resolve;
+    });
+  }
+  managedActorForegroundRequestCount += 1;
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    managedActorForegroundRequestCount = Math.max(0, managedActorForegroundRequestCount - 1);
+    if (managedActorForegroundRequestCount !== 0) return;
+    const resolve = resolveManagedActorForegroundIdle;
+    resolveManagedActorForegroundIdle = null;
+    managedActorForegroundIdle = null;
+    resolve?.();
+  };
+}
+
+async function waitForManagedActorForegroundIdle(signal: AbortSignal): Promise<void> {
+  const pendingIdle = managedActorForegroundIdle;
+  if (pendingIdle === null) return;
+  if (signal.aborted) throw signal.reason;
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    void pendingIdle.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", abort);
+    });
+  });
+  await waitForManagedActorForegroundIdle(signal);
 }
 
 export function handleManagedActorPageHide(persisted: boolean): void {
@@ -196,9 +234,11 @@ export async function managedActorFetch(
   if (tracksMutation) updateManagedActorMutationCount(1);
   let responseOwnsCleanup = false;
   let cleaned = false;
+  let endForegroundRequest = () => {};
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
+    endForegroundRequest();
     managedActorRequests.delete(actorRequest);
     inputSignal?.removeEventListener("abort", abortFromCaller);
     if (tracksMutation) updateManagedActorMutationCount(-1);
@@ -212,10 +252,26 @@ export async function managedActorFetch(
     init,
     headers,
   );
+  const boundedHttp1Sse = cleanCloseDelayMs > 0;
+  if (isForegroundApiRequest(input, init, headers, boundedHttp1Sse)) {
+    endForegroundRequest = beginManagedActorForegroundRequest();
+  }
   if (acceptedEpoch && init.credentials !== "omit" && !headers.has(MANAGED_ACTOR_EPOCH_HEADER)) {
     headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
   }
+  let boundedRequestTimer: ReturnType<typeof setTimeout> | null = null;
   try {
+    if (boundedHttp1Sse) {
+      boundedRequestTimer = setTimeout(() => {
+        controller.abort(
+          new DOMException(
+            "The bounded HTTP/1 stream did not complete its native response in time",
+            "AbortError",
+          ),
+        );
+      }, nativeLifetimeMs);
+      await waitForManagedActorForegroundIdle(controller.signal);
+    }
     const response = await fetch(transportInput, {
       ...init,
       headers,
@@ -243,7 +299,8 @@ export async function managedActorFetch(
     // EOF. Draining here also guarantees the native body already has a
     // rejection consumer before any post-header actor abort.
     let actorResponse = response;
-    const detachedResponse = isFiniteJsonResponse(response) || isFiniteSseBatchResponse(response);
+    const finiteSseBatch = isFiniteSseBatchResponse(response);
+    const detachedResponse = isFiniteJsonResponse(response) || finiteSseBatch;
     if (detachedResponse) {
       const bytes = await readFiniteResponseBytes(response);
       if (responseIsStale()) {
@@ -257,6 +314,17 @@ export async function managedActorFetch(
         statusText: response.statusText,
         headers: response.headers,
       });
+      if (finiteSseBatch) {
+        // Chromium can expose EOF for a finite HTTP/1 SSE body while still
+        // accounting the native request against the per-origin connection
+        // pool. The caller now owns a complete byte copy, so aborting the
+        // original fetch is harmless for a settled transport and retires an
+        // orphaned one without affecting the detached response.
+        controller.abort(
+          new DOMException("The finite HTTP/1 stream body was fully detached", "AbortError"),
+        );
+      }
+      endForegroundRequest();
     }
     // Before headers—and through a finite response drain—actor rotation aborts the
     // native fetch. A detached finite body no longer owns a network resource,
@@ -291,6 +359,7 @@ export async function managedActorFetch(
       detachedResponse ? 0 : nativeLifetimeMs,
     );
   } finally {
+    if (boundedRequestTimer !== null) clearTimeout(boundedRequestTimer);
     if (!responseOwnsCleanup) cleanup();
   }
 }
@@ -321,6 +390,27 @@ function browserSseTransportInput(
     HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS,
     HTTP1_BROWSER_SSE_NATIVE_LIFETIME_MS,
   ];
+}
+
+function isForegroundApiRequest(
+  input: string | URL | Request,
+  init: RequestInit,
+  headers: Headers,
+  boundedHttp1Sse: boolean,
+): boolean {
+  if (boundedHttp1Sse || headers.get("accept")?.toLowerCase().includes("text/event-stream")) {
+    return false;
+  }
+  try {
+    const raw = typeof Request !== "undefined" && input instanceof Request ? input.url : input;
+    const base = typeof window === "undefined" ? "http://opengeni.local" : window.location.href;
+    return (
+      new URL(String(raw), base).pathname.startsWith("/v1/") &&
+      !new Set(["HEAD", "OPTIONS"]).has(requestMethod(input, init))
+    );
+  } catch {
+    return false;
+  }
 }
 
 function observedApiProtocol(): string | null {

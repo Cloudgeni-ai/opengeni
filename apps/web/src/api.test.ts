@@ -33,6 +33,242 @@ describe("web API auth helpers", () => {
     expect(shouldBoundBrowserSseForProtocol(null)).toBe(false);
   });
 
+  test("holds a new bounded stream until foreground API reads drain", async () => {
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    let finiteController!: ReadableStreamDefaultController<Uint8Array>;
+    let streamDispatches = 0;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: new URL("https://api.example.test/workspaces/current") },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
+    });
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/workspaces") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              finiteController = controller;
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      streamDispatches += 1;
+      return new Response(": connected\n\n", {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "content-length": "13",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("foreground-gate");
+      const finite = managedActorFetch("https://api.example.test/v1/workspaces");
+      await Promise.resolve();
+      const stream = managedActorFetch(
+        "https://api.example.test/v1/workspaces/current/live-events/stream",
+        { headers: { accept: "text/event-stream" } },
+      );
+      await Promise.resolve();
+      expect(streamDispatches).toBe(0);
+      finiteController.enqueue(new TextEncoder().encode("[]"));
+      finiteController.close();
+      const finiteResponse = await finite;
+      const streamResponse = await stream;
+      expect(streamDispatches).toBe(1);
+      await finiteResponse.body!.cancel();
+      await streamResponse.body!.cancel();
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor) {
+        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      } else {
+        Reflect.deleteProperty(performance, "getEntriesByType");
+      }
+    }
+  });
+
+  test("aborts a bounded stream that never receives response headers", async () => {
+    jest.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: new URL("https://api.example.test/workspaces/current") },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
+    });
+    globalThis.fetch = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+          once: true,
+        });
+      })) as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("pre-header-deadline");
+      const stream = managedActorFetch(
+        "https://api.example.test/v1/workspaces/current/live-events/stream",
+        { headers: { accept: "text/event-stream" } },
+      );
+      await Promise.resolve();
+      jest.advanceTimersByTime(11_000);
+      await expect(stream).rejects.toMatchObject({
+        message: "The bounded HTTP/1 stream did not complete its native response in time",
+        name: "AbortError",
+      });
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor) {
+        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      } else {
+        Reflect.deleteProperty(performance, "getEntriesByType");
+      }
+      jest.useRealTimers();
+    }
+  });
+
+  test("aborts a bounded stream whose finite native body never drains", async () => {
+    jest.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: new URL("https://api.example.test/workspaces/current") },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
+    });
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
+              once: true,
+            });
+          },
+        }),
+        {
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "content-length": "13",
+          },
+        },
+      )) as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("native-drain-deadline");
+      const stream = managedActorFetch(
+        "https://api.example.test/v1/workspaces/current/live-events/stream",
+        { headers: { accept: "text/event-stream" } },
+      );
+      await Promise.resolve();
+      jest.advanceTimersByTime(11_000);
+      await expect(stream).rejects.toMatchObject({
+        message: "The bounded HTTP/1 stream did not complete its native response in time",
+        name: "AbortError",
+      });
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor) {
+        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      } else {
+        Reflect.deleteProperty(performance, "getEntriesByType");
+      }
+      jest.useRealTimers();
+    }
+  });
+
+  test("bounds a stream while it waits for foreground API reads", async () => {
+    jest.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    let finiteController!: ReadableStreamDefaultController<Uint8Array>;
+    let streamDispatches = 0;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: new URL("https://api.example.test/workspaces/current") },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
+    });
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/workspaces") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              finiteController = controller;
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      streamDispatches += 1;
+      return new Response(": connected\n\n", {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "content-length": "13",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("foreground-deadline");
+      const finite = managedActorFetch("https://api.example.test/v1/workspaces");
+      await Promise.resolve();
+      const stream = managedActorFetch(
+        "https://api.example.test/v1/workspaces/current/live-events/stream",
+        { headers: { accept: "text/event-stream" } },
+      );
+      await Promise.resolve();
+      jest.advanceTimersByTime(11_000);
+      await expect(stream).rejects.toMatchObject({
+        message: "The bounded HTTP/1 stream did not complete its native response in time",
+        name: "AbortError",
+      });
+      expect(streamDispatches).toBe(0);
+      finiteController.enqueue(new TextEncoder().encode("[]"));
+      finiteController.close();
+      const finiteResponse = await finite;
+      await finiteResponse.body!.cancel();
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor) {
+        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      } else {
+        Reflect.deleteProperty(performance, "getEntriesByType");
+      }
+      jest.useRealTimers();
+    }
+  });
+
   test("holds a clean bounded-stream EOF long enough for finite HTTP/1 reads to run", async () => {
     const source = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -434,9 +670,11 @@ describe("web API auth helpers", () => {
 
   test("drains a known-length HTTP/1 SSE batch before exposing it", async () => {
     const originalFetch = globalThis.fetch;
+    const observed: { signal?: AbortSignal | null } = {};
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
     let source!: ReadableStream<Uint8Array>;
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      observed.signal = init?.signal ?? null;
       source = new ReadableStream<Uint8Array>({
         start(controller) {
           bodyController = controller;
@@ -463,8 +701,11 @@ describe("web API auth helpers", () => {
       bodyController.enqueue(new TextEncoder().encode(": connected\n\n"));
       await Promise.resolve();
       expect(exposed).toBe(false);
+      expect(observed.signal?.aborted).toBe(false);
       bodyController.close();
       const response = await pending;
+      expect(observed.signal?.aborted).toBe(true);
+      expect(observed.signal?.reason).toMatchObject({ name: "AbortError" });
       expect(source.locked).toBe(false);
       await expect(response.text()).resolves.toBe(": connected\n\n");
     } finally {
