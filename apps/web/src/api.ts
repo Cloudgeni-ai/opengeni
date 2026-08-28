@@ -214,7 +214,7 @@ export async function managedActorFetch(
     let actorResponse = response;
     const finiteJsonResponse = isFiniteJsonResponse(response);
     if (finiteJsonResponse) {
-      const bytes = await response.arrayBuffer();
+      const bytes = await readFiniteResponseBytes(response);
       if (responseIsStale()) {
         throw new DOMException(
           "Ignored a response from the previous browser account",
@@ -260,6 +260,29 @@ export async function managedActorFetch(
 function isFiniteJsonResponse(response: Response): boolean {
   const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   return contentType === "application/json" || contentType?.endsWith("+json") === true;
+}
+
+async function readFiniteResponseBytes(response: Response): Promise<ArrayBuffer> {
+  const reader = response.body!.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      chunks.push(next.value);
+      length += next.value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer;
 }
 
 function managedActorTrackedResponse(
