@@ -741,6 +741,10 @@ describe("deployment contract", () => {
         OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
         OPENGENI_DELEGATION_SECRET: "delegation",
         OPENGENI_BETTER_AUTH_SECRET: "better-auth",
+        OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID: "google-login-staging",
+        OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET: "google-login-secret",
+        OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID: "github-login-staging",
+        OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET: "github-login-secret",
         OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
         OPENGENI_INTEGRATIONS_ENABLED: "true",
         OPENGENI_INTEGRATIONS_STATE_SECRET: "integration-state",
@@ -787,6 +791,12 @@ describe("deployment contract", () => {
 
     expect(artifacts.missingEnvVars).toEqual([]);
     expect(artifacts.runtimeEnv).toContain("OPENGENI_AUTH_REQUIRED=false");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID=google-login-staging",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID=github-login-staging",
+    );
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_ACCESS_KEY=");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PRODUCT_ACCESS_MODE=managed");
     expect(artifacts.runtimeEnv).toContain(

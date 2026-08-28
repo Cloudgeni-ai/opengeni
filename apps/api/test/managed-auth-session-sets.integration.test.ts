@@ -66,6 +66,93 @@ function mutationHeaders(
 }
 
 describe("managed session-set API with Better Auth and PostgreSQL", () => {
+  test("starts social OAuth once and replays the exact provider state", async () => {
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: shared.adminUrl,
+        productAccessMode: "managed",
+        managedAuthSessionSetMode: "broker",
+        betterAuthSecret: "managed-session-set-integration-secret-32-bytes",
+        publicBaseUrl: "http://opengeni.test",
+        managedAuthGoogleClientId: "google-client-id",
+        managedAuthGoogleClientSecret: "google-client-secret",
+        managedAuthGithubClientId: "github-client-id",
+        managedAuthGithubClientSecret: "github-client-secret",
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+    });
+    const initialResponse = await app.request("/v1/auth/session-set");
+    const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
+    const authorityCookie = oneCookie(initialResponse, MANAGED_AUTH_SESSION_SET_COOKIE);
+    const begin = await app.request("/v1/auth/session-set/transactions", {
+      method: "POST",
+      headers: mutationHeaders(initial, authorityCookie),
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        expectedGeneration: initial.generation,
+        kind: "add",
+      }),
+    });
+    expect(begin.status).toBe(200);
+    const transaction = (await begin.json()) as { id: string };
+    const transactionCookie = oneCookie(begin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE);
+    const operationId = crypto.randomUUID();
+    const socialBody = JSON.stringify({
+      operationId,
+      expectedGeneration: initial.generation,
+      transactionId: transaction.id,
+      provider: "google",
+    });
+    const start = await app.request("/v1/auth/session-set/transactions/social", {
+      method: "POST",
+      headers: mutationHeaders(initial, `${authorityCookie}; ${transactionCookie}`),
+      body: socialBody,
+    });
+    expect(start.status).toBe(200);
+    const started = (await start.json()) as { url: string };
+    const authorizationUrl = new URL(started.url);
+    expect(authorizationUrl.origin).toBe("https://accounts.google.com");
+    expect(authorizationUrl.searchParams.get("client_id")).toBe("google-client-id");
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
+      "http://opengeni.test/v1/auth/callback/google",
+    );
+    const state = authorizationUrl.searchParams.get("state");
+    expect(state).toBeString();
+    expect(state).not.toContain(transaction.id);
+    const stateCookie = start.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith("better-auth.state="));
+    expect(stateCookie).toBeString();
+
+    const replay = await app.request("/v1/auth/session-set/transactions/social", {
+      method: "POST",
+      headers: mutationHeaders(initial, `${authorityCookie}; ${transactionCookie}`),
+      body: socialBody,
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(started);
+    expect(
+      replay.headers.getSetCookie().find((cookie) => cookie.startsWith("better-auth.state=")),
+    ).toBe(stateCookie);
+
+    const reused = await app.request("/v1/auth/session-set/transactions/social", {
+      method: "POST",
+      headers: mutationHeaders(initial, `${authorityCookie}; ${transactionCookie}`),
+      body: JSON.stringify({
+        operationId,
+        expectedGeneration: initial.generation,
+        transactionId: transaction.id,
+        provider: "github",
+      }),
+    });
+    expect(reused.status).toBe(409);
+    expect(await reused.json()).toMatchObject({
+      error: { details: { managedAuthCode: "operation_reused" } },
+    });
+  });
+
   test("starts the first isolated Add from a read-only empty broker projection", async () => {
     const app = createApp({
       settings: testSettings({

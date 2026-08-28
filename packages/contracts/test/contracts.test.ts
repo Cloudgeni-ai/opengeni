@@ -1418,6 +1418,7 @@ describe("contracts", () => {
     expect(payload.auth.mode === "managedSession" && payload.auth.emailVerificationRequired).toBe(
       true,
     );
+    expect(payload.auth.mode === "managedSession" && payload.auth.socialProviders).toEqual([]);
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
     expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     expect(payload.managedAuthSessionSetMode).toBe("legacy");

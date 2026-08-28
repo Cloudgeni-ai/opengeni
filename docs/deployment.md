@@ -481,6 +481,29 @@ restart an arbitrary old image after broker activation. The complete rollout,
 rollback, self-hosting, header/proxy, and security contract is
 [`browser-login-session-sets.md`](browser-login-session-sets.md).
 
+### Managed Google and GitHub sign-in
+
+Managed deployments may enable either provider independently with
+`OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` plus
+`OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET`, and
+`OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` plus
+`OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET`. A partial pair is rejected at
+startup. These credentials are separate from the Google Drive connector, the
+personal GitHub connector, and the OpenGeni GitHub App, although an operator may
+deliberately use an existing provider application when its redirect and consent
+configuration is compatible.
+
+Register these exact callback URLs against the canonical public origin:
+
+- `<OPENGENI_PUBLIC_BASE_URL>/v1/auth/callback/google`
+- `<OPENGENI_PUBLIC_BASE_URL>/v1/auth/callback/github`
+
+The public client config exposes only the enabled provider names. OAuth tokens,
+client secrets, Better Auth state, and provider session identifiers remain
+server-side. Better Auth automatic email-based account linking stays disabled;
+an existing email/password human is not silently merged with a newly presented
+Google or GitHub identity.
+
 ### Durable invited-user email delivery (0351)
 
 Migration 0351 is rolling and additive. Before inviting users, configure
@@ -1733,6 +1756,7 @@ The runtime secret must provide values such as:
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
+- optional paired `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET` and `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET` for managed social sign-in
 - `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`
 - sandbox backend credentials when required

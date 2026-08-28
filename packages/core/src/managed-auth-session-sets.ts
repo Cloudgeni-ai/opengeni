@@ -278,25 +278,48 @@ export async function authenticateAndAdoptManagedAuthSession(input: {
     credentials: { email: input.email, password: input.password },
     headers: input.isolatedHeaders,
   });
+  return await adoptManagedAuthSession({
+    ...input,
+    authorityHash: managedAuthSha256(input.authority),
+    transactionSecretHash: managedAuthSha256(input.transactionSecret),
+    authSessionId: created.authSessionId,
+  });
+}
+
+export async function adoptManagedAuthSession(input: {
+  db: Database;
+  adapter: ManagedAuthSessionAdapter;
+  authority: string;
+  authorityHash: string;
+  csrfHash: string;
+  operationId: string;
+  requestDigest: string;
+  expectedGeneration: string;
+  expectedActorEpoch: string;
+  transactionId: string;
+  transactionSecretHash: string;
+  authSessionId: string;
+  mode: ManagedAuthSessionSetMode;
+}): Promise<{ projection: ManagedAuthDatabaseProjection; returnIntent: string | null }> {
   let completed: { projection: ManagedAuthDatabaseProjection; returnIntent: string | null };
   try {
     completed = await completeManagedAuthLoginTransaction(input.db, {
-      authorityHash: managedAuthSha256(input.authority),
+      authorityHash: input.authorityHash,
       csrfHash: input.csrfHash,
       operationId: input.operationId,
       requestDigest: input.requestDigest,
       expectedGeneration: input.expectedGeneration,
       expectedActorEpoch: input.expectedActorEpoch,
       transactionId: input.transactionId,
-      transactionSecretHash: managedAuthSha256(input.transactionSecret),
-      authSessionId: created.authSessionId,
+      transactionSecretHash: input.transactionSecretHash,
+      authSessionId: input.authSessionId,
       mode: input.mode,
     });
   } catch (error) {
     let receipt: Awaited<ReturnType<typeof getManagedAuthSessionSetOperationReceipt>>;
     try {
       receipt = await getManagedAuthSessionSetOperationReceipt(input.db, {
-        authorityHash: managedAuthSha256(input.authority),
+        authorityHash: input.authorityHash,
         operationId: input.operationId,
         requestDigest: input.requestDigest,
       });
@@ -304,14 +327,16 @@ export async function authenticateAndAdoptManagedAuthSession(input: {
       throw new ManagedAuthCompletionOutcomeUnknownError({ cause: receiptError });
     }
     if (receipt) {
-      await reconcileCreatedManagedAuthSession(input, created.authSessionId);
+      await reconcileCreatedManagedAuthSession(input, input.authSessionId);
       return receipt;
     }
-    await input.adapter.revokeSession(created).catch(() => undefined);
+    await input.adapter
+      .revokeSession({ authSessionId: input.authSessionId })
+      .catch(() => undefined);
     throw error;
   }
   try {
-    await reconcileCreatedManagedAuthSession(input, created.authSessionId);
+    await reconcileCreatedManagedAuthSession(input, input.authSessionId);
   } catch (error) {
     throw new ManagedAuthCompletionOutcomeUnknownError({ cause: error });
   }
@@ -319,10 +344,12 @@ export async function authenticateAndAdoptManagedAuthSession(input: {
 }
 
 async function reconcileCreatedManagedAuthSession(
-  input: Pick<
-    Parameters<typeof authenticateAndAdoptManagedAuthSession>[0],
-    "db" | "adapter" | "authority" | "mode"
-  >,
+  input: {
+    db: Database;
+    adapter: ManagedAuthSessionAdapter;
+    authority: string;
+    mode: ManagedAuthSessionSetMode;
+  },
   authSessionId: string,
 ): Promise<void> {
   const snapshot = await getManagedAuthSessionSetSnapshot(input.db, {

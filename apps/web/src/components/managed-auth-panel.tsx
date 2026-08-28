@@ -7,6 +7,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import {
+  ManagedAuthDivider,
+  ManagedSocialAuthButtons,
+  type ManagedSocialProvider,
+} from "@/components/managed-social-auth-buttons";
+import {
   managedAuthFailure,
   validateManagedAuthInput,
   type ManagedAuthField,
@@ -19,6 +24,8 @@ export function ManagedAuthPanel(props: {
   allowedModes?: readonly ManagedAuthMode[];
   emailVerificationRequired?: boolean;
   presentation?: "card" | "embedded";
+  socialProviders?: readonly ManagedSocialProvider[];
+  onSocialSubmit?: (provider: ManagedSocialProvider) => Promise<void>;
   onSubmit: (
     mode: "signin" | "signup",
     input: { name: string; email: string; password: string },
@@ -36,6 +43,7 @@ export function ManagedAuthPanel(props: {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
   const [resendBusy, setResendBusy] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<ManagedAuthFormErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -120,6 +128,23 @@ export function ManagedAuthPanel(props: {
     }
   }
 
+  async function submitSocial(provider: ManagedSocialProvider) {
+    if (!props.onSocialSubmit) return;
+    setSocialBusy(provider);
+    setFieldErrors({});
+    setFormError(null);
+    setSuccessMessage(null);
+    try {
+      await props.onSocialSubmit(provider);
+    } catch {
+      setFormError(
+        `Couldn't continue with ${provider === "google" ? "Google" : "GitHub"}. Try again.`,
+      );
+      setFormActionMode(null);
+      setSocialBusy(null);
+    }
+  }
+
   return (
     <section
       className={
@@ -149,7 +174,7 @@ export function ManagedAuthPanel(props: {
               {mode === "signup" ? "Create account" : "Sign in"}
             </h1>
             <p className="text-sm text-fg-subtle">
-              Email and password access for the managed console.
+              Use your preferred account to access the managed console.
             </p>
           </div>
         </div>
@@ -172,6 +197,17 @@ export function ManagedAuthPanel(props: {
               Sign up
             </Button>
           </div>
+        ) : null}
+        {props.socialProviders?.length && props.onSocialSubmit ? (
+          <>
+            <ManagedSocialAuthButtons
+              providers={props.socialProviders}
+              busyProvider={socialBusy}
+              disabled={busy || resendBusy}
+              onSelect={(provider) => void submitSocial(provider)}
+            />
+            <ManagedAuthDivider />
+          </>
         ) : null}
         {mode === "signup" ? (
           <div className="mb-3">
@@ -273,7 +309,7 @@ export function ManagedAuthPanel(props: {
             {successMessage}
           </Notice>
         ) : null}
-        <Button type="submit" className="mt-4 w-full" disabled={busy}>
+        <Button type="submit" className="mt-4 w-full" disabled={busy || socialBusy !== null}>
           {busy ? (
             <Loader2Icon className="size-4 animate-spin" />
           ) : (
@@ -293,7 +329,7 @@ export function ManagedAuthPanel(props: {
             type="button"
             variant="ghost"
             className="mt-2 w-full"
-            disabled={resendBusy || busy}
+            disabled={resendBusy || busy || socialBusy !== null}
             onClick={() => void resendVerification()}
           >
             {resendBusy ? (

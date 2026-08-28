@@ -178,14 +178,47 @@ const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlyS
 
 const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<string, ReadonlySet<string>>([
   // These phases intentionally create or reload a whole document. React can
-  // cancel only its two bootstrap reads while replacing that document; keep
-  // the endpoint and same-phase checks exact so product/tenant reads stay red.
+  // cancel only its configuration/session bootstrap reads while replacing
+  // that document; keep endpoint and phase checks exact so other reads stay red.
+  ["primary-set-sign-in", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["add-response-loss-replay", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["second-tab-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["cross-tab-select-race", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["late-old-epoch-setup-beta-to-alpha", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["late-old-epoch-alpha-to-beta", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  [
+    "late-old-epoch-primary-settled-before-old-release",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
   ["cross-slot-deep-link", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["slot-revocation-reauthentication", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["logout-one", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["logout-all-response-loss-replay", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["signed-out-settled", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["responsive-evidence-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["independent-set-sign-in", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  [
+    "independent-set-after-other-logout-all",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+]);
+
+const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
+  "primary-set-sign-in",
+  "add-response-loss-replay",
+  "second-tab-bootstrap",
+  "cross-tab-select-race",
+  "late-old-epoch-setup-beta-to-alpha",
+  "late-old-epoch-alpha-to-beta",
+  "late-old-epoch-primary-settled-before-old-release",
+  "cross-slot-deep-link",
+  "slot-revocation-reauthentication",
+  "logout-one",
+  "logout-all-response-loss-replay",
+  "signed-out-settled",
+  "responsive-evidence-bootstrap",
+  "independent-set-sign-in",
+  "independent-set-after-other-logout-all",
 ]);
 
 const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
@@ -343,8 +376,8 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     !isConnectionReset &&
     input.method === "GET" &&
     input.actorEpoch !== null &&
-    input.dispatchPhase === "responsive-evidence-bootstrap" &&
-    input.responsePhase === "responsive-evidence-bootstrap" &&
+    input.dispatchPhase === input.responsePhase &&
+    DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES.has(input.responsePhase) &&
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname);
   const isExpectedDocumentBootstrapCancellation =
     isCancellation &&
@@ -1951,6 +1984,24 @@ describe("provider-neutral browser account acceptance", () => {
     expect(
       requestFailureProblem({
         ...oldActorRead,
+        actorEpoch: "primary-actor",
+        dispatchPhase: "primary-set-sign-in",
+        responsePhase: "primary-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "add-replay-actor",
+        dispatchPhase: "add-response-loss-replay",
+        responsePhase: "add-response-loss-replay",
+        url: `${publicOrigin}/v1/config/client`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
         dispatchPhase: "independent-set-sign-in",
         responsePhase: "independent-set-after-other-logout-all",
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream`,
@@ -1972,6 +2023,33 @@ describe("provider-neutral browser account acceptance", () => {
     ).toContain("responsive-accessibility-evidence");
     expect(requestFailureProblem({ ...oldActorRead, method: "POST" })).toContain("POST");
     expect(requestFailureProblem({ ...oldActorRead, actorEpoch: null })).toContain("actor=missing");
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: null,
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-sign-in",
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "independent-actor",
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/realtime-model-catalog`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "independent-actor",
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
+      }),
+    ).toContain("/sessions");
     const longLivedOldActorStream = {
       ...oldActorRead,
       acceptedActorTransitions: [
@@ -2043,6 +2121,16 @@ describe("provider-neutral browser account acceptance", () => {
         ...longLivedOldActorStream,
         acceptedActorTransitions: [],
         dispatchPhase: "primary-set-sign-in",
+        responsePhase: "primary-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        acceptedActorTransitions: [],
+        dispatchPhase: "primary-set-sign-in",
+        failure: "NS_ERROR_NET_RESET",
         responsePhase: "primary-set-sign-in",
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
       }),

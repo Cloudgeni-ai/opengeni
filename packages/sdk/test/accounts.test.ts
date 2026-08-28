@@ -35,6 +35,32 @@ describe("BrowserAccountsClient", () => {
     expect(requests[1]!.headers.get("x-opengeni-api-contract")).toBeTruthy();
   });
 
+  test("starts social authentication through the fenced session-set transaction", async () => {
+    const requests: Request[] = [];
+    const client = new BrowserAccountsClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        return request.method === "GET"
+          ? Response.json(projection)
+          : Response.json({ url: "https://accounts.example.test/authorize?state=opaque" });
+      },
+    });
+    await client.getSessionSet();
+    expect(
+      await client.startSocialTransaction({
+        operationId: "11111111-1111-4111-8111-111111111111",
+        expectedGeneration: "1",
+        transactionId: "22222222-2222-4222-8222-222222222222",
+        provider: "github",
+      }),
+    ).toEqual({ url: "https://accounts.example.test/authorize?state=opaque" });
+    expect(new URL(requests[1]!.url).pathname).toBe("/v1/auth/session-set/transactions/social");
+    expect(requests[1]!.headers.get("x-opengeni-session-csrf")).toBe(projection.csrfToken);
+    expect(await requests[1]!.json()).toMatchObject({ provider: "github" });
+  });
+
   test("requires a safe projection before mutations", async () => {
     const client = new BrowserAccountsClient({
       baseUrl: "https://api.example.test",

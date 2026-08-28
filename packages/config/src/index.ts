@@ -1266,6 +1266,10 @@ const SettingsSchema = z.object({
   betterAuthAllowedHosts: z.string().default(""),
   betterAuthCookieDomain: z.string().optional(),
   betterAuthTrustedOrigins: z.string().default(""),
+  managedAuthGoogleClientId: z.string().optional(),
+  managedAuthGoogleClientSecret: z.string().optional(),
+  managedAuthGithubClientId: z.string().optional(),
+  managedAuthGithubClientSecret: z.string().optional(),
   // Rolling browser login-slot compatibility. Repository/deployment default is
   // deliberately legacy; changing to broker is an operator-authorized rollout.
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
@@ -2664,6 +2668,10 @@ export function getSettings(): Settings {
     betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
     betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),
     betterAuthTrustedOrigins: optional("OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS"),
+    managedAuthGoogleClientId: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID"),
+    managedAuthGoogleClientSecret: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET"),
+    managedAuthGithubClientId: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID"),
+    managedAuthGithubClientSecret: optional("OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET"),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
@@ -5332,6 +5340,41 @@ function validateSettings(settings: Settings): void {
     if (!["local", "test"].includes(settings.environment) && !settings.environmentsEncryptionKey) {
       throw new Error(
         "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for managed mode outside local/test",
+      );
+    }
+  }
+  if (
+    Boolean(settings.managedAuthGoogleClientId) !== Boolean(settings.managedAuthGoogleClientSecret)
+  ) {
+    throw new Error(
+      "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID and OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (
+    Boolean(settings.managedAuthGithubClientId) !== Boolean(settings.managedAuthGithubClientSecret)
+  ) {
+    throw new Error(
+      "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID and OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET must be configured together",
+    );
+  }
+  const managedSocialAuthConfigured = Boolean(
+    settings.managedAuthGoogleClientId || settings.managedAuthGithubClientId,
+  );
+  if (managedSocialAuthConfigured) {
+    if (settings.productAccessMode !== "managed") {
+      throw new Error(
+        "Managed Google/GitHub authentication requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
+      );
+    }
+    const publicOrigin = canonicalPublicOrigin(settings.publicBaseUrl);
+    if (!publicOrigin) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free HTTP(S) origin when managed social authentication is configured",
+      );
+    }
+    if (!publicOrigin.startsWith("https://") && !["local", "test"].includes(settings.environment)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when managed social authentication is configured outside local/test",
       );
     }
   }

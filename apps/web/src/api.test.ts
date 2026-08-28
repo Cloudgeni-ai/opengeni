@@ -225,19 +225,18 @@ describe("web API auth helpers", () => {
   test("aborts a finite JSON drain when the accepted actor changes", async () => {
     const originalFetch = globalThis.fetch;
     const observed: { signal?: AbortSignal | null } = {};
+    let source!: ReadableStream<Uint8Array>;
     globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       observed.signal = init?.signal ?? null;
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          start(controller) {
-            init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
-              once: true,
-            });
-            controller.enqueue(new TextEncoder().encode('{"partial":'));
-          },
-        }),
-        { headers: { "content-type": "application/json" } },
-      );
+      source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), {
+            once: true,
+          });
+          controller.enqueue(new TextEncoder().encode('{"partial":'));
+        },
+      });
+      return new Response(source, { headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
 
     try {
@@ -247,6 +246,7 @@ describe("web API auth helpers", () => {
       configureManagedActorEpoch("15");
       expect(observed.signal?.aborted).toBe(true);
       await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(source.locked).toBe(false);
     } finally {
       configureManagedActorEpoch(null);
       globalThis.fetch = originalFetch;
