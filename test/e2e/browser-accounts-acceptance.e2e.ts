@@ -884,7 +884,41 @@ async function expectAndConsumePageErrors(
   allowed: string[],
   required: string[] = allowed,
 ): Promise<void> {
-  await page.waitForTimeout(100);
+  // A request-failure event is delivered over Playwright independently from
+  // the renderer task that reports the corresponding page error. Close the
+  // complete correlation window for every accepted failure, cross two renderer
+  // task boundaries, then check again for a later failure. This derives the
+  // wait from the same fail-closed time fence used by the matcher instead of an
+  // arbitrary delay, so delayed evidence is either present now or too late to
+  // be accepted and remains in the final strict ledger.
+  let latestFailureAt = Number.NEGATIVE_INFINITY;
+  while (true) {
+    await settlePendingRequestFailureChecks(problems);
+    latestFailureAt = Math.max(
+      latestFailureAt,
+      ...problems.acceptedRequestFailures.map(({ failedAt }) => failedAt),
+    );
+    const remainingCorrelationWindow =
+      latestFailureAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - performance.now();
+    if (remainingCorrelationWindow > 0) await Bun.sleep(remainingCorrelationWindow);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          setTimeout(() => setTimeout(resolve, 0), 0);
+        }),
+    );
+    await settlePendingRequestFailureChecks(problems);
+    const nextLatestFailureAt = Math.max(
+      Number.NEGATIVE_INFINITY,
+      ...problems.acceptedRequestFailures.map(({ failedAt }) => failedAt),
+    );
+    if (
+      nextLatestFailureAt <= latestFailureAt &&
+      performance.now() >= nextLatestFailureAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+    ) {
+      break;
+    }
+  }
   const counts = Object.fromEntries(
     [...new Set(problems.pageErrors)].map((message) => [
       message,
@@ -2777,10 +2811,6 @@ describe("provider-neutral browser account acceptance", () => {
         ],
         [],
       );
-      // Let WebKit deliver the page-error task before correlating it with the
-      // already timestamped request-failure event.
-      await page.waitForTimeout(100);
-      await settlePendingRequestFailureChecks(pageProblems);
       await expectAndConsumePageErrors(
         page,
         pageProblems,
