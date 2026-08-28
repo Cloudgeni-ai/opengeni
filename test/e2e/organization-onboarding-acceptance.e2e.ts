@@ -195,8 +195,22 @@ function observeBrowser(page: Page): BrowserProblems {
   return problems;
 }
 
+function isExpectedNavigationReadCancellation(problem: string): boolean {
+  const match = /^GET (https?:\/\/[^/]+)(\/[^:]*): net::ERR_ABORTED$/u.exec(problem);
+  if (!match || match[1] !== publicOrigin) return false;
+  const pathname = new URL(`${match[1]}${match[2]}`).pathname;
+  return (
+    pathname === "/v1/config/client" ||
+    pathname === "/v1/auth/get-session" ||
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname)
+  );
+}
+
 function expectNoBrowserProblems(problems: BrowserProblems): void {
-  expect(problems).toEqual({
+  const failedRequests = problems.failedRequests.filter(
+    (problem) => !isExpectedNavigationReadCancellation(problem),
+  );
+  expect({ ...problems, failedRequests }).toEqual({
     consoleErrors: [],
     pageErrors: [],
     failedRequests: [],

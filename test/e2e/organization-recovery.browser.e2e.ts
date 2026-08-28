@@ -93,6 +93,7 @@ const recoveryReadActorEpochs: Array<{
 }> = [];
 const externalRequests: string[] = [];
 const browserProblems: string[] = [];
+let custodianTwoSuspended = false;
 const fakeProvider = new InMemoryOrganizationRecoveryNotificationTransport();
 
 function workflowStub(): SessionWorkflowClient {
@@ -325,12 +326,38 @@ function observeRecoveryPage(page: Page, actor: ActorKey): void {
     }
   });
   page.on("requestfailed", (request) => {
+    const url = new URL(request.url());
+    const failure = request.failure()?.errorText ?? "unknown";
+    const expectedNavigationReadCancellation =
+      request.method() === "GET" &&
+      url.origin === publicOrigin &&
+      failure === "net::ERR_ABORTED" &&
+      (url.pathname === "/v1/config/client" ||
+        url.pathname === "/v1/auth/get-session" ||
+        /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(url.pathname));
+    if (expectedNavigationReadCancellation) return;
+    const expectedSuspendedCustodianStreamFailure =
+      custodianTwoSuspended &&
+      actor === "custodian-2" &&
+      request.method() === "GET" &&
+      url.pathname === `/v1/workspaces/${workspaceId}/live-events/stream` &&
+      /ERR_ABORTED|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(failure);
+    if (expectedSuspendedCustodianStreamFailure) return;
     browserProblems.push(
-      `${actor}: requestfailed: ${request.method()} ${request.url()} ${request.failure()?.errorText ?? "unknown"}`,
+      `${actor}: requestfailed: ${request.method()} ${request.url()} ${failure}`,
     );
   });
   page.on("response", (response) => {
     const url = new URL(response.url());
+    if (
+      custodianTwoSuspended &&
+      actor === "custodian-2" &&
+      response.request().method() === "GET" &&
+      response.status() === 403 &&
+      url.pathname === `/v1/workspaces/${workspaceId}/live-events/stream`
+    ) {
+      return;
+    }
     if (url.pathname.includes("/recovery") && response.status() >= 400) {
       browserProblems.push(`${actor}: recovery response ${response.status()} ${url.pathname}`);
     } else if (
@@ -870,6 +897,10 @@ describe("organization recovery same-origin Chromium acceptance", () => {
       operationState: "executed",
     });
 
+    await custodianOnePage.locator("[data-sonner-toast]").first().waitFor({
+      state: "hidden",
+      timeout: 10_000,
+    });
     await axe(custodianOnePage);
     await bounded(custodianOnePage, 1440);
     await custodianOnePage.screenshot({
@@ -898,6 +929,7 @@ describe("organization recovery same-origin Chromium acceptance", () => {
       from organization_memberships
       where id = ${members[1].membershipId}::uuid`;
     if (!custodian) throw new Error("custodian membership missing");
+    custodianTwoSuspended = true;
     await updateOrganizationMember(client.db, {
       organizationId,
       actorSubjectId: `user:${ownerUserId}`,
