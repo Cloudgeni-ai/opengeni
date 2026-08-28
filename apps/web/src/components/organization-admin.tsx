@@ -1050,26 +1050,24 @@ export function OrganizationOverviewSection(props: {
                         </span>
                       ) : null}
                     </span>
-                    <span className="flex shrink-0 items-center gap-2">
-                      <span className="text-xs text-fg-muted">
-                        {workspace.members.length}{" "}
-                        {workspace.members.length === 1 ? "member" : "members"}
-                      </span>
-                      {props.accessibleWorkspaceIds.has(workspace.id) ? (
+                    <span className="shrink-0 text-xs text-fg-muted">
+                      {workspace.members.length}{" "}
+                      {workspace.members.length === 1 ? "member" : "members"}
+                    </span>
+                  </summary>
+                  <div className="grid gap-3 border-t border-border/70 px-3 py-3">
+                    {props.accessibleWorkspaceIds.has(workspace.id) ? (
+                      <div className="flex justify-end">
                         <a
                           href={`/workspaces/${encodeURIComponent(workspace.id)}/settings?section=general`}
                           aria-label={`Open ${workspace.name} workspace settings`}
                           className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-                          onClick={(event) => event.stopPropagation()}
-                          onKeyDown={(event) => event.stopPropagation()}
                         >
                           Open settings
                           <ArrowUpRightIcon className="size-3.5" />
                         </a>
-                      ) : null}
-                    </span>
-                  </summary>
-                  <div className="grid gap-3 border-t border-border/70 px-3 py-3">
+                      </div>
+                    ) : null}
                     <form
                       className="flex flex-wrap items-end gap-2"
                       onSubmit={(event) => {
