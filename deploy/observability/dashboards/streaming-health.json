@@ -3,7 +3,7 @@
   "title": "OpenGeni \u00b7 Streaming Health",
   "description": "TTFT, inter-delta gaps, durable append, NATS publication, and SSE connection lifecycle \u2014 so 'streaming is sluggish' names its layer.",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "editable": true,
   "graphTooltip": 1,
   "timezone": "",
@@ -43,7 +43,7 @@
     {
       "type": "timeseries",
       "title": "Time-to-first-token p99 / p95 / p50 by provider",
-      "description": "Seconds from a model (re)start to its first streamed content delta. High here = the model, not our pipeline.",
+      "description": "Seconds from a model (re)start to its first streamed content delta. The red 8-second line matches the warning threshold; high here points to the model rather than our write or delivery path.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -51,11 +51,27 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 8
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "fillOpacity": 8,
-            "showPoints": "never"
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line"
+            }
           }
         },
         "overrides": []

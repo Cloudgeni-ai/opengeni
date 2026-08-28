@@ -19,7 +19,7 @@ export interface ObservabilityStackPlan {
   environment: string;
   opensandbox: boolean;
   chartPath: "deploy/observability";
-  chartVersion: "0.1.7";
+  chartVersion: "0.1.8";
   kubePrometheusStackVersion: "87.16.1";
   valuesFiles: string[];
   applicationValuesFile: "deploy/observability/opengeni.values.example.yaml";
@@ -112,7 +112,7 @@ export function observabilityStackPlanFor(
     environment,
     opensandbox,
     chartPath: "deploy/observability",
-    chartVersion: "0.1.7",
+    chartVersion: "0.1.8",
     kubePrometheusStackVersion: "87.16.1",
     valuesFiles,
     applicationValuesFile: "deploy/observability/opengeni.values.example.yaml",
