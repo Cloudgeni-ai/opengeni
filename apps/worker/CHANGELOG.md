@@ -1,5 +1,23 @@
 # @opengeni/worker-bundle
 
+## 0.22.8
+
+### Patch Changes
+
+- 35db41b: Preserve the exact provider retry count when an operational database outage interrupts same-turn recovery, preventing stale replacement attempts from reopening an already-consumed retry generation.
+- Updated dependencies [7238fa4]
+  - @opengeni/config@0.22.0
+  - @opengeni/contracts@2.7.0
+  - @opengeni/db@3.6.0
+  - @opengeni/core@2.5.3
+  - @opengeni/documents@0.8.6
+  - @opengeni/github@0.6.1
+  - @opengeni/runtime@1.4.2
+  - @opengeni/storage@0.2.110
+  - @opengeni/codemode@0.4.17
+  - @opengeni/events@0.4.4
+  - @opengeni/observability@0.8.9
+
 ## 0.22.7
 
 ### Patch Changes
