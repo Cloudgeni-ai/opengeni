@@ -1,4 +1,4 @@
-import { createContext, useContext, useRef } from "react";
+import { createContext, useContext, useRef, type ReactNode } from "react";
 
 /* ----------------------------------------------------------------------------
    Entrance animation gating
@@ -15,8 +15,33 @@ import { createContext, useContext, useRef } from "react";
    -------------------------------------------------------------------------- */
 
 const EntranceAnimationContext = createContext(true);
+const EntranceAnimationLiveContext = createContext(true);
 
-export const EntranceAnimationProvider = EntranceAnimationContext.Provider;
+/**
+ * Freeze the mount-time gate for this subtree while publishing a separate live
+ * gate to activity rails that need later appends to animate after a bulk paint.
+ * MessageTimeline mounts one provider per durable group, so existing groups do
+ * not receive a context invalidation when a prepend toggles bulk mode and new
+ * groups still capture the value from the commit that created them.
+ */
+export function EntranceAnimationProvider({
+  value,
+  liveValue = value,
+  children,
+}: {
+  value: boolean;
+  liveValue?: boolean | undefined;
+  children: ReactNode;
+}) {
+  const mountedValue = useRef(value).current;
+  return (
+    <EntranceAnimationContext.Provider value={mountedValue}>
+      <EntranceAnimationLiveContext.Provider value={liveValue}>
+        {children}
+      </EntranceAnimationLiveContext.Provider>
+    </EntranceAnimationContext.Provider>
+  );
+}
 
 /**
  * Live entrance gate from the nearest provider. Prefer
@@ -25,7 +50,7 @@ export const EntranceAnimationProvider = EntranceAnimationContext.Provider;
  * later appends after a bulk window clears.
  */
 export function useEntranceAnimationLive(): boolean {
-  return useContext(EntranceAnimationContext);
+  return useContext(EntranceAnimationLiveContext);
 }
 
 /**

@@ -2091,6 +2091,10 @@ function findOpenCall(
     if (byId) {
       return byId as ToolCallItem | WorkerItem;
     }
+    // An explicit provider correlation id is authoritative. Falling back to
+    // an unrelated running call corrupts its status/output when compact pages
+    // or interleaved providers deliver an unmatched historical result.
+    return undefined;
   }
   return reversed.find(
     (item): item is ToolCallItem | WorkerItem => isCall(item) && item.status === "running",

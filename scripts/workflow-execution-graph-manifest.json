@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "b684d41c9110f3a4c9d7dd2d046516564f6d9bf8cf895f0ab0155055fd5be48b"
+      "sha256": "0dd7111339f87b03e8c330fdfbeb235c6a4238f5372559efb9b394565a62472f"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -552,8 +552,8 @@
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "browser-acceptance",
-      "step": "Timeline pagination browser regressions",
-      "sha256": "1e63777b6c45012b47e62e4c067000f60fd4e0e746cf949204b299f8b4bbe09c"
+      "step": "Timeline pagination and tip-follow browser regressions",
+      "sha256": "010c7a4b7d04eb1940dbfc2c7e4c27db4f711a1217a5dca52c70da65e61c676f"
     },
     {
       "workflow": ".github/workflows/ci.yml",

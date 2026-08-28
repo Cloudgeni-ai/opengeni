@@ -1774,10 +1774,12 @@ function SessionChatPane(props: {
               onLoadOlder={props.onLoadOlder}
               hasNewer={props.hasNewer}
               loadingNewer={props.loadingNewer}
-              onLoadNewer={() => void props.onLoadNewer()}
+              onLoadNewer={props.onLoadNewer}
               loadingOldest={props.loadingOldest}
-              onJumpToStart={() => void props.onJumpToStart()}
-              onJumpToLatest={() => void props.onJumpToLatest()}
+              onJumpToStart={async () => {
+                await props.onJumpToStart();
+              }}
+              onJumpToLatest={props.onJumpToLatest}
               trailingState={
                 props.humanInput.requests.length > 0 &&
                 props.session.status === "requires_action" ? (
