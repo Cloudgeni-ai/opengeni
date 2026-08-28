@@ -332,6 +332,12 @@ const budgets = {
   // measures 2,220,970 raw / 620,262 gzip bytes across 30 files. Advance only
   // the shared raw envelope to 2,170 KiB, retaining 1,110 bytes of headroom;
   // gzip, request count, initial, lazy, and CSS caps remain fixed.
+  // Managed Google and GitHub sign-in keeps the configured provider projection
+  // and one safe redirect helper in the shared managed-auth boundary while both
+  // provider-button surfaces remain lazy. The exact Linux/x64 Bun 1.4 graph
+  // measures 2,226,486 raw / 622,689 gzip bytes across 31 files. Advance only
+  // the policy-derived raw envelope to 2,176 KiB, retaining 1,738 bytes of
+  // headroom; gzip, request count, initial, lazy, and CSS caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
