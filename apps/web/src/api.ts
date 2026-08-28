@@ -23,6 +23,7 @@ const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 const boundedHttp1SseTransport = "http1-bounded";
+const boundedHttp1SseBatchContentType = "application/vnd.opengeni.sse-batch";
 const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 4_000;
 const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
 // New APIs close bounded HTTP/1 streams after one second. Keep a longer
@@ -385,6 +386,12 @@ function browserSseTransportInput(
   }
   const url = new URL(String(input), window.location.href);
   url.searchParams.set("transport", boundedHttp1SseTransport);
+  // Make the bounded fallback an ordinary finite HTTP request end to end.
+  // The SDK parses its SSE-framed bytes directly and does not depend on this
+  // media type. Avoiding `text/event-stream` at the native browser boundary
+  // prevents a replaced Chromium document from retaining an orphaned SSE
+  // request in the connection pool shared by every tab on this origin.
+  headers.set("accept", boundedHttp1SseBatchContentType);
   return [
     typeof input === "string" ? url.toString() : url,
     HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS,
@@ -443,7 +450,7 @@ function isFiniteSseBatchResponse(response: Response): boolean {
   const contentLength = response.headers.get("content-length");
   const parsedContentLength = contentLength === null ? Number.NaN : Number(contentLength);
   return (
-    contentType === "text/event-stream" &&
+    contentType === boundedHttp1SseBatchContentType &&
     contentLength !== null &&
     /^\d+$/.test(contentLength) &&
     Number.isSafeInteger(parsedContentLength) &&

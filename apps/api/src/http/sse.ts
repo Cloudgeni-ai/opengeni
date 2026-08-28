@@ -28,6 +28,7 @@ export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
 export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 export const HTTP1_BROWSER_SSE_LIFETIME_MS = 1_000;
 export const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
+export const HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE = "application/vnd.opengeni.sse-batch";
 type SseStreamKind = "session" | "workspace_control" | "workspace_interaction";
 const activeSseStreams: Record<SseStreamKind, number> = {
   session: 0,
@@ -980,7 +981,17 @@ async function sseHttpResponse(
   }
   return new Response(body, {
     headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
+      // A bounded HTTP/1 poll carries the same SSE-framed bytes the SDK
+      // already parses, but it is an ordinary finite response at the browser
+      // transport boundary. Keeping `text/event-stream` here lets Chromium
+      // retain an orphaned fetch in its shared per-origin SSE pool after the
+      // initiating document is replaced, starving unrelated finite reads in
+      // every tab. HTTP/2 and other unbounded streams keep the standard media
+      // type; only the explicit `http1-bounded` fallback uses this vendor type.
+      "Content-Type":
+        contentLength === null
+          ? "text/event-stream; charset=utf-8"
+          : `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`,
       "Cache-Control": "no-cache, no-transform",
       // Direct HTTP/1 streams need an unambiguous transport retirement even
       // after a finite Web Stream reaches EOF: Chromium can otherwise keep the

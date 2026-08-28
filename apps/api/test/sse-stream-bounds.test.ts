@@ -108,6 +108,7 @@ mock.module("@opengeni/db", () => ({
 const {
   browserSseDeliveryOptions,
   createByteBoundedSseStream,
+  HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE,
   sseSessionStream,
   sseWorkspaceControlStream,
   sseWorkspaceInteractionRevisionStream,
@@ -159,6 +160,9 @@ test("HTTP/1 browser fallback returns a fully framed finite SSE batch", async ()
     },
   );
   const bytes = await response.arrayBuffer();
+  expect(response.headers.get("content-type")).toBe(
+    `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`,
+  );
   expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
   expect(response.headers.get("connection")).toBe("close");
   expect(new TextDecoder().decode(bytes)).toContain('"sequence":3');
@@ -179,6 +183,7 @@ test("workspace interaction SSE projects only the newest durable revision", asyn
     controller.signal,
     { pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
   );
+  expect(response.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
   expect(response.headers.get("connection")).toBe("close");
   const reader = response.body!.getReader();
   expect(await readSequences(reader, 1)).toEqual([3]);

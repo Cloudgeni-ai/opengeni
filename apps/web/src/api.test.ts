@@ -39,6 +39,7 @@ describe("web API auth helpers", () => {
     const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
     let finiteController!: ReadableStreamDefaultController<Uint8Array>;
     let streamDispatches = 0;
+    const streamAccepts: Array<string | null> = [];
     Object.defineProperty(globalThis, "window", {
       configurable: true,
       value: { location: new URL("https://api.example.test/workspaces/current") },
@@ -47,7 +48,7 @@ describe("web API auth helpers", () => {
       configurable: true,
       value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
     });
-    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.pathname === "/v1/workspaces") {
         return new Response(
@@ -60,9 +61,10 @@ describe("web API auth helpers", () => {
         );
       }
       streamDispatches += 1;
+      streamAccepts.push(new Headers(init?.headers).get("accept"));
       return new Response(": connected\n\n", {
         headers: {
-          "content-type": "text/event-stream; charset=utf-8",
+          "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
           "content-length": "13",
         },
       });
@@ -83,6 +85,7 @@ describe("web API auth helpers", () => {
       const finiteResponse = await finite;
       const streamResponse = await stream;
       expect(streamDispatches).toBe(1);
+      expect(streamAccepts).toEqual(["application/vnd.opengeni.sse-batch"]);
       await finiteResponse.body!.cancel();
       await streamResponse.body!.cancel();
     } finally {
@@ -168,7 +171,7 @@ describe("web API auth helpers", () => {
         }),
         {
           headers: {
-            "content-type": "text/event-stream; charset=utf-8",
+            "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
             "content-length": "13",
           },
         },
@@ -230,7 +233,7 @@ describe("web API auth helpers", () => {
       streamDispatches += 1;
       return new Response(": connected\n\n", {
         headers: {
-          "content-type": "text/event-stream; charset=utf-8",
+          "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
           "content-length": "13",
         },
       });
@@ -682,7 +685,7 @@ describe("web API auth helpers", () => {
       });
       return new Response(source, {
         headers: {
-          "content-type": "text/event-stream; charset=utf-8",
+          "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
           "content-length": "14",
         },
       });
@@ -721,7 +724,7 @@ describe("web API auth helpers", () => {
       source = new ReadableStream<Uint8Array>();
       return new Response(source, {
         headers: {
-          "content-type": "text/event-stream; charset=utf-8",
+          "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
           "content-length": String(512 * 1024 + 1),
         },
       });
