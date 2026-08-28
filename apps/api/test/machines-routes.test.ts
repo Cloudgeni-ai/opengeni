@@ -381,7 +381,7 @@ type SeedOpts = {
   online?: boolean;
   hasDisplay?: boolean;
   allowScreenControl?: boolean;
-  sandboxBackend?: "modal" | "none";
+  sandboxBackend?: "modal" | "none" | "selfhosted";
 };
 async function seed(opts: SeedOpts = {}) {
   const { accountId, workspaceId } = await freshWorkspace();
@@ -443,6 +443,50 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(body.machines).toEqual([
       expect.objectContaining({ sandboxId: sandbox.id, active: false, isSessionGroup: false }),
     ]);
+  }, 60_000);
+
+  test("a machine-home session exposes the deployment-managed fallback group", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, sandbox, bus } = await seed({
+      sandboxBackend: "selfhosted",
+    });
+    const app = appFor(bus, {
+      settings: testSettings({ ...settings, sandboxBackend: "modal" }),
+    });
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
+      { headers: { authorization: auth } },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      activeSandboxId: string | null;
+      machines: Array<{
+        sandboxId: string;
+        kind: string;
+        active: boolean;
+        isSessionGroup: boolean;
+      }>;
+    };
+    expect(body.activeSandboxId).toBeNull();
+    expect(body.machines).toHaveLength(2);
+    expect(body.machines).toContainEqual(
+      expect.objectContaining({
+        sandboxId: session.sandboxGroupId,
+        kind: "modal",
+        active: true,
+        isSessionGroup: true,
+      }),
+    );
+    expect(body.machines).toContainEqual(
+      expect.objectContaining({
+        sandboxId: sandbox.id,
+        kind: "selfhosted",
+        active: false,
+        isSessionGroup: false,
+      }),
+    );
   }, 60_000);
 
   test("an online machine returns the contract shape with latest metrics; ?sessionId adds the synthetic group + active pointer", async () => {
