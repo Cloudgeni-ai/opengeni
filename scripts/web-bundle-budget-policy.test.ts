@@ -122,8 +122,8 @@ describe("web bundle budget policy", () => {
   });
 
   test("retains the exact bounded HTTP/1 browser-stream envelope", () => {
-    expect(HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT).toBe(2_236_754);
+    expect(HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT).toBe(2_237_019);
     expect(HTTP1_BROWSER_STREAMS_RAW_BUDGET).toBe(2186 * KIB);
-    expect(HTTP1_BROWSER_STREAMS_RAW_BUDGET - HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT).toBe(1_710);
+    expect(HTTP1_BROWSER_STREAMS_RAW_BUDGET - HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT).toBe(1_445);
   });
 });

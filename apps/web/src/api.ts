@@ -23,6 +23,7 @@ const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 const boundedHttp1SseTransport = "http1-bounded";
+const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 2_000;
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 let managedActorEpoch: string | null = null;
 let managedActorRevision = 0;
@@ -200,7 +201,7 @@ export async function managedActorFetch(
     typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined,
   );
   new Headers(init.headers).forEach((value, key) => headers.set(key, value));
-  const transportInput = browserSseTransportInput(input, init, headers);
+  const [transportInput, cleanCloseDelayMs] = browserSseTransportInput(input, init, headers);
   if (acceptedEpoch && init.credentials !== "omit" && !headers.has(MANAGED_ACTOR_EPOCH_HEADER)) {
     headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
   }
@@ -276,6 +277,7 @@ export async function managedActorFetch(
       actorBodyController.signal,
       cleanup,
       abortNativeTransport,
+      finiteJsonResponse ? 0 : cleanCloseDelayMs,
     );
   } finally {
     if (!responseOwnsCleanup) cleanup();
@@ -292,18 +294,18 @@ function browserSseTransportInput(
   input: string | URL | Request,
   init: RequestInit,
   headers: Headers,
-): string | URL | Request {
+): readonly [input: string | URL | Request, cleanCloseDelayMs: number] {
   if (
     requestMethod(input, init) !== "GET" ||
     !headers.get("accept")?.toLowerCase().includes("text/event-stream") ||
     (typeof Request !== "undefined" && input instanceof Request) ||
     !shouldBoundBrowserSseForProtocol(observedApiProtocol())
   ) {
-    return input;
+    return [input, 0];
   }
   const url = new URL(String(input), window.location.href);
   url.searchParams.set("transport", boundedHttp1SseTransport);
-  return typeof input === "string" ? url.toString() : url;
+  return [typeof input === "string" ? url.toString() : url, HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS];
 }
 
 function observedApiProtocol(): string | null {
@@ -354,11 +356,12 @@ async function readFiniteResponseBytes(response: Response): Promise<ArrayBuffer>
   return bytes.buffer;
 }
 
-function managedActorTrackedResponse(
+export function managedActorTrackedResponse(
   response: Response,
   signal: AbortSignal,
   cleanup: () => void,
   abortNativeTransport?: (reason: unknown) => void,
+  cleanCloseDelayMs = 0,
 ): Response {
   const reader = response.body!.getReader();
   let settled = false;
@@ -421,6 +424,17 @@ function managedActorTrackedResponse(
             return;
           }
           if (next.done) {
+            // The native body has reached EOF and its HTTP/1 connection is now
+            // free. Keep the wrapper logically live for a short grace period
+            // so already-queued finite reads win the browser's newly available
+            // slots before the SDK reconnects this durable stream.
+            if (cleanCloseDelayMs > 0) {
+              await abortableDelay(cleanCloseDelayMs, signal);
+            }
+            if (actorAbortReason !== null) {
+              controller.error(actorAbortReason);
+              return;
+            }
             releaseReader();
             if (settle()) controller.close();
             return;
@@ -455,6 +469,19 @@ function managedActorTrackedResponse(
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
+  });
+}
+
+async function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (delayMs <= 0 || signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, delayMs);
+    signal.addEventListener("abort", done, { once: true });
   });
 }
 

@@ -7,6 +7,7 @@ import {
   configureClientAuth,
   createOpenGeniClient,
   handleManagedActorPageHide,
+  managedActorTrackedResponse,
   managedActorMutationBusySnapshot,
   managedActorFetch,
   redeemCodexResetCredit,
@@ -30,6 +31,37 @@ describe("web API auth helpers", () => {
     expect(shouldBoundBrowserSseForProtocol("h2")).toBe(false);
     expect(shouldBoundBrowserSseForProtocol("h3")).toBe(false);
     expect(shouldBoundBrowserSseForProtocol(null)).toBe(false);
+  });
+
+  test("holds a clean bounded-stream EOF long enough for finite HTTP/1 reads to run", async () => {
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.close();
+      },
+    });
+    let cleaned = 0;
+    const response = managedActorTrackedResponse(
+      new Response(source, { headers: { "content-type": "text/event-stream" } }),
+      new AbortController().signal,
+      () => {
+        cleaned += 1;
+      },
+      undefined,
+      10,
+    );
+    let settled = false;
+    const read = response
+      .body!.getReader()
+      .read()
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+    await Bun.sleep(2);
+    expect(settled).toBe(false);
+    await expect(read).resolves.toEqual({ done: true, value: undefined });
+    expect(cleaned).toBe(1);
+    expect(source.locked).toBe(false);
   });
 
   test("attaches the accepted actor epoch and rejects a late prior-actor response", async () => {

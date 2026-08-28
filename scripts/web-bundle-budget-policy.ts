@@ -61,7 +61,7 @@ export const MANAGED_SOCIAL_SIGN_IN_MERGE_TREE_RAW_BUDGET = wholeKibEnvelope(
 );
 
 /** Exact bounded HTTP/1 browser-stream Linux/x64 Bun 1.4 measurement. */
-export const HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT = 2_236_754;
+export const HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT = 2_237_019;
 export const HTTP1_BROWSER_STREAMS_RAW_BUDGET = wholeKibEnvelope(
   HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT,
 );
