@@ -212,7 +212,8 @@ export async function managedActorFetch(
     // EOF. Draining here also guarantees the native body already has a
     // rejection consumer before any post-header actor abort.
     let actorResponse = response;
-    if (isFiniteJsonResponse(response)) {
+    const finiteJsonResponse = isFiniteJsonResponse(response);
+    if (finiteJsonResponse) {
       const bytes = await response.arrayBuffer();
       if (responseIsStale()) {
         throw new DOMException(
@@ -227,14 +228,30 @@ export async function managedActorFetch(
       });
     }
     // Before headers—and through a finite JSON drain—actor rotation aborts the
-    // native fetch. Once a streaming or detached body is admitted, transfer
-    // both actor and caller cancellation to the wrapper reader. WebKit otherwise
-    // reclassifies a post-header native abort as an unhandled access-control
-    // error. The downstream body remains fail-closed with the same AbortError.
+    // native fetch. A detached finite body no longer owns a network resource,
+    // so only its wrapper remains actor-bound. A live body must also abort its
+    // native fetch after admission: cancelling only the source reader can leave
+    // Chromium's HTTP/1 request open, eventually exhausting the per-origin
+    // connection pool across account switches and tabs. Publish the wrapper
+    // abort first so downstream consumption still fails closed with the same
+    // AbortError, then release the native transport in the next microtask.
     const actorBodyController = new AbortController();
-    abortTarget = (reason) => actorBodyController.abort(reason);
+    const abortNativeTransport = finiteJsonResponse
+      ? undefined
+      : (reason: unknown) => queueMicrotask(() => controller.abort(reason));
+    abortTarget = finiteJsonResponse
+      ? (reason) => actorBodyController.abort(reason)
+      : (reason) => {
+          actorBodyController.abort(reason);
+          abortNativeTransport?.(reason);
+        };
     responseOwnsCleanup = true;
-    return managedActorTrackedResponse(actorResponse, actorBodyController.signal, cleanup);
+    return managedActorTrackedResponse(
+      actorResponse,
+      actorBodyController.signal,
+      cleanup,
+      abortNativeTransport,
+    );
   } finally {
     if (!responseOwnsCleanup) cleanup();
   }
@@ -249,6 +266,7 @@ function managedActorTrackedResponse(
   response: Response,
   signal: AbortSignal,
   cleanup: () => void,
+  abortNativeTransport?: (reason: unknown) => void,
 ): Response {
   const reader = response.body!.getReader();
   let settled = false;
@@ -319,11 +337,12 @@ function managedActorTrackedResponse(
         }
       },
       async cancel(reason) {
+        const ownsSettlement = settle();
+        if (ownsSettlement) abortNativeTransport?.(reason);
         try {
           await reader.cancel(reason);
         } finally {
           releaseReader();
-          settle();
         }
       },
     },
