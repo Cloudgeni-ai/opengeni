@@ -29,7 +29,7 @@ import {
   type TimelineAnnotation,
   type PersonalResourceAttachmentIntent,
 } from "@opengeni/contracts";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { setSubjectRlsContext, type Database, type SessionActivityDatabase } from "./database";
 import {
   fromPostgresLosslessJson,
@@ -345,10 +345,54 @@ async function lockSession(
 
 type SteerSupersessionResult = {
   interruptionCount: number;
+  steerTargetTurn: typeof schema.sessionTurns.$inferSelect | null;
   replacedTurn: typeof schema.sessionTurns.$inferSelect | null;
   liveCurrentTurnId: string | null;
+  deferredUntilCompaction: boolean;
   lastSequence: number;
 };
+
+async function turnAttemptIsCompacting(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turn: typeof schema.sessionTurns.$inferSelect;
+  },
+): Promise<boolean> {
+  // A standalone operator compaction is maintenance rather than replaceable
+  // direction. Once claimed, let it finish even before its provider-visible
+  // started landmark is appended.
+  if (input.turn.source === "compaction") return true;
+  if (!input.turn.activeAttemptId) return false;
+
+  // Automatic/proactive/overflow compaction happens inside an ordinary turn.
+  // The latest exact-attempt landmark is durable state: `started` means the
+  // checkpoint provider call is still in flight, while compacted/skipped opens
+  // ordinary Steer interruption again. Multiple compactions in one attempt are
+  // therefore handled by the newest lifecycle event rather than a historical
+  // existence test.
+  const [latest] = await db
+    .select({ type: schema.sessionEvents.type })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.turnId, input.turn.id),
+        eq(schema.sessionEvents.turnGeneration, input.turn.executionGeneration),
+        eq(schema.sessionEvents.turnAttemptId, input.turn.activeAttemptId),
+        inArray(schema.sessionEvents.type, [
+          "session.context.compaction.started",
+          "session.context.compacted",
+          "session.context.compaction.skipped",
+        ]),
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
+    .limit(1);
+  return latest?.type === "session.context.compaction.started";
+}
 
 /**
  * One canonical replacement transition shared by human row/new-prompt Steer
@@ -371,8 +415,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
   if (!input.activeTurnId) {
     return {
       interruptionCount: 0,
+      steerTargetTurn: null,
       replacedTurn: null,
       liveCurrentTurnId: null,
+      deferredUntilCompaction: false,
       lastSequence: input.lastSequence,
     };
   }
@@ -410,6 +456,26 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       `Running turn ${current.id} has no first-class attempt owner`,
     );
   }
+  if (
+    current.activeAttemptId &&
+    (await turnAttemptIsCompacting(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turn: current,
+    }))
+  ) {
+    return {
+      interruptionCount: 0,
+      steerTargetTurn: current,
+      // An ordinary turn is superseded cooperatively as soon as its checkpoint
+      // settles. Standalone maintenance completes normally, then the Steer is
+      // already first in line.
+      replacedTurn: current.source === "compaction" ? null : current,
+      liveCurrentTurnId: current.id,
+      deferredUntilCompaction: true,
+      lastSequence: input.lastSequence,
+    };
+  }
   if (current.activeAttemptId) {
     if (current.status !== "running") {
       throw new SessionControlInvariantError(
@@ -431,8 +497,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
       .returning({ id: schema.sessionAttemptInterruptions.id });
     return {
       interruptionCount: interruption ? 1 : 0,
+      steerTargetTurn: current,
       replacedTurn: current,
       liveCurrentTurnId: current.id,
+      deferredUntilCompaction: false,
       lastSequence: input.lastSequence,
     };
   }
@@ -571,8 +639,10 @@ export async function supersedeSessionCurrentDirectionInTransaction(
   }
   return {
     interruptionCount: 0,
+    steerTargetTurn: current,
     replacedTurn: current,
     liveCurrentTurnId: null,
+    deferredUntilCompaction: false,
     lastSequence,
   };
 }
@@ -1388,9 +1458,11 @@ export async function steerQueuedTurnInTransaction(
     lastSequence: session.lastSequence,
   });
   const interruptionCount = supersession.interruptionCount;
+  const steerTargetTurn = supersession.steerTargetTurn;
   const supersededTurnId = supersession.replacedTurn?.id ?? null;
   const supersededAttemptId = supersession.replacedTurn?.activeAttemptId ?? null;
   const liveCurrentTurnId = supersession.liveCurrentTurnId;
+  const deferredUntilCompaction = supersession.deferredUntilCompaction;
 
   const withoutTarget = rows.filter((row) => row.id !== target.id);
   const ordered = [target, ...withoutTarget];
@@ -1412,6 +1484,7 @@ export async function steerQueuedTurnInTransaction(
         replacedTurnId: supersededTurnId,
         replacedAttemptId: supersededAttemptId,
         interruptionCount,
+        ...(deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
       },
       updatedAt: now,
     })
@@ -1440,12 +1513,16 @@ export async function steerQueuedTurnInTransaction(
     sessionId: input.sessionId,
     sequence: ++sequence,
     type: "session.control.steer_requested",
-    turnId: supersededTurnId ?? target.id,
+    turnId: steerTargetTurn?.id ?? target.id,
+    turnGeneration: steerTargetTurn?.executionGeneration ?? null,
+    turnAttemptId: steerTargetTurn?.activeAttemptId ?? null,
+    turnAssociation: steerTargetTurn ? "current" : null,
     payload: {
       operationId: reserved.receipt.id,
       targetTurnId: target.id,
       replacedTurnId: supersededTurnId,
-      stopping: liveCurrentTurnId !== null,
+      stopping: liveCurrentTurnId !== null && !deferredUntilCompaction,
+      ...(deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
     },
     occurredAt: now,
   });
@@ -1480,6 +1557,7 @@ export async function steerQueuedTurnInTransaction(
           operationId: reserved.receipt.id,
           replacedTurnId: supersededTurnId,
           interruptionCount,
+          deferredUntilCompaction,
         },
       },
       "metadata",
@@ -1501,6 +1579,7 @@ export async function steerQueuedTurnInTransaction(
     result: {
       interruptionCount,
       supersededTurnId,
+      deferredUntilCompaction,
       wakeRevision,
       workspaceControlEventId: resumed.workspaceControlEventId,
     },
@@ -2100,8 +2179,10 @@ export async function submitHumanPromptInTransaction(
         })
       : {
           interruptionCount: 0,
+          steerTargetTurn: null,
           replacedTurn: null,
           liveCurrentTurnId: null,
+          deferredUntilCompaction: false,
           lastSequence: session.lastSequence,
         };
   // Ownerless Steer settlement may have appended interrupted tool results.
@@ -2109,9 +2190,11 @@ export async function submitHumanPromptInTransaction(
   sequence = supersession.lastSequence;
   for (const event of eventValues) event.sequence = ++sequence;
   const interruptionCount = supersession.interruptionCount;
+  const steerTargetTurn = supersession.steerTargetTurn;
   const replacedTurnId = supersession.replacedTurn?.id ?? null;
   const replacedAttemptId = supersession.replacedTurn?.activeAttemptId ?? null;
   const liveCurrentTurnId = supersession.liveCurrentTurnId;
+  const deferredUntilCompaction = supersession.deferredUntilCompaction;
   // Durable provenance for the queue projection. Until the superseded attempt
   // loses inference, user-visible output, and workspace-persistence authority,
   // its exact first-class attempt has no quiescence receipt. Pairing that
@@ -2129,6 +2212,7 @@ export async function submitHumanPromptInTransaction(
           replacedTurnId,
           replacedAttemptId,
           interruptionCount,
+          ...(deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
         },
         updatedAt: now,
       })
@@ -2145,8 +2229,8 @@ export async function submitHumanPromptInTransaction(
     }
     committedTurn = updatedTurn;
   }
-  if (supersession.replacedTurn) {
-    const current = supersession.replacedTurn;
+  if (steerTargetTurn) {
+    const current = steerTargetTurn;
     if (!liveCurrentTurnId) {
       eventValues.push({
         accountId: input.accountId,
@@ -2172,8 +2256,9 @@ export async function submitHumanPromptInTransaction(
       payload: {
         operationId: reserved.receipt.id,
         targetTurnId: turnId,
-        replacedTurnId: current.id,
-        stopping: liveCurrentTurnId !== null,
+        replacedTurnId,
+        stopping: liveCurrentTurnId !== null && !deferredUntilCompaction,
+        ...(deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
       },
       occurredAt: now,
     });
@@ -2310,6 +2395,7 @@ export async function submitHumanPromptInTransaction(
           operationId: reserved.receipt.id,
           replacedTurnId,
           interruptionCount,
+          deferredUntilCompaction,
           ...(input.turnExecutionPolicy
             ? turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId)
             : {}),
@@ -2353,6 +2439,7 @@ export async function submitHumanPromptInTransaction(
       wakeRevision,
       interruptionCount,
       replacedTurnId,
+      deferredUntilCompaction,
       workspaceControlEventId: resumed.workspaceControlEventId,
       routing,
       ...(input.turnExecutionPolicy
@@ -2830,16 +2917,17 @@ export async function steerAgentSessionInTransaction(
       sessionId: input.targetSessionId,
       sequence: ++sequence,
       type: "session.control.steer_requested",
-      turnId: supersession.replacedTurn?.id ?? null,
-      turnGeneration: supersession.replacedTurn?.executionGeneration ?? null,
-      turnAttemptId: supersession.replacedTurn?.activeAttemptId ?? null,
-      turnAssociation: supersession.replacedTurn ? "current" : null,
+      turnId: supersession.steerTargetTurn?.id ?? null,
+      turnGeneration: supersession.steerTargetTurn?.executionGeneration ?? null,
+      turnAttemptId: supersession.steerTargetTurn?.activeAttemptId ?? null,
+      turnAssociation: supersession.steerTargetTurn ? "current" : null,
       payload: {
         operationId: reserved.receipt.id,
         targetUpdateId: update.id,
         replacedTurnId: supersession.replacedTurn?.id ?? null,
         actorSessionId: input.actor.sessionId,
-        stopping: supersession.liveCurrentTurnId !== null,
+        stopping: supersession.liveCurrentTurnId !== null && !supersession.deferredUntilCompaction,
+        ...(supersession.deferredUntilCompaction ? { deferredUntilCompaction: true } : {}),
       },
       occurredAt: now,
     },
@@ -2927,6 +3015,7 @@ export async function steerAgentSessionInTransaction(
           callerExecutionGeneration: input.actor.executionGeneration,
           controlRevision: resumed.revision,
           interruptionCount: supersession.interruptionCount,
+          deferredUntilCompaction: supersession.deferredUntilCompaction,
           workspaceControlEventId: resumed.workspaceControlEventId,
         },
       },
@@ -2943,6 +3032,7 @@ export async function steerAgentSessionInTransaction(
       wakeRevision,
       workflowId,
       interruptionCount: supersession.interruptionCount,
+      deferredUntilCompaction: supersession.deferredUntilCompaction,
     },
   });
   return {

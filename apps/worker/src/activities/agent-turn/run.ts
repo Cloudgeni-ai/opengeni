@@ -834,6 +834,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         compactionModeOptions,
         compactionOnlyTurn,
         compactionSummarizerFor,
+        settleDeferredSteerAfterCompaction,
       } = compactionPrep.ok;
 
       const toolPolicy = await prepareTurnToolPolicy({
@@ -1278,6 +1279,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         compactionModeOptions,
         compactionOnlyTurn,
         compactionSummarizerFor,
+        settleDeferredSteerAfterCompaction,
         agent,
       });
       if ("exit" in postAgentCompaction) return postAgentCompaction.exit;
@@ -1462,6 +1464,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings,
         turnTools,
         compactSummarizer,
+        settleDeferredSteerAfterCompaction,
         compactionModelHistoryProjector,
         generatedImageHistoryProjector,
         modelHistoryProjector,

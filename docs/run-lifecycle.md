@@ -581,7 +581,15 @@ and continue; compaction itself never creates queue or recovery work. If that
 fresh continuation ends without any terminal model response, it is not accepted
 as an empty completion: cancellation still wins, otherwise the compacted
 checkpoint enters the ordinary bounded same-turn recovery path while newer
-queued prompts remain behind it.
+queued prompts remain behind it. Steer admission is immediate but deliberately
+does not interrupt while the latest exact-attempt compaction landmark is
+`started`, because an interruption row would also fence the terminal checkpoint
+write. Once `session.context.compacted` or
+`session.context.compaction.skipped` is durable, a waiting human/API or Agent
+Steer cooperatively settles the ordinary turn as `superseded` before another
+model request. A claimed standalone compaction instead completes its maintenance
+turn, then the waiting Steer is first to claim. Pause and Cancel remain immediate
+interruption fences.
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
@@ -845,10 +853,17 @@ terminal event on a unique contiguous durable sequence. The operator output is
 limited to safe IDs, event counts, sequences, and model name; credentials and
 event payloads are never printed.
 Pause closes the exact live attempt as `interrupted_recoverable` and leaves its
-logical turn `recovering`; Steer closes it as `superseded`, makes the steered
-human prompt first, and does not revive the old turn. A missing or already
-closed owner is an event-free stale no-op. This prevents a superseded activity
-that keeps running from publishing contradictory history or terminal truth.
+logical turn `recovering`; Steer normally closes it as `superseded`, makes the
+steered human prompt first, and does not revive the old turn. The exact exception
+is active compaction: while the latest exact-attempt landmark is
+`session.context.compaction.started`, and for the whole lifetime of a claimed
+standalone compaction turn, Steer records durable waiting work but inserts no
+interruption. The terminal checkpoint write therefore remains authorized; its
+first safe boundary supersedes the ordinary turn before another model request,
+or completes standalone maintenance before the Steer claim. A missing or
+already closed owner is an event-free stale no-op. This prevents a superseded
+activity that keeps running from publishing contradictory history or terminal
+truth without creating a compaction/Steer retry loop.
 
 Pause/Resume command persistence distinguishes `changed`, `unchanged`, and
 `replayed` before allocating a control revision. A fresh Pause is unchanged

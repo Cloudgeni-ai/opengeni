@@ -36,7 +36,14 @@ export type ClaimedResult = (
 
 export type TurnSettleFn = (input: {
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
-  turnStatus: "queued" | "running" | "completed" | "failed" | "cancelled" | "requires_action";
+  turnStatus:
+    | "queued"
+    | "running"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "superseded"
+    | "requires_action";
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
   consumeRequestedCompactionFailure?: boolean;

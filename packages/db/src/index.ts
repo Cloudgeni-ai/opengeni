@@ -35687,6 +35687,138 @@ export async function recordSkippedContextCompaction(
 }
 
 /**
+ * Read the durable handoff condition immediately after one exact compaction
+ * landmark settles. Steer admission deliberately leaves the active attempt
+ * unfenced while its latest compaction event is `started`; the worker calls
+ * this at the first safe boundary after `compacted`/`skipped` and supersedes
+ * the ordinary turn before another model request can begin.
+ *
+ * The later terminal settlement remains the authority fence. This read only
+ * decides whether that settlement is needed, so a concurrent Pause/Cancel or a
+ * Steer admitted after the landmark can still win and make the caller stale.
+ */
+export async function hasPendingSteerAfterContextCompaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [ownership] = await scopedDb
+        .select({
+          sessionActiveTurnId: schema.sessions.activeTurnId,
+          turnStatus: schema.sessionTurns.status,
+          turnSource: schema.sessionTurns.source,
+          turnGeneration: schema.sessionTurns.executionGeneration,
+          turnActiveAttemptId: schema.sessionTurns.activeAttemptId,
+          attemptState: schema.sessionTurnAttempts.state,
+          attemptGeneration: schema.sessionTurnAttempts.executionGeneration,
+        })
+        .from(schema.sessions)
+        .innerJoin(
+          schema.sessionTurns,
+          and(
+            eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+            eq(schema.sessionTurns.sessionId, schema.sessions.id),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .innerJoin(
+          schema.sessionTurnAttempts,
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, schema.sessionTurns.workspaceId),
+            eq(schema.sessionTurnAttempts.turnId, schema.sessionTurns.id),
+            eq(schema.sessionTurnAttempts.id, input.attemptId),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.sessions.accountId, input.accountId),
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (
+        !ownership ||
+        ownership.sessionActiveTurnId !== input.turnId ||
+        ownership.turnStatus !== "running" ||
+        ownership.turnSource === "compaction" ||
+        ownership.turnGeneration !== input.executionGeneration ||
+        ownership.turnActiveAttemptId !== input.attemptId ||
+        ownership.attemptGeneration !== input.executionGeneration ||
+        !["claimed", "running"].includes(ownership.attemptState)
+      ) {
+        return false;
+      }
+
+      const [latestCompaction] = await scopedDb
+        .select({ type: schema.sessionEvents.type })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.turnId, input.turnId),
+            eq(schema.sessionEvents.turnGeneration, input.executionGeneration),
+            eq(schema.sessionEvents.turnAttemptId, input.attemptId),
+            inArray(schema.sessionEvents.type, [
+              "session.context.compaction.started",
+              "session.context.compacted",
+              "session.context.compaction.skipped",
+            ]),
+          ),
+        )
+        .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
+        .limit(1);
+      if (
+        latestCompaction?.type !== "session.context.compacted" &&
+        latestCompaction?.type !== "session.context.compaction.skipped"
+      ) {
+        return false;
+      }
+
+      const [humanSteer] = await scopedDb
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.status, "queued"),
+            inArray(schema.sessionTurns.source, ["user", "api"]),
+            sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
+          ),
+        )
+        .limit(1);
+      if (humanSteer) return true;
+
+      const [agentSteer] = await scopedDb
+        .select({ id: schema.sessionSystemUpdates.id })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+            eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+            eq(schema.sessionSystemUpdates.state, "pending"),
+          ),
+        )
+        .limit(1);
+      return agentSteer !== undefined;
+    },
+  );
+}
+
+/**
  * The next free WHOLE-NUMBER history position for a session: one past the
  * largest existing position (active or superseded), floored so the synthetic
  * summary's fractional half-step never shifts the count. The dual-write
@@ -62790,7 +62922,7 @@ export async function applySessionTurnSettlement(
           // generation for monotonic fencing, but remove the old activity id so
           // a later typed SCHEDULE_TO_START timeout can recover an approval
           // dispatch that never registered without taking over a newer one.
-          ...(input.turnStatus === "requires_action"
+          ...(input.turnStatus === "requires_action" || input.turnStatus === "superseded"
             ? { metadata: metadataWithoutTurnDispatchAttempt(turn.metadata) }
             : {}),
           finishedAt:
@@ -62832,7 +62964,9 @@ export async function applySessionTurnSettlement(
             eq(schema.sessions.id, input.sessionId),
           ),
         );
-      if (terminal && input.activeTurnId === null) {
+      // Supersession already has newer human/Agent direction waiting. It must
+      // not also arm an autonomous goal continuation behind that Steer.
+      if (terminal && input.turnStatus !== "superseded" && input.activeTurnId === null) {
         const [armedGoal] = await tx
           .update(schema.sessionGoals)
           .set({
