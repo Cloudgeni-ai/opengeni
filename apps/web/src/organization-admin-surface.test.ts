@@ -12,6 +12,9 @@ const normalizedRecoverySource = recoverySource.replace(/\s+/gu, " ");
 const workspaceSettingsSource = await Bun.file(
   `${import.meta.dir}/routes/workspace-settings.tsx`,
 ).text();
+const workspaceMembersSource = await Bun.file(
+  `${import.meta.dir}/routes/workspace-members-section.tsx`,
+).text();
 const tenancyDocs = await Bun.file(
   `${import.meta.dir}/../../../docs/organization-tenancy.md`,
 ).text();
@@ -38,9 +41,10 @@ describe("organization administration surface", () => {
     expect(normalizedRecoverySource).toContain("No Personal content, workspace ownership");
     expect(normalizedRecoverySource).toContain("Recovery unavailable");
     expect(normalizedRecoverySource).toContain("A current owner must rotate the policy");
-    expect(workspaceSettingsSource).toContain("client.listWorkspaceMemberCandidates");
-    expect(workspaceSettingsSource).toContain("Search by name or email");
-    expect(workspaceSettingsSource).toContain("Add to workspace");
+    expect(workspaceSettingsSource).toContain('import("./workspace-members-section")');
+    expect(workspaceMembersSource).toContain("client.listWorkspaceMemberCandidates");
+    expect(workspaceMembersSource).toContain("Search by name or email");
+    expect(workspaceMembersSource).toContain("Add to workspace");
   });
 
   test("uses only lifecycle APIs and never links a member personal workspace", () => {
