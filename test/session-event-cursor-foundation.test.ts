@@ -93,4 +93,23 @@ describe("session event cursor foundation", () => {
     );
     expect(posture).toContain('"session_event_cursors"');
   });
+
+  test("places the narrow cursor in the canonical writer lock prefix", async () => {
+    const source = await readFile(join(repo, "packages/db/src/session-control.ts"), "utf8");
+    const helper = source.slice(
+      source.indexOf("export async function lockSessionEventWriteRows"),
+      source.indexOf("export async function registerSessionTurnAttemptClaim"),
+    );
+    const sessionLock = helper.indexOf(".from(schema.sessions)");
+    const cursorLock = helper.indexOf(".from(schema.sessionEventCursors)");
+    const turnLock = helper.indexOf(".from(schema.sessionTurns)");
+    const attemptLock = helper.indexOf(".from(schema.sessionTurnAttempts)");
+
+    expect(sessionLock).toBeGreaterThanOrEqual(0);
+    expect(cursorLock).toBeGreaterThan(sessionLock);
+    expect(turnLock).toBeGreaterThan(cursorLock);
+    expect(attemptLock).toBeGreaterThan(turnLock);
+    expect(helper).toContain("cursor.lastSequence !== session.lastSequence");
+    expect(helper).toContain("Session event cursor parity failed");
+  });
 });

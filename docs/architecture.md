@@ -105,11 +105,13 @@ that a mutation committed.
 
 Session events have a monotonic per-session sequence. The narrow
 `session_event_cursors` row mirrors and transactionally verifies every append;
-`sessions.last_sequence` remains the rolling-deploy allocator until the
-Pause/Steer admission gate moves to the same narrow lock boundary. SSE clients begin with
-durable replay, subscribe to live fanout, and backfill from Postgres whenever a
-sequence gap appears. A NATS restart may interrupt live delivery or machine
-reachability, but it must not erase session history or queued obligations.
+every canonical event/control writer now locks it immediately after the matching
+`sessions` row and verifies parity. `sessions.last_sequence` remains the
+rolling-deploy allocator until the Pause/Steer admission gate moves to that
+narrow lock boundary. SSE clients begin with durable replay, subscribe to live
+fanout, and backfill from Postgres whenever a sequence gap appears. A NATS
+restart may interrupt live delivery or machine reachability, but it must not
+erase session history or queued obligations.
 
 Interactive commands acknowledge their durable transaction. NATS publication
 and immediate Temporal signalling are replayable follow-up work. Never make a
