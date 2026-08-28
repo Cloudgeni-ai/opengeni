@@ -69,7 +69,9 @@ describe("AI Gateway custom model settings in Chromium", () => {
     const add = page.getByRole("button", { name: "Add model" });
     await slug.fill("anthropic/claude sonnet");
     expect(await add.isDisabled()).toBe(true);
-    await page.getByText("Use the exact printable slug with no spaces.", { exact: true }).waitFor();
+    await page
+      .getByText("Use the exact printable slug with no spaces or |.", { exact: true })
+      .waitFor();
 
     await slug.fill("xai/grok-4.1-fast");
     expect(await add.isEnabled()).toBe(true);
