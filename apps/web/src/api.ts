@@ -299,7 +299,8 @@ export async function managedActorFetch(
     // EOF. Draining here also guarantees the native body already has a
     // rejection consumer before any post-header actor abort.
     let actorResponse = response;
-    const detachedResponse = isFiniteJsonResponse(response) || isFiniteSseBatchResponse(response);
+    const finiteSseBatch = isFiniteSseBatchResponse(response);
+    const detachedResponse = isFiniteJsonResponse(response) || finiteSseBatch;
     if (detachedResponse) {
       const bytes = await readFiniteResponseBytes(response);
       if (responseIsStale()) {
@@ -313,6 +314,16 @@ export async function managedActorFetch(
         statusText: response.statusText,
         headers: response.headers,
       });
+      if (finiteSseBatch) {
+        // Chromium can expose EOF for a finite HTTP/1 SSE body while still
+        // accounting the native request against the per-origin connection
+        // pool. The caller now owns a complete byte copy, so aborting the
+        // original fetch is harmless for a settled transport and retires an
+        // orphaned one without affecting the detached response.
+        controller.abort(
+          new DOMException("The finite HTTP/1 stream body was fully detached", "AbortError"),
+        );
+      }
       endForegroundRequest();
     }
     // Before headers—and through a finite response drain—actor rotation aborts the

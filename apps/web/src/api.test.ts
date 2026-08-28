@@ -670,9 +670,11 @@ describe("web API auth helpers", () => {
 
   test("drains a known-length HTTP/1 SSE batch before exposing it", async () => {
     const originalFetch = globalThis.fetch;
+    const observed: { signal?: AbortSignal | null } = {};
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
     let source!: ReadableStream<Uint8Array>;
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      observed.signal = init?.signal ?? null;
       source = new ReadableStream<Uint8Array>({
         start(controller) {
           bodyController = controller;
@@ -699,8 +701,11 @@ describe("web API auth helpers", () => {
       bodyController.enqueue(new TextEncoder().encode(": connected\n\n"));
       await Promise.resolve();
       expect(exposed).toBe(false);
+      expect(observed.signal?.aborted).toBe(false);
       bodyController.close();
       const response = await pending;
+      expect(observed.signal?.aborted).toBe(true);
+      expect(observed.signal?.reason).toMatchObject({ name: "AbortError" });
       expect(source.locked).toBe(false);
       await expect(response.text()).resolves.toBe(": connected\n\n");
     } finally {
