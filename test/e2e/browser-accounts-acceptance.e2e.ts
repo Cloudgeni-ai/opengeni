@@ -228,6 +228,7 @@ const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
 ]);
 
 const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
+  ["late-old-epoch-primary-settled-before-old-release", new Set(["late-old-epoch-alpha-to-beta"])],
   ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
 ]);
 
@@ -1057,6 +1058,7 @@ async function expectAndConsumeActorTransitionResponse(
     phase: string;
     status: number;
     statusLabel: string;
+    allowedConsoleErrors?: readonly string[];
     workspaceId?: string;
     timing?: { kind: "direct-race-fence"; settledAt: number };
   },
@@ -1118,7 +1120,7 @@ async function expectAndConsumeActorTransitionResponse(
   await expectAndConsumeConsoleErrors(
     page,
     problems,
-    exactConsoleErrors,
+    [...exactConsoleErrors, ...(input.allowedConsoleErrors ?? [])],
     requestedEngine === "firefox" ? [] : exactConsoleErrors,
   );
   problems.actorTransitionResponses.splice(0);
@@ -2317,6 +2319,49 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/auth/get-session`,
       }),
     ).toBeNull();
+    const lateOldActorBootstrapRead = {
+      ...crossTabBootstrapRead,
+      actorEpoch: "old-actor-epoch",
+      dispatchPhase: "late-old-epoch-alpha-to-beta",
+      responsePhase: "late-old-epoch-primary-settled-before-old-release",
+    };
+    expect(requestFailureProblem(lateOldActorBootstrapRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        dispatchPhase: "late-old-epoch-setup-beta-to-alpha",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        responsePhase: "responsive-evidence-bootstrap",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        failure: "NS_ERROR_NET_RESET",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        method: "POST",
+      }),
+    ).toContain("POST");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        url: `${publicOrigin}/v1/config/other`,
+      }),
+    ).toContain("/v1/config/other");
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
@@ -2748,6 +2793,12 @@ describe("provider-neutral browser account acceptance", () => {
             kind: "direct-race-fence",
             settledAt: racedSelectionSettledAt,
           },
+          allowedConsoleErrors:
+            engine === "chromium"
+              ? [
+                  `[cross-tab-select-race] Failed to load resource: net::ERR_CONNECTION_RESET @ /v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+                ]
+              : [],
         });
       }
       const racedSelectionAcceptance = actorMutationAcceptances
