@@ -64,6 +64,65 @@ describe("web API auth helpers", () => {
     expect(source.locked).toBe(false);
   });
 
+  test("forces a clean logical seam when a bounded native HTTP/1 stream outlives the server seam", async () => {
+    let nativeAbort: unknown;
+    let sourceCancel: unknown;
+    let cleaned = 0;
+    const source = new ReadableStream<Uint8Array>({
+      cancel(reason) {
+        sourceCancel = reason;
+      },
+    });
+    const response = managedActorTrackedResponse(
+      new Response(source, { headers: { "content-type": "text/event-stream" } }),
+      new AbortController().signal,
+      () => {
+        cleaned += 1;
+      },
+      (reason) => {
+        nativeAbort = reason;
+      },
+      10,
+      5,
+    );
+    let settled = false;
+    const read = response
+      .body!.getReader()
+      .read()
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+    await Bun.sleep(7);
+    expect(settled).toBe(false);
+    expect(nativeAbort).toMatchObject({ name: "AbortError" });
+    expect(sourceCancel).toBe(nativeAbort);
+    await expect(read).resolves.toEqual({ done: true, value: undefined });
+    expect(cleaned).toBe(1);
+    expect(source.locked).toBe(false);
+  });
+
+  test("keeps actor rotation fail-closed while a native HTTP/1 seam is in grace", async () => {
+    const actor = new AbortController();
+    const source = new ReadableStream<Uint8Array>();
+    const response = managedActorTrackedResponse(
+      new Response(source, { headers: { "content-type": "text/event-stream" } }),
+      actor.signal,
+      () => undefined,
+      () => undefined,
+      30,
+      5,
+    );
+    const read = response.body!.getReader().read();
+    await Bun.sleep(8);
+    actor.abort(new DOMException("account changed during stream seam", "AbortError"));
+    await expect(read).rejects.toMatchObject({
+      name: "AbortError",
+      message: "account changed during stream seam",
+    });
+    expect(source.locked).toBe(false);
+  });
+
   test("attaches the accepted actor epoch and rejects a late prior-actor response", async () => {
     const originalFetch = globalThis.fetch;
     let release!: (response: Response) => void;
