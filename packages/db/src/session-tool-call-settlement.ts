@@ -15,7 +15,12 @@ export const TOOL_RESULT_TYPE_BY_CALL_TYPE: Readonly<Record<string, string>> = {
 };
 
 export function historyCallId(item: Record<string, unknown>): string | null {
-  const value = item.callId ?? item.call_id ?? item.id;
+  const providerData =
+    item.providerData && typeof item.providerData === "object" && !Array.isArray(item.providerData)
+      ? (item.providerData as Record<string, unknown>)
+      : null;
+  const value =
+    item.callId ?? item.call_id ?? providerData?.callId ?? providerData?.call_id ?? item.id;
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 

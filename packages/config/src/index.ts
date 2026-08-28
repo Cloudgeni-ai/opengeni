@@ -386,6 +386,21 @@ const SettingsSchema = z.object({
   // holder of stream:control gets 403 until this flips. Keeps stream:control a
   // declared-but-inert permission so later hardening is a flag flip.
   streamControlEnabled: EnvBoolean.default(false),
+  // Provider-neutral advisory work discovery rollout. Disabling this keeps
+  // ordinary session listings available while rejecting relevance discovery
+  // and omitting claim evidence from their compact projections.
+  workDiscoveryEnabled: EnvBoolean.default(true),
+  // Exact-attempt claim mutations are independently reversible. Turning this
+  // off removes the first-party mutation tools; durable claims and lifecycle
+  // settlement evidence remain readable.
+  workClaimMutationsEnabled: EnvBoolean.default(true),
+  // Human presentation is a separate rollout stage from the read API. The
+  // topology response carries this decision so clients can hide advisory UI
+  // without inventing authorization or ownership semantics.
+  workDiscoveryHumanAdvisoriesEnabled: EnvBoolean.default(true),
+  // Automatic overlap nudges are deliberately unshipped and default OFF until
+  // an evaluated precision threshold and operator runbook approve them.
+  workDiscoveryAutomaticNudgesEnabled: EnvBoolean.default(false),
   // Optional release-coherent bootstrap hint for custom rigs/connected machines
   // that do not carry the stock-image ogtool binary. Exact stable versions only:
   // the agent must never guess a tag or silently install `latest`.
@@ -2322,6 +2337,14 @@ export function getSettings(): Settings {
     allowedFirstPartyMcpTools: optional("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
+    workDiscoveryEnabled: optional("OPENGENI_WORK_DISCOVERY_ENABLED"),
+    workClaimMutationsEnabled: optional("OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED"),
+    workDiscoveryHumanAdvisoriesEnabled: optional(
+      "OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED",
+    ),
+    workDiscoveryAutomaticNudgesEnabled: optional(
+      "OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED",
+    ),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),

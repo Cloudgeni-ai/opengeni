@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/browserd",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "private": true,
   "description": "Placement-resident browser controller and audited agent-browser adapter for OpenGeni.",
   "license": "Apache-2.0",

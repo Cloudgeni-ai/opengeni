@@ -276,6 +276,12 @@ export type PostClaimDatabaseRecoveryDetail = {
   triggerEventId: string;
   executionGeneration: number;
   code: "db_deadlock" | "db_serialization_failure" | "db_failure";
+  /** Present when the database outage interrupted a retryable provider
+   * recovery checkpoint. The control lane must advance this exact durable
+   * count instead of reopening the same recovery generation. */
+  providerRecoveryCount?: number;
+  /** Safe classified provider cause paired with providerRecoveryCount. */
+  providerFailureCode?: string;
 };
 
 export const POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE = "OpenGeniPostClaimDatabaseRecovery";

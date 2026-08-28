@@ -20,9 +20,21 @@ import {
   SessionGoalSnapshot,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
+  WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT,
+  WORK_CLAIM_DISCOVERY_LIMIT,
+  WORK_DISCOVERY_QUERY_MAX_CHARS,
+  WORK_DISCOVERY_RECENT_HOURS_MAX,
+  WorkClaimDiscoverySummary as WorkClaimDiscoverySummarySchema,
+  WorkDiscoveryMatch as WorkDiscoveryMatchSchema,
+  WorkClaimNamespace,
+  WorkClaimSubjectType,
+  WorkClaimCanonicalKey,
+  SessionStatus as SessionStatusSchema,
   SessionGoalRootConstraintsWrite,
   normalizeSessionGoalRootConstraints,
   normalizeAutomaticSessionTitle,
+  normalizeWorkClaimCanonicalKey,
+  normalizeWorkClaimNamespace,
   sessionVisibilityToPublic,
   sessionGoalUtf8Bytes,
 } from "@opengeni/contracts";
@@ -154,6 +166,9 @@ import type {
   WorkspaceArchiveDescriptor,
   ModalCheckpointProviderBinding,
   SandboxProviderContinuityRecovery,
+  WorkClaimDiscoverySummary,
+  WorkClaimSubjectFilter,
+  WorkDiscoveryProjection,
 } from "@opengeni/contracts";
 import {
   closePrivateSessionCreateCapability,
@@ -273,6 +288,7 @@ import {
   sql,
   type SQL,
 } from "drizzle-orm";
+import type { PgTransactionConfig } from "drizzle-orm/pg-core";
 import {
   creatorColumns,
   frozenInitiatorForCommandActor,
@@ -426,6 +442,7 @@ export * from "./company-brain-governed-writes";
 export * from "./company-brain-context-selection";
 export * from "./knowledge-source-sync";
 export * from "./task-notes";
+export * from "./work-claims";
 export * from "./managed-human-provisioning";
 export * from "./managed-user-setup";
 export * from "./organization-membership-backfill";
@@ -30838,9 +30855,11 @@ export async function getLatestSessionModelForSubject(
   });
 }
 
-export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt";
+export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt" | "relevance";
 export type SessionDiscoveryCursor = {
   orderBy: SessionDiscoveryOrderBy;
+  /** Stable rank class for relevance order; null for chronological order. */
+  sortRank: number | null;
   /** Decimal database activity revision; zero is the legacy/created-order bucket. */
   sortRevision: string;
   /** Exact PostgreSQL timestamp text (including microseconds), not a JS Date. */
@@ -30852,6 +30871,8 @@ export type SessionDiscoveryCursor = {
   snapshotRevision: string;
   /** Incremental revision scope is cursor-bound and cannot change on continuation. */
   updatedAfter: string | null;
+  /** SHA-256 of normalized relevance filters; null for chronological order. */
+  filterHash: string | null;
 };
 export const SESSION_DISCOVERY_GOAL_MAX_CHARS = 600;
 export const SESSION_DISCOVERY_MESSAGE_MAX_CHARS = 600;
@@ -30876,12 +30897,15 @@ export type SessionDiscoverySummary = {
     preview: string | null;
     previewOriginalChars: number | null;
   } | null;
+  workDiscovery: WorkDiscoveryProjection;
   createdAt: string;
   updatedAt: string;
   /** Internal exact revision key; omitted from the MCP row projection. */
   sortRevision: string;
   /** Internal exact keyset timestamp; omitted from the MCP row projection. */
   sortAt: string;
+  /** Internal stable relevance class; omitted from public row projections. */
+  sortRank: number | null;
 };
 
 function projectSessionDiscoveryControlForRelatedAccess(
@@ -30938,6 +30962,700 @@ async function readWorkspaceSessionActivityRevision(
     throw new Error("sessions_list workspace activity revision is unavailable");
   }
   return normalizeSessionActivityRevision(revision, "snapshot revision");
+}
+
+const SESSION_DISCOVERY_QUERY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
+
+type NormalizedSessionDiscoveryFilters = {
+  query: string | null;
+  statuses: SessionStatus[];
+  activeOnly: boolean;
+  recentHours: number | null;
+  rootSessionId: string | null;
+  parentSessionId: string | null | undefined;
+  subject: WorkClaimSubjectFilter | null;
+};
+
+type SessionDiscoveryPageRow = {
+  id: string | null;
+  title: string | null;
+  titleOriginalChars: number | string | null;
+  parentSessionId: string | null;
+  rootSessionId: string | null;
+  nestedAgentDepth: number | string | null;
+  status: string | null;
+  createdAt: Date | string | null;
+  updatedAt: Date | string | null;
+  sortRevision: string | null;
+  sortAt: string | null;
+  sortRank: number | string | null;
+  matchClass: string | null;
+  matchedField: string | null;
+  scoreBand: string | null;
+  matchedClaimId: string | null;
+  total: number | string;
+};
+
+type SessionDiscoveryClaimRow = {
+  sessionId: string;
+  id: string;
+  subjectNamespace: string;
+  subjectType: string;
+  canonicalKey: string;
+  displayLabel: string | null;
+  role: string;
+  state: string;
+  revision: number | string;
+  provenance: string;
+  versionKind: string | null;
+  versionValue: string | null;
+  observedAt: Date | string;
+  updatedAt: Date | string;
+  settledAt: Date | string | null;
+  availableCount: number | string;
+};
+
+function normalizeSessionDiscoveryQuery(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const canonical = value.normalize("NFKC");
+  if (SESSION_DISCOVERY_QUERY_CONTROL_CHARACTERS.test(canonical)) {
+    throw new Error("sessions_list query must not contain control characters");
+  }
+  const normalized = canonical.trim().replace(/\s+/gu, " ").toLowerCase();
+  if (!normalized) return null;
+  if (Array.from(normalized).length > WORK_DISCOVERY_QUERY_MAX_CHARS) {
+    throw new Error(
+      `sessions_list query must be at most ${WORK_DISCOVERY_QUERY_MAX_CHARS} characters`,
+    );
+  }
+  return normalized;
+}
+
+function normalizeSessionDiscoverySubject(
+  value: WorkClaimSubjectFilter | undefined,
+): WorkClaimSubjectFilter | null {
+  if (!value) return null;
+  return {
+    namespace: WorkClaimNamespace.parse(normalizeWorkClaimNamespace(value.namespace)),
+    type: WorkClaimSubjectType.parse(value.type),
+    canonicalKey: WorkClaimCanonicalKey.parse(normalizeWorkClaimCanonicalKey(value.canonicalKey)),
+  };
+}
+
+function normalizeSessionDiscoveryFilters(options: {
+  query?: string;
+  search?: string;
+  statuses?: SessionStatus[];
+  activeOnly?: boolean;
+  recentHours?: number;
+  rootSessionId?: string;
+  parentSessionId?: string | null;
+  subject?: WorkClaimSubjectFilter;
+}): NormalizedSessionDiscoveryFilters {
+  const query = normalizeSessionDiscoveryQuery(options.query ?? options.search);
+  if (
+    options.query !== undefined &&
+    options.search !== undefined &&
+    normalizeSessionDiscoveryQuery(options.query) !== normalizeSessionDiscoveryQuery(options.search)
+  ) {
+    throw new Error("sessions_list query and legacy search filter do not match");
+  }
+  const statuses = [...new Set(options.statuses ?? [])]
+    .map((status) => SessionStatusSchema.parse(status))
+    .sort();
+  const recentHours = options.recentHours ?? null;
+  if (
+    recentHours !== null &&
+    (!Number.isSafeInteger(recentHours) ||
+      recentHours < 1 ||
+      recentHours > WORK_DISCOVERY_RECENT_HOURS_MAX)
+  ) {
+    throw new Error(
+      `sessions_list recentHours must be an integer between 1 and ${WORK_DISCOVERY_RECENT_HOURS_MAX}`,
+    );
+  }
+  const subject = normalizeSessionDiscoverySubject(options.subject);
+  if (query && subject) {
+    throw new Error("sessions_list query cannot be combined with an exact subject filter");
+  }
+  return {
+    query,
+    statuses,
+    activeOnly: options.activeOnly === true,
+    recentHours,
+    rootSessionId: options.rootSessionId ?? null,
+    parentSessionId: Object.prototype.hasOwnProperty.call(options, "parentSessionId")
+      ? (options.parentSessionId ?? null)
+      : undefined,
+    subject,
+  };
+}
+
+function sessionDiscoveryFilterHash(filters: NormalizedSessionDiscoveryFilters): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        query: filters.query,
+        statuses: filters.statuses,
+        activeOnly: filters.activeOnly,
+        recentHours: filters.recentHours,
+        rootSessionId: filters.rootSessionId,
+        parentSessionId:
+          filters.parentSessionId === undefined ? { any: true } : filters.parentSessionId,
+        subject: filters.subject,
+      }),
+    )
+    .digest("hex");
+}
+
+function sessionDiscoverySubjectDigest(subject: WorkClaimSubjectFilter): string {
+  return createHash("sha256")
+    .update(`${subject.namespace}\u001f${subject.type}\u001f${subject.canonicalKey}`, "utf8")
+    .digest("hex");
+}
+
+function sessionDiscoveryIso(value: Date | string): string {
+  return (value instanceof Date ? value : new Date(value)).toISOString();
+}
+
+async function selectSessionDiscoveryPageRows(
+  db: Database,
+  workspaceId: string,
+  options: {
+    limit: number;
+    orderBy: SessionDiscoveryOrderBy;
+    cursor?: SessionDiscoveryCursor;
+    snapshotAt: string;
+    snapshotRevision: string;
+    updatedAfter: string | null;
+    subjectId?: string;
+    authorizationScope?: SessionAuthorizationListScope;
+    filters: NormalizedSessionDiscoveryFilters;
+  },
+): Promise<{ rows: SessionDiscoveryPageRow[]; total: number }> {
+  const authorizationFilters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
+  if (options.subjectId) {
+    authorizationFilters.push(sql`not exists (
+      select 1
+      from ${schema.slackInteractions} private_slack_interaction
+      where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+        and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+        and private_slack_interaction.visibility = 'private'
+        and private_slack_interaction.owning_subject_id <> ${options.subjectId}
+    )`);
+  } else {
+    // Missing subject context must fail closed for Slack-private roots. Public
+    // and ordinary workspace-shared discovery remains available to internal
+    // callers that do not carry a human subject.
+    authorizationFilters.push(sql`not exists (
+      select 1
+      from ${schema.slackInteractions} private_slack_interaction
+      where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+        and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+        and private_slack_interaction.visibility = 'private'
+    )`);
+  }
+  if (options.authorizationScope) {
+    authorizationFilters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
+  }
+  if (options.filters.statuses.length > 0) {
+    authorizationFilters.push(inArray(schema.sessions.status, options.filters.statuses));
+  }
+  if (options.filters.activeOnly) {
+    authorizationFilters.push(notInArray(schema.sessions.status, ["failed", "cancelled"]));
+  }
+  if (options.filters.recentHours !== null) {
+    authorizationFilters.push(
+      sql`${schema.sessions.updatedAt} >= ${options.snapshotAt}::text::timestamptz
+        - (${options.filters.recentHours}::integer * interval '1 hour')`,
+    );
+  }
+  if (options.filters.rootSessionId) {
+    authorizationFilters.push(eq(schema.sessions.rootSessionId, options.filters.rootSessionId));
+  }
+  if (options.filters.parentSessionId !== undefined) {
+    authorizationFilters.push(
+      options.filters.parentSessionId === null
+        ? isNull(schema.sessions.parentSessionId)
+        : eq(schema.sessions.parentSessionId, options.filters.parentSessionId),
+    );
+  }
+  authorizationFilters.push(
+    options.orderBy === "createdAt"
+      ? sql`${schema.sessions.createdAt} <= ${options.snapshotAt}::text::timestamptz`
+      : sql`${schema.sessions.activityRevision} <= ${options.snapshotRevision}::text::bigint`,
+  );
+  if (options.updatedAfter !== null) {
+    authorizationFilters.push(
+      sql`${schema.sessions.activityRevision} > ${options.updatedAfter}::text::bigint`,
+    );
+  }
+  const authorizedPredicate = and(...authorizationFilters) ?? sql`false`;
+  const claimStatePredicate =
+    options.filters.activeOnly || options.filters.recentHours === null
+      ? sql`${schema.sessionWorkClaims.state} = 'active'`
+      : sql`(${schema.sessionWorkClaims.state} = 'active' or
+          ${schema.sessionWorkClaims.updatedAt} >= ${options.snapshotAt}::text::timestamptz
+            - (${options.filters.recentHours}::integer * interval '1 hour'))`;
+  const subjectDigest = options.filters.subject
+    ? sessionDiscoverySubjectDigest(options.filters.subject)
+    : null;
+  const subjectScopePredicate = options.filters.subject
+    ? sql`exists (
+        select 1
+        from ${schema.sessionWorkClaims}
+        where ${schema.sessionWorkClaims.workspaceId} = ${workspaceId}
+          and ${schema.sessionWorkClaims.sessionId} = authorized_sessions.id
+          and ${schema.sessionWorkClaims.subjectNamespace} = ${options.filters.subject.namespace}
+          and ${schema.sessionWorkClaims.subjectType} = ${options.filters.subject.type}
+          and ${schema.sessionWorkClaims.subjectDigest} = ${subjectDigest}
+          and ${claimStatePredicate}
+      )`
+    : sql`true`;
+
+  const rankingCtes = options.filters.subject
+    ? sql`,
+      match_candidates as materialized (
+        select
+          subject_scoped_sessions.id as session_id,
+          0::integer as match_rank,
+          'exact_subject'::text as match_class,
+          'subject'::text as matched_field,
+          'exact'::text as score_band,
+          ${schema.sessionWorkClaims.id} as matched_claim_id,
+          ${schema.sessionWorkClaims.updatedAt} as matched_claim_updated_at
+        from subject_scoped_sessions
+        join ${schema.sessionWorkClaims}
+          on ${schema.sessionWorkClaims.workspaceId} = ${workspaceId}
+         and ${schema.sessionWorkClaims.sessionId} = subject_scoped_sessions.id
+         and ${schema.sessionWorkClaims.subjectNamespace} = ${options.filters.subject.namespace}
+         and ${schema.sessionWorkClaims.subjectType} = ${options.filters.subject.type}
+         and ${schema.sessionWorkClaims.subjectDigest} = ${subjectDigest}
+         and ${claimStatePredicate}
+      ),
+      best_matches as materialized (
+        select distinct on (session_id)
+          session_id, match_rank, match_class, matched_field, score_band, matched_claim_id
+        from match_candidates
+        order by session_id, match_rank, matched_claim_updated_at desc, matched_claim_id desc
+      )`
+    : options.filters.query
+      ? sql`,
+        search_input as materialized (
+          select
+            lower(${options.filters.query}::text) as normalized_query,
+            websearch_to_tsquery('simple', ${options.filters.query}::text) as ts_query
+        ),
+        match_candidates as materialized (
+          select
+            subject_scoped_sessions.id as session_id,
+            case
+              when lower(search_session.title) = search_input.normalized_query then 10
+              when starts_with(lower(search_session.title), search_input.normalized_query) then 11
+              else 12
+            end::integer as match_rank,
+            'title'::text as match_class,
+            'title'::text as matched_field,
+            case
+              when lower(search_session.title) = search_input.normalized_query then 'exact'
+              else 'strong'
+            end::text as score_band,
+            null::uuid as matched_claim_id,
+            null::timestamptz as matched_claim_updated_at
+          from subject_scoped_sessions
+          join ${schema.sessions} search_session
+            on search_session.workspace_id = ${workspaceId}
+           and search_session.id = subject_scoped_sessions.id
+          cross join search_input
+          where search_session.title is not null
+            and (
+              lower(search_session.title) = search_input.normalized_query
+              or starts_with(lower(search_session.title), search_input.normalized_query)
+              or to_tsvector('simple', search_session.title) @@ search_input.ts_query
+            )
+
+          union all
+
+          select
+            subject_scoped_sessions.id as session_id,
+            case
+              when lower(${schema.sessionGoals.text}) = search_input.normalized_query then 20
+              when starts_with(
+                lower(${schema.sessionGoals.text}), search_input.normalized_query
+              ) then 21
+              else 22
+            end::integer as match_rank,
+            'goal'::text as match_class,
+            'goal'::text as matched_field,
+            case
+              when lower(${schema.sessionGoals.text}) = search_input.normalized_query then 'exact'
+              else 'strong'
+            end::text as score_band,
+            null::uuid as matched_claim_id,
+            null::timestamptz as matched_claim_updated_at
+          from subject_scoped_sessions
+          join ${schema.sessionGoals}
+            on ${schema.sessionGoals.workspaceId} = ${workspaceId}
+           and ${schema.sessionGoals.sessionId} = subject_scoped_sessions.id
+           and ${schema.sessionGoals.status} = 'active'
+          cross join search_input
+          where lower(${schema.sessionGoals.text}) = search_input.normalized_query
+             or starts_with(lower(${schema.sessionGoals.text}), search_input.normalized_query)
+             or to_tsvector('simple', ${schema.sessionGoals.text}) @@ search_input.ts_query
+
+          union all
+
+          select
+            subject_scoped_sessions.id as session_id,
+            (
+              case when ${schema.sessionWorkClaims.state} = 'active' then 30 else 40 end
+              + case
+                  when lower(${schema.sessionWorkClaims.canonicalKey}) = search_input.normalized_query
+                    or lower(coalesce(${schema.sessionWorkClaims.displayLabel}, '')) = search_input.normalized_query then 0
+                  when starts_with(
+                    lower(${schema.sessionWorkClaims.canonicalKey}),
+                    search_input.normalized_query
+                  ) or starts_with(
+                    lower(coalesce(${schema.sessionWorkClaims.displayLabel}, '')),
+                    search_input.normalized_query
+                  ) then 1
+                  else 2
+                end
+            )::integer as match_rank,
+            'fuzzy'::text as match_class,
+            case
+              when lower(coalesce(${schema.sessionWorkClaims.displayLabel}, '')) = search_input.normalized_query
+                or starts_with(
+                  lower(coalesce(${schema.sessionWorkClaims.displayLabel}, '')),
+                  search_input.normalized_query
+                )
+                or to_tsvector('simple', coalesce(${schema.sessionWorkClaims.displayLabel}, '')) @@ search_input.ts_query
+                then 'claim_label'
+              else 'claim_key'
+            end::text as matched_field,
+            case
+              when lower(${schema.sessionWorkClaims.canonicalKey}) = search_input.normalized_query
+                or lower(coalesce(${schema.sessionWorkClaims.displayLabel}, '')) = search_input.normalized_query then 'exact'
+              when starts_with(
+                lower(${schema.sessionWorkClaims.canonicalKey}), search_input.normalized_query
+              ) or starts_with(
+                lower(coalesce(${schema.sessionWorkClaims.displayLabel}, '')),
+                search_input.normalized_query
+              ) then 'strong'
+              else 'related'
+            end::text as score_band,
+            ${schema.sessionWorkClaims.id} as matched_claim_id,
+            ${schema.sessionWorkClaims.updatedAt} as matched_claim_updated_at
+          from subject_scoped_sessions
+          join ${schema.sessionWorkClaims}
+            on ${schema.sessionWorkClaims.workspaceId} = ${workspaceId}
+           and ${schema.sessionWorkClaims.sessionId} = subject_scoped_sessions.id
+           and ${claimStatePredicate}
+          cross join search_input
+          where lower(${schema.sessionWorkClaims.canonicalKey}) = search_input.normalized_query
+             or starts_with(
+                  lower(${schema.sessionWorkClaims.canonicalKey}),
+                  search_input.normalized_query
+                )
+             or to_tsvector(
+                  'simple',
+                  ${schema.sessionWorkClaims.canonicalKey} || ' '
+                    || coalesce(${schema.sessionWorkClaims.displayLabel}, '')
+                ) @@ search_input.ts_query
+             or lower(coalesce(${schema.sessionWorkClaims.displayLabel}, '')) = search_input.normalized_query
+             or starts_with(
+                  lower(coalesce(${schema.sessionWorkClaims.displayLabel}, '')),
+                  search_input.normalized_query
+                )
+        ),
+        best_matches as materialized (
+          select distinct on (session_id)
+            session_id, match_rank, match_class, matched_field, score_band, matched_claim_id
+          from match_candidates
+          order by session_id, match_rank, matched_claim_updated_at desc nulls last,
+            matched_claim_id desc nulls last
+        )`
+      : sql``;
+  const rankedCte =
+    options.orderBy === "relevance"
+      ? sql`,
+        ranked_sessions as materialized (
+          select
+            subject_scoped_sessions.*,
+            best_matches.match_rank,
+            best_matches.match_class,
+            best_matches.matched_field,
+            best_matches.score_band,
+            best_matches.matched_claim_id
+          from subject_scoped_sessions
+          join best_matches on best_matches.session_id = subject_scoped_sessions.id
+        )`
+      : sql`,
+        ranked_sessions as materialized (
+          select
+            subject_scoped_sessions.*,
+            null::integer as match_rank,
+            null::text as match_class,
+            null::text as matched_field,
+            null::text as score_band,
+            null::uuid as matched_claim_id
+          from subject_scoped_sessions
+        )`;
+  const cursorPredicate = !options.cursor
+    ? sql`true`
+    : options.orderBy === "relevance"
+      ? sql`(
+          ranked_sessions.match_rank > ${options.cursor.sortRank}::integer
+          or (
+            ranked_sessions.match_rank = ${options.cursor.sortRank}::integer
+            and (
+              ranked_sessions.activity_revision < ${options.cursor.sortRevision}::text::bigint
+              or (
+                ranked_sessions.activity_revision = ${options.cursor.sortRevision}::text::bigint
+                and (
+                  ranked_sessions.updated_at < ${options.cursor.sortAt}::text::timestamptz
+                  or (
+                    ranked_sessions.updated_at = ${options.cursor.sortAt}::text::timestamptz
+                    and ranked_sessions.id < ${options.cursor.id}::uuid
+                  )
+                )
+              )
+            )
+          )
+        )`
+      : options.orderBy === "updatedAt"
+        ? sql`(
+            ranked_sessions.activity_revision < ${options.cursor.sortRevision}::text::bigint
+            or (
+              ranked_sessions.activity_revision = ${options.cursor.sortRevision}::text::bigint
+              and (
+                ranked_sessions.updated_at < ${options.cursor.sortAt}::text::timestamptz
+                or (
+                  ranked_sessions.updated_at = ${options.cursor.sortAt}::text::timestamptz
+                  and ranked_sessions.id < ${options.cursor.id}::uuid
+                )
+              )
+            )
+          )`
+        : sql`(
+            ranked_sessions.created_at < ${options.cursor.sortAt}::text::timestamptz
+            or (
+              ranked_sessions.created_at = ${options.cursor.sortAt}::text::timestamptz
+              and ranked_sessions.id < ${options.cursor.id}::uuid
+            )
+          )`;
+  const pageOrder =
+    options.orderBy === "relevance"
+      ? sql`ranked_sessions.match_rank asc, ranked_sessions.activity_revision desc,
+          ranked_sessions.updated_at desc, ranked_sessions.id desc`
+      : options.orderBy === "updatedAt"
+        ? sql`ranked_sessions.activity_revision desc, ranked_sessions.updated_at desc,
+            ranked_sessions.id desc`
+        : sql`ranked_sessions.created_at desc, ranked_sessions.id desc`;
+  const outerOrder =
+    options.orderBy === "relevance"
+      ? sql`page."sortRank" asc nulls last, page."sortRevision"::bigint desc nulls last,
+          page."sortAt"::timestamptz desc nulls last, page.id desc nulls last`
+      : options.orderBy === "updatedAt"
+        ? sql`page."sortRevision"::bigint desc nulls last,
+            page."sortAt"::timestamptz desc nulls last, page.id desc nulls last`
+        : sql`page."sortAt"::timestamptz desc nulls last, page.id desc nulls last`;
+  const sortRevision =
+    options.orderBy === "createdAt" ? sql`'0'::text` : sql`ranked_sessions.activity_revision::text`;
+  const sortAt =
+    options.orderBy === "createdAt"
+      ? sql`to_char(ranked_sessions.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+      : sql`to_char(ranked_sessions.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+  const result = await rawRows<SessionDiscoveryPageRow>(
+    db,
+    sql`
+      with authorized_sessions as materialized (
+        select
+          ${schema.sessions.id} as id,
+          ${schema.sessions.title} as title,
+          ${schema.sessions.parentSessionId} as parent_session_id,
+          ${schema.sessions.rootSessionId} as root_session_id,
+          ${schema.sessions.nestedAgentDepth} as nested_agent_depth,
+          ${schema.sessions.status} as status,
+          ${schema.sessions.createdAt} as created_at,
+          ${schema.sessions.updatedAt} as updated_at,
+          ${schema.sessions.activityRevision} as activity_revision
+        from ${schema.sessions}
+        where ${authorizedPredicate}
+      ),
+      subject_scoped_sessions as materialized (
+        select * from authorized_sessions where ${subjectScopePredicate}
+      )
+      ${rankingCtes}
+      ${rankedCte}
+      select
+        page.id,
+        page.title,
+        page."titleOriginalChars",
+        page."parentSessionId",
+        page."rootSessionId",
+        page."nestedAgentDepth",
+        page.status,
+        page."createdAt",
+        page."updatedAt",
+        page."sortRevision",
+        page."sortAt",
+        page."sortRank",
+        page."matchClass",
+        page."matchedField",
+        page."scoreBand",
+        page."matchedClaimId",
+        totals.total
+      from (select count(*)::integer as total from ranked_sessions) totals
+      left join lateral (
+        select
+          ranked_sessions.id,
+          left(ranked_sessions.title, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}) as title,
+          char_length(ranked_sessions.title)::integer as "titleOriginalChars",
+          ranked_sessions.parent_session_id as "parentSessionId",
+          ranked_sessions.root_session_id as "rootSessionId",
+          ranked_sessions.nested_agent_depth as "nestedAgentDepth",
+          ranked_sessions.status,
+          ranked_sessions.created_at as "createdAt",
+          ranked_sessions.updated_at as "updatedAt",
+          ${sortRevision} as "sortRevision",
+          ${sortAt} as "sortAt",
+          ranked_sessions.match_rank as "sortRank",
+          ranked_sessions.match_class as "matchClass",
+          ranked_sessions.matched_field as "matchedField",
+          ranked_sessions.score_band as "scoreBand",
+          ranked_sessions.matched_claim_id as "matchedClaimId"
+        from ranked_sessions
+        where ${cursorPredicate}
+        order by ${pageOrder}
+        limit ${options.limit + 1}
+      ) page on true
+      order by ${outerOrder}
+    `,
+  );
+  const total = Number(result[0]?.total ?? 0);
+  return { rows: result.filter((row) => row.id !== null), total };
+}
+
+async function sessionDiscoveryClaimsForSessions(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  options: {
+    snapshotAt: string;
+    activeOnly: boolean;
+    recentHours: number | null;
+    limit: number;
+    matchedClaimIds: ReadonlyMap<string, string | null>;
+  },
+): Promise<Map<string, { claims: WorkClaimDiscoverySummary[]; truncated: boolean }>> {
+  if (sessionIds.length === 0 || options.limit < 1) return new Map();
+  const claimStatePredicate =
+    options.activeOnly || options.recentHours === null
+      ? sql`${schema.sessionWorkClaims.state} = 'active'`
+      : sql`(${schema.sessionWorkClaims.state} = 'active' or
+          ${schema.sessionWorkClaims.updatedAt} >= ${options.snapshotAt}::text::timestamptz
+            - (${options.recentHours}::integer * interval '1 hour'))`;
+  const rows = await rawRows<SessionDiscoveryClaimRow>(
+    db,
+    sql`
+      with requested_sessions(session_id, matched_claim_id) as (
+        values ${sql.join(
+          sessionIds.map(
+            (sessionId) =>
+              sql`(${sessionId}::uuid, ${options.matchedClaimIds.get(sessionId) ?? null}::uuid)`,
+          ),
+          sql`, `,
+        )}
+      )
+      select
+        requested_sessions.session_id as "sessionId",
+        claim.id,
+        claim.subject_namespace as "subjectNamespace",
+        claim.subject_type as "subjectType",
+        claim.canonical_key as "canonicalKey",
+        claim.display_label as "displayLabel",
+        claim.role,
+        claim.state,
+        claim.revision,
+        claim.provenance,
+        claim.version_kind as "versionKind",
+        claim.version_value as "versionValue",
+        claim.observed_at as "observedAt",
+        claim.updated_at as "updatedAt",
+        claim.settled_at as "settledAt",
+        claim.available_count as "availableCount"
+      from requested_sessions
+      cross join lateral (
+        select
+          ${schema.sessionWorkClaims.id} as id,
+          ${schema.sessionWorkClaims.subjectNamespace} as subject_namespace,
+          ${schema.sessionWorkClaims.subjectType} as subject_type,
+          ${schema.sessionWorkClaims.canonicalKey} as canonical_key,
+          ${schema.sessionWorkClaims.displayLabel} as display_label,
+          ${schema.sessionWorkClaims.role} as role,
+          ${schema.sessionWorkClaims.state} as state,
+          ${schema.sessionWorkClaims.revision} as revision,
+          ${schema.sessionWorkClaims.provenance} as provenance,
+          ${schema.sessionWorkClaims.versionKind} as version_kind,
+          ${schema.sessionWorkClaims.versionValue} as version_value,
+          ${schema.sessionWorkClaims.observedAt} as observed_at,
+          ${schema.sessionWorkClaims.updatedAt} as updated_at,
+          ${schema.sessionWorkClaims.settledAt} as settled_at,
+          count(*) over()::integer as available_count
+        from ${schema.sessionWorkClaims}
+        where ${schema.sessionWorkClaims.workspaceId} = ${workspaceId}
+          and ${schema.sessionWorkClaims.sessionId} = requested_sessions.session_id
+          and ${claimStatePredicate}
+        order by
+          (
+            requested_sessions.matched_claim_id is not null
+            and ${schema.sessionWorkClaims.id} = requested_sessions.matched_claim_id
+          ) desc,
+          (${schema.sessionWorkClaims.state} = 'active') desc,
+          ${schema.sessionWorkClaims.updatedAt} desc,
+          ${schema.sessionWorkClaims.id} desc
+        limit ${options.limit}
+      ) claim
+      order by requested_sessions.session_id,
+        (
+          requested_sessions.matched_claim_id is not null
+          and claim.id = requested_sessions.matched_claim_id
+        ) desc,
+        (claim.state = 'active') desc, claim.updated_at desc, claim.id desc
+    `,
+  );
+  const grouped = new Map<string, { claims: WorkClaimDiscoverySummary[]; truncated: boolean }>();
+  for (const row of rows) {
+    const entry = grouped.get(row.sessionId) ?? { claims: [], truncated: false };
+    entry.claims.push(
+      WorkClaimDiscoverySummarySchema.parse({
+        id: row.id,
+        sessionId: row.sessionId,
+        subject: {
+          namespace: row.subjectNamespace,
+          type: row.subjectType,
+          canonicalKey: row.canonicalKey,
+          displayLabel: row.displayLabel,
+        },
+        role: row.role,
+        state: row.state,
+        revision: Number(row.revision),
+        provenance: row.provenance,
+        version:
+          row.versionKind === null || row.versionValue === null
+            ? null
+            : { kind: row.versionKind, value: row.versionValue },
+        observedAt: sessionDiscoveryIso(row.observedAt),
+        updatedAt: sessionDiscoveryIso(row.updatedAt),
+        settledAt: row.settledAt === null ? null : sessionDiscoveryIso(row.settledAt),
+      }),
+    );
+    entry.truncated = Number(row.availableCount) > options.limit;
+    grouped.set(row.sessionId, entry);
+  }
+  return grouped;
 }
 
 /**
@@ -31003,7 +31721,17 @@ export async function listSessionDiscoverySummaries(
     orderBy?: SessionDiscoveryOrderBy;
     updatedAfter?: string;
     parentSessionId?: string | null;
+    rootSessionId?: string;
+    query?: string;
+    /** @deprecated use query; retained for the existing topology route. */
     search?: string;
+    statuses?: SessionStatus[];
+    activeOnly?: boolean;
+    recentHours?: number;
+    subject?: WorkClaimSubjectFilter;
+    claimLimit?: number;
+    /** Skip advisory claim reads for an operator-disabled discovery rollout. */
+    includeWorkDiscovery?: boolean;
     subjectId?: string;
     authorizationScope?: SessionAuthorizationListScope;
   },
@@ -31017,330 +31745,306 @@ export async function listSessionDiscoverySummaries(
   snapshotRevision: string;
   updatedThrough: string | null;
   updatedAfter: string | null;
+  /** Internal relevance cursor binding; omitted from row projections. */
+  filterHash: string | null;
 }> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
-  const orderBy = options.orderBy ?? options.cursor?.orderBy ?? "createdAt";
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) => {
-      const requestedUpdatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
-      const updatedAfter =
-        requestedUpdatedAfter === null
-          ? null
-          : normalizeSessionActivityRevision(requestedUpdatedAfter, "updatedAfter");
-      if (options.cursor?.orderBy !== undefined && options.cursor.orderBy !== orderBy) {
-        throw new Error("sessions_list cursor order does not match the request");
-      }
-      if (options.cursor && options.cursor.updatedAfter !== updatedAfter) {
-        throw new Error("sessions_list cursor incremental filter does not match the request");
-      }
-      if (updatedAfter !== null && orderBy !== "updatedAt") {
-        throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
-      }
-      const snapshotAt =
-        options.cursor?.snapshotAt ??
-        (
-          await rawRows<{ value: string }>(
-            scopedDb,
-            // The transaction-start cutoff is no later than any statement or
-            // repeatable-read snapshot used below. Later rows therefore belong
-            // to the next traversal instead of entering this cursor mid-scan.
-            sql`select to_char(transaction_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as value`,
-          )
-        )[0]!.value;
-      const snapshotRevision =
-        orderBy === "updatedAt"
-          ? options.cursor?.snapshotRevision !== undefined
-            ? normalizeSessionActivityRevision(
-                options.cursor.snapshotRevision,
-                "cursor snapshot revision",
-              )
-            : await readWorkspaceSessionActivityRevision(scopedDb, workspaceId)
-          : "0";
-      const cursorSortRevision = options.cursor
-        ? normalizeSessionActivityRevision(options.cursor.sortRevision, "cursor sort revision")
-        : null;
+  const claimLimit = Math.max(
+    1,
+    Math.min(
+      WORK_CLAIM_DISCOVERY_LIMIT,
+      Math.floor(options.claimLimit ?? WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT),
+    ),
+  );
+  const filters = normalizeSessionDiscoveryFilters(options);
+  const relevanceRequested = filters.query !== null || filters.subject !== null;
+  const orderBy =
+    options.orderBy ?? options.cursor?.orderBy ?? (relevanceRequested ? "relevance" : "createdAt");
+  if (relevanceRequested && orderBy !== "relevance") {
+    throw new Error("sessions_list query and exact subject filters require relevance order");
+  }
+  if (!relevanceRequested && orderBy === "relevance") {
+    throw new Error("sessions_list relevance order requires query or an exact subject filter");
+  }
+  const filterHash = relevanceRequested ? sessionDiscoveryFilterHash(filters) : null;
+  const readPage = async (scopedDb: Database) => {
+    const requestedUpdatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
+    const updatedAfter =
+      requestedUpdatedAfter === null
+        ? null
+        : normalizeSessionActivityRevision(requestedUpdatedAfter, "updatedAfter");
+    if (options.cursor?.orderBy !== undefined && options.cursor.orderBy !== orderBy) {
+      throw new Error("sessions_list cursor order does not match the request");
+    }
+    if (options.cursor && options.cursor.updatedAfter !== updatedAfter) {
+      throw new Error("sessions_list cursor incremental filter does not match the request");
+    }
+    if (updatedAfter !== null && orderBy !== "updatedAt") {
+      throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
+    }
+    if (options.cursor && orderBy === "relevance") {
       if (
-        orderBy === "createdAt" &&
-        options.cursor &&
-        (cursorSortRevision !== "0" || options.cursor.snapshotRevision !== "0")
+        !Number.isSafeInteger(options.cursor.sortRank) ||
+        options.cursor.sortRank === null ||
+        options.cursor.sortRank < 0
       ) {
-        throw new Error("sessions_list created-order cursor cannot carry activity revisions");
+        throw new Error("sessions_list relevance cursor rank is invalid");
       }
-      const cursorPredicate = options.cursor
-        ? orderBy === "updatedAt"
-          ? or(
-              sql`${schema.sessions.activityRevision} < ${cursorSortRevision!}::text::bigint`,
-              and(
-                sql`${schema.sessions.activityRevision} = ${cursorSortRevision!}::text::bigint`,
-                or(
-                  sql`${schema.sessions.updatedAt} < ${options.cursor.sortAt}::text::timestamptz`,
-                  and(
-                    sql`${schema.sessions.updatedAt} = ${options.cursor.sortAt}::text::timestamptz`,
-                    lt(schema.sessions.id, options.cursor.id),
-                  ),
-                ),
-              ),
-            )
-          : or(
-              // Cast through text deliberately. postgres.js otherwise infers a
-              // timestamptz parameter and serializes this exact cursor string via
-              // JS Date, which discards PostgreSQL's sub-millisecond precision.
-              sql`${schema.sessions.createdAt} < ${options.cursor.sortAt}::text::timestamptz`,
-              and(
-                sql`${schema.sessions.createdAt} = ${options.cursor.sortAt}::text::timestamptz`,
-                lt(schema.sessions.id, options.cursor.id),
-              ),
-            )
-        : undefined;
-      const snapshotFilters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
-      if (options.subjectId) {
-        snapshotFilters.push(sql`not exists (
-        select 1
-        from ${schema.slackInteractions} private_slack_interaction
-        where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
-          and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
-          and private_slack_interaction.visibility = 'private'
-          and private_slack_interaction.owning_subject_id <> ${options.subjectId}
-      )`);
+      if (options.cursor.filterHash !== filterHash) {
+        throw new Error("sessions_list cursor relevance filters do not match the request");
       }
-      if (options.authorizationScope) {
-        snapshotFilters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
-      }
-      if (Object.prototype.hasOwnProperty.call(options, "parentSessionId")) {
-        snapshotFilters.push(
-          options.parentSessionId === null
-            ? isNull(schema.sessions.parentSessionId)
-            : eq(schema.sessions.parentSessionId, options.parentSessionId!),
-        );
-      }
-      const search = options.search?.trim();
-      if (search) {
-        const pattern = `%${search
-          .replaceAll("\\", "\\\\")
-          .replaceAll("%", "\\%")
-          .replaceAll("_", "\\_")}%`;
-        snapshotFilters.push(
-          or(
-            ilike(schema.sessions.title, pattern),
-            ilike(schema.sessions.initialMessage, pattern),
-          )!,
-        );
-      }
-      snapshotFilters.push(
-        orderBy === "updatedAt"
-          ? sql`${schema.sessions.activityRevision} <= ${snapshotRevision}::text::bigint`
-          : sql`${schema.sessions.createdAt} <= ${snapshotAt}::text::timestamptz`,
-      );
-      if (updatedAfter !== null) {
-        snapshotFilters.push(
-          sql`${schema.sessions.activityRevision} > ${updatedAfter}::text::bigint`,
-        );
-      }
-      const rows = await scopedDb
-        .select({
-          id: schema.sessions.id,
-          title: sql<
-            string | null
-          >`left(${schema.sessions.title}, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS})`,
-          titleOriginalChars: sql<number | null>`char_length(${schema.sessions.title})::integer`,
-          parentSessionId: schema.sessions.parentSessionId,
-          rootSessionId: schema.sessions.rootSessionId,
-          nestedAgentDepth: schema.sessions.nestedAgentDepth,
-          status: schema.sessions.status,
-          createdAt: schema.sessions.createdAt,
-          updatedAt: schema.sessions.updatedAt,
-          sortRevision:
-            orderBy === "updatedAt"
-              ? sql<string>`${schema.sessions.activityRevision}::text`
-              : sql<string>`'0'`,
-          sortAt:
-            orderBy === "updatedAt"
-              ? sql<string>`to_char(${schema.sessions.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
-              : sql<string>`to_char(${schema.sessions.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
-        })
-        .from(schema.sessions)
-        .where(and(...snapshotFilters, cursorPredicate))
-        .orderBy(
-          ...(orderBy === "updatedAt"
-            ? [
-                desc(schema.sessions.activityRevision),
-                desc(schema.sessions.updatedAt),
-                desc(schema.sessions.id),
-              ]
-            : [desc(schema.sessions.createdAt), desc(schema.sessions.id)]),
+    } else if (
+      options.cursor &&
+      (options.cursor.sortRank !== null || options.cursor.filterHash !== null)
+    ) {
+      throw new Error("sessions_list chronological cursor cannot carry relevance fields");
+    }
+    const snapshotAt =
+      options.cursor?.snapshotAt ??
+      (
+        await rawRows<{ value: string }>(
+          scopedDb,
+          // The transaction-start cutoff is no later than any statement or
+          // repeatable-read snapshot used below. Later rows therefore belong
+          // to the next traversal instead of entering this cursor mid-scan.
+          sql`select to_char(transaction_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as value`,
         )
-        .limit(limit + 1);
-      const hasMore = rows.length > limit;
-      const page = rows.slice(0, limit);
-      const ids = page.map((row) => row.id);
-      const [{ total } = { total: 0 }] = await scopedDb
-        .select({ total: sql<number>`count(*)::int` })
-        .from(schema.sessions)
-        .where(and(...snapshotFilters));
-      if (ids.length === 0) {
-        return {
-          sessions: [],
-          hasMore: false,
-          nextCursor: null,
-          total: Number(total),
-          orderBy,
-          snapshotAt,
-          snapshotRevision,
-          updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
-          updatedAfter,
-        };
-      }
-
-      const rootRelatedIds = await sessionIdsCoveredByAuthorizationRoots(
-        scopedDb,
-        workspaceId,
-        ids,
-        options.authorizationScope,
-      );
-      const controls = await evaluateSessionDiscoveryControls(scopedDb, workspaceId, ids);
-      const treeStats = await sessionTreeStatsForSessions(scopedDb, workspaceId, [
-        ...rootRelatedIds,
-      ]);
-      const goals = await scopedDb
-        .select({
-          sessionId: schema.sessionGoals.sessionId,
-          status: schema.sessionGoals.status,
-          text: sql<string>`left(${schema.sessionGoals.text}, ${SESSION_DISCOVERY_GOAL_MAX_CHARS})`,
-          textOriginalChars: sql<number>`char_length(${schema.sessionGoals.text})::integer`,
-        })
-        .from(schema.sessionGoals)
-        .where(
-          and(
-            eq(schema.sessionGoals.workspaceId, workspaceId),
-            inArray(schema.sessionGoals.sessionId, ids),
-          ),
-        );
-      const goalsBySession = new Map(goals.map((goal) => [goal.sessionId, goal]));
-      const queueCounts = await scopedDb
-        .select({
-          sessionId: schema.sessionTurns.sessionId,
-          count: sql<number>`count(*)::int`,
-        })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            inArray(schema.sessionTurns.sessionId, ids),
-            eq(schema.sessionTurns.status, "queued"),
-            inArray(schema.sessionTurns.source, ["user", "api"]),
-          ),
-        )
-        .groupBy(schema.sessionTurns.sessionId);
-      const queueBySession = new Map(
-        queueCounts.map((entry) => [entry.sessionId, Number(entry.count)]),
-      );
-      const latestMessages = options.includeLastMessage
-        ? await scopedDb
-            .selectDistinctOn([schema.sessionEvents.sessionId], {
-              sessionId: schema.sessionEvents.sessionId,
-              type: schema.sessionEvents.type,
-              // Extract only the bounded textual preview in PostgreSQL. Selecting
-              // the JSON payload here would re-materialize the exact multi-MB
-              // event bodies this compact discovery path exists to avoid.
-              preview: sql<string | null>`left(coalesce(
-              ${schema.sessionEvents.payload}->>'text',
-              ${schema.sessionEvents.payload}->>'message',
-              ${schema.sessionEvents.payload}->>'content'
-            ), ${SESSION_DISCOVERY_MESSAGE_MAX_CHARS})`,
-              previewOriginalChars: sql<number | null>`char_length(coalesce(
-              ${schema.sessionEvents.payload}->>'text',
-              ${schema.sessionEvents.payload}->>'message',
-              ${schema.sessionEvents.payload}->>'content'
-            ))::integer`,
-            })
-            .from(schema.sessionEvents)
-            .where(
-              and(
-                eq(schema.sessionEvents.workspaceId, workspaceId),
-                inArray(schema.sessionEvents.sessionId, ids),
-                inArray(schema.sessionEvents.type, ["user.message", "agent.message.completed"]),
-                excludeUnclaimedHumanPromptEventFilter(workspaceId),
-              ),
+      )[0]!.value;
+    const snapshotRevision =
+      orderBy !== "createdAt"
+        ? options.cursor?.snapshotRevision !== undefined
+          ? normalizeSessionActivityRevision(
+              options.cursor.snapshotRevision,
+              "cursor snapshot revision",
             )
-            .orderBy(schema.sessionEvents.sessionId, desc(schema.sessionEvents.sequence))
-        : [];
-      const latestBySession = new Map(latestMessages.map((entry) => [entry.sessionId, entry]));
-      const sessions = page.map((row): SessionDiscoverySummary => {
-        const control = controls.get(row.id);
-        if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-        const relatedAccess = rootRelatedIds.has(row.id) ? "root" : "target";
-        const goal = goalsBySession.get(row.id);
-        const latest = latestBySession.get(row.id);
-        return {
-          id: row.id,
-          title: row.title,
-          titleOriginalChars:
-            row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
-          parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
-          rootSessionId: relatedAccess === "root" ? row.rootSessionId : row.id,
-          nestedAgentDepth: row.nestedAgentDepth,
-          status: row.status as SessionStatus,
-          effectiveControl: projectSessionDiscoveryControlForRelatedAccess(
-            control,
-            row.id,
-            relatedAccess,
-          ),
-          goal: goal
-            ? {
-                status: goal.status as SessionGoalStatus,
-                text: goal.text,
-                textOriginalChars: Number(goal.textOriginalChars),
-              }
-            : null,
-          queuedPromptCount: queueBySession.get(row.id) ?? 0,
-          treeStats:
-            relatedAccess === "root"
-              ? (treeStats.get(row.id) ?? EMPTY_SESSION_TREE_STATS)
-              : EMPTY_SESSION_TREE_STATS,
-          latestMessage: latest
-            ? {
-                type: latest.type as SessionEventType,
-                preview: latest.preview,
-                previewOriginalChars:
-                  latest.previewOriginalChars === null ? null : Number(latest.previewOriginalChars),
-              }
-            : null,
-          createdAt: row.createdAt.toISOString(),
-          updatedAt: row.updatedAt.toISOString(),
-          sortRevision: row.sortRevision,
-          sortAt: row.sortAt,
-        };
-      });
-      const last = page.at(-1);
+          : await readWorkspaceSessionActivityRevision(scopedDb, workspaceId)
+        : "0";
+    const cursorSortRevision = options.cursor
+      ? normalizeSessionActivityRevision(options.cursor.sortRevision, "cursor sort revision")
+      : null;
+    if (
+      orderBy === "createdAt" &&
+      options.cursor &&
+      (cursorSortRevision !== "0" ||
+        options.cursor.snapshotRevision !== "0" ||
+        options.cursor.sortRank !== null ||
+        options.cursor.filterHash !== null)
+    ) {
+      throw new Error("sessions_list created-order cursor cannot carry activity revisions");
+    }
+    const selected = await selectSessionDiscoveryPageRows(scopedDb, workspaceId, {
+      limit,
+      orderBy,
+      ...(options.cursor ? { cursor: options.cursor } : {}),
+      snapshotAt,
+      snapshotRevision,
+      updatedAfter,
+      ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+      ...(options.authorizationScope ? { authorizationScope: options.authorizationScope } : {}),
+      filters,
+    });
+    const hasMore = selected.rows.length > limit;
+    const page = selected.rows.slice(0, limit);
+    const ids = page.map((row) => row.id!);
+    if (ids.length === 0) {
       return {
-        sessions,
-        hasMore,
-        nextCursor:
-          hasMore && last
-            ? {
-                orderBy,
-                sortRevision: last.sortRevision,
-                sortAt: last.sortAt,
-                id: last.id,
-                snapshotAt,
-                snapshotRevision,
-                updatedAfter,
-              }
-            : null,
-        total: Number(total),
+        sessions: [],
+        hasMore: false,
+        nextCursor: null,
+        total: selected.total,
         orderBy,
         snapshotAt,
         snapshotRevision,
         updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
         updatedAfter,
+        filterHash,
       };
-    },
-    orderBy === "updatedAt"
-      ? { isolationLevel: "repeatable read", accessMode: "read only" }
-      : { isolationLevel: "read committed", accessMode: "read only" },
-  );
+    }
+
+    const rootRelatedIds = await sessionIdsCoveredByAuthorizationRoots(
+      scopedDb,
+      workspaceId,
+      ids,
+      options.authorizationScope,
+    );
+    const controls = await evaluateSessionDiscoveryControls(scopedDb, workspaceId, ids);
+    const treeStats = await sessionTreeStatsForSessions(scopedDb, workspaceId, [...rootRelatedIds]);
+    const includeWorkDiscovery = options.includeWorkDiscovery !== false;
+    const workClaims = includeWorkDiscovery
+      ? await sessionDiscoveryClaimsForSessions(scopedDb, workspaceId, ids, {
+          snapshotAt,
+          activeOnly: filters.activeOnly,
+          recentHours: filters.recentHours,
+          limit: claimLimit,
+          matchedClaimIds: new Map(page.map((row) => [row.id!, row.matchedClaimId] as const)),
+        })
+      : new Map<string, { claims: WorkClaimDiscoverySummary[]; truncated: boolean }>();
+    const goals = await scopedDb
+      .select({
+        sessionId: schema.sessionGoals.sessionId,
+        status: schema.sessionGoals.status,
+        text: sql<string>`left(${schema.sessionGoals.text}, ${SESSION_DISCOVERY_GOAL_MAX_CHARS})`,
+        textOriginalChars: sql<number>`char_length(${schema.sessionGoals.text})::integer`,
+      })
+      .from(schema.sessionGoals)
+      .where(
+        and(
+          eq(schema.sessionGoals.workspaceId, workspaceId),
+          inArray(schema.sessionGoals.sessionId, ids),
+        ),
+      );
+    const goalsBySession = new Map(goals.map((goal) => [goal.sessionId, goal]));
+    const queueCounts = await scopedDb
+      .select({
+        sessionId: schema.sessionTurns.sessionId,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          inArray(schema.sessionTurns.sessionId, ids),
+          eq(schema.sessionTurns.status, "queued"),
+          inArray(schema.sessionTurns.source, ["user", "api"]),
+        ),
+      )
+      .groupBy(schema.sessionTurns.sessionId);
+    const queueBySession = new Map(
+      queueCounts.map((entry) => [entry.sessionId, Number(entry.count)]),
+    );
+    const latestMessages = options.includeLastMessage
+      ? await scopedDb
+          .selectDistinctOn([schema.sessionEvents.sessionId], {
+            sessionId: schema.sessionEvents.sessionId,
+            type: schema.sessionEvents.type,
+            // Extract only the bounded textual preview in PostgreSQL. Selecting
+            // the JSON payload here would re-materialize the exact multi-MB
+            // event bodies this compact discovery path exists to avoid.
+            preview: sql<string | null>`left(coalesce(
+              ${schema.sessionEvents.payload}->>'text',
+              ${schema.sessionEvents.payload}->>'message',
+              ${schema.sessionEvents.payload}->>'content'
+            ), ${SESSION_DISCOVERY_MESSAGE_MAX_CHARS})`,
+            previewOriginalChars: sql<number | null>`char_length(coalesce(
+              ${schema.sessionEvents.payload}->>'text',
+              ${schema.sessionEvents.payload}->>'message',
+              ${schema.sessionEvents.payload}->>'content'
+            ))::integer`,
+          })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              inArray(schema.sessionEvents.sessionId, ids),
+              inArray(schema.sessionEvents.type, ["user.message", "agent.message.completed"]),
+              excludeUnclaimedHumanPromptEventFilter(workspaceId),
+            ),
+          )
+          .orderBy(schema.sessionEvents.sessionId, desc(schema.sessionEvents.sequence))
+      : [];
+    const latestBySession = new Map(latestMessages.map((entry) => [entry.sessionId, entry]));
+    const sessions = page.map((row): SessionDiscoverySummary => {
+      const sessionId = row.id!;
+      const control = controls.get(sessionId);
+      if (!control) throw new Error(`Effective control missing for session ${sessionId}`);
+      const relatedAccess = rootRelatedIds.has(sessionId) ? "root" : "target";
+      const goal = goalsBySession.get(sessionId);
+      const latest = latestBySession.get(sessionId);
+      const claims = workClaims.get(sessionId) ?? { claims: [], truncated: false };
+      const match =
+        !includeWorkDiscovery ||
+        row.matchClass === null ||
+        row.matchedField === null ||
+        row.scoreBand === null
+          ? null
+          : WorkDiscoveryMatchSchema.parse({
+              class: row.matchClass,
+              field: row.matchedField,
+              scoreBand: row.scoreBand,
+              claimId: row.matchedClaimId,
+            });
+      return {
+        id: sessionId,
+        title: row.title,
+        titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
+        parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
+        rootSessionId: relatedAccess === "root" ? row.rootSessionId! : sessionId,
+        nestedAgentDepth: Number(row.nestedAgentDepth),
+        status: row.status as SessionStatus,
+        effectiveControl: projectSessionDiscoveryControlForRelatedAccess(
+          control,
+          sessionId,
+          relatedAccess,
+        ),
+        goal: goal
+          ? {
+              status: goal.status as SessionGoalStatus,
+              text: goal.text,
+              textOriginalChars: Number(goal.textOriginalChars),
+            }
+          : null,
+        queuedPromptCount: queueBySession.get(sessionId) ?? 0,
+        treeStats:
+          relatedAccess === "root"
+            ? (treeStats.get(sessionId) ?? EMPTY_SESSION_TREE_STATS)
+            : EMPTY_SESSION_TREE_STATS,
+        latestMessage: latest
+          ? {
+              type: latest.type as SessionEventType,
+              preview: latest.preview,
+              previewOriginalChars:
+                latest.previewOriginalChars === null ? null : Number(latest.previewOriginalChars),
+            }
+          : null,
+        workDiscovery: {
+          claims: claims.claims,
+          claimsTruncated: claims.truncated,
+          match,
+          possibleOverlap: match !== null,
+          advisoryOnly: true,
+          noAdditionalAccess: true,
+        },
+        createdAt: sessionDiscoveryIso(row.createdAt!),
+        updatedAt: sessionDiscoveryIso(row.updatedAt!),
+        sortRevision: row.sortRevision!,
+        sortAt: row.sortAt!,
+        sortRank: row.sortRank === null ? null : Number(row.sortRank),
+      };
+    });
+    const last = page.at(-1);
+    return {
+      sessions,
+      hasMore,
+      nextCursor:
+        hasMore && last
+          ? {
+              orderBy,
+              sortRank: last.sortRank === null ? null : Number(last.sortRank),
+              sortRevision: last.sortRevision!,
+              sortAt: last.sortAt!,
+              id: last.id!,
+              snapshotAt,
+              snapshotRevision,
+              updatedAfter,
+              filterHash,
+            }
+          : null,
+      total: selected.total,
+      orderBy,
+      snapshotAt,
+      snapshotRevision,
+      updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
+      updatedAfter,
+      filterHash,
+    };
+  };
+  const transactionConfig: PgTransactionConfig =
+    orderBy === "createdAt"
+      ? { isolationLevel: "read committed", accessMode: "read only" }
+      : { isolationLevel: "repeatable read", accessMode: "read only" };
+  return options.subjectId
+    ? await withWorkspaceSubjectRls(db, workspaceId, options.subjectId, readPage, transactionConfig)
+    : await withWorkspaceRls(db, workspaceId, readPage, transactionConfig);
 }
 
 export type SessionDiscoveryAncestor = {
@@ -31359,10 +32063,34 @@ export async function listSessionDiscoveryAncestorPaths(
   workspaceId: string,
   sessionIds: string[],
   authorizationScope?: SessionAuthorizationListScope,
+  subjectId?: string,
 ): Promise<Map<string, SessionDiscoveryAncestor[]>> {
   const targetIds = [...new Set(sessionIds)].slice(0, 100);
   if (targetIds.length === 0) return new Map();
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const readPaths = async (scopedDb: Database) => {
+    const authorizationFilters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
+    authorizationFilters.push(
+      subjectId
+        ? sql`not exists (
+            select 1
+            from ${schema.slackInteractions} private_slack_interaction
+            where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+              and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+              and private_slack_interaction.visibility = 'private'
+              and private_slack_interaction.owning_subject_id <> ${subjectId}
+          )`
+        : sql`not exists (
+            select 1
+            from ${schema.slackInteractions} private_slack_interaction
+            where private_slack_interaction.workspace_id = ${schema.sessions.workspaceId}
+              and private_slack_interaction.session_reservation_id = ${schema.sessions.rootSessionId}
+              and private_slack_interaction.visibility = 'private'
+          )`,
+    );
+    if (authorizationScope) {
+      authorizationFilters.push(sessionAuthorizationScopeFilter(authorizationScope));
+    }
+    const authorizedPredicate = and(...authorizationFilters) ?? sql`false`;
     const rows = await rawRows<{
       targetId: string;
       id: string;
@@ -31373,7 +32101,15 @@ export async function listSessionDiscoveryAncestorPaths(
     }>(
       scopedDb,
       sql`
-      with recursive lineage as (
+      with recursive authorized_sessions as materialized (
+        select
+          ${schema.sessions.id} as id,
+          ${schema.sessions.parentSessionId} as parent_session_id,
+          ${schema.sessions.title} as title
+        from ${schema.sessions}
+        where ${authorizedPredicate}
+      ),
+      lineage as (
         select
           target.id as target_id,
           target.id,
@@ -31382,9 +32118,8 @@ export async function listSessionDiscoveryAncestorPaths(
           0::integer as depth,
           array[target.id]::uuid[] as path,
           false as cycle
-        from ${schema.sessions} target
-        where target.workspace_id = ${workspaceId}
-          and ${inArray(sql`target.id`, targetIds)}
+        from authorized_sessions target
+        where ${inArray(sql`target.id`, targetIds)}
 
         union all
 
@@ -31397,9 +32132,7 @@ export async function listSessionDiscoveryAncestorPaths(
           child.path || parent.id,
           parent.id = any(child.path)
         from lineage child
-        join ${schema.sessions} parent
-          on parent.workspace_id = ${workspaceId}
-         and parent.id = child.parent_session_id
+        join authorized_sessions parent on parent.id = child.parent_session_id
         where not child.cycle
           and child.depth < 64
       )
@@ -31415,24 +32148,9 @@ export async function listSessionDiscoveryAncestorPaths(
       order by target_id, depth desc
     `,
     );
-    const candidateIds = [...new Set(rows.filter((row) => !row.cycle).map((row) => row.id))];
-    let allowed = new Set(candidateIds);
-    if (authorizationScope && authorizationScope.kind !== "all" && candidateIds.length > 0) {
-      const allowedRows = await scopedDb
-        .select({ id: schema.sessions.id })
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, workspaceId),
-            inArray(schema.sessions.id, candidateIds),
-            sessionAuthorizationScopeFilter(authorizationScope),
-          ),
-        );
-      allowed = new Set(allowedRows.map((row) => row.id));
-    }
     const result = new Map<string, SessionDiscoveryAncestor[]>();
     for (const row of rows) {
-      if (row.cycle || !allowed.has(row.id)) continue;
+      if (row.cycle) continue;
       const path = result.get(row.targetId) ?? [];
       path.push({
         id: row.id,
@@ -31442,7 +32160,10 @@ export async function listSessionDiscoveryAncestorPaths(
       result.set(row.targetId, path);
     }
     return result;
-  });
+  };
+  return subjectId
+    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, readPaths)
+    : await withWorkspaceRls(db, workspaceId, readPaths);
 }
 
 export type SessionLineage = {
@@ -42301,6 +43022,65 @@ async function lockWorkspaceMutationSessionTx(
   return session;
 }
 
+/** True while an exact closed attempt still owns the physical-quiescence gate.
+ * Both user control interruptions and activity-owned recoverable shutdowns use
+ * this predicate so wake delivery cannot turn an unfinished writer drain into
+ * an acknowledged edge-trigger. */
+async function hasPendingSessionAttemptQuiescenceTx(
+  tx: Database,
+  input: { workspaceId: string; sessionId: string; attemptId?: string },
+): Promise<boolean> {
+  const [row] = await tx.execute<{ pending: boolean }>(sql`
+    select exists (
+      select 1
+      from session_turn_attempts attempt
+      where attempt.workspace_id = ${input.workspaceId}
+        and attempt.session_id = ${input.sessionId}
+        ${input.attemptId ? sql`and attempt.id = ${input.attemptId}` : sql``}
+        and attempt.state = 'closed'
+        and attempt.quiesced_at is null
+        and (
+          exists (
+            select 1
+            from session_attempt_interruptions interruption
+            where interruption.workspace_id = attempt.workspace_id
+              and interruption.session_id = attempt.session_id
+              and interruption.attempt_id = attempt.id
+              and interruption.state in ('settled', 'rejected_stale')
+          )
+          or (
+            attempt.outcome = 'interrupted_recoverable'
+            and not exists (
+              select 1
+              from session_turn_attempts successor
+              where successor.account_id = attempt.account_id
+                and successor.workspace_id = attempt.workspace_id
+                and successor.session_id = attempt.session_id
+                and (
+                  successor.started_at > attempt.started_at
+                  or (
+                    successor.started_at = attempt.started_at
+                    and successor.id > attempt.id
+                  )
+                )
+            )
+            and exists (
+              select 1
+              from session_events event
+              where event.account_id = attempt.account_id
+                and event.workspace_id = attempt.workspace_id
+                and event.session_id = attempt.session_id
+                and event.turn_id = attempt.turn_id
+                and event.turn_attempt_id = attempt.id
+                and event.type = 'turn.recovery.requested'
+            )
+          )
+        )
+    ) as pending
+  `);
+  return row?.pending === true;
+}
+
 /**
  * Resolve the organization grant identity behind a causal human, and refuse the
  * operation when that grant has been revoked or suspended.
@@ -44278,7 +45058,11 @@ export async function settleRetainedProcess(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        await lockWorkspaceMutationSessionTx(tx, input.workspaceId, input.sessionId);
+        const session = await lockWorkspaceMutationSessionTx(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+        );
         const [process] = await tx
           .select()
           .from(schema.sandboxRetainedProcesses)
@@ -44485,6 +45269,22 @@ export async function settleRetainedProcess(
           where id = ${process.leaseId}
             and sandbox_group_id = ${process.sandboxGroupId}
         `);
+        if (
+          process.ownerAttemptId &&
+          (await hasPendingSessionAttemptQuiescenceTx(tx, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            attemptId: process.ownerAttemptId,
+          }))
+        ) {
+          await enqueueSessionWorkflowWakeInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+            reason: "retained_process_settled_quiescence",
+          });
+        }
         return { settled: true, process: mapRetainedProcess(updated) };
       }),
   );
@@ -62877,6 +63677,13 @@ export async function requestSessionTurnRecovery(
       if (!updatedSession) {
         throw new Error(`Active session turn changed while locked: ${input.turnId}`);
       }
+      await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+        reason: "turn_recovery_requested",
+      });
       return {
         action: "recovering" as const,
         events: [...closedTools.events, ...inserted.map(mapEvent)],
@@ -64621,33 +65428,12 @@ export async function markSessionWorkflowWakeDelivered(
               blocker: "pending_agent_steer",
             } as const;
           }
-          const [pendingQuiescence] = await tx
-            .select({ id: schema.sessionTurnAttempts.id })
-            .from(schema.sessionTurnAttempts)
-            .innerJoin(
-              schema.sessionAttemptInterruptions,
-              and(
-                eq(
-                  schema.sessionAttemptInterruptions.workspaceId,
-                  schema.sessionTurnAttempts.workspaceId,
-                ),
-                eq(
-                  schema.sessionAttemptInterruptions.sessionId,
-                  schema.sessionTurnAttempts.sessionId,
-                ),
-                eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
-              ),
-            )
-            .where(
-              and(
-                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-                eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
-                isNull(schema.sessionTurnAttempts.quiescedAt),
-                inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
-              ),
-            )
-            .limit(1);
-          if (pendingQuiescence) {
+          if (
+            await hasPendingSessionAttemptQuiescenceTx(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+            })
+          ) {
             return {
               action: "pending_admission",
               blocker: "pending_quiescence",

@@ -287,12 +287,15 @@ const budgets = {
   // platform-skew allowance. Initial, file-count, lazy-chunk, CSS, and unrelated
   // per-file caps remain fixed.
   // Combined with main's attachment preview, exact-ID Variable Set selection,
-  // and the accessible notification transition, the exact Linux/x64 Bun 1.4
-  // graph measures 2,218,160 raw / 620,765 gzip bytes, and the CSS asset measures
-  // 31,773 gzip bytes. Advance only the raw policy envelope, direct-session gzip
-  // to 608 KiB, and CSS gzip to 32 KiB. They retain 1,872, 1,827, and 995 bytes
-  // of headroom respectively; initial, file-count, lazy-chunk, and unrelated
-  // per-file caps remain fixed.
+  // permission-scoped work discovery, and the accessible notification transition,
+  // the exact Linux/x64 Bun 1.4 graph measures 2,219,469 raw / 621,190 gzip bytes,
+  // and the CSS asset measures 31,784 gzip bytes. Advance only the raw policy
+  // envelope, direct-session gzip to 609 KiB, and CSS gzip to 32 KiB. They retain
+  // 1,587, 2,426, and 984 bytes of headroom respectively; initial, file-count,
+  // lazy-chunk, and unrelated per-file caps remain fixed.
+  // Permission-scoped work discovery keeps its advisory UI on the lazy Agents
+  // route and isolates the topology/work-claim validators behind a contracts
+  // leaf, so unrelated browser imports do not retain the write-side schemas.
   // Exact-ID Variable Set attachment resolution keeps attach/use-only grants
   // out of the metadata catalog, while the selected-row repair keeps restored
   // exact IDs visible without catalog permission. Combined with current main's
@@ -300,8 +303,15 @@ const budgets = {
   // raw bytes. Its 2,153-KiB envelope retains 1,394 bytes of headroom; take the
   // maximum with current main's independent exact measurement so either graph
   // may advance without weakening the gate.
+  // On the exact current-main integration, permission-scoped discovery measures
+  // 2,206,112 raw / 617,185 gzip bytes across 30 files. The contracts leaf keeps
+  // the original 9,107-byte eager-schema regression out of the session graph;
+  // the remaining integrated growth advances the effective raw envelope to
+  // 2,156 KiB. Advance gzip to 605 KiB so the established 1.5-KiB platform-skew
+  // allowance remains intact. Initial, file-count, lazy, CSS, and unrelated
+  // per-file caps stay fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
-  directSessionGzip: 608 * kib,
+  directSessionGzip: 609 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

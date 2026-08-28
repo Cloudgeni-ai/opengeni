@@ -31,10 +31,10 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0365 local human personal authority", () => {
+describe("migration 0369 local human personal authority", () => {
   test("keeps the local authority lane exact, narrow, and role-pinned", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0365_local_human_personal_authority.sql", import.meta.url),
+      new URL("../drizzle/0369_local_human_personal_authority.sql", import.meta.url),
     ).text();
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
     expect(source).toContain("account_row.external_source = 'opengeni:local'");

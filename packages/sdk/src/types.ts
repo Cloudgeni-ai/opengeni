@@ -1390,6 +1390,64 @@ export type SessionListResponse = {
   nextCursor: string | null;
 };
 
+export type WorkClaimSubjectType =
+  | "repository"
+  | "branch"
+  | "pull_request"
+  | "issue"
+  | "artifact"
+  | "release"
+  | "ci_run"
+  | "other";
+
+export type WorkClaimDiscoverySummary = {
+  id: string;
+  sessionId: string;
+  subject: {
+    namespace: string;
+    type: WorkClaimSubjectType;
+    canonicalKey: string;
+    displayLabel: string | null;
+  };
+  role: "working" | "reviewing" | "monitoring" | "delivering";
+  state: "active" | "released" | "superseded" | "stale";
+  revision: number;
+  provenance:
+    | "explicit_agent"
+    | "user_api"
+    | "trusted_integration"
+    | "session_resource"
+    | "system_lifecycle";
+  version: {
+    kind:
+      | "git_commit"
+      | "branch_head"
+      | "pull_request_head"
+      | "artifact_version"
+      | "release_version"
+      | "ci_run"
+      | "other";
+    value: string;
+  } | null;
+  observedAt: string;
+  updatedAt: string;
+  settledAt: string | null;
+};
+
+export type WorkDiscoveryProjection = {
+  claims: WorkClaimDiscoverySummary[];
+  claimsTruncated: boolean;
+  match: {
+    class: "exact_subject" | "title" | "goal" | "fuzzy";
+    field: "subject" | "title" | "goal" | "claim_key" | "claim_label";
+    scoreBand: "exact" | "strong" | "related";
+    claimId: string | null;
+  } | null;
+  possibleOverlap: boolean;
+  advisoryOnly: true;
+  noAdditionalAccess: true;
+};
+
 /** Compact, bounded session projection for workspace agent-topology browsers. */
 export type AgentTopologySession = {
   id: string;
@@ -1404,6 +1462,11 @@ export type AgentTopologySession = {
     titleTruncated: boolean;
   }>;
   status: SessionStatus;
+  goal: {
+    status: SessionGoalStatus;
+    summary: string;
+    summaryTruncated: boolean;
+  } | null;
   pause: {
     state: "active" | "paused";
     additionalBlockerCount: number;
@@ -1424,6 +1487,7 @@ export type AgentTopologySession = {
     failedDescendants: number;
     truncated: boolean;
   };
+  relatedWork: WorkDiscoveryProjection;
   createdAt: string;
   updatedAt: string;
 };
@@ -1432,6 +1496,8 @@ export type AgentTopologyPageResponse = {
   sessions: AgentTopologySession[];
   total: number;
   hasMore: boolean;
+  /** Operator rollout decision for human advisory presentation. */
+  humanAdvisoriesEnabled?: boolean | undefined;
   nextCursor: string | null;
 };
 
@@ -2777,6 +2843,8 @@ export type FirstPartyMcpToolName =
   | "task_note_save"
   | "task_note_archive"
   | "task_note_replace"
+  | "work_claim_upsert"
+  | "work_claim_release"
   | "knowledge_propose"
   | "knowledge_correct"
   | "task_note_promote_knowledge"

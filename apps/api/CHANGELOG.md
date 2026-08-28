@@ -1,5 +1,40 @@
 # @opengeni/api-router
 
+## 2.5.0
+
+### Minor Changes
+
+- 7238fa4: Add permission-scoped advisory work discovery, durable non-exclusive typed work claims, bounded related-work projections, independent rollout controls, observability, and SDK topology filters.
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/config@0.22.0
+  - @opengeni/contracts@2.7.0
+  - @opengeni/db@3.6.0
+  - @opengeni/core@2.5.3
+  - @opengeni/documents@0.8.6
+  - @opengeni/github@0.6.1
+  - @opengeni/runtime@1.4.2
+  - @opengeni/storage@0.2.110
+  - @opengeni/artifact-tool@0.3.9
+  - @opengeni/codemode@0.4.17
+  - @opengeni/events@0.4.4
+  - @opengeni/observability@0.8.9
+
+## 2.4.2
+
+### Patch Changes
+
+- 3a004ff: Preserve optional structured human-input answers, replay terminal settlements idempotently, and retain Slack replies when expiry or cancellation wins a response race.
+- Updated dependencies [18afc44]
+- Updated dependencies [bc88a28]
+- Updated dependencies [3a004ff]
+  - @opengeni/db@3.5.2
+  - @opengeni/core@2.5.2
+  - @opengeni/documents@0.8.5
+  - @opengeni/events@0.4.3
+
 ## 2.4.1
 
 ### Patch Changes

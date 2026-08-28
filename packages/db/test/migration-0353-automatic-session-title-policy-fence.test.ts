@@ -957,6 +957,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "pr_review_managed_github_authority_nonces",
       "pr_review_managed_github_routes",
       "remember_knowledge_memory_materializations",
+      "session_work_claim_revisions",
+      "session_work_claim_write_capabilities",
+      "session_work_claims",
     ]);
     // The current runtime evaluator intentionally requires every capability in
     // today's schema. A database frozen immediately after 0353 predates the
@@ -998,6 +1001,8 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "managed_auth_session_set_operation_receipt(text, uuid, text, text)",
       "get_organization_recovery_overview(uuid, text, jsonb, text, text)",
       "organization_recovery_command(jsonb)",
+      "upsert_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text, text, text, text, text)",
+      "release_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
     ]);
     const post0353CapabilityRoutines = new Set([
       ...sessionSetRoutines,

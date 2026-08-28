@@ -574,6 +574,174 @@ describe("transactional session workflow wake outbox", () => {
     });
   });
 
+  test("recoverable activity shutdown retains a durable wake until quiescence", async () => {
+    const ctx = await fixture();
+    const started = await initializeSessionStartAtomically(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: started.temporalWorkflowId,
+      wakeRevision: started.workflowWakeRevision!,
+    });
+    const attemptId = crypto.randomUUID();
+    const workflowRunId = crypto.randomUUID();
+    const activityId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: started.temporalWorkflowId,
+      workflowRunId,
+      attemptId,
+      dispatchId: activityId,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("turn was not claimed");
+
+    expect(
+      await requestSessionTurnRecovery(client.db, ctx.grant.workspaceId!, {
+        sessionId: ctx.session.id,
+        turnId: claimed.turn.id,
+        triggerEventId: claimed.turn.triggerEventId,
+        attemptId,
+        reason: "worker_shutdown",
+      }),
+    ).toMatchObject({ action: "recovering" });
+    const recoveryWake = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(recoveryWake).toMatchObject({
+      wakeRevision: started.workflowWakeRevision! + 1,
+      interruptionRequested: false,
+    });
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      reason: "turn_recovery_requested",
+      deliveredRevision: started.workflowWakeRevision,
+    });
+
+    expect(await markSessionWorkflowWakeDelivered(client.db, recoveryWake!)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_quiescence",
+    });
+    expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+      wakeRevision: recoveryWake!.wakeRevision,
+      deliveredRevision: started.workflowWakeRevision,
+    });
+
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      attemptId,
+      temporalWorkflowId: started.temporalWorkflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: activityId,
+    });
+    const settledWake = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(settledWake!.wakeRevision).toBe(recoveryWake!.wakeRevision + 1);
+    expect(await markSessionWorkflowWakeDelivered(client.db, settledWake!)).toEqual({
+      action: "acknowledged",
+    });
+  });
+
+  test("historical recovery-only debt cannot hold successor wakes unacknowledged", async () => {
+    const ctx = await fixture();
+    const started = await initializeSessionStartAtomically(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: started.temporalWorkflowId,
+      wakeRevision: started.workflowWakeRevision!,
+    });
+    const predecessorAttemptId = crypto.randomUUID();
+    const predecessorRunId = crypto.randomUUID();
+    const predecessorActivityId = crypto.randomUUID();
+    const predecessor = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: started.temporalWorkflowId,
+      workflowRunId: predecessorRunId,
+      attemptId: predecessorAttemptId,
+      dispatchId: predecessorActivityId,
+      trigger: { kind: "next" },
+    });
+    expect(predecessor.action).toBe("claimed");
+    if (predecessor.action !== "claimed") throw new Error("predecessor was not claimed");
+    expect(
+      await requestSessionTurnRecovery(client.db, ctx.grant.workspaceId!, {
+        sessionId: ctx.session.id,
+        turnId: predecessor.turn.id,
+        triggerEventId: predecessor.turn.triggerEventId,
+        attemptId: predecessorAttemptId,
+        reason: "worker_shutdown",
+      }),
+    ).toMatchObject({ action: "recovering" });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      attemptId: predecessorAttemptId,
+      temporalWorkflowId: started.temporalWorkflowId,
+      temporalWorkflowRunId: predecessorRunId,
+      temporalActivityId: predecessorActivityId,
+    });
+    const recoveredWake = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+      (entry) => entry.sessionId === ctx.session.id,
+    );
+    expect(await markSessionWorkflowWakeDelivered(client.db, recoveredWake!)).toEqual({
+      action: "acknowledged",
+    });
+
+    const successor = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: started.temporalWorkflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(successor.action).toBe("claimed");
+
+    // Model the durable pre-fix state: a successor was admitted even though the
+    // historical recovery-only predecessor has no physical receipt.
+    await withWorkspaceRls(client.db, ctx.grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurnAttempts)
+        .set({ quiescedAt: null })
+        .where(eq(schema.sessionTurnAttempts.id, predecessorAttemptId));
+    });
+    const ordinaryRevision = await enqueueSessionWorkflowWake(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: started.temporalWorkflowId,
+      reason: "successor_work",
+    });
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        temporalWorkflowId: started.temporalWorkflowId,
+        wakeRevision: ordinaryRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
+  });
+
   test("fully quiesced historical interruptions do not upgrade ordinary wakes to control", async () => {
     const ctx = await fixture();
     const queued = await send(ctx, "run");
@@ -741,14 +909,19 @@ describe("transactional session workflow wake outbox", () => {
       interruptionRequested: true,
     });
 
-    await markSessionWorkflowWakeDelivered(client.db, claimed!);
+    expect(await markSessionWorkflowWakeDelivered(client.db, claimed!)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_quiescence",
+    });
     const ordinary = await send(ctx, "ordinary follow-up");
     const ordinaryClaim = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
       (entry) => entry.sessionId === ctx.session.id,
     );
     expect(ordinaryClaim).toMatchObject({
       wakeRevision: ordinary.wakeRevision,
-      interruptionRequested: false,
+      // The closed recoverable predecessor still lacks physical quiescence, so
+      // the older control revision cannot be acknowledged away yet.
+      interruptionRequested: true,
     });
   });
 

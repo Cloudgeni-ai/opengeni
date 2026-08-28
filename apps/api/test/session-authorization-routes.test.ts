@@ -21,6 +21,7 @@ import {
   getSessionHumanInputRequest,
   mutateSessionControlInTransaction,
   submitHumanPromptInTransaction,
+  updateSessionTitle,
   updateSessionVariableSets,
   withWorkspaceSubjectSessionActivityRls,
   withWorkspaceSessionActivityRls,
@@ -72,7 +73,11 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-function appWith(port?: SessionAuthorizationPort, database: Database = client.db): Hono {
+function appWith(
+  port?: SessionAuthorizationPort,
+  database: Database = client.db,
+  settingsOverrides: Parameters<typeof testSettings>[0] = {},
+): Hono {
   const noop = async () => undefined;
   const app = new Hono();
   registerSessionRoutes(app, {
@@ -84,6 +89,7 @@ function appWith(port?: SessionAuthorizationPort, database: Database = client.db
       sandboxDesktopEnabled: true,
       streamTokenSecret: "session-authorization-stream-secret",
       sandboxOwnershipEnabled: true,
+      ...settingsOverrides,
     }),
     db: database,
     bus: new MemoryEventBus(),
@@ -586,6 +592,79 @@ async function expectControlledVariableSetCreateRemovalRace(
 }
 
 describe("embedding host session authorization routes", () => {
+  test("rejects operator-disabled HTTP relevance discovery before storage", async () => {
+    const accountId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const subjectId = `user:${crypto.randomUUID()}`;
+    const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId,
+      workspaceId,
+      subjectId,
+      permissions: ["sessions:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    let databaseTouches = 0;
+    const database = new Proxy(
+      {},
+      {
+        get() {
+          databaseTouches += 1;
+          throw new Error("disabled work discovery reached storage");
+        },
+      },
+    ) as Database;
+    const app = appWith(
+      {
+        authorizeSession: async () => ({ allowed: true }),
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      database,
+      { workDiscoveryEnabled: false },
+    );
+
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/agent-topology?query=permission-scoped`,
+      { headers: { authorization } },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("work discovery is disabled");
+    expect(databaseTouches).toBe(0);
+  });
+
+  test("projects the independent human-advisory rollout decision", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const app = appWith(
+      {
+        authorizeSession: async () => ({ allowed: true }),
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      client.db,
+      { workDiscoveryHumanAdvisoriesEnabled: false },
+    );
+
+    const response = await app.request(`/v1/workspaces/${value.grant.workspaceId}/agent-topology`, {
+      headers: { authorization: value.authorization },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      sessions: Array<{
+        relatedWork: { advisoryOnly: boolean; noAdditionalAccess: boolean };
+      }>;
+      humanAdvisoriesEnabled: boolean;
+    };
+    expect(body.humanAdvisoriesEnabled).toBe(false);
+    expect(body.sessions.length).toBeGreaterThan(0);
+    expect(
+      body.sessions.every(
+        (session) =>
+          session.relatedWork.advisoryOnly === true &&
+          session.relatedWork.noAdditionalAccess === true,
+      ),
+    ).toBe(true);
+  });
+
   test("keeps the legacy raw revision array and exposes pagination separately", async () => {
     if (!available || !shared) return;
     const value = await fixture();
@@ -1468,6 +1547,16 @@ describe("embedding host session authorization routes", () => {
   test("applies exact host scope to first-party MCP target reads and discovery", async () => {
     if (!available) return;
     const value = await fixture();
+    for (const sessionId of [value.child.id, value.hidden.id]) {
+      expect(
+        await updateSessionTitle(client.db, {
+          workspaceId: value.grant.workspaceId,
+          sessionId,
+          title: "Shared host search target",
+          source: "user",
+        }),
+      ).toMatchObject({ updated: true });
+    }
     const calls: Array<{ sessionId: string; operation: string; surface: string }> = [];
     const port: SessionAuthorizationPort = {
       authorizeSession: async ({ target, operation, surface }) => {
@@ -1482,6 +1571,18 @@ describe("embedding host session authorization routes", () => {
         sessionIds: [value.child.id],
       }),
     };
+    const topologyResponse = await appWith(port).request(
+      `/v1/workspaces/${value.grant.workspaceId}/agent-topology?query=${encodeURIComponent("Shared host search target")}`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(topologyResponse.status).toBe(200);
+    const topology = (await topologyResponse.json()) as {
+      sessions: Array<{ id: string }>;
+      total: number;
+    };
+    expect(topology.total).toBe(1);
+    expect(topology.sessions).toEqual([expect.objectContaining({ id: value.child.id })]);
+
     const noop = async () => undefined;
     const server = buildOpenGeniMcpServer(
       {
@@ -1517,7 +1618,9 @@ describe("embedding host session authorization routes", () => {
 
     const listed = await callMcpTool<{
       sessions: Array<{ id: string; parentSessionId: string | null }>;
-    }>(server, "sessions_list", {});
+      total: number;
+    }>(server, "sessions_list", { query: "Shared host search target" });
+    expect(listed.total).toBe(1);
     expect(listed.sessions).toEqual([
       expect.objectContaining({ id: value.child.id, parentSessionId: null }),
     ]);

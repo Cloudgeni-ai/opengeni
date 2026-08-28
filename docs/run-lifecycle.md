@@ -321,6 +321,15 @@ filter is agent-monitoring only: REST event pages (which the browser composer
 uses to reconcile an outcome-unknown Send by `clientEventId`), SSE, and forensic
 reads stay byte-identical, and stored events are never rewritten.
 
+Related-work search is another compact projection over this same durable state,
+not a new run-lifecycle input. It searches semantic titles, active goals, and
+bounded typed work claims only after ordinary authorization/host narrowing; it
+never searches opening prompts or makes a claim control the turn, goal, queue,
+or worker. Terminal goal/session lifecycle settles active claim evidence while
+Pause and recovery preserve it. See
+[`work-discovery.md`](work-discovery.md) for the complete authority, ranking,
+mutation, and rollout contract.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
@@ -474,7 +483,13 @@ replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
 exhaustion evidence. This is an infrastructure retry budget, not a goal,
 continuation, model-call, or run-length cap; a later human/API prompt may retry as
-new accepted work. Every Steer commits a control wake revision, including when
+new accepted work. If an operational database outage interrupts the recovery
+checkpoint itself, the existing post-claim failure wire carries the immutable
+turn identity, classified provider cause, and exact next recovery count into the
+DB-only control lane. That lane accepts the checkpoint only when the identity
+still owns the attempt and the count is exactly one beyond durable turn metadata;
+ambiguous commits and stale replays therefore cannot reset the retry budget.
+Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes
 the new direction immediately.
@@ -551,7 +566,11 @@ A Codex terminal SSE failure carried
 on HTTP 200 is converted to one bounded, marked, non-retried provider error; it
 cannot masquerade as an empty successful summary. After a fenced durable
 replacement, the same activity, turn, attempt, and sandbox rebuild model input
-and continue; compaction never creates queue or recovery work.
+and continue; compaction itself never creates queue or recovery work. If that
+fresh continuation ends without any terminal model response, it is not accepted
+as an empty completion: cancellation still wins, otherwise the compacted
+checkpoint enters the ordinary bounded same-turn recovery path while newer
+queued prompts remain behind it.
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
@@ -997,13 +1016,18 @@ best-effort live fanout; a NATS failure cannot trigger proof recovery or undo a
 committed receipt.
 
 Settling or stale-rejecting an interruption atomically commits its own durable
-control wake. While the receipt is absent, wake acknowledgement remains pending,
+control wake. Activity-owned recoverable shutdown commits an ordinary durable
+wake in the same transaction as `turn.recovery.requested`. While the receipt is
+absent, wake acknowledgement remains pending for either recovery form,
 `peekSessionWork` returns `cancellation-wait`, and every claim path remains
 `control-pending` from the interruption ledger alone—queue presentation metadata
 is never admission authority. The workflow waits up to five seconds for a wake
 and may then close without running another turn activity; the outbox continues
-bounded redelivery until the exact activity disappears or supplies its proof. A
-proof accepted at that timeout boundary is persisted before close. Once the
+bounded redelivery until the exact activity disappears or supplies its proof.
+When an attempt-owned retained process was the final writer, its terminal
+settlement advances that outbox revision atomically, so settlement racing the
+workflow's last reconciliation check cannot be lost. A proof accepted at that
+timeout boundary is persisted before close. Once the
 receipt commits, its coalescing outbox wake uses immediate `signalWithStart` on
 the same stable workflow id, which restarts the exact
 session and admits the replacement once. This event-driven path needs no

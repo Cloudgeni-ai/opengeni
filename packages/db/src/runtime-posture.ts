@@ -378,6 +378,10 @@ const TASK_NOTE_CAPABILITY_ROUTINES = [
   "replace_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid, uuid, integer, text, text, integer, text)",
   "resolve_task_note_knowledge_promotion_source(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text)",
 ] as const;
+export const WORK_CLAIM_CAPABILITY_ROUTINES = [
+  "upsert_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text, text, text, text, text)",
+  "release_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
+] as const;
 const COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE =
   "company_brain_context_get_or_create_selection(uuid, uuid, uuid, uuid, uuid, integer)";
 const COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE =
@@ -501,6 +505,7 @@ const SESSION_AUTHORITY_ROUTINES = new Set<string>([
   ...PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES,
   TRANSITION_SESSION_VISIBILITY_ROUTINE,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
+  ...WORK_CLAIM_CAPABILITY_ROUTINES,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
 ]);
@@ -558,6 +563,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...MANAGED_AUTH_SESSION_SET_ROUTINES,
   ...ORGANIZATION_RECOVERY_ROUTINES,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
+  ...WORK_CLAIM_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE,
@@ -869,6 +875,9 @@ export const FORCE_RLS_TABLES = [
   "session_turns",
   "session_variable_set_attachments",
   "session_visibility_write_capabilities",
+  "session_work_claim_revisions",
+  "session_work_claim_write_capabilities",
+  "session_work_claims",
   "session_workflow_wake_outbox",
   "sessions",
   "site_auth_connections",
@@ -1137,6 +1146,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "preference_registry_events",
   "preference_registry_snapshots",
   "session_tenancy_activations",
+  "session_work_claims",
   "slack_installation_bindings",
   "slack_task_policy_activation_events",
   "slack_task_policy_heads",
@@ -1331,6 +1341,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "session_tenancy_greenfield_activation_evidence",
   "session_variable_set_attachments",
   "session_visibility_write_capabilities",
+  "session_work_claim_revisions",
+  "session_work_claim_write_capabilities",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
   "task_note_replacement_receipts",

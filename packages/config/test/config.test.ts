@@ -138,6 +138,28 @@ describe("browser analytics configuration", () => {
     ).toBe(true);
   });
 
+  test("work discovery rollout stages have safe independent defaults", () => {
+    const defaults = getSettings();
+    expect(defaults.workDiscoveryEnabled).toBe(true);
+    expect(defaults.workClaimMutationsEnabled).toBe(true);
+    expect(defaults.workDiscoveryHumanAdvisoriesEnabled).toBe(true);
+    expect(defaults.workDiscoveryAutomaticNudgesEnabled).toBe(false);
+
+    const disabled = withEnv(
+      {
+        OPENGENI_WORK_DISCOVERY_ENABLED: "false",
+        OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED: "false",
+        OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED: "false",
+        OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED: "true",
+      },
+      () => getSettings(),
+    );
+    expect(disabled.workDiscoveryEnabled).toBe(false);
+    expect(disabled.workClaimMutationsEnabled).toBe(false);
+    expect(disabled.workDiscoveryHumanAdvisoriesEnabled).toBe(false);
+    expect(disabled.workDiscoveryAutomaticNudgesEnabled).toBe(true);
+  });
+
   test("parses public provider identifiers without treating them as credentials", () => {
     const settings = withEnv(
       {

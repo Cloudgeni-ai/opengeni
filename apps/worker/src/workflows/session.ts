@@ -275,6 +275,18 @@ export function postClaimDatabaseRecoveryDetail(
   ) {
     return null;
   }
+  const hasProviderRecoveryCount = detail.providerRecoveryCount !== undefined;
+  const hasProviderFailureCode = detail.providerFailureCode !== undefined;
+  if (
+    hasProviderRecoveryCount !== hasProviderFailureCode ||
+    (hasProviderRecoveryCount &&
+      (!Number.isSafeInteger(detail.providerRecoveryCount) ||
+        (detail.providerRecoveryCount ?? 0) <= 0 ||
+        typeof detail.providerFailureCode !== "string" ||
+        !/^[a-z][a-z0-9_]{0,63}$/.test(detail.providerFailureCode)))
+  ) {
+    return null;
+  }
   return detail as PostClaimDatabaseRecoveryDetail;
 }
 

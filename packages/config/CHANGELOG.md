@@ -1,5 +1,16 @@
 # @opengeni/config
 
+## 0.22.0
+
+### Minor Changes
+
+- 7238fa4: Add permission-scoped advisory work discovery, durable non-exclusive typed work claims, bounded related-work projections, independent rollout controls, observability, and SDK topology filters.
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/contracts@2.7.0
+
 ## 0.21.0
 
 ### Minor Changes
