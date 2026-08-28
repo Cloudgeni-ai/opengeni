@@ -252,6 +252,7 @@ import {
   buildOpenAIClientFromSettings,
   configureOpenAI,
   configureRuntimeMetricsHooks,
+  recordRuntimeMcpLifecycleMetric,
   recordRuntimeMcpToolCallMetric,
   resolveTurnModel,
 } from "./model-provider";
@@ -334,7 +335,13 @@ export {
 } from "./skill-library";
 
 export {
+  MCP_LIFECYCLE_OUTCOMES,
+  MCP_LIFECYCLE_PHASES,
+  MCP_LIFECYCLE_POLICIES,
   MCP_TOOL_CALL_OUTCOMES,
+  type McpLifecycleOutcome,
+  type McpLifecyclePhase,
+  type McpLifecyclePolicy,
   type McpToolCallOutcome,
   type RuntimeMetricsHooks,
 } from "./metrics";
@@ -5705,10 +5712,21 @@ export class PrefixedMcpServer implements MCPServer {
   }
 
   async connect(): Promise<void> {
+    await this.connectWithLifecycleMetric(true);
+  }
+
+  private async connectWithLifecycleMetric(recordMetric: boolean): Promise<void> {
+    const startedAt = recordMetric ? performance.now() : 0;
+    let outcome: "completed" | "failed" = "completed";
     try {
-      await this.inner.connect();
+      if (this.inner instanceof PrefixedMcpServer) {
+        await this.inner.connectWithLifecycleMetric(false);
+      } else {
+        await this.inner.connect();
+      }
       delete this.lifecycleFailures.connect;
     } catch (error) {
+      outcome = "failed";
       // The SDK logs its rejected Error directly. Keep exact internal truth
       // out-of-band and reject only a structural public lifecycle error.
       const exactError = exactMcpLifecycleError(error, {
@@ -5724,15 +5742,35 @@ export class PrefixedMcpServer implements MCPServer {
       };
       logPublicMcpLifecycleFailure(publicError);
       throw publicError;
+    } finally {
+      if (recordMetric) {
+        recordRuntimeMcpLifecycleMetric(
+          "connect",
+          this.bestEffort ? "best_effort" : "strict",
+          outcome,
+          startedAt,
+        );
+      }
     }
   }
 
   async close(): Promise<void> {
+    await this.closeWithLifecycleMetric(true);
+  }
+
+  private async closeWithLifecycleMetric(recordMetric: boolean): Promise<void> {
+    const startedAt = recordMetric ? performance.now() : 0;
+    let outcome: "completed" | "failed" = "completed";
     this.releaseAggregateBudget();
     try {
-      await this.inner.close();
+      if (this.inner instanceof PrefixedMcpServer) {
+        await this.inner.closeWithLifecycleMetric(false);
+      } else {
+        await this.inner.close();
+      }
       delete this.lifecycleFailures.close;
     } catch (error) {
+      outcome = "failed";
       const exactError = exactMcpLifecycleError(error);
       const publicError = publicMcpLifecycleError(exactError, "close", this.registryId);
       this.lifecycleFailures.close = {
@@ -5742,6 +5780,15 @@ export class PrefixedMcpServer implements MCPServer {
       };
       logPublicMcpLifecycleFailure(publicError);
       throw publicError;
+    } finally {
+      if (recordMetric) {
+        recordRuntimeMcpLifecycleMetric(
+          "close",
+          this.bestEffort ? "best_effort" : "strict",
+          outcome,
+          startedAt,
+        );
+      }
     }
   }
 
