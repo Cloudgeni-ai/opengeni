@@ -896,6 +896,12 @@ can race the snapshot. A failed or unverifiable capture cannot be treated as an
 empty successful snapshot, and teardown must not destroy the only recoverable
 workspace state.
 
+When provider-deadline rotation aborts an Agents SDK run, the SDK closes the
+readable stream before its completion promise rejects. Iterator EOF is therefore
+not terminal success authority: the worker must await SDK completion and route
+its rejection through `sandbox_deadline_rotation` recovery before settling
+`turn.completed`.
+
 Repeated retained-process Modal binding-missing or binding-mismatch observations
 may be quarantined for a 24-hour recheck after five claimed probes, but the
 process, admission, PTY, and holder remain capture blockers. Quarantine never
