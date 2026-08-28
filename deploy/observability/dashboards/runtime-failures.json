@@ -117,7 +117,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"critical\"}) or vector(0)",
+          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
           "legendFormat": "critical",
           "editorMode": "code",
           "instant": true,
@@ -160,7 +160,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"warning\"}) or vector(0)",
+          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"warning\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
           "legendFormat": "warning",
           "editorMode": "code",
           "instant": true,
@@ -367,7 +367,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=~\"warning|critical\"}",
+          "expr": "ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=~\"warning|critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}",
           "format": "table",
           "legendFormat": "{{severity}} · {{alertname}}",
           "editorMode": "code",
@@ -383,7 +383,10 @@
               "Time": true,
               "Value": true,
               "__name__": true,
-              "alertstate": true
+              "alertstate": true,
+              "environment": true,
+              "namespace": true,
+              "release": true
             },
             "indexByName": { "severity": 0, "alertname": 1 },
             "renameByName": { "alertname": "Alert", "severity": "Severity" }

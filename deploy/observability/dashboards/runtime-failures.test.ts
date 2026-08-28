@@ -112,6 +112,13 @@ describe("runtime failures dashboard", () => {
     expect(variables.get("release")?.definition).not.toContain("environment=");
 
     const alertTable = dashboard.panels.find((panel) => panel.title === "Firing OpenGeni alerts");
+    for (const panelTitle of ["Critical alerts", "Warnings", "Firing OpenGeni alerts"]) {
+      const expression = dashboard.panels.find((panel) => panel.title === panelTitle)?.targets?.[0]
+        ?.expr;
+      expect(expression).toContain('namespace="$namespace"');
+      expect(expression).toContain('environment="$environment"');
+      expect(expression).toContain('release="$release"');
+    }
     expect(alertTable?.targets?.[0]?.expr).toContain('severity=~"warning|critical"');
   });
 

@@ -6,6 +6,22 @@ const DEPLOYMENT_SCOPE =
   "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
 
 describe("turn-capacity Prometheus alerts", () => {
+  test("labels the complete rule group with exact deployment identity", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+
+    const groupStart = template.indexOf("    - name: opengeni.rules\n");
+    const rulesStart = template.indexOf("      rules:\n", groupStart);
+    expect(groupStart).toBeGreaterThanOrEqual(0);
+    expect(rulesStart).toBeGreaterThan(groupStart);
+    expect(template.slice(groupStart, rulesStart)).toContain(`      labels:
+        namespace: {{ .Release.Namespace | quote }}
+        environment: {{ $environment | quote }}
+        release: {{ .Release.Name | quote }}`);
+  });
+
   test("alerts on cumulative queue, provider-dispatch, and first-byte p95 SLOs", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
