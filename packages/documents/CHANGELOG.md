@@ -1,5 +1,19 @@
 # @opengeni/documents
 
+## 0.8.8
+
+### Patch Changes
+
+- e4655a7: Make common Documents uploads reliable by replacing ImageMagick-dependent image conversion, shipping Office conversion and local OCR prerequisites in the stock workloads, recognizing ordinary text files with generic MIME types, and surfacing indexing failures during upload.
+- Updated dependencies [595939e]
+- Updated dependencies [8dc432d]
+- Updated dependencies [c705de3]
+- Updated dependencies [80d7594]
+  - @opengeni/config@0.22.2
+  - @opengeni/contracts@2.8.0
+  - @opengeni/db@3.6.2
+  - @opengeni/storage@0.2.112
+
 ## 0.8.7
 
 ### Patch Changes

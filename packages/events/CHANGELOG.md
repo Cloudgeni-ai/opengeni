@@ -1,5 +1,16 @@
 # @opengeni/events
 
+## 0.4.6
+
+### Patch Changes
+
+- Updated dependencies [595939e]
+- Updated dependencies [8dc432d]
+- Updated dependencies [c705de3]
+- Updated dependencies [80d7594]
+  - @opengeni/contracts@2.8.0
+  - @opengeni/db@3.6.2
+
 ## 0.4.5
 
 ### Patch Changes

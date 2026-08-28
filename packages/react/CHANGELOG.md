@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 3.2.0
+
+### Patch Changes
+
+- 80d7594: Show a bounded, sensitive-safe opening-prompt preview while a session's durable automatic title is still pending, then yield automatically to the semantic agent title or a human rename.
+- Updated dependencies [595939e]
+- Updated dependencies [80d7594]
+  - @opengeni/sdk@3.2.0
+
 ## 3.1.1
 
 ### Patch Changes
