@@ -15753,6 +15753,10 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         default: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
         allowed: [...FIRST_PARTY_MCP_TOOL_NAMES],
       }),
+    // Client-safe placement default. A selfhosted-primary deployment has no
+    // anonymous managed box: the composer must bind an explicit Connected
+    // Machine instead of sending a targetless selfhosted create.
+    defaultSandboxBackend: SandboxBackend.optional(),
     fileUploads: z.object({
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),

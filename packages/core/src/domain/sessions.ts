@@ -2172,6 +2172,19 @@ export async function createSessionForRequestWithOutcome(
         "workingDir requires targetSandboxId (it is the targeted machine's working directory)",
     });
   }
+  // A registry-built selfhosted client is deliberately inert: it has no live
+  // agent identity until a concrete Connected Machine is named. Reject an own
+  // targetless home before persisting a session whose first turn can only fail.
+  // Shared children retain their already-bound group through inheritedBackend.
+  if (
+    inheritedBackend === undefined &&
+    !payload.targetSandboxId &&
+    (payload.sandboxBackend ?? settings.sandboxBackend) === "selfhosted"
+  ) {
+    throw new HTTPException(422, {
+      message: "selfhosted sessions require targetSandboxId; select an online Connected Machine",
+    });
+  }
   // Honest-label (Stage-D closure): a session TARGETED at a Connected
   // Machine (a selfhosted sandbox) runs machine-primary every turn, so its HOME
   // sandbox_backend must read "selfhosted" — not the deployment cloud default —
