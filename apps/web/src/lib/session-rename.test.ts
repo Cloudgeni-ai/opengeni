@@ -160,6 +160,12 @@ describe("resolveRenameSubmission", () => {
     expect(resolveRenameSubmission(display, display)).toBeNull();
     expect(resolveRenameSubmission(`  ${display}  `, display)).toBeNull();
   });
+
+  test("treats an untouched edit seed as a no-op after the display title changes", () => {
+    expect(
+      resolveRenameSubmission("Inspect the repo", "Automatic Session Naming", "Inspect the repo"),
+    ).toBeNull();
+  });
 });
 
 describe("session title bounds", () => {
@@ -251,6 +257,72 @@ describe("useInlineRename commit fencing", () => {
       await Promise.all([first, second]);
     });
     expect(calls).toHaveLength(1);
+    await hook.unmount();
+  });
+
+  test("an untouched provisional draft cannot overwrite a semantic title arriving mid-edit", async () => {
+    const calls: string[] = [];
+    const hook = await renderHook(
+      ({ current }: { current: Session }) =>
+        useInlineRename(current, async (_workspaceId, _sessionId, title) => {
+          calls.push(title);
+          return session({ title, titleSource: "user" });
+        }),
+      {
+        current: session({
+          title: "New conversation",
+          titleSource: "agent",
+          initialMessage: "Inspect the repo",
+        }),
+      },
+    );
+
+    await actRun(() => hook.result.current.startEditing());
+    expect(hook.result.current.draft).toBe("Inspect the repo");
+
+    await hook.rerender({
+      current: session({
+        title: "Automatic Session Naming",
+        titleSource: "agent",
+        initialMessage: "Inspect the repo",
+      }),
+    });
+    await actRun(() => hook.result.current.commit());
+
+    expect(calls).toEqual([]);
+    expect(hook.result.current.editing).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a deliberate edit still persists after a semantic title arrives mid-edit", async () => {
+    const calls: string[] = [];
+    const hook = await renderHook(
+      ({ current }: { current: Session }) =>
+        useInlineRename(current, async (_workspaceId, _sessionId, title) => {
+          calls.push(title);
+          return session({ title, titleSource: "user" });
+        }),
+      {
+        current: session({
+          title: "New conversation",
+          titleSource: "agent",
+          initialMessage: "Inspect the repo",
+        }),
+      },
+    );
+
+    await actRun(() => hook.result.current.startEditing());
+    await actRun(() => hook.result.current.setDraft("My chosen title"));
+    await hook.rerender({
+      current: session({
+        title: "Automatic Session Naming",
+        titleSource: "agent",
+        initialMessage: "Inspect the repo",
+      }),
+    });
+    await actRun(() => hook.result.current.commit());
+
+    expect(calls).toEqual(["My chosen title"]);
     await hook.unmount();
   });
 });

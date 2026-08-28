@@ -212,7 +212,13 @@ function hasVisibleAutomaticTitleContent(value: string): boolean {
   return automaticTitleDetectionValue(value).trim().length > 0;
 }
 
-function containsSensitiveAutomaticTitleValue(value: string): boolean {
+/**
+ * Whether a bounded automatic-title candidate contains a credential, URL, or
+ * opaque identifier that must stay out of navigation and other display-title
+ * surfaces. Callers handling an unbounded source must bound it before invoking
+ * this helper.
+ */
+export function containsSensitiveAutomaticSessionTitleValue(value: string): boolean {
   const detectionValue = automaticTitleDetectionValue(value);
 
   if (KNOWN_SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(detectionValue))) return true;
@@ -271,7 +277,8 @@ function automaticTitleGraphemes(value: string): string[] {
   return graphemes;
 }
 
-function boundAutomaticTitle(value: string): string {
+/** Bound an already-normalized automatic-title candidate without splitting graphemes. */
+export function boundAutomaticSessionTitle(value: string): string {
   const words = value.split(/\s+/u);
   const wordBounded = words.length > 10 ? words.slice(0, 10).join(" ") : value;
   const graphemes = automaticTitleGraphemes(wordBounded);
@@ -299,7 +306,7 @@ export function normalizeAutomaticSessionTitle(value: string): string | null {
   if (
     !firstLine ||
     !hasVisibleAutomaticTitleContent(firstLine) ||
-    containsSensitiveAutomaticTitleValue(firstLine)
+    containsSensitiveAutomaticSessionTitleValue(firstLine)
   ) {
     return null;
   }
@@ -311,12 +318,12 @@ export function normalizeAutomaticSessionTitle(value: string): string | null {
   if (
     !title ||
     !hasVisibleAutomaticTitleContent(title) ||
-    containsSensitiveAutomaticTitleValue(title)
+    containsSensitiveAutomaticSessionTitleValue(title)
   ) {
     return null;
   }
 
-  title = boundAutomaticTitle(title)
+  title = boundAutomaticSessionTitle(title)
     .replace(/[\s.!?,;:\-–—]+$/u, "")
     .trim();
   if (!title || !hasVisibleAutomaticTitleContent(title)) return null;

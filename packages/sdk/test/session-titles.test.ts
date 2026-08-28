@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { AUTOMATIC_SESSION_TITLE_FALLBACK as CONTRACT_TITLE_FALLBACK } from "@opengeni/contracts";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
@@ -28,6 +28,7 @@ describe("session display titles", () => {
         titleSource: "user",
       }),
     ).toBe(false);
+    expect(sessionTitleIsPending({ title: "   ", titleSource: "user" })).toBe(false);
   });
 
   test("shows a bounded opening-prompt preview until the semantic title arrives", () => {
@@ -67,6 +68,9 @@ describe("session display titles", () => {
     for (const initialMessage of [
       "SECRET_TOKEN=hunter2 investigate the failed deployment",
       "Open https://example.com/private?token=hunter2 and inspect the failure",
+      "Open example.com/account and inspect the failure",
+      "Open localhost:3000/admin and inspect the failure",
+      "oauth.clientSecret=swordfish investigate the failure",
       "Bearer abcdefghijklmnop investigate the failed deployment",
       "Inspect abcdefghijklmnopqrstuvwxyz1234567890",
     ]) {
@@ -86,5 +90,44 @@ describe("session display titles", () => {
         initialMessage: "Inspect the workspace",
       }),
     ).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
+
+    expect(
+      deriveSessionDisplayTitle({
+        title: "   ",
+        titleSource: "user",
+        initialMessage: "Inspect the workspace",
+      }),
+    ).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
+  });
+
+  test("bounds a very large prompt before splitting it into preview lines", () => {
+    const initialMessage = `Inspect the repo\n${" \n".repeat(100_000)}`;
+    const splitInputLengths: number[] = [];
+    const stringPrototype = String.prototype as unknown as {
+      split: (separator?: string | RegExp, limit?: number) => string[];
+    };
+    const originalSplit = stringPrototype.split;
+    const split = spyOn(stringPrototype, "split").mockImplementation(function (
+      this: string,
+      separator?: string | RegExp,
+      limit?: number,
+    ): string[] {
+      splitInputLengths.push(this.length);
+      return originalSplit.call(this, separator, limit);
+    });
+    try {
+      expect(
+        deriveSessionDisplayTitle({
+          title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+          titleSource: "agent",
+          initialMessage,
+        }),
+      ).toBe("Inspect the repo");
+    } finally {
+      split.mockRestore();
+    }
+
+    expect(initialMessage.length).toBeGreaterThan(100_000);
+    expect(Math.max(...splitInputLengths)).toBeLessThan(10_000);
   });
 });
