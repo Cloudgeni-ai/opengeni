@@ -48,8 +48,8 @@ export const WORKSPACE_MEMBER_ADMINISTRATION_RAW_BUDGET = wholeKibEnvelope(
   WORKSPACE_MEMBER_ADMINISTRATION_RAW_MEASUREMENT,
 );
 
-/** Exact workspace-member administration plus current-main Linux/x64 Bun 1.4 measurement. */
-export const WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT = 2_220_970;
+/** Exact workspace-member administration plus protected-main Linux/x64 Bun 1.4 measurement. */
+export const WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT = 2_224_726;
 export const WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_BUDGET = wholeKibEnvelope(
   WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT,
 );

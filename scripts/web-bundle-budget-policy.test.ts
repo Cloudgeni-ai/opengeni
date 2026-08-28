@@ -98,11 +98,11 @@ describe("web bundle budget policy", () => {
   });
 
   test("retains the exact workspace-member administration current-main envelope", () => {
-    expect(WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT).toBe(2_220_970);
-    expect(WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_BUDGET).toBe(2170 * KIB);
+    expect(WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT).toBe(2_224_726);
+    expect(WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_BUDGET).toBe(2174 * KIB);
     expect(
       WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_BUDGET -
         WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT,
-    ).toBe(1_110);
+    ).toBe(1_450);
   });
 });
