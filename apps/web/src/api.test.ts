@@ -39,6 +39,7 @@ describe("web API auth helpers", () => {
     const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
     let finiteController!: ReadableStreamDefaultController<Uint8Array>;
     let streamDispatches = 0;
+    const streamAccepts: Array<string | null> = [];
     Object.defineProperty(globalThis, "window", {
       configurable: true,
       value: { location: new URL("https://api.example.test/workspaces/current") },
@@ -47,7 +48,7 @@ describe("web API auth helpers", () => {
       configurable: true,
       value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
     });
-    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.pathname === "/v1/workspaces") {
         return new Response(
@@ -60,9 +61,10 @@ describe("web API auth helpers", () => {
         );
       }
       streamDispatches += 1;
+      streamAccepts.push(new Headers(init?.headers).get("accept"));
       return new Response(": connected\n\n", {
         headers: {
-          "content-type": "text/event-stream; charset=utf-8",
+          "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
           "content-length": "13",
         },
       });
@@ -83,6 +85,7 @@ describe("web API auth helpers", () => {
       const finiteResponse = await finite;
       const streamResponse = await stream;
       expect(streamDispatches).toBe(1);
+      expect(streamAccepts).toEqual(["application/vnd.opengeni.sse-batch"]);
       await finiteResponse.body!.cancel();
       await streamResponse.body!.cancel();
     } finally {
@@ -168,7 +171,7 @@ describe("web API auth helpers", () => {
         }),
         {
           headers: {
-            "content-type": "text/event-stream; charset=utf-8",
+            "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
             "content-length": "13",
           },
         },
@@ -230,7 +233,7 @@ describe("web API auth helpers", () => {
       streamDispatches += 1;
       return new Response(": connected\n\n", {
         headers: {
-          "content-type": "text/event-stream; charset=utf-8",
+          "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
           "content-length": "13",
         },
       });
@@ -668,49 +671,90 @@ describe("web API auth helpers", () => {
     }
   });
 
-  test("drains a known-length HTTP/1 SSE batch before exposing it", async () => {
+  test("drains current and rolling-legacy HTTP/1 SSE batches before exposing them", async () => {
+    jest.useFakeTimers();
     const originalFetch = globalThis.fetch;
-    const observed: { signal?: AbortSignal | null } = {};
-    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
-    let source!: ReadableStream<Uint8Array>;
-    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      observed.signal = init?.signal ?? null;
-      source = new ReadableStream<Uint8Array>({
-        start(controller) {
-          bodyController = controller;
-        },
-      });
-      return new Response(source, {
-        headers: {
-          "content-type": "text/event-stream; charset=utf-8",
-          "content-length": "14",
-        },
-      });
-    }) as unknown as typeof fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: new URL("https://api.example.test/workspaces/current") },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
+    });
 
     try {
       configureManagedActorEpoch("finite-sse");
-      let exposed = false;
-      const pending = managedActorFetch("https://api.example.test/v1/sessions/live").then(
-        (response) => {
+      for (const [contentType, retiresNativeFetch] of [
+        ["application/vnd.opengeni.sse-batch; charset=utf-8", false],
+        ["text/event-stream; charset=utf-8", true],
+      ] as const) {
+        const observed: {
+          accept?: string | null;
+          input?: string;
+          signal?: AbortSignal | null;
+        } = {};
+        let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+        let source!: ReadableStream<Uint8Array>;
+        globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+          observed.accept = new Headers(init?.headers).get("accept");
+          observed.input = String(input);
+          observed.signal = init?.signal ?? null;
+          source = new ReadableStream<Uint8Array>({
+            start(controller) {
+              bodyController = controller;
+            },
+          });
+          return new Response(source, {
+            headers: {
+              "content-type": contentType,
+              "content-length": "13",
+            },
+          });
+        }) as unknown as typeof fetch;
+
+        let exposed = false;
+        const pending = managedActorFetch("https://api.example.test/v1/sessions/live", {
+          headers: { accept: "text/event-stream" },
+        }).then((response) => {
           exposed = true;
           return response;
-        },
-      );
-      await Promise.resolve();
-      bodyController.enqueue(new TextEncoder().encode(": connected\n\n"));
-      await Promise.resolve();
-      expect(exposed).toBe(false);
-      expect(observed.signal?.aborted).toBe(false);
-      bodyController.close();
-      const response = await pending;
-      expect(observed.signal?.aborted).toBe(true);
-      expect(observed.signal?.reason).toMatchObject({ name: "AbortError" });
-      expect(source.locked).toBe(false);
-      await expect(response.text()).resolves.toBe(": connected\n\n");
+        });
+        await Promise.resolve();
+        expect(observed.accept).toBe("application/vnd.opengeni.sse-batch");
+        expect(new URL(observed.input!).searchParams.get("transport")).toBe("http1-bounded");
+        bodyController.enqueue(new TextEncoder().encode(": connected\n\n"));
+        await Promise.resolve();
+        expect(exposed).toBe(false);
+        expect(observed.signal?.aborted).toBe(false);
+        bodyController.close();
+        const response = await pending;
+        expect(observed.signal?.aborted).toBe(retiresNativeFetch);
+        if (retiresNativeFetch) {
+          expect(observed.signal?.reason).toMatchObject({ name: "AbortError" });
+        }
+        expect(source.locked).toBe(false);
+        const reader = response.body!.getReader();
+        const payload = await reader.read();
+        expect(new TextDecoder().decode(payload.value)).toBe(": connected\n\n");
+        const terminal = reader.read();
+        for (let microtask = 0; microtask < 5; microtask += 1) await Promise.resolve();
+        jest.advanceTimersByTime(4_000);
+        await expect(terminal).resolves.toEqual({ done: true, value: undefined });
+      }
     } finally {
       configureManagedActorEpoch(null);
       globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor) {
+        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      } else {
+        Reflect.deleteProperty(performance, "getEntriesByType");
+      }
+      jest.useRealTimers();
     }
   });
 
@@ -721,7 +765,7 @@ describe("web API auth helpers", () => {
       source = new ReadableStream<Uint8Array>();
       return new Response(source, {
         headers: {
-          "content-type": "text/event-stream; charset=utf-8",
+          "content-type": "application/vnd.opengeni.sse-batch; charset=utf-8",
           "content-length": String(512 * 1024 + 1),
         },
       });
@@ -732,6 +776,33 @@ describe("web API auth helpers", () => {
       const response = await managedActorFetch("https://api.example.test/v1/sessions/live");
       await response.body!.cancel();
       expect(source.locked).toBe(false);
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("does not detach an unrelated finite SSE response outside the bounded request seam", async () => {
+    const originalFetch = globalThis.fetch;
+    const observed: { input?: string; signal?: AbortSignal | null } = {};
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      observed.input = String(input);
+      observed.signal = init?.signal ?? null;
+      return new Response(": connected\n\n", {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "content-length": "13",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("unrelated-finite-sse");
+      const response = await managedActorFetch("https://api.example.test/v1/unrelated/finite-sse");
+      expect(new URL(observed.input!).searchParams.has("transport")).toBe(false);
+      expect(observed.signal?.aborted).toBe(false);
+      await response.body!.cancel();
+      expect(observed.signal?.aborted).toBe(true);
     } finally {
       configureManagedActorEpoch(null);
       globalThis.fetch = originalFetch;

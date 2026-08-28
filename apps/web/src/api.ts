@@ -23,13 +23,12 @@ const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 const boundedHttp1SseTransport = "http1-bounded";
+const boundedHttp1SseBatchContentType = "application/vnd.opengeni.sse-batch";
 const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 4_000;
 const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
-// New APIs close bounded HTTP/1 streams after one second. Keep a longer
-// browser-owned backstop as well: a server/runtime adapter can acknowledge a
-// Web Stream close without retiring Chromium's native request, and one such
-// orphan per tab is enough to exhaust the shared per-origin connection pool.
-// Eleven seconds also preserves rolling compatibility with older five-second APIs.
+// New APIs answer bounded HTTP/1 event requests from an immediate durable
+// snapshot. Keep a browser-owned backstop as well: it bounds a stalled network
+// response and preserves rolling compatibility with older five-second APIs.
 const HTTP1_BROWSER_SSE_NATIVE_LIFETIME_MS = 11_000;
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 let managedActorEpoch: string | null = null;
@@ -299,8 +298,8 @@ export async function managedActorFetch(
     // EOF. Draining here also guarantees the native body already has a
     // rejection consumer before any post-header actor abort.
     let actorResponse = response;
-    const finiteSseBatch = isFiniteSseBatchResponse(response);
-    const detachedResponse = isFiniteJsonResponse(response) || finiteSseBatch;
+    const finiteSseBatch = finiteSseBatchKind(response, boundedHttp1Sse);
+    const detachedResponse = isFiniteJsonResponse(response) || finiteSseBatch !== null;
     if (detachedResponse) {
       const bytes = await readFiniteResponseBytes(response);
       if (responseIsStale()) {
@@ -314,12 +313,12 @@ export async function managedActorFetch(
         statusText: response.statusText,
         headers: response.headers,
       });
-      if (finiteSseBatch) {
-        // Chromium can expose EOF for a finite HTTP/1 SSE body while still
-        // accounting the native request against the per-origin connection
-        // pool. The caller now owns a complete byte copy, so aborting the
-        // original fetch is harmless for a settled transport and retires an
-        // orphaned one without affecting the detached response.
+      if (finiteSseBatch === "legacy") {
+        // An older API can expose EOF for its finite text/event-stream body
+        // while Chromium still accounts the native request as a live SSE
+        // transport. Retire only that rolling-deployment seam. The current
+        // vendor-typed response is an ordinary completed HTTP response whose
+        // connection must remain reusable.
         controller.abort(
           new DOMException("The finite HTTP/1 stream body was fully detached", "AbortError"),
         );
@@ -355,7 +354,7 @@ export async function managedActorFetch(
       actorBodyController.signal,
       cleanup,
       abortNativeTransport,
-      isFiniteSseBatchResponse(actorResponse) ? cleanCloseDelayMs : 0,
+      finiteSseBatch !== null ? cleanCloseDelayMs : 0,
       detachedResponse ? 0 : nativeLifetimeMs,
     );
   } finally {
@@ -385,6 +384,12 @@ function browserSseTransportInput(
   }
   const url = new URL(String(input), window.location.href);
   url.searchParams.set("transport", boundedHttp1SseTransport);
+  // Make the bounded fallback an ordinary finite HTTP request end to end.
+  // The SDK parses its SSE-framed bytes directly and does not depend on this
+  // media type. Avoiding `text/event-stream` at the native browser boundary
+  // prevents a replaced Chromium document from retaining an orphaned SSE
+  // request in the connection pool shared by every tab on this origin.
+  headers.set("accept", boundedHttp1SseBatchContentType);
   return [
     typeof input === "string" ? url.toString() : url,
     HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS,
@@ -438,17 +443,28 @@ function isFiniteJsonResponse(response: Response): boolean {
   return contentType === "application/json" || contentType?.endsWith("+json") === true;
 }
 
-function isFiniteSseBatchResponse(response: Response): boolean {
+function finiteSseBatchKind(
+  response: Response,
+  boundedHttp1Sse: boolean,
+): "current" | "legacy" | null {
+  // The explicit request transform is the authority boundary. Accept the
+  // legacy SSE media type only inside that boundary so a new web bundle can
+  // safely overlap an older API during a rolling deployment without turning
+  // unrelated finite SSE responses into browser-batch transports.
+  if (!boundedHttp1Sse) return null;
   const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   const contentLength = response.headers.get("content-length");
   const parsedContentLength = contentLength === null ? Number.NaN : Number(contentLength);
-  return (
-    contentType === "text/event-stream" &&
-    contentLength !== null &&
-    /^\d+$/.test(contentLength) &&
-    Number.isSafeInteger(parsedContentLength) &&
-    parsedContentLength <= HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
-  );
+  if (
+    contentLength === null ||
+    !/^\d+$/.test(contentLength) ||
+    !Number.isSafeInteger(parsedContentLength) ||
+    parsedContentLength > HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
+  ) {
+    return null;
+  }
+  if (contentType === boundedHttp1SseBatchContentType) return "current";
+  return contentType === "text/event-stream" ? "legacy" : null;
 }
 
 async function readFiniteResponseBytes(response: Response): Promise<ArrayBuffer> {

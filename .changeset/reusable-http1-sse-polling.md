@@ -3,4 +3,4 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Keep finite browser HTTP/1 event batches on reusable connections and shorten their bounded cycle so ordinary API reads retain connection-pool headroom across tabs and account changes.
+Deliver browser HTTP/1 events as immediate, vendor-typed snapshots read from the durable event store, without opening a timed live subscription or closing the reusable socket. Preserve cursor-based replay while preventing replaced documents from starving ordinary API reads across tabs and account changes.

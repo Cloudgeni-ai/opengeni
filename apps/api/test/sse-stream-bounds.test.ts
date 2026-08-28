@@ -108,6 +108,7 @@ mock.module("@opengeni/db", () => ({
 const {
   browserSseDeliveryOptions,
   createByteBoundedSseStream,
+  HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE,
   sseSessionStream,
   sseWorkspaceControlStream,
   sseWorkspaceInteractionRevisionStream,
@@ -118,10 +119,10 @@ afterAll(() => {
   mock.restore();
 });
 
-test("HTTP/1 browser streams cycle cleanly while HTTP/2 streams remain long-lived", async () => {
+test("HTTP/1 browsers select finite polling while HTTP/2 streams remain long-lived", async () => {
   expect(browserSseDeliveryOptions("http1-bounded")).toEqual({
-    connectionLifetimeMs: 1_000,
     finiteResponseMaxBytes: 512 * 1024,
+    finiteResponseMediaType: "http1-browser-batch",
   });
   expect(browserSseDeliveryOptions(undefined)).toEqual({});
   expect(browserSseDeliveryOptions("h2")).toEqual({});
@@ -152,6 +153,7 @@ test("HTTP/1 browser fallback returns a fully framed finite SSE batch", async ()
     1,
     new AbortController().signal,
     {
+      ...browserSseDeliveryOptions("http1-bounded"),
       connectionLifetimeMs: 10,
       finiteResponseMaxBytes: 96 * 1024,
       pollIntervalMs: 100,
@@ -159,9 +161,121 @@ test("HTTP/1 browser fallback returns a fully framed finite SSE batch", async ()
     },
   );
   const bytes = await response.arrayBuffer();
+  expect(response.headers.get("content-type")).toBe(
+    `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`,
+  );
   expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
   expect(response.headers.get("connection")).toBeNull();
   expect(new TextDecoder().decode(bytes)).toContain('"sequence":3');
+});
+
+test("HTTP/1 browser fallback reads a finite durable snapshot without opening subscriptions", async () => {
+  durableEvents = [event(1), event(2)];
+  durableControlEvents = [controlEvent(1), controlEvent(2)];
+  interactionRevisionState = {
+    revision: 3,
+    updatedAt: new Date("2026-08-10T00:00:03.000Z"),
+  };
+  const bus = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("finite browser polling must not access the live event bus");
+      },
+    },
+  ) as EventBus;
+  const options = browserSseDeliveryOptions("http1-bounded");
+  const [sessionResponse, liveResponse] = await Promise.all([
+    sseSessionStream(
+      fakeDb as never,
+      bus,
+      WORKSPACE_ID,
+      SESSION_ID,
+      0,
+      new AbortController().signal,
+      options,
+    ),
+    sseWorkspaceLiveStream(
+      fakeDb as never,
+      bus,
+      "00000000-0000-4000-8000-000000000010",
+      WORKSPACE_ID,
+      0,
+      0,
+      new AbortController().signal,
+      options,
+    ),
+  ]);
+  const sessionBody = await sessionResponse.text();
+  const liveBody = await liveResponse.text();
+  expect(sessionBody).toContain('"sequence":1');
+  expect(sessionBody).toContain('"coalescedUntil":2');
+  expect(liveBody).toContain('"sequence":1');
+  expect(liveBody).toContain('"sequence":2');
+  expect(liveBody).toContain('"sequence":3');
+  expect(sessionResponse.headers.get("connection")).toBeNull();
+  expect(liveResponse.headers.get("connection")).toBeNull();
+});
+
+test("finite durable snapshots stop on whole frames and resume without gaps", async () => {
+  durableEvents = Array.from({ length: 100 }, (_, index) =>
+    titleEvent(index + 1, `${index + 1}:${"x".repeat(8_000)}`),
+  );
+  const options = browserSseDeliveryOptions("http1-bounded");
+  const first = await sseSessionStream(
+    fakeDb as never,
+    {} as EventBus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    options,
+  );
+  const firstText = await first.text();
+  const firstSequences = [...firstText.matchAll(/^id: (\d+)$/gmu)].map((match) => Number(match[1]));
+  expect(firstSequences.length).toBeGreaterThan(0);
+  expect(firstSequences.length).toBeLessThan(durableEvents.length);
+  expect(Number(first.headers.get("content-length"))).toBeLessThanOrEqual(512 * 1024);
+  expect(firstText.endsWith("\n\n")).toBe(true);
+
+  const lastFirstSequence = firstSequences.at(-1)!;
+  const second = await sseSessionStream(
+    fakeDb as never,
+    {} as EventBus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    lastFirstSequence,
+    new AbortController().signal,
+    options,
+  );
+  const secondSequences = [...(await second.text()).matchAll(/^id: (\d+)$/gmu)].map((match) =>
+    Number(match[1]),
+  );
+  expect(secondSequences[0]).toBe(lastFirstSequence + 1);
+  expect(secondSequences.at(-1)).toBe(durableEvents.length);
+});
+
+test("an unrelated finite SSE response keeps the standard media type", async () => {
+  interactionRevisionState = {
+    revision: 4,
+    updatedAt: new Date("2026-08-10T00:00:04.000Z"),
+  };
+  const response = await sseWorkspaceInteractionRevisionStream(
+    fakeDb as never,
+    "00000000-0000-4000-8000-000000000010",
+    WORKSPACE_ID,
+    3,
+    new AbortController().signal,
+    {
+      connectionLifetimeMs: 10,
+      finiteResponseMaxBytes: 96 * 1024,
+      pollIntervalMs: 100,
+      heartbeatIntervalMs: 1_000,
+    },
+  );
+  await response.arrayBuffer();
+  expect(response.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
+  expect(response.headers.get("content-length")).not.toBeNull();
 });
 
 test("workspace interaction SSE projects only the newest durable revision", async () => {
@@ -179,6 +293,7 @@ test("workspace interaction SSE projects only the newest durable revision", asyn
     controller.signal,
     { pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
   );
+  expect(response.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
   expect(response.headers.get("connection")).toBe("close");
   const reader = response.body!.getReader();
   expect(await readSequences(reader, 1)).toEqual([3]);
