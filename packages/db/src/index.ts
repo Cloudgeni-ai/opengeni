@@ -56707,6 +56707,14 @@ export type ClaimSessionWorkForAttemptInput = {
     tx: Database,
     update: SessionSystemUpdate,
   ) => Promise<{ action: "accept" } | { action: "reject"; reason: string }>;
+  /**
+   * A requires-action resume first persists its open tool-call result, then
+   * re-enters this exact attempt to attach machine input that arrived while the
+   * session was blocked. Keeping this opt-in prevents an ordinary activity
+   * retry from inserting a system message ahead of the required call/result
+   * pair in canonical history.
+   */
+  attachPendingUpdatesToRunningAttempt?: boolean;
 };
 
 export type ClaimSessionWorkForAttemptResult =
@@ -57083,6 +57091,7 @@ export async function claimSessionWorkForAttempt(
           options: {
             supersedeGoalContinuations?: boolean;
             deliverUpdates?: boolean;
+            createdBeforeOrAt?: Date;
           } = {},
         ): Promise<{
           count: number;
@@ -57108,6 +57117,9 @@ export async function claimSessionWorkForAttempt(
                       eq(schema.sessionSystemUpdates.sessionId, sessionId),
                       eq(schema.sessionSystemUpdates.state, "pending"),
                       eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+                      options.createdBeforeOrAt
+                        ? lte(schema.sessionSystemUpdates.createdAt, options.createdBeforeOrAt)
+                        : undefined,
                     ),
                   )
                   .orderBy(
@@ -57167,6 +57179,9 @@ export async function claimSessionWorkForAttempt(
                       eq(schema.sessionSystemUpdates.sessionId, sessionId),
                       eq(schema.sessionSystemUpdates.state, "pending"),
                       ne(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+                      options.createdBeforeOrAt
+                        ? lte(schema.sessionSystemUpdates.createdAt, options.createdBeforeOrAt)
+                        : undefined,
                     ),
                   )
                   .orderBy(
@@ -57909,6 +57924,65 @@ export async function claimSessionWorkForAttempt(
             activeTurn.activeAttemptId === input.attemptId &&
             parsedDispatch.attempt?.id === input.dispatchId
           ) {
+            if (input.attachPendingUpdatesToRunningAttempt) {
+              const now = new Date();
+              if (!activeTurn.startedAt) {
+                throw new SessionControlInvariantError(
+                  `Running turn ${activeTurn.id} has no attempt-start boundary`,
+                );
+              }
+              const xaiSnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
+                activeTurn.xaiProviderAccountAuthoritySnapshot,
+              );
+              const delivered = await deliverPendingUpdates(
+                session.accountId,
+                activeTurn.id,
+                activeTurn.executionGeneration,
+                session.lastSequence + 1,
+                now,
+                undefined,
+                {
+                  snapshot: xaiSnapshot,
+                  subjectId:
+                    xaiSnapshot.scope === "user"
+                      ? (activeTurn.initiatingHumanSubjectId ??
+                        (activeTurn.initiatorKind === "subject"
+                          ? activeTurn.initiatorSubjectId
+                          : null))
+                      : null,
+                },
+                { createdBeforeOrAt: activeTurn.startedAt },
+              );
+              await persistDeliveredUpdateBatch(delivered, session.accountId, activeTurn.id);
+              await acknowledgeConsumedChildLifecycleNotices(tx as unknown as Database, {
+                workspaceId,
+                sessionId,
+                subjectId:
+                  activeTurn.initiatingHumanSubjectId ??
+                  (activeTurn.initiatorKind === "subject" ? activeTurn.initiatorSubjectId : null),
+                childSessionIds: delivered.childSessionIds,
+              });
+              if (delivered.events.length > 0) {
+                await tx
+                  .insert(schema.sessionEvents)
+                  .values(
+                    withLosslessContentWriteVersion(
+                      delivered.events,
+                      "payload",
+                      "payloadCodecVersion",
+                    ),
+                  );
+                await tx
+                  .update(schema.sessions)
+                  .set({ lastSequence: delivered.lastSequence, updatedAt: now })
+                  .where(
+                    and(
+                      eq(schema.sessions.workspaceId, workspaceId),
+                      eq(schema.sessions.id, sessionId),
+                    ),
+                  );
+              }
+            }
             await registerAttempt(activeTurn);
             return {
               action: "claimed",

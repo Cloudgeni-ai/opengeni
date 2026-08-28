@@ -7,6 +7,8 @@ import {
   APPROVAL_RUN_STATE_MAX_JSON_BYTES,
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
+  addSessionSystemUpdate,
+  appendSessionHistoryItems,
   applySessionTurnSettlement,
   attachOpenSuffixToPendingToolCalls,
   bootstrapWorkspace,
@@ -14,10 +16,14 @@ import {
   createDb,
   createSession,
   expireSessionHumanInputRequest,
+  getActiveSessionHistoryItems,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   listSessionHumanInputRequests,
+  listOutstandingSessionSystemUpdates,
+  listSessionSystemUpdatesForTurn,
   listTurnOpenSuffixToolCalls,
+  nextSessionHistoryPosition,
   peekSessionWork,
   registerPendingSessionToolCall,
   submitHumanPromptInTransaction,
@@ -298,6 +304,158 @@ describe("durable structured human input", () => {
         executionGeneration: fixture.turn.executionGeneration + 1,
       },
     });
+  });
+
+  test("attaches machine input after the resumed open suffix without creating a second turn", async () => {
+    const frozen = await freezeRequest();
+    const followUp = await addSessionSystemUpdate(client.db, {
+      accountId: frozen.grant.accountId,
+      workspaceId: frozen.grant.workspaceId!,
+      sessionId: frozen.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `follow-up-${crypto.randomUUID()}`,
+      summary: "FOLLOWUP-ACK",
+      payload: {
+        type: "agent_message",
+        text: "FOLLOWUP-ACK",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!followUp.added) throw new Error(`follow-up was not added: ${followUp.reason}`);
+    const accepted = await acceptSessionHumanInputResponse(client.db, {
+      accountId: frozen.grant.accountId,
+      workspaceId: frozen.grant.workspaceId!,
+      sessionId: frozen.session.id,
+      requestId: frozen.requestId,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: "environment", values: ["production"] }],
+      },
+      respondedBy: frozen.grant.subjectId,
+    });
+    if (accepted.action !== "accepted") throw new Error("response was not accepted");
+
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = crypto.randomUUID();
+    const resumedAttemptId = crypto.randomUUID();
+    const resumedInput = {
+      sessionId: frozen.session.id,
+      workflowId: `session-${frozen.session.id}`,
+      workflowRunId,
+      dispatchId,
+      attemptId: resumedAttemptId,
+      trigger: { kind: "approval" as const, triggerEventId: accepted.event.id },
+    };
+    const resumed = await claimSessionWorkForAttempt(
+      client.db,
+      frozen.grant.workspaceId!,
+      resumedInput,
+    );
+    if (resumed.action !== "claimed") throw new Error(`resume failed: ${resumed.reason}`);
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(
+          client.db,
+          frozen.grant.workspaceId!,
+          frozen.session.id,
+        )
+      ).map((update) => update.id),
+    ).toContain(followUp.update.id);
+    const laterFollowUp = await addSessionSystemUpdate(client.db, {
+      accountId: frozen.grant.accountId,
+      workspaceId: frozen.grant.workspaceId!,
+      sessionId: frozen.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `later-follow-up-${crypto.randomUUID()}`,
+      summary: "NEXT-TURN-ONLY",
+      payload: {
+        type: "agent_message",
+        text: "NEXT-TURN-ONLY",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!laterFollowUp.added) {
+      throw new Error(`later follow-up was not added: ${laterFollowUp.reason}`);
+    }
+
+    const nextPosition = await nextSessionHistoryPosition(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.session.id,
+    );
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: frozen.grant.accountId,
+        workspaceId: frozen.grant.workspaceId!,
+        sessionId: frozen.session.id,
+        turnId: resumed.turn.id,
+        expectedExecutionGeneration: resumed.turn.executionGeneration,
+        expectedAttemptId: resumedAttemptId,
+        items: [
+          {
+            position: nextPosition,
+            item: {
+              type: "function_call",
+              callId: "human-call-1",
+              name: "request_human_input",
+              arguments: "{}",
+            },
+          },
+          {
+            position: nextPosition + 1,
+            item: {
+              type: "function_call_result",
+              callId: "human-call-1",
+              name: "request_human_input",
+              output: JSON.stringify({ outcome: "answered" }),
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
+
+    const attached = await claimSessionWorkForAttempt(client.db, frozen.grant.workspaceId!, {
+      ...resumedInput,
+      attachPendingUpdatesToRunningAttempt: true,
+    });
+    expect(attached).toMatchObject({
+      action: "claimed",
+      turn: { id: resumed.turn.id, executionGeneration: resumed.turn.executionGeneration },
+    });
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          frozen.grant.workspaceId!,
+          frozen.session.id,
+          resumed.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([followUp.update.id]);
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(
+          client.db,
+          frozen.grant.workspaceId!,
+          frozen.session.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([laterFollowUp.update.id]);
+    const history = await getActiveSessionHistoryItems(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.session.id,
+    );
+    expect(history.slice(-3).map((row) => row.item.type)).toEqual([
+      "function_call",
+      "function_call_result",
+      "message",
+    ]);
+    expect(JSON.stringify(history.at(-1)?.item)).toContain("FOLLOWUP-ACK");
   });
 
   test("accepts an empty optional answer and a permitted Skip without weakening required validation", async () => {

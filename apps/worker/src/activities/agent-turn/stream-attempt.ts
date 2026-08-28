@@ -209,6 +209,7 @@ export type TurnStreamAttemptDeps = {
   turn: { executionGeneration: number; model: string };
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
+  attachPendingUpdatesAfterOpenSuffix: () => Promise<boolean>;
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]>;
   resolvedModel: ReturnType<ActivityServices["runtime"]["resolveTurnModel"]>;
   providerApi: HistoryProviderApi;
@@ -289,6 +290,7 @@ export async function runTurnStreamAttempt(
     turn,
     trigger,
     humanInputResume,
+    attachPendingUpdatesAfterOpenSuffix,
     agent,
     resolvedModel,
     providerApi,
@@ -1544,6 +1546,12 @@ export async function runTurnStreamAttempt(
   if (openSuffixResume.action === "requires_action") {
     control.activityStatus = "requires_action";
     return claimedResult({ status: "requires_action" });
+  }
+  if (
+    (trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse") &&
+    !(await attachPendingUpdatesAfterOpenSuffix())
+  ) {
+    return claimedResult({ status: "cancelled" });
   }
 
   await prepareRunAttemptInput();

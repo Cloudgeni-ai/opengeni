@@ -15,6 +15,12 @@ an activity-local system message.
    serializes one deterministic system message, and inserts that exact message
    into `session_history_items` in the same transaction that marks every member
    `delivered`.
+   A `requires_action` resume is the one two-phase form of that boundary: the
+   resumed attempt first persists the interrupted call/result pair, then
+   idempotently re-enters its exact claim to attach only machine inputs that
+   were already pending when that resumed attempt started. This keeps provider
+   call/result ordering valid, prevents a second inference for pre-resume
+   input, and leaves later arrivals pending for the next turn.
 4. The worker builds the first and every subsequent model request from active
    session history. It does not inject a second transient copy and does not
    remove system input during reconciliation.

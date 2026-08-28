@@ -1467,8 +1467,11 @@ audit reads may return it, so it is never a secret boundary.
    (human-input response, approval invoke through the existing MCP execute-once
    fence, or rejection), promotes reasoning + call + bounded result as one pair,
    and either stays `requires_action` without a model call or continues from
-   history. Missing suffix rows fail closed. It does not reconstruct SDK
-   `RunState`.
+   history. Before that continued model call, the exact resumed attempt
+   idempotently attaches machine input that was pending at its attempt-start
+   boundary, after the paired result in canonical history; input accepted later
+   remains pending for the next turn. Missing suffix rows fail closed. It does
+   not reconstruct SDK `RunState`.
    Historical sandbox envelopes receive one exact-path compatibility repair before
    SDK validation: invalid non-record `exposedPorts` values are removed only from
    the root and `sessionsByAgent[*]` session envelopes, while provider state and

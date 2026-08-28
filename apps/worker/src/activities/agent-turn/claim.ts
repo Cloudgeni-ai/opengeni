@@ -10,6 +10,7 @@ import {
   type AppendEventInput,
   type ApiIntegrationRuntime,
   type CanonicalTurnStartupMilestoneReceipt,
+  type ClaimSessionWorkForAttemptInput,
   type SessionTurnForExecution,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
@@ -112,6 +113,7 @@ export type ClaimTurnOk = {
   interactionInterventionResume: Awaited<
     ReturnType<typeof getInteractionInterventionResumeForEvent>
   >;
+  attachPendingUpdatesAfterOpenSuffix: () => Promise<boolean>;
   throwIfWorkerShuttingDown: () => void;
   throwIfTurnCancelled: () => void;
   opJournal: ReturnType<typeof makeTurnOpJournal>;
@@ -163,6 +165,16 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     abandonActiveRecording,
   } = deps;
 
+  const validatePendingSystemUpdateAuthority: NonNullable<
+    ClaimSessionWorkForAttemptInput["validatePendingSystemUpdateAuthority"]
+  > = async (tx, update) =>
+    await validateIncidentTelemetrySystemUpdateAuthority({
+      db: tx,
+      settings,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      update,
+    });
   const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
     sessionId: input.sessionId,
     workflowId: input.workflowId,
@@ -170,14 +182,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     attemptId: input.attemptId,
     dispatchId,
     trigger: input.trigger,
-    validatePendingSystemUpdateAuthority: async (tx, update) =>
-      await validateIncidentTelemetrySystemUpdateAuthority({
-        db: tx,
-        settings,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        update,
-      }),
+    validatePendingSystemUpdateAuthority,
   });
   if (claim.action === "unclaimed") {
     control.activityStatus = "unclaimed";
@@ -289,6 +294,19 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     trigger,
   );
   attempt.triggerType = trigger.type;
+  const attachPendingUpdatesAfterOpenSuffix = async (): Promise<boolean> => {
+    const attached = await claimSessionWorkForAttempt(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      workflowId: input.workflowId,
+      workflowRunId: input.workflowRunId,
+      attemptId: input.attemptId,
+      dispatchId,
+      trigger: input.trigger,
+      validatePendingSystemUpdateAuthority,
+      attachPendingUpdatesToRunningAttempt: true,
+    });
+    return attached.action === "claimed" && attached.turn.id === turn.id;
+  };
   turnLifecycleMetricsFor(observability).start(attempt.turnId);
   // §7.5 P3 — pass the accepted billing attribution (externally funded turns
   // bypass OpenGeni credit/token gates)
@@ -579,6 +597,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       trigger,
       humanInputResume,
       interactionInterventionResume,
+      attachPendingUpdatesAfterOpenSuffix,
       throwIfWorkerShuttingDown,
       throwIfTurnCancelled,
       opJournal,
