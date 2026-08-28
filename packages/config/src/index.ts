@@ -4100,6 +4100,10 @@ function definitionVersionFor(
     billing: model.billing,
     executionLimits: model.executionLimits,
     capabilities: model.capabilities,
+    // Workspace-facing free/credits classification is a separate live
+    // deployment policy. Operators must drain/fence accepted turns before
+    // changing it; it is intentionally not a second executable-definition
+    // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
     pricing: model.pricing ?? null,
   });

@@ -39,9 +39,13 @@ afterAll(async () => {
 }, 180_000);
 
 describe("migration 0369 model catalog and Gateway custom models", () => {
-  test("pins rolling posture, least privilege, and secret-free storage", async () => {
+  test("pins maintenance posture, runtime drain, least privilege, and secret-free storage", async () => {
     const migration = await readFile(migrationUrl, "utf8");
-    expect(migration).toContain("-- deployment-mode: rolling");
+    expect(migration).toContain("-- deployment-mode: maintenance");
+    expect(migration).toContain("opengeni.migration_application_roles");
+    expect(migration).toContain("model_catalog_runtime_drain_before");
+    expect(migration).toContain("model_catalog_runtime_drain_after");
+    expect(migration).toContain("pg_stat_activity");
     expect(migration).toContain("CREATE TABLE deployment_model_catalog");
     expect(migration).toContain("CREATE TABLE workspace_gateway_custom_models");
     expect(migration).toContain(

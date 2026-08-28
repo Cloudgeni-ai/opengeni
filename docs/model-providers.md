@@ -100,9 +100,13 @@ The strict document rejects keys, billing, pricing policy, enabled flags,
 bands, unknown note IDs, duplicate product IDs, and reserved provider IDs.
 Notes are at most 500 characters and cannot contain a newline or `|`.
 
-For a database-source cutover, apply migration 0369 while every API and worker
-still uses `code`. Validate and upsert a document that is semantically
-equivalent to the active code/env catalog before changing any source flag:
+Migration 0369 is a drained maintenance cutover because it changes the exact
+runtime-posture table/grant contract. Stop every API and worker, supply the
+complete application-login list through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply the migration with the
+catalog-aware release, and restart only that release in `code` mode. Then
+validate and upsert a document that is semantically equivalent to the active
+code/env catalog before changing any source flag:
 
 ```bash
 OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \

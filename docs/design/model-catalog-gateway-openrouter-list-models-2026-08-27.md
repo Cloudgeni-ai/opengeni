@@ -2,6 +2,12 @@
 
 Status: implementation specification captured on 2026-08-27.
 
+Implementation correction on 2026-08-28: migration 0369 is maintenance-only.
+Although its tables are additive, it changes OpenGeni's exact runtime-posture
+table/grant contract, so already-running pre-0369 processes become unready after
+commit. The rolling-migration requirements in the original specification are
+superseded by the drained procedure in `docs/deployment.md`.
+
 Repository observation at capture time: this checkout already contained
 `0364_workspace_learning_policy_snapshot_lock_order.sql`. The migration was subsequently
 renumbered against the eventual PR base to
@@ -169,11 +175,12 @@ Authorization:
 The custom table uses FORCE RLS. It has no seed. It is not stored in `workspaces.settings` or
 `workspace_model_policies`.
 
-Migration activation is compatibility-first. Apply the schema and deploy the new binary while all
-consumers remain in code mode, upsert a semantically equivalent database document, then converge
-every API and worker on database mode before adding database-only membership. Drain or fence
-accepted turns before removals or executable-definition changes. No backfill. Use the next free
-ordinal after the current head.
+Migration activation is maintenance-first. Stop every API and worker, apply the schema with the
+explicit application-role drain fence, and restart only the new binary in code mode. Then upsert a
+semantically equivalent database document and converge every API and worker on database mode
+before adding database-only membership. Drain or fence accepted turns before removals,
+executable-definition changes, or free/credits changes. No backfill. Use the next free ordinal
+after the current head.
 
 ### `list_models` contract
 
@@ -270,7 +277,7 @@ Follow:
 - Overlays, not global mutation.
 - Video split between catalog and enablement.
 - Secret-safe projection.
-- Rolling migration plus the three-site schema contract.
+- Maintenance migration plus the three-site schema contract and explicit runtime-role drain.
 - ConfigMap, then Secret.
 
 Extend:
@@ -499,7 +506,6 @@ Stop if the implementation introduces any of the following:
 - List text in `Agent.instructions`.
 - A session-model-switch tool.
 - `getSettings()` reading the catalog table.
-- A maintenance migration.
 - Editing `releaseSchemaContractHash`.
 - Defaulting database mode on.
 - Automatic overwrite of the singleton.

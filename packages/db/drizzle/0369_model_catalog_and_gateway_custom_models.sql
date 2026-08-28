@@ -1,9 +1,65 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- Migration 0369: deployment-owned model catalog authority plus workspace
 -- custom Vercel AI Gateway slugs.
+-- This changes the exact runtime-posture table/grant contract. Stop every API,
+-- control worker, and turn worker before applying it, and never restart a
+-- pre-0369 image after commit.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
+
+DO $model_catalog_runtime_drain_before$
+DECLARE
+  configured_roles_text text := nullif(
+    current_setting('opengeni.migration_application_roles', true), ''
+  );
+  configured_roles jsonb;
+BEGIN
+  IF configured_roles_text IS NULL THEN
+    RAISE EXCEPTION
+      '0369 model catalog activation requires an explicit application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  BEGIN
+    configured_roles := configured_roles_text::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION
+      '0369 model catalog activation received a malformed application database role list'
+      USING ERRCODE = '55000';
+  END;
+  IF jsonb_typeof(configured_roles) <> 'array'
+    OR jsonb_array_length(configured_roles) NOT BETWEEN 1 AND 16
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(configured_roles) AS roles(value)
+      WHERE jsonb_typeof(value) <> 'string'
+        OR btrim(value #>> '{}') = ''
+        OR octet_length(value #>> '{}') > 63
+    )
+    OR (
+      SELECT count(*) FROM jsonb_array_elements_text(configured_roles)
+    ) <> (
+      SELECT count(DISTINCT value)
+      FROM jsonb_array_elements_text(configured_roles) AS roles(value)
+    )
+  THEN
+    RAISE EXCEPTION
+      '0369 model catalog activation received an invalid application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0369 model catalog activation requires all configured OpenGeni application database sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$model_catalog_runtime_drain_before$;
 
 -- Exactly one deployment-global, secret-free catalog document. Ordinary API
 -- and worker roles may only read it; the operator upsert command uses a
@@ -76,3 +132,24 @@ $grants$;
 
 COMMENT ON TABLE workspace_gateway_custom_models IS
   'Workspace-owned unpinned Vercel AI Gateway upstream slugs. Capabilities and billing are never stored here.';
+
+DO $model_catalog_runtime_drain_after$
+DECLARE
+  configured_roles jsonb := current_setting(
+    'opengeni.migration_application_roles', false
+  )::jsonb;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0369 model catalog activation observed a configured OpenGeni application database session after schema installation'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$model_catalog_runtime_drain_after$;

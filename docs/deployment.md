@@ -1804,25 +1804,32 @@ Do not commit real secret values.
 ### Deployment database model catalog cutover
 
 The default source remains the reviewed code/env catalog. Database mode is an
-operator-owned singleton, not a boot-time reconciliation loop. Use a
-compatibility-first rollout; a mixed fleet must never observe database-only
-membership:
+operator-owned singleton, not a boot-time reconciliation loop. Migration 0369
+changes the exact runtime-posture table/grant contract, so this is a drained
+maintenance cutover rather than a rolling migration. A mixed pre/post-0369
+fleet is unsupported even while every process still uses `code`:
 
-1. Apply migration `0369_model_catalog_and_gateway_custom_models.sql` while
-   API and workers still use `OPENGENI_MODEL_CATALOG_SOURCE=code`.
-   This additive migration can coexist with already-running pre-0369 processes,
-   but it advances the exact runtime-posture table/grant contract. After it
-   commits, a pre-0369 API or worker cannot pass startup/readiness posture and
-   must not be restarted or used as an image rollback target. Keep the old
-   fleet healthy until the catalog-aware rollout finishes; if replacement fails,
-   remain on the new schema and fix forward.
-2. Deploy the catalog-aware binary to every API, control worker, and turn worker
-   while all of them still use `code`.
-3. Prepare a strict, secret-free schema-v1 JSON document that is semantically
+1. Bind and verify the exact database, schema, new application image, and every
+   API/worker database login. Set
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` to that complete comma-separated
+   login list (normally `opengeni_app`).
+2. Stop every API, control worker, and turn worker, then prove no configured
+   application login remains in `pg_stat_activity`. Do not rely on the normal
+   Helm pre-upgrade hook while old pods still serve traffic: after 0369 commits,
+   their repeated runtime-posture readiness check fails.
+3. Apply `0369_model_catalog_and_gateway_custom_models.sql`, provision roles,
+   and assert runtime posture using the catalog-aware release artifacts. The
+   migration repeats the configured-login drain check before and after schema
+   installation and aborts with SQLSTATE `55000` if a listed session is live.
+   After commit, never restart a pre-0369 image or use it as an application
+   rollback target; remain on the new schema and fix forward.
+4. Start the catalog-aware API and workers with
+   `OPENGENI_MODEL_CATALOG_SOURCE=code`, then verify startup and readiness.
+5. Prepare a strict, secret-free schema-v1 JSON document that is semantically
    equivalent to the active code/env catalog. Membership and optional one-line
    notes belong in the document; keys, enabled flags, billing, cost policy, and
    pricing do not.
-4. Validate and upsert it with a migration/admin database credential:
+6. Validate and upsert it with a migration/admin database credential:
 
    ```bash
    OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
@@ -1841,13 +1848,13 @@ membership:
    database change. The command uses transaction-local lock and statement
    timeouts so a competing operator cannot block it indefinitely.
 
-5. Confirm the command reports the expected version, then roll every API,
+7. Confirm the command reports the expected version, then roll every API,
    control worker, and turn worker with
    `OPENGENI_MODEL_CATALOG_SOURCE=database` while the document remains
    equivalent to code mode.
-6. Verify `/v1/config/client`, one authenticated workspace model catalog, a
+8. Verify `/v1/config/client`, one authenticated workspace model catalog, a
    model picker, and the `list_models` tool after the whole fleet converges.
-7. Only then add database-only membership. Before removing membership, changing
+9. Only then add database-only membership. Before removing membership, changing
    an executable model definition, or changing a product's `free`/`credits`
    classification, drain or fence queued and active accepted turns that still
    name the affected product. Executable-definition drift fails closed rather
@@ -1857,7 +1864,8 @@ membership:
    alternative.
 
 Database mode fails closed when the singleton is missing or invalid and never
-falls back to code. Rollback is the source flag: restoring `code` makes the
+falls back to code. After the maintenance cutover, rollback is limited to the
+catalog-aware binary with the source flag restored to `code`; that makes the
 singleton inert but leaves it available for inspection or correction. Catalog
 cost remains separately controlled by `OPENGENI_MODEL_COST_POLICY_JSON`; a
 model marked `credits` needs `OPENGENI_MODEL_PRICING_JSON` under managed

@@ -308,7 +308,9 @@ operator-owned database singleton); workspace policy, connection readiness,
 and provider health decide selectability; deployment cost policy decides
 `free` versus `credits` independently of upstream settlement. Workspace custom
 Gateway rows are a workspace overlay, never deployment catalog or billing rows.
-The accepted turn policy freezes the resulting executable identity and cost.
+The accepted turn policy freezes executable provider identity, not the separate
+workspace-facing cost policy. Operators must drain or fence accepted turns
+before changing `free`/`credits` for a product.
 
 Documentation may explain why a contract exists, but it must not copy complete
 lists that can drift. Cross-boundary enum evolution is additive within a major
