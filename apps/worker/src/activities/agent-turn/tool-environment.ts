@@ -40,7 +40,7 @@ import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
+import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { type ToolAuthNeededPayload } from "@opengeni/contracts";
 
@@ -64,6 +64,7 @@ import {
   sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
 } from "./session-title";
+import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -586,21 +587,17 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   ) => {
     throwIfWorkerShuttingDown();
     throwIfTurnCancelled();
-    let sandbox = sandboxState.resolvedSandbox;
-    if (!sandbox && sandboxState.turnSandboxProvisioner) {
-      sandbox = await sandboxState.turnSandboxProvisioner.get();
-    }
-    const sessionForImport = (sandboxState.lazyOwnedSandbox?.session ??
-      sandbox?.established.session ??
-      media.sdkOwnedSandboxSession) as ChannelASession | null;
-    if (!sessionForImport) {
-      throw new Error("Connector attachment sandbox is unavailable");
-    }
+    const sandboxAccess = await resolveTurnSandboxAccess(
+      sandboxState,
+      media.sdkOwnedSandboxSession,
+      "Connector attachment sandbox is unavailable",
+    );
+    const sandbox = sandboxAccess.sandbox;
     const runAs = sandboxRunAs(runSettings);
     const channel = new SandboxChannelAService({
-      session: sessionForImport,
+      session: sandboxAccess.session,
       workspaceRoot: "/workspace",
-      leaseEpoch: sandbox?.leaseEpoch ?? 0,
+      leaseEpoch: sandboxAccess.leaseEpoch,
       emit: async (events) => {
         await eventing.publish?.(events, true);
       },
