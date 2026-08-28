@@ -10,11 +10,9 @@
 // below it; invalid states ("clone my repo onto a machine") are unreachable by
 // construction.
 //
-// The Connected Machine path is OPT-IN: with an empty self-hosted fleet and no
-// explicit opt-in, the segmented control is not rendered at all and the composer
-// collapses to the clean sandbox-only flow (just the managed sandbox fields). The
-// control appears once machines exist, or once the user reveals it via a
-// lightweight local opt-in.
+// The Connected Machine path is opt-in when the deployment owns a managed
+// sandbox. On a selfhosted-primary deployment it is the only truthful default:
+// the composer selects an online machine and remains blocked when none exists.
 import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
@@ -147,7 +145,7 @@ import {
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
-import type { Channel, Session } from "@/types";
+import type { Channel, SandboxBackend, Session } from "@/types";
 
 export function SessionsIndexRoute({
   workspaceId,
@@ -190,6 +188,7 @@ function SessionsIndexRouteContent({
       ) ?? firstPartyMcpToolPolicy.default,
     [configuredToolDefaults, firstPartyMcpToolPolicy],
   );
+  const defaultSandboxBackend = context.clientConfig.defaultSandboxBackend;
   const firstPartyToolOptions = useMemo(
     () => firstPartySessionToolOptionsFor(firstPartyMcpToolPolicy.allowed),
     [firstPartyMcpToolPolicy],
@@ -209,7 +208,7 @@ function SessionsIndexRouteContent({
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   const [draft, setDraft] = useState<SessionDraft>(() =>
-    emptySessionDraft(defaultFirstPartyMcpTools),
+    emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
@@ -663,9 +662,10 @@ function SessionsIndexRouteContent({
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
         defaultFirstPartyMcpTools,
+        defaultSandboxBackend,
       );
       const channelId = launch.channelId ?? history.projects[0]?.channelId ?? null;
-      const rememberedCompute = rememberedProjectCompute(history, channelId);
+      const rememberedCompute = rememberedProjectCompute(history, channelId, defaultSandboxBackend);
       setSelectionHistory(history);
       setSelectedChannelId(channelId);
       setDraft(rememberedCompute ? { ...restored, compute: rememberedCompute } : restored);
@@ -694,6 +694,7 @@ function SessionsIndexRouteContent({
       setSelectedRepoRefs,
       githubRepos,
       defaultFirstPartyMcpTools,
+      defaultSandboxBackend,
       launch.channelId,
       workspaceDefaultToolIdsForHydration,
     ],
@@ -701,12 +702,16 @@ function SessionsIndexRouteContent({
   const selectProject = useCallback(
     (channelId: string | null) => {
       setSelectedChannelId(channelId);
-      const rememberedCompute = rememberedProjectCompute(selectionHistory, channelId);
+      const rememberedCompute = rememberedProjectCompute(
+        selectionHistory,
+        channelId,
+        defaultSandboxBackend,
+      );
       if (rememberedCompute) {
         setDraft((current) => ({ ...current, compute: rememberedCompute }));
       }
     },
-    [selectionHistory],
+    [defaultSandboxBackend, selectionHistory],
   );
   const newSessionDraft = useNewSessionDraft({
     workspaceId,
@@ -898,7 +903,7 @@ function SessionsIndexRouteContent({
                 const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
                 if (acknowledged?.kind === "consumed") {
                   setMessage("");
-                  setDraft(emptySessionDraft(defaultFirstPartyMcpTools));
+                  setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
                   attachments.removeReadyFiles(
                     submittedResources.flatMap((resource) =>
                       resource.kind === "file" ? [resource.fileId] : [],
@@ -1230,6 +1235,7 @@ function SessionsIndexRouteContent({
 
           <ComputeTargetControl
             workspaceId={workspaceId}
+            defaultSandboxBackend={defaultSandboxBackend}
             draft={draft}
             onChange={setDraft}
             disabled={busy || newSessionDraft.loading}
@@ -1642,6 +1648,7 @@ type FixedResourceCatalogRecovery = {
 
 function ComputeTargetControl(props: {
   workspaceId: string;
+  defaultSandboxBackend?: SandboxBackend;
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
@@ -1657,19 +1664,16 @@ function ComputeTargetControl(props: {
   const { draft, onChange } = props;
   const { fleet, machines } = props;
   const fleetEmpty = machines.length === 0;
+  const selfhostedPrimary = props.defaultSandboxBackend === "selfhosted";
   // A 404 is the expected "self-hosted machines are disabled here" signal, not a
   // failure — only a genuine load error (network/5xx) is surfaced, so the machine
   // option isn't silently swallowed by a transient outage (states #4).
   const fleetLoadFailed =
     fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
-  // The Connected Machine path is OPT-IN. With an EMPTY self-hosted fleet and no
-  // explicit opt-in, the segmented control is not rendered at all — the composer
-  // shows the clean sandbox-only flow (byte-identical submission to before this
-  // redesign). Once machines exist, the control is always shown. A lightweight
-  // local opt-in lets a user reveal the option before/while enrolling.
-  // No teaser for absent hardware: the segmented control exists only when the
-  // fleet has machines. Discovery lives on the Machines page, not the composer.
-  const showComputeTarget = fleet.loading || !fleetEmpty;
+  // Managed-primary deployments keep Connected Machine opt-in and hide the
+  // chooser when the fleet is empty. Selfhosted-primary deployments always show
+  // the required machine path, including its honest unavailable state.
+  const showComputeTarget = selfhostedPrimary || fleet.loading || !fleetEmpty;
   const machineAvailabilityKey = machines
     .map((machine) => `${machine.sandboxId}:${machine.state}`)
     .join("\u0000");
@@ -1684,8 +1688,49 @@ function ComputeTargetControl(props: {
   // Also drop any leftover managed-backend override — that control is gone from
   // the composer, so a stale draft must not keep forcing a sandbox type.
   useEffect(() => {
+    if (selfhostedPrimary && draft.compute.kind === "sandbox") {
+      const firstSelectable = machines.find((machine) => isMachineComputeSelectable(machine.state));
+      onChange({
+        ...draft,
+        compute: {
+          kind: "machine",
+          sandboxId: firstSelectable?.sandboxId ?? null,
+          folder: firstSelectable
+            ? rememberedMachineFolder(
+                props.selectionHistory,
+                props.selectedChannelId,
+                firstSelectable.sandboxId,
+              )
+            : { kind: "root" },
+        },
+      });
+      return;
+    }
     if (!showComputeTarget && draft.compute.kind === "machine") {
       onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
+      return;
+    }
+    if (
+      selfhostedPrimary &&
+      !fleet.loading &&
+      draft.compute.kind === "machine" &&
+      selectedMachineSandboxId === null
+    ) {
+      const firstSelectable = machines.find((machine) => isMachineComputeSelectable(machine.state));
+      if (firstSelectable) {
+        onChange({
+          ...draft,
+          compute: {
+            kind: "machine",
+            sandboxId: firstSelectable.sandboxId,
+            folder: rememberedMachineFolder(
+              props.selectionHistory,
+              props.selectedChannelId,
+              firstSelectable.sandboxId,
+            ),
+          },
+        });
+      }
       return;
     }
     if (
@@ -1717,6 +1762,7 @@ function ComputeTargetControl(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     showComputeTarget,
+    selfhostedPrimary,
     fleet.loading,
     machineAvailabilityKey,
     draft.compute.kind,
@@ -1811,14 +1857,16 @@ function ComputeTargetControl(props: {
         Where should this run?
       </p>
       <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-        <ComputeKindButton
-          selected={draft.compute.kind === "sandbox"}
-          disabled={props.disabled}
-          icon={<BoxIcon className="size-4 shrink-0" />}
-          title="Managed sandbox"
-          subtitle="A fresh sandbox, set up for you"
-          onClick={() => selectKind("sandbox")}
-        />
+        {selfhostedPrimary ? null : (
+          <ComputeKindButton
+            selected={draft.compute.kind === "sandbox"}
+            disabled={props.disabled}
+            icon={<BoxIcon className="size-4 shrink-0" />}
+            title="Managed sandbox"
+            subtitle="A fresh sandbox, set up for you"
+            onClick={() => selectKind("sandbox")}
+          />
+        )}
         <ComputeKindButton
           selected={draft.compute.kind === "machine"}
           disabled={props.disabled || fleetEmpty}

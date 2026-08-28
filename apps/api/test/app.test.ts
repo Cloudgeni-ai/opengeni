@@ -1730,6 +1730,7 @@ describe("GET /v1/config/client", () => {
 
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(config.managedAuthSessionSetMode).toBe("legacy");
+    expect(config.defaultSandboxBackend).toBe(settings.sandboxBackend);
     expect(config.models.length).toBeGreaterThan(0);
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
     // Built-in deployment topology stays private in the client projection.

@@ -1131,6 +1131,16 @@ describe("session MCP permission groups", () => {
 });
 
 describe("session create draft", () => {
+  test("a selfhosted-primary deployment starts on a required Connected Machine", () => {
+    const draft = emptySessionDraft(undefined, "selfhosted");
+    expect(draft.compute).toEqual({
+      kind: "machine",
+      sandboxId: null,
+      folder: { kind: "root" },
+    });
+    expect(isSessionDraftComputeReady(draft)).toBe(false);
+  });
+
   test("an untouched (managed sandbox) draft adds nothing to the create payload", () => {
     expect(submissionFromSessionDraft(emptySessionDraft())).toEqual({
       extras: {},

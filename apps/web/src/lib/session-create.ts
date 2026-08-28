@@ -67,10 +67,15 @@ export type ComputeTarget = ManagedSandboxTarget | ConnectedMachineTarget;
 export function rememberedProjectCompute(
   history: NewSessionSelectionHistory,
   channelId: string | null,
+  defaultSandboxBackend?: SandboxBackend,
 ): ComputeTarget | null {
   const project = history.projects.find((candidate) => candidate.channelId === channelId);
   if (!project) return null;
-  if (!project.targetSandboxId) return { kind: "sandbox", backend: "" };
+  if (!project.targetSandboxId) {
+    return defaultSandboxBackend === "selfhosted"
+      ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
+      : { kind: "sandbox", backend: "" };
+  }
   const machine = project.machines.find(
     (candidate) => candidate.sandboxId === project.targetSandboxId,
   );
@@ -115,10 +120,14 @@ export type SessionDraft = {
 
 export function emptySessionDraft(
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  defaultSandboxBackend?: SandboxBackend,
 ): SessionDraft {
   return {
     visibility: "workspace",
-    compute: { kind: "sandbox", backend: "" },
+    compute:
+      defaultSandboxBackend === "selfhosted"
+        ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
+        : { kind: "sandbox", backend: "" },
     variableSetIds: [],
     variableSetId: "",
     rigId: "",
@@ -468,10 +477,14 @@ export function newSessionDraftOptionsFromSessionDraft(
 export function sessionDraftFromNewSessionDraftOptions(
   options: NewSessionDraftOptions,
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  defaultSandboxBackend?: SandboxBackend,
 ): SessionDraft {
-  const base = emptySessionDraft(defaultFirstPartyMcpTools);
+  const base = emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend);
   const machine = Boolean(
-    options.targetSandboxId || options.workingDir || options.sandboxBackend === "selfhosted",
+    options.targetSandboxId ||
+    options.workingDir ||
+    options.sandboxBackend === "selfhosted" ||
+    defaultSandboxBackend === "selfhosted",
   );
   return {
     ...base,

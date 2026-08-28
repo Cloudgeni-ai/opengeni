@@ -366,6 +366,35 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(turnRow?.sandbox_backend).toBe("modal");
   }, 60_000);
 
+  test("a selfhosted-primary own create without a machine target is rejected before persistence", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const selfhostedPrimary = testSettings({
+      productAccessMode: "managed",
+      sandboxBackend: "selfhosted",
+      sandboxOwnershipEnabled: true,
+      sandboxSelfhostedEnabled: true,
+      selfhostedRelayUrl: "wss://relay.example",
+      publicBaseUrl: "https://app.example",
+    });
+    const [before] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+    await expect(
+      createSessionForRequest(
+        deps(bus, selfhostedPrimary),
+        grant(accountId, workspaceId),
+        workspaceId,
+        { initialMessage: "do not create a targetless machine session" },
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: "selfhosted sessions require targetSandboxId; select an online Connected Machine",
+    });
+    const [after] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+    expect(after?.count).toBe(before?.count);
+  }, 60_000);
+
   test("a child of a backend:'none' manager with a machine target (sandbox and sandboxBackend omitted) ⇒ own selfhosted home", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();

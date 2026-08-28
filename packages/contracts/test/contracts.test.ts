@@ -1421,9 +1421,25 @@ describe("contracts", () => {
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
     expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     expect(payload.managedAuthSessionSetMode).toBe("legacy");
+    expect(payload.defaultSandboxBackend).toBeUndefined();
     // models defaults to [] for back-compat (callers reading only allowedModels
     // are unaffected when the host hasn't populated the richer list).
     expect(payload.models).toEqual([]);
+  });
+
+  test("accepts a client-safe deployment sandbox default", () => {
+    const payload = ClientConfig.parse({
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      deploymentRevision: "test-sha",
+      defaultModel: "gpt-5.6-sol",
+      allowedModels: ["gpt-5.6-sol"],
+      defaultReasoningEffort: "high",
+      allowedReasoningEfforts: ["high"],
+      defaultSandboxBackend: "selfhosted",
+      fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
+      productAccessMode: "local",
+    });
+    expect(payload.defaultSandboxBackend).toBe("selfhosted");
   });
 
   test("accepts allowlisted browser analytics providers", () => {
