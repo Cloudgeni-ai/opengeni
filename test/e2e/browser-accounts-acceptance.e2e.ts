@@ -1196,6 +1196,7 @@ function logoutAllActorFenceResponseProblem(
   input: {
     acceptedAt: number;
     actorEpoch: string;
+    settledAt: number;
     workspaceId: string;
   },
 ): string | null {
