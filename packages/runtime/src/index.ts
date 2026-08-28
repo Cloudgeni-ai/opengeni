@@ -3326,6 +3326,30 @@ export type ConnectedMcpServerBatches = {
   close: () => Promise<void>;
 };
 
+/** @internal Settle required and best-effort MCP setup without weakening strict failures. */
+export async function settleMcpConnectionGroups<T extends { close: () => Promise<void> }>(
+  requiredPromise: Promise<T | null>,
+  bestEffortPromise: Promise<T | null>,
+  onBestEffortRejected: (error: unknown) => void,
+): Promise<{ required: T | null; bestEffort: T | null }> {
+  const [requiredResult, bestEffortResult] = await Promise.allSettled([
+    requiredPromise,
+    bestEffortPromise,
+  ]);
+  const connectedRequired = requiredResult.status === "fulfilled" ? requiredResult.value : null;
+  const connectedBestEffort =
+    bestEffortResult.status === "fulfilled" ? bestEffortResult.value : null;
+  if (requiredResult.status === "rejected") {
+    await connectedBestEffort?.close().catch(() => undefined);
+    await connectedRequired?.close().catch(() => undefined);
+    throw requiredResult.reason;
+  }
+  if (bestEffortResult.status === "rejected") {
+    onBestEffortRejected(bestEffortResult.reason);
+  }
+  return { required: connectedRequired, bestEffort: connectedBestEffort };
+}
+
 /**
  * Connect SDK-managed MCP servers in stable, bounded batches. The SDK cleans a
  * failing strict batch; this wrapper additionally closes every earlier batch
@@ -3764,33 +3788,31 @@ export async function prepareAgentTools(
       );
     }
   };
+  const warnBestEffortGroupFailure = (entries: typeof servers, error: unknown): void => {
+    const exactError = error instanceof Error ? error : new Error(String(error));
+    for (const entry of entries) {
+      if (!(entry.server instanceof PrefixedMcpServer)) continue;
+      console.warn(
+        entry.server.registryId === CODEX_APPS_MCP_SERVER_ID
+          ? "[mcp] Codex Apps setup failed; reconnect or retry before relying on its tools"
+          : "[mcp] best-effort server setup failed; skipping it for this turn",
+        mcpErrorFields(exactError, "mcp_connect_failed", entry.server.registryId),
+      );
+      entry.server.releaseAggregateBudget();
+    }
+  };
   const connectEntryGroups = async (
     required: typeof servers,
     bestEffort: typeof servers,
   ): Promise<{
     required: ConnectedMcpServerBatches | null;
     bestEffort: ConnectedMcpServerBatches | null;
-  }> => {
-    const [requiredResult, bestEffortResult] = await Promise.allSettled([
+  }> =>
+    await settleMcpConnectionGroups(
       connectEntries(required, true, "required_connect"),
       connectEntries(bestEffort, false, "optional_connect"),
-    ]);
-    const connectedRequired = requiredResult.status === "fulfilled" ? requiredResult.value : null;
-    const connectedBestEffort =
-      bestEffortResult.status === "fulfilled" ? bestEffortResult.value : null;
-    const failure =
-      requiredResult.status === "rejected"
-        ? requiredResult.reason
-        : bestEffortResult.status === "rejected"
-          ? bestEffortResult.reason
-          : undefined;
-    if (failure !== undefined) {
-      await connectedBestEffort?.close().catch(() => undefined);
-      await connectedRequired?.close().catch(() => undefined);
-      throw failure;
-    }
-    return { required: connectedRequired, bestEffort: connectedBestEffort };
-  };
+      (error) => warnBestEffortGroupFailure(bestEffort, error),
+    );
   const connectedEager = await connectEntryGroups(eagerRequiredEntries, eagerBestEffortEntries);
   const connectedEagerRequired = connectedEager.required;
   const connectedEagerBestEffort = connectedEager.bestEffort;
