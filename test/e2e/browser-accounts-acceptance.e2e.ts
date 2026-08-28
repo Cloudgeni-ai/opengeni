@@ -735,12 +735,12 @@ function observeBrowser(page: Page): BrowserProblems {
     const finishedAt = performance.now();
     const finishedUrl = new URL(request.url());
     const finishedFiniteRead = problems.pendingFiniteReads.get(request);
+    const finishedBoundedStream = isBoundedHttp1StreamRequest(request.method(), request.url());
     problems.activeStreams.delete(request);
     problems.pendingFiniteReads.delete(request);
     if (
       problems.phase === "slot-revocation-reauthentication" &&
-      (finishedFiniteRead !== undefined ||
-        isBoundedHttp1StreamRequest(request.method(), request.url()))
+      (finishedFiniteRead !== undefined || finishedBoundedStream)
     ) {
       // After its finite bytes are detached, WebKit may report the explicit
       // native-fetch retirement—or an old-document finite-read cancellation—
@@ -748,6 +748,7 @@ function observeBrowser(page: Page): BrowserProblems {
       // classified the same request as finished. Keep exact terminal evidence
       // for the same bijective page-error fence used by requestfailed;
       // unrelated successful requests cannot authorize it.
+      if (finishedBoundedStream) problems.boundedHttp1NativeSeams += 1;
       problems.acceptedRequestTerminals.push({
         observedAt: finishedAt,
         pathnameAndSearch: `${finishedUrl.pathname}${finishedUrl.search}`,
