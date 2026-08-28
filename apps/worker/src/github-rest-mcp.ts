@@ -258,8 +258,11 @@ function appRepositoryAuthority(resources: ResourceRef[]): GitHubRestRepository[
     );
     const repositoryId = positiveSafeInteger(resource.githubRepositoryId ?? resource.repositoryId);
     const fullName = canonicalGitHubFullName(resource.uri);
-    if (!installationId || !repositoryId || !fullName) {
+    if (!installationId || !repositoryId) {
       throw new GitHubRestAuthorityError("GitHub App repository authority is incomplete");
+    }
+    if (!fullName) {
+      throw new GitHubRestAuthorityError("GitHub App repository URL is invalid");
     }
     return [
       {
