@@ -31,6 +31,12 @@ export {
   isRetryableStreamError,
 } from "./errors";
 export {
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
+  deriveSessionDisplayTitle,
+  sessionTitleIsPending,
+} from "./session-titles";
+export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+export {
   formatSseEvent,
   proxySessionEventStream,
   resumeSequenceFromRequest,

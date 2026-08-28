@@ -1,13 +1,13 @@
-import type { Session } from "@opengeni/sdk";
+import { deriveSessionDisplayTitle, type Session } from "@opengeni/sdk";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
 import { SessionStatus } from "./session-status";
 
-const AUTOMATIC_SESSION_TITLE_FALLBACK = "New conversation";
+const SESSION_METADATA_TITLE_KEYS = ["title", "name"] as const;
 
 export type FleetTileProps = {
   session: Session;
-  /** Overrides the derived title (session title, metadata title/name, or safe fallback). */
+  /** Overrides the derived title (durable title, metadata, prompt preview, or safe fallback). */
   title?: string | undefined;
   /** Extra line under the title — e.g. "drift check" or the worker's task. */
   subtitle?: string | undefined;
@@ -17,18 +17,7 @@ export type FleetTileProps = {
 
 /** Best-effort display title for a session. */
 export function sessionDisplayTitle(session: Session): string {
-  // A set title (agent-generated or user-renamed) wins over metadata and the
-  // prompt-free fallback.
-  if (typeof session.title === "string" && session.title.trim().length > 0) {
-    return session.title;
-  }
-  for (const key of ["title", "name"] as const) {
-    const value = session.metadata[key];
-    if (typeof value === "string" && value.trim().length > 0) {
-      return value;
-    }
-  }
-  return AUTOMATIC_SESSION_TITLE_FALLBACK;
+  return deriveSessionDisplayTitle(session, { metadataKeys: SESSION_METADATA_TITLE_KEYS });
 }
 
 /**

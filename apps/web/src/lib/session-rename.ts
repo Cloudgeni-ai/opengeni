@@ -5,31 +5,38 @@
 // the Enter-save / Esc-cancel / blur-save / empty-or-unchanged-no-op behaviour
 // lives in exactly one place.
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
+  deriveSessionDisplayTitle,
+  sessionTitleIsPending,
+} from "@opengeni/sdk";
 
 import type { Session } from "@/types";
 
 /** The maximum length a session title may be renamed to. */
 export const SESSION_TITLE_MAX_LENGTH = 200;
 
-const AUTOMATIC_SESSION_TITLE_FALLBACK = "New conversation";
-
 /**
- * The title shown for a session: the durable agent/user-set title, falling back
- * to a stable prompt-free placeholder. Mirrors the rail list and the header so
- * every surface reads identically.
+ * The title shown for a session: durable agent/user metadata once available,
+ * otherwise a bounded opening-prompt preview while automatic naming is still
+ * pending. Mirrors the rail list and the header so every surface reads
+ * identically.
  */
 export function sessionDisplayTitle(session: Session): string {
-  return session.title?.trim() || AUTOMATIC_SESSION_TITLE_FALLBACK;
+  return deriveSessionDisplayTitle(session);
 }
 
 /**
- * The value the editor seeds from when entering edit mode: the raw current
- * title without the fallback placeholder, so the user edits durable metadata
- * rather than prompt content and an untitled legacy session opens empty.
+ * The value the editor seeds from when entering edit mode. A safe provisional
+ * prompt preview is editable because it is also what the user sees; the generic
+ * fallback remains an empty draft rather than becoming an accidental rename.
  */
 export function renameSeedValue(session: Session): string {
-  const title = session.title?.trim() || "";
-  return session.titleSource === "agent" && title === AUTOMATIC_SESSION_TITLE_FALLBACK ? "" : title;
+  if (!sessionTitleIsPending(session)) {
+    return session.title?.trim() || "";
+  }
+  const display = deriveSessionDisplayTitle(session);
+  return display === AUTOMATIC_SESSION_TITLE_FALLBACK ? "" : display;
 }
 
 /**

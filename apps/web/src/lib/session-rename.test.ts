@@ -93,13 +93,31 @@ function session(patch: Partial<Session> = {}): Session {
 }
 
 describe("sessionDisplayTitle", () => {
-  test("prefers the durable title and never falls back to raw prompt text", () => {
+  test("prefers the durable title and previews the prompt while automatic naming is pending", () => {
     expect(sessionDisplayTitle(session({ title: "  Ship the rename UI  " }))).toBe(
       "Ship the rename UI",
     );
-    expect(sessionDisplayTitle(session({ title: null }))).toBe("New conversation");
+    expect(sessionDisplayTitle(session({ title: null }))).toBe("Inspect the repo");
+    expect(
+      sessionDisplayTitle(
+        session({
+          title: "New conversation",
+          titleSource: "agent",
+          initialMessage: "Please investigate automatic session title generation failures",
+        }),
+      ),
+    ).toBe("investigate automatic session title generation failures");
     expect(
       sessionDisplayTitle(session({ title: null, initialMessage: "SECRET_TOKEN=hunter2" })),
+    ).toBe("New conversation");
+    expect(
+      sessionDisplayTitle(
+        session({
+          title: "New conversation",
+          titleSource: "user",
+          initialMessage: "Inspect the repo",
+        }),
+      ),
     ).toBe("New conversation");
     expect(
       sessionDisplayTitle(session({ title: "   ", initialMessage: null as unknown as string })),
@@ -108,10 +126,18 @@ describe("sessionDisplayTitle", () => {
 });
 
 describe("renameSeedValue", () => {
-  test("seeds the editor only from durable title metadata, never prompt text or fallback", () => {
+  test("seeds the editor from durable or safe provisional display text, never the fallback", () => {
     expect(renameSeedValue(session({ title: "Existing title" }))).toBe("Existing title");
-    expect(renameSeedValue(session({ title: "New conversation", titleSource: "agent" }))).toBe("");
-    expect(renameSeedValue(session({ title: null }))).toBe("");
+    expect(renameSeedValue(session({ title: "New conversation", titleSource: "agent" }))).toBe(
+      "Inspect the repo",
+    );
+    expect(renameSeedValue(session({ title: null }))).toBe("Inspect the repo");
+    expect(renameSeedValue(session({ title: null, initialMessage: "SECRET_TOKEN=hunter2" }))).toBe(
+      "",
+    );
+    expect(renameSeedValue(session({ title: "New conversation", titleSource: "user" }))).toBe(
+      "New conversation",
+    );
     expect(
       renameSeedValue(session({ title: null, initialMessage: null as unknown as string })),
     ).toBe("");
@@ -183,8 +209,8 @@ describe("performRename (the commit every rename surface runs)", () => {
     expect(await performRename(session({ title: "Keep me" }), "   ", rename.fn)).toBeNull();
     // Unchanged from the displayed title.
     expect(await performRename(session({ title: "Keep me" }), "Keep me", rename.fn)).toBeNull();
-    // Unchanged from the prompt-free fallback display.
-    expect(await performRename(session({ title: null }), "New conversation", rename.fn)).toBeNull();
+    // Unchanged from the opening-prompt preview.
+    expect(await performRename(session({ title: null }), "Inspect the repo", rename.fn)).toBeNull();
     expect(rename.calls).toEqual([]);
   });
 });
