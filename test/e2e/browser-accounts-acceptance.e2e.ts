@@ -1058,6 +1058,7 @@ async function expectAndConsumeActorTransitionResponse(
     phase: string;
     status: number;
     statusLabel: string;
+    allowedConsoleErrors?: readonly string[];
     workspaceId?: string;
     timing?: { kind: "direct-race-fence"; settledAt: number };
   },
@@ -1119,7 +1120,7 @@ async function expectAndConsumeActorTransitionResponse(
   await expectAndConsumeConsoleErrors(
     page,
     problems,
-    exactConsoleErrors,
+    [...exactConsoleErrors, ...(input.allowedConsoleErrors ?? [])],
     requestedEngine === "firefox" ? [] : exactConsoleErrors,
   );
   problems.actorTransitionResponses.splice(0);
@@ -2792,6 +2793,12 @@ describe("provider-neutral browser account acceptance", () => {
             kind: "direct-race-fence",
             settledAt: racedSelectionSettledAt,
           },
+          allowedConsoleErrors:
+            engine === "chromium"
+              ? [
+                  `[cross-tab-select-race] Failed to load resource: net::ERR_CONNECTION_RESET @ /v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+                ]
+              : [],
         });
       }
       const racedSelectionAcceptance = actorMutationAcceptances

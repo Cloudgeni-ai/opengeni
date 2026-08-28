@@ -6,6 +6,7 @@ import {
   configureManagedActorEpoch,
   configureClientAuth,
   createOpenGeniClient,
+  handleManagedActorPageHide,
   managedActorMutationBusySnapshot,
   managedActorFetch,
   redeemCodexResetCredit,
@@ -182,6 +183,72 @@ describe("web API auth helpers", () => {
       expect(observed.cancelledWith).toBe(reason);
       expect(transportCloseOrder).toEqual(["native-abort", "source-cancel"]);
       expect(source.locked).toBe(false);
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("aborts live native transports before a document is replaced", async () => {
+    const originalFetch = globalThis.fetch;
+    const observed: { signal?: AbortSignal | null } = {};
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      observed.signal = init?.signal ?? null;
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller;
+        },
+      });
+      return new Response(source, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("document-old");
+      const response = await managedActorFetch("https://api.example.test/v1/sessions/live");
+      const read = response.body!.getReader().read();
+      handleManagedActorPageHide(false);
+      await Promise.resolve();
+      expect(observed.signal?.aborted).toBe(true);
+      await expect(read).rejects.toMatchObject({ name: "AbortError" });
+      // The old response must not retain a native body controller that can
+      // continue publishing after document teardown.
+      expect(() => bodyController.enqueue(new Uint8Array([1]))).toThrow();
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("keeps live transports intact when the document enters the back-forward cache", async () => {
+    const originalFetch = globalThis.fetch;
+    const observed: { signal?: AbortSignal | null } = {};
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      observed.signal = init?.signal ?? null;
+      const source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller;
+        },
+      });
+      return new Response(source, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("document-persisted");
+      const response = await managedActorFetch("https://api.example.test/v1/sessions/live");
+      const reader = response.body!.getReader();
+      const read = reader.read();
+      handleManagedActorPageHide(true);
+      await Promise.resolve();
+      expect(observed.signal?.aborted).toBe(false);
+      bodyController.enqueue(new Uint8Array([1]));
+      await expect(read).resolves.toEqual({ done: false, value: new Uint8Array([1]) });
+      await reader.cancel();
     } finally {
       configureManagedActorEpoch(null);
       globalThis.fetch = originalFetch;

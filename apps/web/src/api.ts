@@ -35,6 +35,27 @@ let managedActorMutationCount = 0;
 const MANAGED_ACTOR_EPOCH_HEADER = "x-opengeni-actor-epoch";
 const MANAGED_ACTOR_STATE_HEADER = "x-opengeni-actor-state";
 
+function abortManagedActorRequests(reason: DOMException): void {
+  for (const managedRequest of [...managedActorRequests]) {
+    managedRequest.abortActor(reason);
+  }
+}
+
+export function handleManagedActorPageHide(persisted: boolean): void {
+  if (persisted) return;
+  abortManagedActorRequests(new DOMException("The document was replaced", "AbortError"));
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", (event) => {
+    // A persisted page can resume from the back/forward cache with its effects
+    // intact. A document that is actually being replaced cannot run React
+    // cleanup reliably after teardown begins, so synchronously release every
+    // actor-owned native transport before the old realm disappears.
+    handleManagedActorPageHide(event.persisted);
+  });
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -105,10 +126,7 @@ export function configureManagedActorEpoch(epoch: string | null): void {
   if (managedActorEpoch === epoch) return;
   managedActorEpoch = epoch;
   managedActorRevision += 1;
-  const reason = new DOMException("The browser account changed", "AbortError");
-  for (const managedRequest of managedActorRequests) {
-    managedRequest.abortActor(reason);
-  }
+  abortManagedActorRequests(new DOMException("The browser account changed", "AbortError"));
 }
 
 export function currentManagedActorEpoch(): string | null {
