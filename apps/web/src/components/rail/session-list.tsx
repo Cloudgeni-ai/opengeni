@@ -153,6 +153,11 @@ import {
   type SessionBrowseDateRange,
   type SessionBrowseGroupBy,
 } from "@/lib/sessions-group";
+import {
+  readSessionBrowseGroupBy,
+  sessionBrowsePreferenceStorageId,
+  writeSessionBrowseGroupBy,
+} from "@/lib/session-browse-preferences";
 import { railRowCreator } from "@/lib/creator-initials";
 import { formatWaitingSince } from "@/lib/format";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
@@ -259,10 +264,29 @@ export function SessionList() {
   const [searchDraft, setSearchDraft] = useState("");
   const [search, setSearch] = useState("");
   const [archivedOpen, setArchivedOpen] = useState(false);
-  const [browseGroupBy, setBrowseGroupBy] = useState<SessionBrowseGroupBy>("activity");
+  const browsePreferenceStorageId = useMemo(
+    () => sessionBrowsePreferenceStorageId(context.accessContext.subjectId),
+    [context.accessContext.subjectId],
+  );
+  const previousBrowsePreferenceStorageId = useRef(browsePreferenceStorageId);
+  const [browseGroupBy, setBrowseGroupByState] = useState<SessionBrowseGroupBy>(() =>
+    readSessionBrowseGroupBy(browsePreferenceStorageId),
+  );
   const [browseDateField, setBrowseDateField] = useState<SessionBrowseDateField>("activity");
   const [browseDateRange, setBrowseDateRange] = useState<SessionBrowseDateRange>("any");
   const [browseCreator, setBrowseCreator] = useState<string | null>(null);
+  useEffect(() => {
+    if (previousBrowsePreferenceStorageId.current === browsePreferenceStorageId) return;
+    previousBrowsePreferenceStorageId.current = browsePreferenceStorageId;
+    setBrowseGroupByState(readSessionBrowseGroupBy(browsePreferenceStorageId));
+  }, [browsePreferenceStorageId]);
+  const setBrowseGroupBy = useCallback(
+    (groupBy: SessionBrowseGroupBy) => {
+      setBrowseGroupByState(groupBy);
+      writeSessionBrowseGroupBy(browsePreferenceStorageId, groupBy);
+    },
+    [browsePreferenceStorageId],
+  );
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(searchDraft.trim()), 200);
     return () => window.clearTimeout(timer);
@@ -275,7 +299,7 @@ export function SessionList() {
     setBrowseDateField("activity");
     setBrowseDateRange("any");
     setBrowseCreator(null);
-  }, []);
+  }, [setBrowseGroupBy]);
 
   const rootPage = useWorkspaceSessions({
     limit: 50,
