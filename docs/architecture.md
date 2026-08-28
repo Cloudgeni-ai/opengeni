@@ -507,6 +507,16 @@ through the claim transaction. Pause blocks admission without pretending that
 physical execution has already stopped. Cancel fences a session subtree and is
 terminal for the affected sessions.
 
+Steer ordinarily inserts at the head and immediately supersedes the live
+direction. Active compaction is the exact exception: while a claimed standalone
+compaction is running, or an ordinary attempt's latest compaction landmark is
+`session.context.compaction.started`, Steer is accepted without inserting the
+interruption that would fence the terminal checkpoint write. A durable
+`compacted` or `skipped` landmark becomes the handoff: the ordinary turn settles
+`superseded` before another model request, while standalone maintenance completes
+and the waiting Steer is claimed next. Pause and Cancel retain immediate
+interruption semantics.
+
 Pause and Resume are desired-state commands with durable semantic receipts. A
 fresh key allocates a control revision, events, interruptions, and wakes only
 when it changes direct blocker/override truth or repairs an uncovered lifecycle
