@@ -1,6 +1,6 @@
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import { AlertTriangleIcon, CopyIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
@@ -36,18 +36,6 @@ export function ProblemPanel(props: { title: string; description: ReactNode; act
  * surfaces only while the stream is degraded, in sentence case.
  */
 export function ConnectionPill({ state }: { state: SessionEventsConnectionState }) {
-  const [visibleState, setVisibleState] = useState(state);
-  useEffect(() => {
-    if (state !== "reconnecting") {
-      setVisibleState(state);
-      return;
-    }
-    // Healthy HTTP/1 streams are deliberately cycled to prevent the browser's
-    // six-connection cap from starving ordinary reads. Keep that sub-second
-    // handoff invisible, while still surfacing a reconnect that truly stalls.
-    const timer = setTimeout(() => setVisibleState(state), 1_500);
-    return () => clearTimeout(timer);
-  }, [state]);
   const degraded: Partial<
     Record<SessionEventsConnectionState, { label: string; dot: string; text: string }>
   > = {
@@ -55,7 +43,7 @@ export function ConnectionPill({ state }: { state: SessionEventsConnectionState 
     reconnecting: { label: "Reconnecting…", dot: "bg-status-running", text: "text-status-running" },
     error: { label: "Stream error", dot: "bg-status-failed", text: "text-status-failed" },
   };
-  const meta = degraded[visibleState];
+  const meta = degraded[state];
   if (!meta) {
     return null;
   }
@@ -64,6 +52,7 @@ export function ConnectionPill({ state }: { state: SessionEventsConnectionState 
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-2 py-1 text-xs font-medium",
         meta.text,
+        state === "reconnecting" && "og-connection-pill-reconnect",
       )}
     >
       <span className={cn("size-2 rounded-full motion-safe:animate-pulse", meta.dot)} />
