@@ -806,6 +806,11 @@ deadlock; the session lock excludes competing mutation while remaining compatibl
 with FK key-share checks. Start, requires-action, ordinary terminal, recoverable interruption,
 supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
+Migration 0374 also advances `session_event_cursors` from an AFTER INSERT
+statement trigger and rejects any non-contiguous batch. This is a rolling
+dual-write/parity phase, not the allocator cutover: writers must keep locking
+and updating `sessions.lastSequence` until Pause/Steer admission and every event
+writer share the narrow cursor lock.
 Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQL
 `40P01`/`40001` only around their bounded, idempotent persistence transaction.
 The pre-inference turn claim follows the same rule around its complete

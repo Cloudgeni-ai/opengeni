@@ -103,7 +103,10 @@ published. NATS carries session-event fanout, invalidations, request/reply, and
 Connected Machine streams, but it is not the event store and is never evidence
 that a mutation committed.
 
-Session events have a monotonic per-session sequence. SSE clients begin with
+Session events have a monotonic per-session sequence. The narrow
+`session_event_cursors` row mirrors and transactionally verifies every append;
+`sessions.last_sequence` remains the rolling-deploy allocator until the
+Pause/Steer admission gate moves to the same narrow lock boundary. SSE clients begin with
 durable replay, subscribe to live fanout, and backfill from Postgres whenever a
 sequence gap appears. A NATS restart may interrupt live delivery or machine
 reachability, but it must not erase session history or queued obligations.
