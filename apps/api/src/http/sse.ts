@@ -26,7 +26,6 @@ const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
 export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
-export const HTTP1_BROWSER_SSE_LIFETIME_MS = 1_000;
 export const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
 export const HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE = "application/vnd.opengeni.sse-batch";
 type SseStreamKind = "session" | "workspace_control" | "workspace_interaction";
@@ -290,6 +289,17 @@ export async function sseSessionStream(
   signal: AbortSignal,
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
+  if (isHttp1BrowserBatch(options)) {
+    const events = await listSessionEvents(db, workspaceId, sessionId, {
+      after,
+      limit: SESSION_REPLAY_PAGE_SIZE,
+    });
+    await options.reauthorize?.();
+    return finiteSseBatchResponse(
+      coalesceSessionEventDeltas(events).map(formatSessionEventSse),
+      options,
+    );
+  }
   const durableFanout = requireSessionEventDurableFanoutCapability(bus);
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
@@ -519,6 +529,21 @@ export async function sseWorkspaceControlStream(
   signal: AbortSignal,
   options: SseDeliveryOptions = {},
 ): Promise<Response> {
+  if (isHttp1BrowserBatch(options)) {
+    const events = await listWorkspaceControlEvents(
+      db,
+      workspaceId,
+      after,
+      WORKSPACE_CONTROL_REPLAY_PAGE_SIZE,
+    );
+    await options.reauthorize?.();
+    return finiteSseBatchResponse(
+      events
+        .sort((left, right) => left.sequence - right.sequence)
+        .map(formatWorkspaceControlEventSse),
+      options,
+    );
+  }
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
   let bootstrapping = true;
@@ -671,6 +696,33 @@ export async function sseWorkspaceLiveStream(
   signal: AbortSignal,
   options: WorkspaceInteractionSseOptions = {},
 ): Promise<Response> {
+  if (isHttp1BrowserBatch(options)) {
+    const [controlEvents, interactionState] = await Promise.all([
+      listWorkspaceControlEvents(db, workspaceId, controlAfter, WORKSPACE_CONTROL_REPLAY_PAGE_SIZE),
+      getWorkspaceInteractionRevisionState(db, { accountId, workspaceId }),
+    ]);
+    await options.reauthorize?.();
+    const frames: string[] = [];
+    if (interactionState.revision > interactionAfter) {
+      frames.push(
+        formatWorkspaceInteractionRevisionSse(
+          WorkspaceInteractionRevisionEvent.parse({
+            workspaceId,
+            sequence: interactionState.revision,
+            revision: interactionState.revision,
+            type: "workspace.interaction.changed",
+            occurredAt: (interactionState.updatedAt ?? new Date()).toISOString(),
+          }),
+        ),
+      );
+    }
+    frames.push(
+      ...controlEvents
+        .sort((left, right) => left.sequence - right.sequence)
+        .map(formatWorkspaceControlEventSse),
+    );
+    return finiteSseBatchResponse(frames, options);
+  }
   const upstream = new AbortController();
   let stopReauthorization = () => {};
   const channel = createByteBoundedSseStream({
@@ -786,6 +838,28 @@ export async function sseWorkspaceInteractionRevisionStream(
   signal: AbortSignal,
   options: WorkspaceInteractionSseOptions = {},
 ): Promise<Response> {
+  if (isHttp1BrowserBatch(options)) {
+    const state = await getWorkspaceInteractionRevisionState(db, {
+      accountId,
+      workspaceId,
+    });
+    await options.reauthorize?.();
+    const frames =
+      state.revision > after
+        ? [
+            formatWorkspaceInteractionRevisionSse(
+              WorkspaceInteractionRevisionEvent.parse({
+                workspaceId,
+                sequence: state.revision,
+                revision: state.revision,
+                type: "workspace.interaction.changed",
+                occurredAt: (state.updatedAt ?? new Date()).toISOString(),
+              }),
+            ),
+          ]
+        : [];
+    return finiteSseBatchResponse(frames, options);
+  }
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   const pollIntervalMs = resolveInteractionPollInterval(options.pollIntervalMs);
   let lastSent = after;
@@ -959,7 +1033,6 @@ export function browserSseDeliveryOptions(
 > {
   return transport === "http1-bounded"
     ? {
-        connectionLifetimeMs: HTTP1_BROWSER_SSE_LIFETIME_MS,
         finiteResponseMaxBytes: HTTP1_BROWSER_SSE_BATCH_MAX_BYTES,
         finiteResponseMediaType: "http1-browser-batch",
       }
@@ -1000,14 +1073,61 @@ async function sseHttpResponse(
           ? `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`
           : "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      // Direct HTTP/1 streams need an unambiguous transport retirement even
-      // after a finite Web Stream reaches EOF: Chromium can otherwise keep the
-      // native request accounted against its per-origin pool despite a client
-      // abort. The one-second batch, four-second reconnect gap, and browser
-      // foreground gate leave ordinary reads deterministic while this close
-      // prevents an orphaned socket from surviving the logical stream.
-      Connection: "close",
-      ...(contentLength === null ? {} : { "Content-Length": String(contentLength) }),
+      // A known-length response is already terminal and leaves the HTTP/1
+      // socket reusable. Only a genuinely live SSE response needs an explicit
+      // close when its stream ends.
+      ...(contentLength === null
+        ? { Connection: "close" }
+        : { "Content-Length": String(contentLength) }),
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
+    },
+  });
+}
+
+function isHttp1BrowserBatch(options: SseDeliveryOptions): boolean {
+  return (
+    options.finiteResponseMediaType === "http1-browser-batch" &&
+    options.finiteResponseMaxBytes !== undefined
+  );
+}
+
+function finiteSseBatchResponse(frames: readonly string[], options: SseDeliveryOptions): Response {
+  const maxBytes = options.finiteResponseMaxBytes;
+  if (
+    maxBytes === undefined ||
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < SESSION_EVENT_SSE_FRAME_MAX_BYTES ||
+    maxBytes > HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
+  ) {
+    throw new RangeError(
+      `finite SSE batch limit must be between ${SESSION_EVENT_SSE_FRAME_MAX_BYTES} and ${HTTP1_BROWSER_SSE_BATCH_MAX_BYTES} bytes`,
+    );
+  }
+  const encoder = new TextEncoder();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for (const frame of frames) {
+    const chunk = encoder.encode(frame);
+    if (chunk.byteLength > maxBytes) {
+      throw new RangeError(
+        `SSE frame cannot fit in the finite browser batch (${chunk.byteLength} > ${maxBytes} bytes)`,
+      );
+    }
+    if (length + chunk.byteLength > maxBytes) break;
+    chunks.push(chunk);
+    length += chunk.byteLength;
+  }
+  const body = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new Response(body, {
+    headers: {
+      "Content-Type": `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`,
+      "Cache-Control": "no-cache, no-transform",
+      "Content-Length": String(body.byteLength),
       ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
