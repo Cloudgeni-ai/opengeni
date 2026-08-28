@@ -77,6 +77,17 @@ NATS and workspace-control fanout plus the immediate Temporal wake attempt are
 scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
 
+One narrow Send exception prevents a conversational answer from getting stuck
+behind the question it is answering. When the active, unpaused branch is in
+`requires_action`, a normal human Send is promoted inside that same transaction
+to Steer-equivalent replacement: pending human-input or approval state is
+cancelled, the new prompt is inserted at the head, and its routing is
+`accepted_for_steering`. Running, recovering, and capacity-waiting turns retain
+ordinary Send queue semantics. An explicitly paused branch also remains inert;
+only Resume or an explicit Steer activates it. Resubmitting a checked-out queue
+Edit also keeps ordinary queue placement: it is a revision of already accepted
+work, not a new conversational answer to the active wait.
+
 An owner-authored `personalResourceAttachment` is part of that same accepted
 work transaction for create, Send, and Steer. The server derives the fixed
 personal Variable Set/Rig/selected Connected Machine closure from the locked session; callers never issue

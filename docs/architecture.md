@@ -501,7 +501,10 @@ flowchart LR
   Idle --> Input
 ```
 
-Send and Steer create durable turn intent. Human prompts are the reorderable
+Send and Steer create durable turn intent. A normal human Send is promoted to
+Steer-equivalent replacement only when the active, unpaused branch is waiting in
+`requires_action`; checked-out queue edits, paused sessions, and other active
+lifecycle states keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
 through the claim transaction. Pause blocks admission without pretending that
 physical execution has already stopped. Cancel fences a session subtree and is
