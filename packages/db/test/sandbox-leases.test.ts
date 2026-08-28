@@ -15,6 +15,7 @@ import {
   confirmDrainCold,
   createDb,
   createSession,
+  createVariableSet,
   deleteWorkspaceIfQuiescent,
   failSandboxRematerialization,
   failWarmingToCold,
@@ -583,6 +584,29 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       releaseLock();
       await blocker;
     }
+
+    // A workspace owns both the selected variable set and the selecting
+    // session. Deletion must detach that relationship through the session
+    // activity gate before the parent cascade reaches workspace_variable_sets.
+    const selectedVariableSet = await createVariableSet(db, {
+      accountId,
+      workspaceId,
+      name: "workspace deletion fixture",
+    });
+    await withWorkspaceSessionActivityRls(db, workspaceId, async (tx) => {
+      await tx.execute(sql`
+        update sessions
+        set variable_set_ids = ${JSON.stringify([selectedVariableSet.id])}::jsonb,
+            variable_set_id = ${selectedVariableSet.id}::uuid,
+            updated_at = now()
+        where workspace_id = ${workspaceId} and id = ${recoveringSessionId}
+      `);
+    });
+    const [attachmentBeforeDelete] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_variable_set_attachments
+      where workspace_id = ${workspaceId}`;
+    expect(attachmentBeforeDelete?.count).toBe(1);
 
     const deleted = await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId });
     expect(deleted.status).toBe("deleted");

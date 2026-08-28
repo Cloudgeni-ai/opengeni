@@ -518,6 +518,7 @@ import {
   setSubjectRlsContext,
   withAccountRls,
   withRlsContext,
+  withRestoredSessionActivityRlsContext,
   withSessionActivityRlsContext,
   withSessionActivitySavepoint,
   withWorkspaceRls,
@@ -3116,6 +3117,30 @@ export async function deleteWorkspaceIfQuiescent(
               ${input.workspaceId}::uuid
             )
           `);
+          // Variable-set attachment guards intentionally prevent deleting a set
+          // while any session still selects it. A workspace cascade owns both
+          // sides, so detach those selections through the activity gate before
+          // deleting the parent. Finalize the gate inside this transaction: the
+          // workspace activity counter disappears with the parent cascade.
+          await withRestoredSessionActivityRlsContext(
+            tx,
+            { accountId: input.accountId, workspaceId: input.workspaceId },
+            async (activityDb) => {
+              await activityDb
+                .update(schema.sessions)
+                .set({
+                  variableSetIds: [],
+                  variableSetId: null,
+                  updatedAt: new Date(),
+                })
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, input.workspaceId),
+                    isNotNull(schema.sessions.variableSetId),
+                  ),
+                );
+            },
+          );
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
