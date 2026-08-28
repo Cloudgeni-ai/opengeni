@@ -5,7 +5,7 @@ import {
   type BlankTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
-import { sql } from "drizzle-orm";
+import { sql as drizzleSql } from "drizzle-orm";
 import postgres from "postgres";
 import {
   createDb,
@@ -501,7 +501,7 @@ describe("migration 0306 atomic personal-resource attachments", () => {
         () =>
           client.db.transaction(async (tx) => {
             await tx.execute(
-              sql`select set_config(
+              drizzleSql`select set_config(
                 'opengeni.initiating_human_subject_id', ${subjectId}, true
               )`,
             );
