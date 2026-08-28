@@ -24,6 +24,8 @@ import {
   type PersonalGitHubGitBrokerRepositoryClaim,
 } from "@opengeni/github";
 import { randomBytes, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { isIP } from "node:net";
 import { isDeepStrictEqual } from "node:util";
 
 const PERSONAL_GITHUB_SERVER_ID = "github:personal";
@@ -39,7 +41,7 @@ export function buildPersonalGitHubGitCredentials(
 ): NonNullable<ConnectionCredentialsPort["gitCredentials"]> | null {
   if (!settings.githubPersonalOauthEnabled) return null;
   const secret = settings.integrationsStateSecret?.trim();
-  const publicOrigin = personalGitBrokerOrigin(settings.publicBaseUrl);
+  const publicOrigin = personalGitBrokerOrigin(settings);
   if (!secret || !publicOrigin) {
     throw new Error("personal GitHub Git broker configuration is unavailable");
   }
@@ -255,19 +257,58 @@ function personalGitHubCanWrite(permissions: {
   return permissions.push || permissions.maintain || permissions.admin;
 }
 
-function personalGitBrokerOrigin(value: string | undefined): string | null {
+let cachedDockerBridgeGateway: string | null | undefined;
+
+function dockerBridgeGateway(): string | null {
+  if (cachedDockerBridgeGateway !== undefined) return cachedDockerBridgeGateway;
+  try {
+    const value = execFileSync(
+      "docker",
+      ["network", "inspect", "bridge", "--format", "{{(index .IPAM.Config 0).Gateway}}"],
+      { encoding: "utf8", timeout: 2_000, maxBuffer: 16 * 1024 },
+    ).trim();
+    cachedDockerBridgeGateway = isIP(value) ? value : null;
+  } catch {
+    cachedDockerBridgeGateway = null;
+  }
+  return cachedDockerBridgeGateway;
+}
+
+export function personalGitBrokerOrigin(settings: Settings): string | null {
+  const value =
+    settings.opengeniMcpUrl ??
+    (settings.sandboxBackend === "docker"
+      ? `http://host.docker.internal:${settings.apiPort}`
+      : settings.sandboxBackend === "local" || settings.sandboxBackend === "none"
+        ? `http://127.0.0.1:${settings.apiPort}`
+        : settings.publicBaseUrl);
   if (!value) return null;
   const url = new URL(value);
   if (
-    url.protocol !== "https:" ||
+    settings.sandboxBackend === "docker" &&
+    (url.hostname === "127.0.0.1" || url.hostname === "localhost")
+  ) {
+    url.hostname = dockerBridgeGateway() ?? "host.docker.internal";
+  }
+  const dockerPrivateOrigin =
+    settings.sandboxBackend === "docker" &&
+    (url.hostname === "host.docker.internal" ||
+      url.hostname === cachedDockerBridgeGateway ||
+      /^[a-z][a-z0-9-]{0,62}$/iu.test(url.hostname));
+  const privateExecutionOrigin =
+    (url.protocol === "http:" &&
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost" || dockerPrivateOrigin)) ||
+    ["local", "test"].includes(settings.environment);
+  if (
+    (url.protocol !== "https:" && !privateExecutionOrigin) ||
     url.username ||
     url.password ||
-    url.pathname !== "/" ||
     url.search ||
     url.hash
   ) {
     return null;
   }
+  url.pathname = "/";
   return url.origin;
 }
 

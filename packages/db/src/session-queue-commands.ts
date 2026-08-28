@@ -1614,6 +1614,8 @@ export async function submitHumanPromptInTransaction(
     annotations?: TimelineAnnotation[];
     modelContext?: string | null;
     resources: ResourceRef[];
+    /** Actor-owned resources used only for the exact durable-draft fence. */
+    composerDraftResources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
     latencyMode?: LatencyMode | null;
@@ -1680,6 +1682,11 @@ export async function submitHumanPromptInTransaction(
     annotations,
     modelContext: input.modelContext ?? null,
     resources: withCanonicalResourceMountPaths(input.resources),
+    ...(input.composerDraftResources
+      ? {
+          composerDraftResources: withCanonicalResourceMountPaths(input.composerDraftResources),
+        }
+      : {}),
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     latencyMode: input.latencyMode ?? null,
@@ -1856,7 +1863,9 @@ export async function submitHumanPromptInTransaction(
         canonicalSessionCommandHash({
           text: input.text,
           annotations: annotations.map(({ ordinal: _ordinal, ...annotation }) => annotation),
-          resources: withCanonicalResourceMountPaths(input.resources),
+          resources: withCanonicalResourceMountPaths(
+            input.composerDraftResources ?? input.resources,
+          ),
           model: input.model ?? session.model,
           reasoningEffort: input.reasoningEffort ?? input.reasoningEffortFallback,
           latencyMode: input.turnExecutionPolicy?.latencyMode ?? input.latencyMode ?? "standard",

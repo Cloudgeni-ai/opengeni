@@ -3,6 +3,7 @@ import {
   ChevronDownIcon,
   GitBranchIcon,
   Loader2Icon,
+  LockIcon,
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
@@ -26,6 +27,7 @@ type FollowUpRepositoryPickerProps = RepositoryContextPickerProps;
 function selectedCount(props: FollowUpRepositoryPickerProps): number {
   return (
     props.selectedRepoIds.size +
+    (props.selectedPersonalGitHubRepoIds?.size ?? 0) +
     props.manualRepos.filter((repository) => repository.url.trim().length > 0).length
   );
 }
@@ -40,6 +42,10 @@ export function FollowUpRepositoryMenuBody(
   props: FollowUpRepositoryPickerProps & { leading?: ReactNode },
 ) {
   const count = selectedCount(props);
+  const personalRepositories = (props.personalGitHubRepositories ?? []).filter(
+    (repository) => repository.selectedAccess !== null,
+  );
+  const personalGitHubActive = props.personalGitHubStatus?.connection?.status === "active";
 
   return (
     <div onKeyDown={(event) => event.stopPropagation()} className="flex min-h-0 flex-1 flex-col">
@@ -69,6 +75,108 @@ export function FollowUpRepositoryMenuBody(
       </div>
 
       <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain p-2.5">
+        {personalGitHubActive ? (
+          <section className="overflow-hidden rounded-lg border border-border bg-bg/25">
+            <div className="border-b border-border px-3 py-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 truncate text-xs font-medium text-fg">
+                  Your GitHub identity
+                </div>
+                <MetaChip dot="running" rounded="full">
+                  @{String(props.personalGitHubStatus?.connection?.metadata.githubLogin ?? "you")}
+                </MetaChip>
+              </div>
+            </div>
+            {props.personalGitHubBusy ? (
+              <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">
+                <Loader2Icon className="size-3.5 animate-spin" />
+                Loading your repositories
+              </div>
+            ) : personalRepositories.length === 0 ? (
+              <div className="p-3 text-xs leading-5 text-fg-muted">
+                No personal repositories are allowed yet. Choose them from Integrations.
+              </div>
+            ) : (
+              <div className="divide-y divide-border/70">
+                {personalRepositories.map((repository) => {
+                  const checked = props.selectedPersonalGitHubRepoIds?.has(repository.repositoryId);
+                  const locked =
+                    props.lockedPersonalGitHubRepoIds?.has(repository.repositoryId) === true;
+                  return (
+                    <div key={repository.repositoryId} className="px-2 py-2">
+                      <button
+                        type="button"
+                        onClick={() => props.onTogglePersonalGitHubRepo?.(repository)}
+                        disabled={props.pending || props.personalGitHubBusy || locked}
+                        aria-pressed={checked}
+                        aria-label={
+                          locked
+                            ? `${repository.fullName} mounted as you`
+                            : `Use ${repository.fullName} as your GitHub identity`
+                        }
+                        className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md text-left"
+                      >
+                        <span
+                          className={cn(
+                            "flex size-4 items-center justify-center rounded border",
+                            checked
+                              ? "border-brand bg-brand-strong text-brand-fg"
+                              : "border-border-strong bg-surface",
+                          )}
+                        >
+                          {checked ? <CheckIcon className="size-3" /> : null}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="flex min-w-0 items-center gap-1.5">
+                            <span className="truncate text-xs font-medium text-fg">
+                              {repository.fullName}
+                            </span>
+                            {repository.private ? (
+                              <LockIcon className="size-3 shrink-0 text-fg-subtle" />
+                            ) : null}
+                          </span>
+                          <span className="mt-0.5 block truncate text-2xs text-fg-subtle">
+                            {repository.selectedAccess === "write" ? "Read and write" : "Read only"}
+                          </span>
+                        </span>
+                        {locked ? (
+                          <MetaChip dot="idle" rounded="full">
+                            Mounted
+                          </MetaChip>
+                        ) : checked ? (
+                          <MetaChip dot="running" rounded="full">
+                            As you
+                          </MetaChip>
+                        ) : null}
+                      </button>
+                      {checked ? (
+                        <div className="mt-2 flex items-center gap-2 pl-6">
+                          <GitBranchIcon className="size-3.5 shrink-0 text-fg-subtle" />
+                          <Input
+                            value={
+                              props.selectedPersonalGitHubRepoRefs?.[repository.repositoryId] ??
+                              repository.defaultBranch
+                            }
+                            onChange={(event) =>
+                              props.onPersonalGitHubRefChange?.(
+                                repository.repositoryId,
+                                event.target.value,
+                              )
+                            }
+                            disabled={props.pending || locked}
+                            aria-label={`${repository.fullName} ref`}
+                            className="h-7 text-xs"
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        ) : null}
+
         {props.repoBusy ? (
           <div className="flex items-center gap-2 rounded-lg border border-border bg-bg/25 p-3 text-xs text-fg-muted">
             <Loader2Icon className="size-3.5 animate-spin" />
@@ -170,11 +278,11 @@ export function FollowUpRepositoryMenuBody(
               </div>
             ))}
           </section>
-        ) : (
+        ) : !personalGitHubActive ? (
           <div className="rounded-lg border border-border bg-bg/25 p-3 text-xs leading-5 text-fg-muted">
             No GitHub repositories are connected. You can still add a public repository by URL.
           </div>
-        )}
+        ) : null}
 
         <section className="overflow-hidden rounded-lg border border-border bg-bg/25">
           <div className="flex items-center justify-between gap-2 px-3 py-2">

@@ -54,6 +54,7 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
   type TurnExecutionPolicyV1,
+  type VariableSet,
   type XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
@@ -65,7 +66,7 @@ import {
   getChannel,
   getRig,
   getWorkspaceDefaultRigId,
-  listDistinctVariableSetIdsInGroup,
+  listDistinctVariableSetSelectionsInGroup,
   listDistinctRigVersionIdsInGroup,
   getSandbox,
   getSession,
@@ -87,7 +88,7 @@ import {
   requireSession,
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
-  updateSessionTitle as updateSessionTitleRow,
+  updateSessionTitleWithEvent,
   withWorkspaceSubjectSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
@@ -107,7 +108,6 @@ import {
   type NewSessionDraftSnapshot,
 } from "@opengeni/db";
 import {
-  appendAndPublishEvents,
   publishDurableSessionEvents,
   publishDurableWorkspaceControlEvent,
   type EventBus,
@@ -640,8 +640,9 @@ export async function createAndStartSessionWithOutcome(input: {
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
   createdByActor?: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
-  // Names/ids only; the session.created payload never carries variable values.
-  variableSet?: { id: string; name: string } | null;
+  // Ordered low-to-high precedence. Names/ids only; session.created never
+  // carries variable values.
+  variableSets?: Array<{ id: string; name: string; scope: VariableSet["scope"] }>;
   // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
   // rig-less session (byte-for-byte today's behavior). Frozen here so a later
   // rig promote never moves an existing session's version.
@@ -760,7 +761,8 @@ export async function createAndStartSessionWithOutcome(input: {
       reasoningEffort: input.reasoningEffort,
       latencyMode: input.latencyMode ?? "standard",
       sandboxBackend: input.sandboxBackend,
-      variableSetId: input.variableSet?.id ?? null,
+      variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
+      variableSetId: input.variableSets?.at(-1)?.id ?? null,
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       channelId: input.channelId ?? null,
@@ -831,7 +833,8 @@ export async function createAndStartSessionWithOutcome(input: {
       reasoningEffort: input.reasoningEffort,
       latencyMode: input.latencyMode ?? "standard",
       sandboxBackend: input.sandboxBackend,
-      variableSetId: input.variableSet?.id ?? null,
+      variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
+      variableSetId: input.variableSets?.at(-1)?.id ?? null,
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       channelId: input.channelId ?? null,
@@ -900,7 +903,7 @@ async function finishStartSession(
     reasoningEffort: Settings["openaiReasoningEffort"];
     turnExecutionPolicy: TurnExecutionPolicyV1;
     sandboxBackend: Settings["sandboxBackend"];
-    variableSet?: { id: string; name: string } | null;
+    variableSets?: Array<{ id: string; name: string; scope: VariableSet["scope"] }>;
     goal?: GoalSpec | null;
     sessionMcpServers?: SessionMcpServerMetadata[];
     seedTargetSandbox?: {
@@ -978,10 +981,13 @@ async function finishStartSession(
     turnExecutionPolicy: input.turnExecutionPolicy,
     createdEventPayload: {
       toolPolicy: input.toolPolicy,
-      ...(input.variableSet
+      ...(input.variableSets?.length
         ? {
-            variableSetId: input.variableSet.id,
-            variableSetName: input.variableSet.name,
+            variableSetIds: input.variableSets.map((variableSet) => variableSet.id),
+            variableSets: input.variableSets,
+            // Legacy highest-precedence aliases.
+            variableSetId: input.variableSets.at(-1)!.id,
+            variableSetName: input.variableSets.at(-1)!.name,
           }
         : {}),
       ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
@@ -1198,6 +1204,8 @@ export async function postUserMessageTurn(input: {
   annotations?: TimelineAnnotation[];
   modelContext?: string | null;
   resources: ResourceRef[];
+  /** Actor-owned resources used only for the exact durable-draft fence. */
+  composerDraftResources?: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   latencyMode?: "standard" | "priority" | "fast" | null;
@@ -1275,6 +1283,9 @@ export async function postUserMessageTurn(input: {
               annotations: input.annotations ?? [],
               modelContext: input.modelContext ?? null,
               resources: input.resources,
+              ...(input.composerDraftResources
+                ? { composerDraftResources: input.composerDraftResources }
+                : {}),
               model: requestedModel,
               reasoningEffort: requestedReasoningEffort,
               latencyMode: input.latencyMode ?? null,
@@ -1719,17 +1730,15 @@ export async function createSessionForRequestWithOutcome(
     });
   }
   await validateFileResources(db, grant.accountId, workspaceId, grant.subjectId, resources);
-  // VariableSet attachment requires variable-sets:use on the calling grant
-  // (validateVariableSetAttachment enforces it), preserving the invariant
-  // that sandboxed agents cannot self-attach workspace secrets.
-  const variableSet = payload.variableSetId
-    ? await validateVariableSetAttachment(
-        { settings, db },
-        grant,
-        workspaceId,
-        payload.variableSetId,
-      )
-    : null;
+  // Every selected Variable Set is independently authorized. Scope does not
+  // affect precedence: explicit order is low-to-high and later sets win name
+  // collisions.
+  const variableSets: VariableSet[] = [];
+  for (const variableSetId of payload.variableSetIds ?? []) {
+    variableSets.push(
+      await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId),
+    );
+  }
   // RIG BINDING (M3). Resolve the rig this session rides — a UUID binds that
   // rig, null explicitly opts out, and omission inherits the workspace default
   // (workspaces.default_rig_id) — then FREEZE both the rig id and its currently-
@@ -1827,7 +1836,12 @@ export async function createSessionForRequestWithOutcome(
             ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
             ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
             ...(payload.workingDir ? { workingDir: payload.workingDir } : {}),
-            ...(payload.variableSetId ? { variableSetId: payload.variableSetId } : {}),
+            ...(variableSets.length
+              ? {
+                  variableSetIds: variableSets.map((variableSet) => variableSet.id),
+                  variableSetId: variableSets.at(-1)!.id,
+                }
+              : {}),
             ...(payload.rigId ? { rigId: payload.rigId } : {}),
             ...(payload.goal ? { goal: payload.goal } : {}),
             ...(payload.firstPartyMcpPermissions
@@ -2041,9 +2055,9 @@ export async function createSessionForRequestWithOutcome(
   // provided-session attach — no shared box state exists to conflict, and
   // env-differing spawns from such parents shared safely before the env-aware
   // check. They keep sharing (and keep inheriting "none").
-  const requestedVariableSetId = payload.variableSetId ?? null;
-  const variableSetMatchesGroup = (memberVariableSetId: string | null): boolean =>
-    memberVariableSetId === requestedVariableSetId;
+  const requestedVariableSetIds = variableSets.map((variableSet) => variableSet.id);
+  const variableSetsMatchGroup = (memberVariableSetIds: readonly string[]): boolean =>
+    stableJson(memberVariableSetIds) === stableJson(requestedVariableSetIds);
   // RIG-AWARE GROUPING (M3), the exact sibling of the env-aware gate above: the
   // box's rig-baked setup/tooling is fixed at cold-create, so a session joining a
   // shared box must ride the SAME frozen rig_version_id. A mismatch is a genuine
@@ -2067,8 +2081,7 @@ export async function createSessionForRequestWithOutcome(
     }
     const parent = parentSession;
     const parentBoxed = parent.sandboxBackend !== "none";
-    const variableSetMismatch =
-      parentBoxed && !variableSetMatchesGroup(parent.variableSetId ?? null);
+    const variableSetMismatch = parentBoxed && !variableSetsMatchGroup(parent.variableSetIds);
     let rigMismatch = parentBoxed && !rigVersionMatchesGroup(parent.rigVersionId ?? null);
     if (parentBoxed && !rigMismatch) {
       const memberRigVersionIds = await listDistinctRigVersionIdsInGroup(
@@ -2113,14 +2126,14 @@ export async function createSessionForRequestWithOutcome(
       // the join verdict nondeterministic. Post-env-aware groups are homogeneous
       // (both join paths enforce equality), so this reads one distinct value in
       // the common case; a mixed legacy group deterministically rejects.
-      const memberVariableSetIds = await listDistinctVariableSetIdsInGroup(
+      const memberVariableSetSelections = await listDistinctVariableSetSelectionsInGroup(
         db,
         workspaceId,
         sandboxChoice.groupId,
       );
       if (
-        !memberVariableSetIds.every((memberVariableSetId) =>
-          variableSetMatchesGroup(memberVariableSetId),
+        !memberVariableSetSelections.every((memberVariableSetIds) =>
+          variableSetsMatchGroup(memberVariableSetIds),
         )
       ) {
         throw new HTTPException(422, {
@@ -2263,7 +2276,11 @@ export async function createSessionForRequestWithOutcome(
       ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
       ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
       createdByActor: creationInitiator.actor ?? null,
-      variableSet: variableSet ? { id: variableSet.id, name: variableSet.name } : null,
+      variableSets: variableSets.map((variableSet) => ({
+        id: variableSet.id,
+        name: variableSet.name,
+        scope: variableSet.scope,
+      })),
       // Frozen rig binding (M3): both null for a rig-less session (today's path).
       rigId: frozenRigId,
       rigVersionId: frozenRigVersionId,
@@ -2417,6 +2434,8 @@ export async function acceptSessionUserMessageWithOutcome(
     annotations?: SubmittedTimelineAnnotation[];
     modelContext?: string | null;
     resources?: ResourceRef[];
+    /** Actor-owned resources used only for the exact durable-draft fence. */
+    composerDraftResources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
     latencyMode?: "standard" | "priority" | "fast" | null;
@@ -2485,6 +2504,20 @@ export async function acceptSessionUserMessageWithOutcome(
     latencyModeSource: input.latencyMode == null ? "session" : "explicit",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
+  const composerDraftResources = input.composerDraftResources
+    ? normalizeResources(input.composerDraftResources)
+    : undefined;
+  if (composerDraftResources) {
+    const acceptedResources = new Set(requestedResources.map((resource) => stableJson(resource)));
+    const unacceptedDraftResource = composerDraftResources.find(
+      (resource) => !acceptedResources.has(stableJson(resource)),
+    );
+    if (unacceptedDraftResource) {
+      throw new HTTPException(422, {
+        message: "composer draft resources must be included in the accepted resource set",
+      });
+    }
+  }
   const annotations = await validateSubmittedTimelineAnnotations(
     db,
     workspaceId,
@@ -2573,6 +2606,7 @@ export async function acceptSessionUserMessageWithOutcome(
       annotations,
       modelContext: input.modelContext ?? null,
       resources: requestedResources,
+      ...(composerDraftResources ? { composerDraftResources } : {}),
       model: input.model ?? null,
       reasoningEffort: input.reasoningEffort ?? null,
       latencyMode: input.latencyMode ?? null,
@@ -2663,25 +2697,18 @@ export async function updateSessionTitle(
     surface: "core",
   });
   const workspaceId = grant.workspaceId;
-  const result = await updateSessionTitleRow(db, {
+  const result = await updateSessionTitleWithEvent(db, {
     workspaceId,
     sessionId,
     title,
     source,
   });
-  if (result.updated) {
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "session.title_set",
-        payload: {
-          title: result.title ?? title,
-          source,
-        },
-      },
-    ]);
+  if (result.events.length > 0) {
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
   }
   return {
-    ...result,
+    updated: result.updated,
+    title: result.title,
     relatedSessionAccess: authorization?.relatedSessionAccess ?? "root",
   };
 }

@@ -10,6 +10,7 @@ import {
   recordTenancyCompatibilityLaneUse,
   sandboxOperationMetricObserver,
   TENANCY_COMPATIBILITY_LANES,
+  workspaceInsightsMetricObserver,
 } from "../src";
 
 const settings = {
@@ -29,6 +30,7 @@ describe("observability", () => {
     expect(typeof obs.incrementCounter).toBe("function");
     expect(typeof obs.observeHistogram).toBe("function");
     expect(typeof obs.debug).toBe("function");
+    expect(typeof obs.flush).toBe("function");
   });
 
   test("renders prometheus metrics with resource and request labels", async () => {
@@ -49,6 +51,55 @@ describe("observability", () => {
     expect(metrics).toContain("opengeni_http_request_duration_seconds_bucket");
     expect(metrics).toContain("opengeni_build_info");
     expect(metrics).toContain("opengeni_process_cpu_user_seconds_total");
+  });
+
+  test("records identity-free Insights timing with an exact two-second target bucket", async () => {
+    const obs = createObservability(settings, { component: "api", now: () => 1 });
+    const observe = workspaceInsightsMetricObserver(obs);
+    const observedLogs: string[] = [];
+    const originalLog = console.log;
+    console.log = (message?: unknown) => observedLogs.push(String(message));
+    try {
+      observe({
+        range: "week",
+        providerFiltered: false,
+        modelFiltered: false,
+        outcome: "completed",
+        durationMs: 1_750,
+      });
+      observe({
+        range: "caller-controlled-range",
+        providerFiltered: true,
+        modelFiltered: true,
+        outcome: "caller-controlled-outcome",
+        durationMs: Number.NaN,
+      });
+    } finally {
+      console.log = originalLog;
+    }
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_workspace_insights_request_duration_seconds_bucket\{[^}]*le="2"[^}]*model_filter="all"[^}]*outcome="completed"[^}]*provider_filter="all"[^}]*range="week"[^}]*\} 1\b/,
+    );
+    expect(metrics).toContain('range="unknown"');
+    expect(metrics).toContain('outcome="unknown"');
+    expect(metrics).not.toContain("caller-controlled-range");
+    expect(metrics).not.toContain("caller-controlled-outcome");
+
+    const completedLog = JSON.parse(observedLogs[0] ?? "{}") as Record<string, unknown>;
+    expect(completedLog).toMatchObject({
+      message: "Workspace Insights request measured",
+      surface: "workspace_insights",
+      eventType: "request_latency",
+      route: "/v1/workspaces/:workspaceId/insights",
+      outcome: "completed",
+      durationMs: 1_750,
+    });
+    expect(completedLog.workspaceId).toBeUndefined();
+    expect(completedLog.range).toBeUndefined();
+    expect(completedLog.provider).toBeUndefined();
+    expect(completedLog.model).toBeUndefined();
   });
 
   test("reports bounded configured and effective sandbox rollout state", async () => {
@@ -326,6 +377,36 @@ describe("observability", () => {
     }
   });
 
+  test("flush waits for every accepted OTLP export", async () => {
+    let releaseExport: (() => void) | undefined;
+    let markExportStarted: (() => void) | undefined;
+    const exportStarted = new Promise<void>((resolve) => {
+      markExportStarted = resolve;
+    });
+    const obs = createObservability(settings, {
+      component: "api",
+      exporter: async () => {
+        markExportStarted?.();
+        await new Promise<void>((resolve) => {
+          releaseExport = resolve;
+        });
+      },
+    });
+
+    obs.startSpan("api.pending_export").end();
+    await exportStarted;
+    let flushed = false;
+    const flush = obs.flush().then(() => {
+      flushed = true;
+    });
+    await Bun.sleep(0);
+
+    expect(flushed).toBe(false);
+    releaseExport?.();
+    await flush;
+    expect(flushed).toBe(true);
+  });
+
   test("projects span errors and drops unknown attributes before OTLP export", async () => {
     const exported: Array<{ body: any }> = [];
     const obs = createObservability(settings, {
@@ -583,6 +664,50 @@ describe("observability", () => {
       status: 502,
     });
     expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
+  });
+
+  test("public fatal diagnostics retain only closed structural fields", () => {
+    const sentinel = "PUBLIC_FATAL_DIAGNOSTIC_SENTINEL_1c3f91";
+    const observed: string[] = [];
+    const originalError = console.error;
+    console.error = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.error("fixed fatal diagnostic", {
+        errorClass: "ApiFatalOperationError",
+        errorCode: "api_unhandled_rejection",
+        origin: "api",
+        phase: "running",
+        reasonKind: "object",
+        correlationId: "api-fatal.test-public",
+        rejection: sentinel,
+      });
+      obs.error("invalid fatal diagnostic", {
+        errorClass: "ApiFatalOperationError",
+        errorCode: "api_uncaught_exception",
+        origin: "api",
+        phase: sentinel,
+        reasonKind: sentinel,
+        correlationId: `invalid correlation ${sentinel}`,
+      });
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(observed).toHaveLength(2);
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "fixed fatal diagnostic",
+      errorClass: "ApiFatalOperationError",
+      errorCode: "api_unhandled_rejection",
+      origin: "api",
+      phase: "running",
+      reasonKind: "object",
+      correlationId: "api-fatal.test-public",
+    });
+    expect(observed.join("\n")).not.toContain(sentinel);
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("phase");
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("reasonKind");
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
   });
 

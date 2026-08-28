@@ -54,6 +54,14 @@ describe("personal resource attachments in Chromium", () => {
   test("create and Send/Steer require keyboard-operable mode plus exact shared warning", async () => {
     const control = page.locator("[data-personal-resource-attachment]");
     expect(await control.first().ariaSnapshot()).toContain("Private deploy keys");
+    expect(await control.first().locator("fieldset").count()).toBe(0);
+    expect(await control.first().getByText("Your resource access").count()).toBe(0);
+    expect(
+      await control
+        .first()
+        .getByRole("radiogroup", { name: /Choose how long OpenGeni may use/ })
+        .count(),
+    ).toBe(1);
     expect(await page.getByRole("button", { name: "Create session" }).isDisabled()).toBe(true);
     expect(await control.first().getByRole("radio").count()).toBe(3);
     await control
@@ -143,7 +151,7 @@ describe("personal resource attachments in Chromium", () => {
     const unavailableControl = page.locator("[data-personal-resource-attachment]").first();
     expect(await unavailableControl.count()).toBe(1);
     expect(await unavailableControl.getByRole("alert").textContent()).toContain(
-      "couldn’t check access to the selected personal resource",
+      "selected personal resource is unavailable",
     );
     expect(await unavailableControl.getByRole("button", { name: "Retry" }).count()).toBe(1);
     expect(await unavailableControl.getByRole("status").textContent()).toContain(

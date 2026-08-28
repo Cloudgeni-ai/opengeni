@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ComponentProps, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
@@ -60,7 +60,7 @@ describe("Google Drive knowledge-source browse ownership", () => {
       browseCount += 1;
       return await (browseCount === 1 ? firstBrowse.promise : secondBrowse.promise);
     });
-    const client = { browseGoogleDriveFacetSource } as unknown as OpenGeniCoreClient;
+    const client = { browseGoogleDriveFacetSource } as unknown as OpenGeniBrowserClient;
     const rendered = await renderDialog({ client, entry });
     try {
       await waitFor(() => browseGoogleDriveFacetSource.mock.calls.length === 1);
@@ -106,7 +106,7 @@ async function renderDialog(
     await act(async () => {
       root.render(
         <GoogleDriveKnowledgeSourceDialog
-          client={{} as OpenGeniCoreClient}
+          client={{} as OpenGeniBrowserClient}
           workspaceId="00000000-0000-4000-8000-000000000101"
           instance={instance}
           entry={null}

@@ -1,4 +1,5 @@
-import { AlertTriangleIcon, KeyRoundIcon, RefreshCwIcon } from "lucide-react";
+import { AlertTriangleIcon, RefreshCwIcon } from "lucide-react";
+import { useId } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -28,6 +29,7 @@ export function PersonalResourceAttachmentControl(props: {
   compact?: boolean;
 }) {
   const { controller } = props;
+  const durationLabelId = useId();
   if (
     !controller.eligible ||
     (!controller.loading &&
@@ -38,6 +40,7 @@ export function PersonalResourceAttachmentControl(props: {
   ) {
     return null;
   }
+  const disabled = props.disabled || controller.loading || controller.refreshing;
   const names = [
     ...controller.selected.variableSets.map((resource) => `Variable set: ${resource.name}`),
     ...controller.selected.rigs.map((resource) => `Rig: ${resource.name}`),
@@ -46,32 +49,27 @@ export function PersonalResourceAttachmentControl(props: {
     ),
   ];
   return (
-    <fieldset
+    <div
       data-personal-resource-attachment
-      className={cn(
-        "min-w-0 rounded-lg border border-border bg-surface/50 p-3",
-        props.compact ? "mt-2" : "mt-4",
-      )}
-      disabled={props.disabled || controller.loading || controller.refreshing}
+      className={cn("min-w-0", props.compact ? "mt-2" : "mt-4")}
+      aria-busy={controller.loading || controller.refreshing}
     >
-      <legend className="px-1 text-xs font-semibold text-fg">
-        <span className="inline-flex items-center gap-1.5">
-          <KeyRoundIcon className="size-3.5 text-fg-subtle" aria-hidden />
-          Your resource access
-        </span>
-      </legend>
       {controller.loading ? (
         <p role="status" className="text-xs text-fg-subtle">
-          Loading your personal resources…
+          Loading selected personal resources…
         </p>
       ) : controller.selected.resourceCount > 0 ? (
         <>
-          <p className="text-xs text-fg-muted">
+          <p id={durationLabelId} className="text-xs text-fg-muted">
             {names.join(" · ")} {controller.selected.resourceCount === 1 ? "belongs" : "belong"} to
             you. Choose how long OpenGeni may use{" "}
             {controller.selected.resourceCount === 1 ? "it" : "them"}.
           </p>
-          <div className="mt-3 grid gap-2 sm:grid-cols-3" role="radiogroup">
+          <div
+            className="mt-3 grid gap-2 sm:grid-cols-3"
+            role="radiogroup"
+            aria-labelledby={durationLabelId}
+          >
             {MODE_OPTIONS.map((option) => (
               <label
                 key={option.value}
@@ -88,6 +86,7 @@ export function PersonalResourceAttachmentControl(props: {
                   name="personal-resource-attachment-mode"
                   value={option.value}
                   checked={controller.mode === option.value}
+                  disabled={disabled}
                   onChange={() => controller.setMode(option.value)}
                   className="mt-0.5 size-4 accent-brand"
                 />
@@ -105,6 +104,7 @@ export function PersonalResourceAttachmentControl(props: {
               <input
                 type="checkbox"
                 checked={controller.acknowledged}
+                disabled={disabled}
                 onChange={(event) => controller.setAcknowledged(event.target.checked)}
                 className="mt-0.5 size-4 shrink-0 accent-brand"
               />
@@ -127,13 +127,14 @@ export function PersonalResourceAttachmentControl(props: {
       {controller.error ? (
         <div className="mt-2 flex items-center justify-between gap-3" role="alert">
           <span className="text-xs text-danger">
-            We couldn’t check access to the selected personal resource. Try again, or choose a
-            different resource.
+            The selected personal resource is unavailable. Try again, or choose a different
+            resource.
           </span>
           <Button
             type="button"
             size="sm"
             variant="secondary"
+            disabled={disabled}
             onClick={() => void controller.refresh()}
           >
             <RefreshCwIcon className="size-3.5" aria-hidden />
@@ -146,6 +147,6 @@ export function PersonalResourceAttachmentControl(props: {
           Showing the first 400 personal resources of each supported type.
         </p>
       ) : null}
-    </fieldset>
+    </div>
   );
 }

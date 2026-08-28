@@ -185,13 +185,17 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   }
   const turn = claim.turn;
   attempt.turnId = turn.id;
+  attempt.executionGeneration = turn.executionGeneration;
+  attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
+  attempt.triggerEventId = turn.triggerEventId;
+  attempt.redispatchesAtDispatch = Number(
+    (turn.metadata as { workerDeathRedispatches?: number } | null)?.workerDeathRedispatches ?? 0,
+  );
   // Establish durable attempt ownership before any later read can fail.
   // Therefore every failure with no turnId came from the one atomic claim
   // transaction and can be classified without conflating ordinary runtime
   // or transport failures with admission failures.
   const session = await requireSession(db, input.workspaceId, input.sessionId);
-  attempt.executionGeneration = turn.executionGeneration;
-  attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
   let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
   const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
   const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
@@ -268,7 +272,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
-  attempt.triggerEventId = turn.triggerEventId;
   const trigger = await getSessionEvent(db, input.workspaceId, attempt.triggerEventId);
   if (!trigger) {
     throw new Error(`Trigger event not found: ${attempt.triggerEventId}`);
@@ -286,9 +289,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     trigger,
   );
   attempt.triggerType = trigger.type;
-  attempt.redispatchesAtDispatch = Number(
-    (turn.metadata as { workerDeathRedispatches?: number } | null)?.workerDeathRedispatches ?? 0,
-  );
   turnLifecycleMetricsFor(observability).start(attempt.turnId);
   // §7.5 P3 — pass the accepted billing attribution (externally funded turns
   // bypass OpenGeni credit/token gates)

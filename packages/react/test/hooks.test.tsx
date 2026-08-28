@@ -27,7 +27,7 @@ import type {
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import type { EmbeddedSessionMcpApprovalPolicyClientLike } from "../src/client";
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import { useAvailableModels } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
@@ -40,6 +40,7 @@ import { useSessionLineage } from "../src/hooks/use-session-lineage";
 import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approval-policy";
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
+import { createEmbeddedSessionClient } from "../src/embedded-session-client";
 
 registerDom();
 
@@ -210,6 +211,7 @@ describe("useWorkspaceSessions", () => {
       "pinned",
       "ordinary",
     ]);
+    expect(hook.result.current.readRevision).toBe(1);
     expect(hook.result.current.pinned.map((session) => session.id)).toEqual(["pinned"]);
     expect(hook.result.current.pinnedTruncated).toBe(true);
     expect(hook.result.current.nextCursor).toBe("next-page");
@@ -277,8 +279,81 @@ describe("useWorkspaceSessions", () => {
     });
     await flush();
     expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["stable"]);
+    expect(hook.result.current.readRevision).toBe(1);
     expect(hook.result.current.error?.message).toBe("poll unavailable");
     expect(hook.result.current.loading).toBe(false);
+    await hook.unmount();
+  });
+
+  test("increments the authoritative list revision only after successful reads", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      listSessionPage: async () => {
+        calls += 1;
+        return {
+          pinned: [],
+          sessions: [{ id: `session-${calls}` } as never],
+          nextCursor: null,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.readRevision).toBe(1);
+
+    await reactAct(async () => {
+      await hook.result.current.refresh();
+    });
+    await flush();
+    expect(hook.result.current.readRevision).toBe(2);
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["session-2"]);
+    await hook.unmount();
+  });
+
+  test("captures a shared causal generation when each list request starts", async () => {
+    let releaseInitial: (() => void) | null = null;
+    let nextGeneration = 40;
+    const started: number[] = [];
+    const beginRead = () => {
+      const generation = ++nextGeneration;
+      started.push(generation);
+      return generation;
+    };
+    const client = fakeClient({
+      listSessionPage: async () => {
+        if (started.length === 1) {
+          await new Promise<void>((resolve) => {
+            releaseInitial = resolve;
+          });
+        }
+        return {
+          pinned: [],
+          sessions: [{ id: `session-${started.length}` } as never],
+          nextCursor: null,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, beginRead }),
+      undefined,
+    );
+    await flush();
+
+    expect(started).toEqual([41]);
+    expect(hook.result.current.readGeneration).toBe(0);
+    await reactAct(async () => releaseInitial!());
+    await flush();
+    expect(hook.result.current.readGeneration).toBe(41);
+
+    await reactAct(async () => {
+      await hook.result.current.refresh();
+    });
+    await flush();
+    expect(started).toEqual([41, 42]);
+    expect(hook.result.current.readGeneration).toBe(42);
     await hook.unmount();
   });
 
@@ -977,6 +1052,206 @@ describe("useTurnQueue", () => {
 });
 
 describe("useSessionLineage", () => {
+  test("captures a shared causal generation when each lineage request starts", async () => {
+    let releaseInitial: (() => void) | null = null;
+    let nextGeneration = 70;
+    let reads = 0;
+    const started: number[] = [];
+    const beginRead = () => {
+      const generation = ++nextGeneration;
+      started.push(generation);
+      return generation;
+    };
+    const client = fakeClient({
+      getSessionLineage: async (_workspaceId, _sessionId, options) => {
+        options?.onRequestStart?.();
+        reads += 1;
+        if (reads === 1) {
+          await new Promise<void>((resolve) => {
+            releaseInitial = resolve;
+          });
+        }
+        return {
+          ancestors: [{ id: `ancestor-${reads}` }],
+          children: [],
+          truncated: false,
+        } as never;
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          beginRead,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(started).toEqual([71]);
+    expect(hook.result.current.readGeneration).toBe(0);
+    await reactAct(async () => releaseInitial!());
+    await flush();
+    expect(hook.result.current.readGeneration).toBe(71);
+
+    await reactAct(async () => {
+      await hook.result.current.refresh();
+    });
+    await flush();
+    expect(started).toEqual([71, 72]);
+    expect(hook.result.current.readGeneration).toBe(72);
+    await hook.unmount();
+  });
+
+  test("does not assign a post-move generation when a remount joins a pre-move lineage GET", async () => {
+    let requests = 0;
+    let channelId = "channel-a";
+    let causalGeneration = 0;
+    const beginRead = () => ++causalGeneration;
+    let releaseInitial!: () => void;
+    let markInitialStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: beginRead,
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        const snapshotChannelId = channelId;
+        if (request === 1) {
+          markInitialStarted();
+          await initialGate;
+        }
+        return new Response(
+          JSON.stringify({
+            ancestors: [
+              {
+                id: "ancestor",
+                workspaceId: WORKSPACE_ID,
+                channelId: snapshotChannelId,
+              },
+            ],
+            children: [],
+            truncated: false,
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    // A non-authority consumer keeps the pre-move shared lineage request alive
+    // while the authority-bearing rail is collapsed.
+    const collapsedRail = await renderHook(
+      () => useSessionLineage(null, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await collapsedRail.unmount();
+    const preMoveConsumer = client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    await initialStarted;
+
+    channelId = "channel-b";
+    const acceptedMoveGeneration = beginRead();
+    const remountedRail = await renderHook(
+      () =>
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          beginRead,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(requests).toBe(1);
+    expect(causalGeneration).toBe(acceptedMoveGeneration);
+    releaseInitial();
+    await preMoveConsumer;
+    await flush();
+
+    expect(remountedRail.result.current.lineage?.ancestors[0]?.channelId).toBe("channel-a");
+    expect(remountedRail.result.current.readGeneration).toBeGreaterThan(0);
+    expect(remountedRail.result.current.readGeneration).toBeLessThan(acceptedMoveGeneration);
+
+    await reactAct(async () => {
+      await remountedRail.result.current.refresh();
+    });
+    await flush();
+    expect(requests).toBe(2);
+    expect(remountedRail.result.current.lineage?.ancestors[0]?.channelId).toBe("channel-b");
+    expect(remountedRail.result.current.readGeneration).toBeGreaterThan(acceptedMoveGeneration);
+    await remountedRail.unmount();
+  });
+
+  test("uses a post-settlement generation when the rail joins a non-authority lineage GET", async () => {
+    let requests = 0;
+    let causalGeneration = 0;
+    const beginRead = () => ++causalGeneration;
+    const acceptedMoveGeneration = beginRead();
+    let releaseInitial!: () => void;
+    let markInitialStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: beginRead,
+      fetch: async () => {
+        requests += 1;
+        markInitialStarted();
+        await initialGate;
+        return new Response(
+          JSON.stringify({
+            ancestors: [
+              {
+                id: "ancestor",
+                workspaceId: WORKSPACE_ID,
+                channelId: "channel-c",
+              },
+            ],
+            children: [],
+            truncated: false,
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    // A mounted route/header poll starts the shared request after B settles;
+    // the authority-bearing rail joins only after that actual network start.
+    const nonAuthorityConsumer = client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    await initialStarted;
+    const remountedRail = await renderHook(
+      () =>
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          beginRead,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(requests).toBe(1);
+    expect(causalGeneration).toBe(acceptedMoveGeneration + 1);
+    releaseInitial();
+    await nonAuthorityConsumer;
+    await flush();
+
+    expect(remountedRail.result.current.lineage?.ancestors[0]?.channelId).toBe("channel-c");
+    expect(remountedRail.result.current.readGeneration).toBeGreaterThan(acceptedMoveGeneration);
+    expect(remountedRail.result.current.readGeneration).toBe(causalGeneration);
+    await remountedRail.unmount();
+  });
+
   test("loads lineage and refreshes on session lineage events", async () => {
     let reads = 0;
     const client = fakeClient({
@@ -2554,6 +2829,85 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("a host submit response wins over an older in-flight draft read", async () => {
+    const initial: ComposerDraft = {
+      revision: 3,
+      text: "ship through the host",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let reads = 0;
+    let releaseStaleRead: (() => void) | null = null;
+    const staleReadGate = new Promise<void>((resolve) => {
+      releaseStaleRead = resolve;
+    });
+    const base = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 1) return initial;
+        await staleReadGate;
+        return initial;
+      },
+    });
+    const client = createEmbeddedSessionClient(base, {
+      overrides: {
+        submitComposerDraft: async (_workspaceId, _sessionId, request) => {
+          const turn = fakeTurn({ prompt: request.text });
+          return {
+            accepted: {
+              ...makeEvent(2, "user.message", { text: request.text }),
+              clientEventId: request.clientEventId,
+            },
+            turn,
+            draft: {
+              ...initial,
+              revision: request.expectedDraftRevision + 1,
+              text: "",
+            },
+            receipt: promptReceipt(turn.id),
+            routing: "accepted_for_execution",
+            interruptionCount: 0,
+            replay: false,
+          };
+        },
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+        }),
+      noEvents,
+    );
+    await flush();
+    expect(hook.result.current.value).toBe(initial.text);
+
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "edit" })]);
+    await flush();
+    expect(reads).toBe(2);
+
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(hook.result.current.draftRevision).toBe(4);
+    expect(hook.result.current.value).toBe("");
+
+    await flushing(async () => {
+      releaseStaleRead!();
+      await staleReadGate;
+    });
+    await flush();
+    expect(hook.result.current.draftRevision).toBe(4);
+    expect(hook.result.current.value).toBe("");
+    await hook.unmount();
+  });
+
   test("historical feed hydration reconciles once without replaying every old event", async () => {
     let reads = 0;
     const client = fakeClient({
@@ -2884,6 +3238,42 @@ describe("useComposer durable draft and control binding", () => {
     );
     await flush();
     expect(reads).toBe(1);
+    await hook.unmount();
+  });
+
+  test("same-revision soft reloads do not republish decoded draft state", async () => {
+    let reads = 0;
+    const authoritative: ComposerDraft = {
+      revision: 7,
+      text: "settled draft",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return { ...authoritative, resources: [] };
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+    const firstProjection = hook.result.current.draft;
+    expect(firstProjection?.revision).toBe(7);
+
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "edit" })]);
+    await flush();
+
+    expect(reads).toBe(2);
+    expect(hook.result.current.draft).toBe(firstProjection);
     await hook.unmount();
   });
 
@@ -3534,6 +3924,33 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.error?.message).toBe(
       "OpenGeni is temporarily unavailable — retry. Reference: edge-503-safe.",
     );
+    await hook.unmount();
+  });
+
+  test("retryable draft hydrate failures stay bounded across client identity churn", async () => {
+    let reads = 0;
+    const failingClient = () =>
+      fakeClient({
+        getComposerDraft: async () => {
+          reads += 1;
+          throw gatewayError(503);
+        },
+      });
+    const hook = await renderHook(
+      (client: ReturnType<typeof failingClient>) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      failingClient(),
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    for (let index = 0; index < 10; index += 1) {
+      await hook.rerender(failingClient());
+    }
+    await flush();
+
+    expect(reads).toBe(1);
+    expect(hook.result.current.error).toMatchObject({ status: 503, retryable: true });
     await hook.unmount();
   });
 

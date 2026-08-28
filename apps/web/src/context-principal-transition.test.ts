@@ -67,6 +67,7 @@ describe("principal transition contract", () => {
       "setSelectedRepoIds(new Set())",
       "setSelectedCapabilityToolIds(new Set())",
       "setWorkspaceStateOwnerId(workspaceId)",
+      "sessionChannelProjectionAuthority.clearWorkspace(previousWorkspaceId)",
     ]) {
       expect(reset).toContain(requiredFence);
     }
@@ -102,6 +103,45 @@ describe("principal transition contract", () => {
     );
     expect(accessLoad.indexOf("ownsPrincipalTransition(")).toBeLessThan(
       accessLoad.indexOf('toast.error("Failed to load workspace access"'),
+    );
+  });
+
+  test("browser actor changes unmount the old routed tree before transport rotation", () => {
+    const transition = sourceBetween(
+      "async function handleBrowserActorTransition(",
+      "// Context actions keep one identity",
+    );
+    expect(transition).toContain("flushSync(() => {");
+    expect(transition.indexOf("flushSync(() => {")).toBeLessThan(
+      transition.indexOf("configureManagedActorEpoch("),
+    );
+    expect(transition.indexOf("if (transition.to === null) return;")).toBeLessThan(
+      transition.indexOf("const acceptedPrincipal"),
+    );
+    expect(transition).toContain(
+      'if (transition.to.selectedSlotId === null || transition.to.state !== "ready")',
+    );
+    expect(transition.indexOf('await navigate({ to: "/", replace: true });')).toBeGreaterThan(
+      transition.indexOf("if (transition.to === null) return;"),
+    );
+    expect(transition.indexOf('await navigate({ to: "/", replace: true });')).toBeLessThan(
+      transition.indexOf("const acceptedPrincipal"),
+    );
+    for (const requiredClear of [
+      "invalidatePrincipalWorkspaceState();",
+      "setAuthSession(undefined);",
+      "setAccessContext(null);",
+      "setWorkspaces([]);",
+    ]) {
+      expect(transition.indexOf(requiredClear)).toBeGreaterThan(
+        transition.indexOf("flushSync(() => {"),
+      );
+      expect(transition.indexOf(requiredClear)).toBeLessThan(
+        transition.indexOf("configureManagedActorEpoch("),
+      );
+    }
+    expect(transition.indexOf("setAccessKeyVersion((version) => version + 1);")).toBeGreaterThan(
+      transition.indexOf("configureManagedActorEpoch("),
     );
   });
 

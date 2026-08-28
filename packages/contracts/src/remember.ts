@@ -21,7 +21,7 @@ import { WorkspaceInstructionPolicyTarget } from "./workspace-instruction-polici
 /**
  * Explicit user-directed durable write ("remember X for this workspace").
  *
- * The lane is the Company Brain area the content belongs to:
+ * The lane is the Agent Knowledge area the content belongs to:
  * - `preference`: a Ways-of-working preference (how agents should act);
  * - `instruction_policy`: a mandatory workspace rule ("always"/"never");
  * - `knowledge`: a company/product/people fact.
@@ -84,7 +84,7 @@ export const RememberRequest = z.discriminatedUnion("lane", [
       lane: z.literal("instruction_policy"),
       // A mandatory rule is composed verbatim into the prompt of every session
       // it applies to, for as long as it stays active, so this is the tightest
-      // agent budget in the Company Brain.
+      // agent budget in Agent Knowledge.
       content: z
         .string()
         .trim()
@@ -145,11 +145,13 @@ export const RememberActivationSummary = z.discriminatedUnion("destination", [
     destination: z.literal("knowledge"),
     receiptId: z.string().uuid(),
     claimId: z.string().uuid(),
+    /** The retrievable Memory record materialized from the approved claim. */
+    memoryId: z.string().uuid(),
     approvalReviewId: z.string().uuid(),
     effectiveAt: z.string().datetime().nullable(),
     authorityKind: z.literal("human_confirmed"),
-    /** Knowledge approvals are undone through the Knowledge review lifecycle (`knowledge_correct` or a human revocation). */
-    undo: z.literal("knowledge_review"),
+    /** Correct or archive the materialized record through the Memory lifecycle. */
+    undo: z.literal("memory_management"),
   }),
 ]);
 export type RememberActivationSummary = z.infer<typeof RememberActivationSummary>;

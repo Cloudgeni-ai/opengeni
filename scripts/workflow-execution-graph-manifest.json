@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "ab93e41563072a09adba74d96cd824cdb3680c5cffa6878a2a465b79561b4e54"
+      "sha256": "0dd7111339f87b03e8c330fdfbeb235c6a4238f5372559efb9b394565a62472f"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "15ae3450651d33fd5751c8ea0ca060522dd8681f4d6c30e5cbdde3e2f81dcdc1"
+      "sha256": "5933e981bf99403905c5967adc038a7da1155b15e1813b6dd3bf6caaa383186f"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -551,6 +551,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "browser-acceptance",
+      "step": "Timeline pagination and tip-follow browser regressions",
+      "sha256": "010c7a4b7d04eb1940dbfc2c7e4c27db4f711a1217a5dca52c70da65e61c676f"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "deployment",
       "step": "Install dependencies",
       "sha256": "c002a6d527c30937cac224d77e729583974d8a4fba6e2e515a2b56231aa499a4"
@@ -685,7 +691,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "65417e12aa310fdda747063ba8c0dc71546ca0deab02384a710f9a6c4c4eb96f"
+      "sha256": "40a40a3d2887f9dbb80f0e32ef0d045e3c4e2299c00f6e58cc5d454c6b795b1f"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -709,7 +715,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "c5654a8fbce26ca93c0f42308c8ec77bec4f02dc63db52db5c40f53041f2b25d"
+      "sha256": "20a914e98aea4f6c8ff25ad17e14a0a5523db1faeeafcb8cf14aa8dc63ca10a8"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -774,6 +780,12 @@
     {
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
+      "step": "Admit protected main source",
+      "sha256": "faec0df74f1ec9d6b83e2b21389f8cc52ec16d8f7873ecbec89edaec0cbc1bf8"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
       "step": "Install dependencies",
       "sha256": "f8bcca05a8977b957eae51d4f41a09276a319cab0e4adba860584025f55132cc"
     },
@@ -782,6 +794,12 @@
       "job": "publish",
       "step": "Publish canary versions",
       "sha256": "7c1b768bb42a75e60e78fcad73d4655b249190a6268f232eae2d32f55af0a3b9"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
+      "step": "Verify exact source",
+      "sha256": "e10d2a67ae143c5223960cad1b2433bdeba7046fecd1a05ae1519a8a880e5022"
     },
     {
       "workflow": ".github/workflows/publish-packages.yml",

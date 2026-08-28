@@ -1,19 +1,22 @@
 /* ----------------------------------------------------------------------------
    Tip-follow camera (pure)
 
-   DOM truth is immediate; the camera eases down toward the layout tip.
+   DOM truth is immediate; while pinned, the viewport tracks new layout growth
+   immediately so already-rendered content is never hidden behind the camera.
+   Any debt that existed before the growth still closes through the camera.
    No React, no DOM — the shell reads metrics, calls step, writes scrollTop.
 
-   One law while pinned — second-order camera (no hard first bite):
+   One law for pre-existing debt — second-order camera:
 
      desiredVel = debt / τ
      scrollVel  → exponential approach to desiredVel (accel τ = k·τ)
      scrollTop += scrollVel · dt   (clamp: no overshoot past tip)
 
-   - Debt jumps with layout; velocity cannot — so motion eases in, then as
-     debt falls desiredVel→0 and velocity eases out (soft settle).
+   - Layout growth advances cameraTop by the same amount, preserving rather
+     than increasing existing debt. This keeps the visible stream truthful.
+   - Existing debt eases out as desiredVel→0 (soft settle).
    - τ still adapts (calm / catch-up / line / idle settle).
-   - maxStep is a speed ceiling only, never a one-frame glue.
+   - maxStep is a speed ceiling for catch-up, never a source of stream lag.
    - Shrink is separate: compensate Δh so collapse doesn't fight the ease
    - Snap only for first paint / reduced motion / cold oversized jumps
    -------------------------------------------------------------------------- */
@@ -197,6 +200,11 @@ export function tipFollowNoteGrowth(
   if (previous <= 0) {
     return { ...state, lastHeight: height };
   }
+  if (height < previous && previous - height <= TIP_FOLLOW_SHRINK_EPS_PX) {
+    // Match viewport-shrink deadband memory: the shell retains the paired
+    // pre-shrink scrollTop and this state retains the corresponding height.
+    return state;
+  }
   if (height <= previous) {
     return { ...state, lastHeight: height };
   }
@@ -310,7 +318,7 @@ export function tipFollowMaxStepPx(
     TIP_FOLLOW_CALM_MAX_PX_S +
     (TIP_FOLLOW_BURST_MAX_PX_S - TIP_FOLLOW_CALM_MAX_PX_S) * blend * blend;
   if (hot && frameGrowthPx > 0 && dtMs > 0) {
-    // Allow tracking this frame's growth rate (growthTrack uses a fraction).
+    // Allow pre-existing debt to close without falling behind current growth.
     maxPxS = Math.max(maxPxS, (frameGrowthPx / dtMs) * 1000);
   }
   if (hot && growthVelocityPxPerSec > TIP_FOLLOW_CALM_MAX_PX_S) {
@@ -438,6 +446,53 @@ export function tipFollowCompensateShrink(
   return Math.max(0, Math.min(maxScroll, scrollTop - delta));
 }
 
+export type TipFollowContentShrinkBaseline = {
+  scrollHeight: number;
+  scrollTop: number;
+};
+
+export type TipFollowContentShrinkObservation = {
+  baseline: TipFollowContentShrinkBaseline | null;
+  compensatedScrollTop: number | null;
+};
+
+/**
+ * Retain the geometry from the first sub-epsilon content-shrink frame until
+ * the cumulative collapse crosses the deadband. Browsers may clamp scrollTop
+ * after every tiny frame, so compensating from the latest DOM top would count
+ * those already-applied clamps twice and make the result animation-cadence
+ * dependent.
+ */
+export function tipFollowObserveContentShrink(
+  baseline: TipFollowContentShrinkBaseline | null,
+  previousHeight: number,
+  previousScrollTop: number,
+  nextHeight: number,
+  clientHeight: number,
+  epsPx: number = TIP_FOLLOW_SHRINK_EPS_PX,
+): TipFollowContentShrinkObservation {
+  if (previousHeight <= 0 || nextHeight >= previousHeight) {
+    return { baseline: null, compensatedScrollTop: null };
+  }
+  const retained = baseline ?? {
+    scrollHeight: previousHeight,
+    scrollTop: previousScrollTop,
+  };
+  if (retained.scrollHeight - nextHeight <= epsPx) {
+    return { baseline: retained, compensatedScrollTop: null };
+  }
+  return {
+    baseline: null,
+    compensatedScrollTop: tipFollowCompensateShrink(
+      retained.scrollTop,
+      retained.scrollHeight,
+      nextHeight,
+      clientHeight,
+      epsPx,
+    ),
+  };
+}
+
 /**
  * Viewport shrank (SessionChrome / composer / window). maxScroll rises by ≈Δc;
  * keep the same tip distance: scrollTop += Δc. Without this, pinned follow only
@@ -502,6 +557,14 @@ export function tipFollowStep(
     );
   }
   const target = targetScrollTop(scrollHeight, clientHeight);
+  if (pinned && frameGrowth > 0) {
+    // Preserve the distance that existed before this layout growth instead of
+    // manufacturing new visual debt. The content is already in the DOM; while
+    // pinned, hiding it behind an eased scroll makes frontend streaming appear
+    // slower than the provider and leaves a visible catch-up tail after the
+    // final token. Existing debt still goes through the camera below.
+    cameraTop = Math.min(target, cameraTop + frameGrowth);
+  }
   const debt = target - cameraTop;
   const hot = now < noted.hotUntil;
   const settling = !hot && Math.abs(debt) < TIP_FOLLOW_CATCHUP_DEBT_PX;
@@ -550,7 +613,7 @@ export function tipFollowStep(
   const dtSec = dt / 1000;
   const tauSec = Math.max(tau / 1000, 1e-3);
   // P-gain: held desiredVel would close debt in ~τ. Velocity cannot jump —
-  // it eases toward desiredVel, so a new line accelerates in then settles out.
+  // pre-existing debt accelerates toward desiredVel and then settles out.
   const desiredVel = debt / tauSec;
   const accelTauSec = Math.max(tauSec * TIP_FOLLOW_ACCEL_TAU_FRAC, 0.02);
   const velAlpha = 1 - Math.exp(-dtSec / accelTauSec);

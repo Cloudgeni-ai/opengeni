@@ -1,5 +1,50 @@
 # @opengeni/github
 
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/config@0.22.0
+  - @opengeni/contracts@2.7.0
+
+## 0.6.0
+
+### Minor Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+
+### Patch Changes
+
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+
+## 0.5.5
+
+### Patch Changes
+
+- Updated dependencies [76d6396]
+- Updated dependencies [b5071cf]
+  - @opengeni/contracts@2.5.0
+  - @opengeni/config@0.20.1
+
+## 0.5.4
+
+### Patch Changes
+
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/config@0.20.0
+
 ## 0.5.3
 
 ### Patch Changes

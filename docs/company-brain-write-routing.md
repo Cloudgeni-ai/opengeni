@@ -1,5 +1,10 @@
 # Company Brain write routing
 
+> **Naming:** The user-facing product surface is **Agent Knowledge**. This
+> document and several code identifiers retain the historical Company Brain
+> name for protocol continuity. The structured preference destination is shown
+> to users and described to agents as **Skills**.
+
 OpenGeni does not use one generic `memory_save` destination for every reusable
 observation. Destination selects authority, visibility, lifetime, and review
 semantics; content labels do not. This document records the target routing
@@ -8,12 +13,22 @@ notes plus governed Knowledge and Ways-of-working proposals.
 
 ## Destination matrix
 
-| Destination | Purpose | Authority | Model access | Current status |
-| --- | --- | --- | --- | --- |
-| Knowledge | Sourced company facts and evidence | Documents/scoped-knowledge authority | Permission-first `knowledge_search`/`get`/`browse`; never prompt-injected | Workspace-local claim proposal/correction plus rooted Task-note promotion implemented as append-only review/relation evidence |
-| Ways of working | Human-authoritative policy and preferences | Existing instruction-policy and preference-registry heads | Bounded descriptors by default; full bodies on demand | Workspace-local Knowledge-backed inactive proposal adapters plus atomic rooted Task-note promotion implemented; activation remains human-only |
-| Task notes | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility | Explicit `task_notes_list`; never prompt-injected | Create/list/archive implemented by migration 0239; atomic correction/revert lineage by migration 0260 |
-| Durable agent learning | Reusable technical knowledge beyond one task tree | Existing Memory/governed-learning authorities | Existing retrieval rules | Routing/promotion remains later work |
+| Destination               | Purpose                                                         | Authority                                                                | Model access                                                                                                                     | Current status                                                                                                                                |
+| ------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Remembered Memory         | User-confirmed facts, decisions, incidents, fixes, and outcomes | Reviewed scoped-Knowledge claim plus the canonical workspace Memory gate | `memory_search`; bounded prompt inclusion depends on workspace mode                                                              | Explicit `remember lane=knowledge` preserves claim/evidence provenance, then materializes the exact confirmed text as active Memory           |
+| Scoped Knowledge evidence | Inferred or sourced facts and normalized claims                 | Documents/scoped-knowledge authority                                     | Permission-first Document retrieval where surfaced; normalized claims are governance evidence, not a standalone retrieval corpus | Workspace-local claim proposal/correction and rooted Task-note promotion use the append-only review/relation lifecycle                        |
+| Workspace instructions    | Minimal, always-on workspace rules                              | Existing instruction-policy heads                                        | Bounded body is always composed                                                                                                  | Workspace-local Knowledge-backed inactive proposal adapters plus atomic rooted Task-note promotion implemented; activation remains human-only |
+| Skills                    | Reusable conditional how-to guidance                            | Existing preference-registry heads                                       | Bounded descriptors by default; full bodies on demand                                                                            | Workspace-local Knowledge-backed inactive proposal adapters plus atomic rooted Task-note promotion implemented; activation remains human-only |
+| Task notes                | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility                 | Explicit `task_notes_list`; never prompt-injected                                                                                | Create/list/archive implemented by migration 0239; atomic correction/revert lineage by migration 0260                                         |
+| Workspace Memory          | Existing and explicitly confirmed `knowledge_memories` records  | Existing Memory selector authority                                       | `memory_search`; prompt inclusion depends on workspace mode                                                                      | Generic agent write tools are retired; the reviewed `remember lane=knowledge` confirmation is the bounded write path                          |
+
+One item should have one canonical destination. A request to remember a specific
+incident uses `remember lane=knowledge`, with compact content that can be found
+later through `memory_search`. It does not become a Skill or workspace
+instruction. A conditional procedure
+belongs in Skills. A universal rule that must apply in every turn belongs in
+Workspace instructions and should use the shortest wording that fully states
+the rule.
 
 The router must preserve the selected destination's provenance and may propose
 promotion, but it must not convert an agent observation into active company
@@ -133,8 +148,10 @@ authority, a different learning-policy source, or replacement evidence bytes.
 
 `remember` (`apps/api/src/mcp/remember.ts`, router
 `packages/core/src/domain/remember.ts`) is the one tool for "remember this for
-the workspace". Its lane is the Company Brain area (`preference`,
-`instruction_policy`, or `knowledge`); v1 supports the workspace scope only. The
+the workspace". Its lane is the Agent Knowledge destination (`preference` for
+a Skill, `instruction_policy` for Workspace instructions, or `knowledge` for
+remembered facts, decisions, incidents, fixes, and outcomes); v1 supports the
+workspace scope only. The
 content becomes one exact task note (the evidence, expiring after 90 days), the
 note is promoted through the learning-policy router above with full user
 confidence, and the receipt is one of:
@@ -160,11 +177,11 @@ Durable text an agent authors is prompt cost, so each lane carries an explicit,
 enforced budget from
 [`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts):
 
-| Lane | Where it lands | Agent budget |
-| --- | --- | --- |
-| `instruction_policy` | composed verbatim into the prompt of every session it applies to (every session for a global charter or policy, every session bound to the role for a role policy; at most three entries compose at once) | 600 characters |
-| `preference` | short title and description composed into every session prompt; content retrieved on demand | 1,200 characters |
-| `knowledge` | retrieval evidence, never in the always-composed prefix | 4,000 characters (`REMEMBER_CONTENT_MAX_CHARS`) |
+| Lane                 | Where it lands                                                                                                                                                                                            | Agent budget                                    |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `instruction_policy` | composed verbatim into the prompt of every session it applies to (every session for a global charter or policy, every session bound to the role for a role policy; at most three entries compose at once) | 600 characters                                  |
+| `preference`         | short title and description composed into every session prompt; content retrieved on demand                                                                                                               | 1,200 characters                                |
+| `knowledge`          | retrieval evidence, never in the always-composed prefix                                                                                                                                                   | 4,000 characters (`REMEMBER_CONTENT_MAX_CHARS`) |
 
 The preference budget exists for a different reason than the rule budget, and the
 obvious wording is wrong: shortening a preference's content does not shrink any
@@ -238,10 +255,19 @@ appends an `approved` service review through the guarded
 `governed_learning_apply_knowledge_review` path (service actor, causal human
 retained; since migration 0284 the reason-carrying overload records a truthful
 human-confirmed reason instead of the automatic wording) and records an
-immutable content-free `remember_knowledge_confirmation_receipts` row. Undo is the Knowledge review
-lifecycle itself (`knowledge_correct` or a human revocation), not Learning &
-autonomy history. Knowledge is never approved automatically, even under the
-`automatic` learning mode.
+immutable content-free `remember_knowledge_confirmation_receipts` row. Migration
+0361's dedicated materialization capability resolves the exact
+claim/fact/evidence/review tuple named by that receipt, verifies the Task-note
+text hash, and inserts exact text in a receipt-specific Memory namespace inside
+the same outer transaction as approval. Its immutable
+`remember_knowledge_memory_materializations` row makes replay return the same
+`memoryId` after archival and prevents a normalized lookalike in general Memory
+from substituting for the content the human approved. A failed Memory write
+therefore rolls back approval rather than leaving a write-only claim. The
+returned activation names the resulting `memoryId`;
+correction or archival uses the Memory lifecycle, not Learning & autonomy
+history. Knowledge is never approved or materialized automatically, even under
+the `automatic` learning mode.
 
 `task_note_promote_knowledge` accepts an active, unexpired version-one note from
 the exact caller's root tree plus normalized entity/predicate metadata. The note

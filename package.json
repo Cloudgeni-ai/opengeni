@@ -103,6 +103,7 @@
     "acceptance:interaction-identity-live": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/interaction-identity-live-acceptance.ts",
     "fixture:interaction-ui-live": "bun scripts/interaction-ui-live-fixture.ts",
     "acceptance:interaction-ui-live": "bun scripts/interaction-ui-live-acceptance.ts",
+    "bench:work-discovery": "bun scripts/bench-work-discovery.ts",
     "check:generated-fonts": "bun scripts/generate-noto-jp-loader.ts --check",
     "check:observability-render": "bun scripts/check-observability-render.ts",
     "image:build:api": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target api -t opengeni-api:local .",

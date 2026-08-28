@@ -234,6 +234,26 @@ describe("HumanInputForm async host boundary", () => {
     );
   });
 
+  test("submits an unanswered optional text question as an empty answered response", async () => {
+    const submissions: SubmitHumanInputResponseRequest[] = [];
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request,
+        onSubmit: (response) => {
+          submissions.push(response);
+        },
+        autoFocus: false,
+      }),
+    );
+    await act(async () => {
+      mounted!.container
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(submissions).toEqual([{ outcome: "answered", answers: [] }]);
+  });
+
   test("multi-question header shows count; invalid Send answers focuses first error", async () => {
     const multi = {
       id: "request-multi",
@@ -606,6 +626,35 @@ describe("HumanInputForm async host boundary", () => {
     expect(mounted.container.textContent).toContain("1 of 2");
     expect(mounted.container.textContent).not.toContain("Second request prompt");
     expect(mounted.container.querySelectorAll("[data-human-input-request]")).toHaveLength(1);
+  });
+
+  test("HumanInputSurface hides an elapsed pending request instead of exposing dead controls", async () => {
+    const expired: SessionHumanInputRequest = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      turnId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      turnGeneration: 1,
+      creationAttemptId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      toolCallId: "expired-call",
+      status: "pending",
+      questions: request.questions,
+      allowSkip: true,
+      response: null,
+      respondedBy: null,
+      respondedAt: null,
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      updatedAt: new Date(Date.now() - 1_000).toISOString(),
+    };
+    mounted = await renderComponent(
+      createElement(HumanInputSurface, {
+        requests: [expired],
+        onSubmit: () => undefined,
+      }),
+    );
+    expect(mounted.container.querySelector("[data-human-input-surface]")).toBeNull();
+    expect(mounted.container.querySelector("button")).toBeNull();
   });
 
   test("collapse hides the form body; expand brings the form back", async () => {

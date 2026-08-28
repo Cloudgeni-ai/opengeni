@@ -105,6 +105,24 @@ describe("Slack App Home projection", () => {
     expect(blocks.at(-1)).toMatchObject({ type: "actions", block_id: "opengeni_home_actions" });
   });
 
+  test("uses a prompt-free fallback when an older session has no durable title", () => {
+    const untitled = {
+      ...session("00000000-0000-4000-8000-000000000005", "running", "ignored"),
+      title: null,
+      initialMessage: "API_TOKEN=super-secret-value deploy production",
+    };
+    const serialized = JSON.stringify(
+      buildSlackAppHomeBlocks({
+        sessions: [untitled],
+        workspaceUrl: null,
+        sessionUrl: () => null,
+        nowMs: Date.parse("2026-08-14T12:00:00.000Z"),
+      }),
+    );
+    expect(serialized).toContain("New conversation");
+    expect(serialized).not.toContain("super-secret-value");
+  });
+
   test("access views contain no stale task content", () => {
     const blocks = buildSlackAppHomeAccessBlocks({
       title: "OpenGeni access changed",

@@ -138,6 +138,28 @@ describe("browser analytics configuration", () => {
     ).toBe(true);
   });
 
+  test("work discovery rollout stages have safe independent defaults", () => {
+    const defaults = getSettings();
+    expect(defaults.workDiscoveryEnabled).toBe(true);
+    expect(defaults.workClaimMutationsEnabled).toBe(true);
+    expect(defaults.workDiscoveryHumanAdvisoriesEnabled).toBe(true);
+    expect(defaults.workDiscoveryAutomaticNudgesEnabled).toBe(false);
+
+    const disabled = withEnv(
+      {
+        OPENGENI_WORK_DISCOVERY_ENABLED: "false",
+        OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED: "false",
+        OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED: "false",
+        OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED: "true",
+      },
+      () => getSettings(),
+    );
+    expect(disabled.workDiscoveryEnabled).toBe(false);
+    expect(disabled.workClaimMutationsEnabled).toBe(false);
+    expect(disabled.workDiscoveryHumanAdvisoriesEnabled).toBe(false);
+    expect(disabled.workDiscoveryAutomaticNudgesEnabled).toBe(true);
+  });
+
   test("parses public provider identifiers without treating them as credentials", () => {
     const settings = withEnv(
       {
@@ -407,6 +429,37 @@ describe("Google Drive integration settings", () => {
   });
 });
 
+describe("managed auth browser session-set rollout", () => {
+  test("remains default-off and accepts only the rolling compatibility modes", () => {
+    expect(withEnv({}, () => getSettings()).managedAuthSessionSetMode).toBe("legacy");
+    expect(
+      withEnv({ OPENGENI_MANAGED_AUTH_SESSION_SET_MODE: "dual" }, () => getSettings())
+        .managedAuthSessionSetMode,
+    ).toBe("dual");
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_SESSION_SET_MODE: "enabled" }, () => getSettings()),
+    ).toThrow();
+  });
+
+  test("requires an HTTPS public authority outside local/test", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+          OPENGENI_PUBLIC_BASE_URL: "http://managed.example.test",
+          OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+          OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+          OPENGENI_RESEND_API_KEY: "re_test",
+          OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 1).toString("base64"),
+          OPENGENI_MANAGED_AUTH_SESSION_SET_MODE: "dual",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/must use https when browser session sets are enabled/);
+  });
+});
+
 describe("personal GitHub OAuth settings", () => {
   const enabled = {
     OPENGENI_ENVIRONMENT: "test",
@@ -440,10 +493,13 @@ describe("personal GitHub OAuth settings", () => {
     ).toThrow(/must be configured together/);
   });
 
-  test("requires managed integrations, state signing, encryption, and a distinct client", () => {
-    expect(() =>
+  test("supports local mode and requires integrations, signing, encryption, and a distinct client", () => {
+    expect(
       withEnv({ ...enabled, OPENGENI_PRODUCT_ACCESS_MODE: "local" }, () => getSettings()),
-    ).toThrow(/requires OPENGENI_PRODUCT_ACCESS_MODE=managed/);
+    ).toMatchObject({
+      productAccessMode: "local",
+      githubPersonalOauthEnabled: true,
+    });
     expect(() =>
       withEnv({ ...enabled, OPENGENI_INTEGRATIONS_ENABLED: "false" }, () => getSettings()),
     ).toThrow(/OPENGENI_INTEGRATIONS_ENABLED=true/);

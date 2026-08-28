@@ -30,13 +30,17 @@ const previewSetup = mock(
 
 mock.module("@/api", () => ({
   AuthApiError: class AuthApiError extends Error {},
+  apiBaseUrl: "",
   completeOrganizationUserSetup: completeSetup,
+  managedActorMutationBusySnapshot: () => false,
   previewOrganizationUserSetup: previewSetup,
   completeSelfServiceOrganizationSetup: completeSelfServiceSetup,
   getSelfServiceOrganizationOnboardingStatus: mock(async () => ({
     state: "required" as const,
   })),
   sendVerificationEmail: resendVerification,
+  subscribeManagedActorInvalidation: () => () => undefined,
+  subscribeManagedActorMutationBusy: () => () => undefined,
 }));
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#signin">{children}</a>,
@@ -102,6 +106,34 @@ describe("organization onboarding UI", () => {
         email: "ada@example.test",
         password: "password1234",
       });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("broker registration can expose signup and resend without a direct sign-in form", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            initialMode="signup"
+            allowedModes={["signup"]}
+            presentation="embedded"
+            onSubmit={async () => undefined}
+          />,
+        ),
+      );
+      expect(container.textContent).toContain("Create account");
+      expect(container.textContent).toContain("Resend verification email");
+      expect(
+        Array.from(container.querySelectorAll("button")).some(
+          (button) => button.textContent?.trim() === "Sign in",
+        ),
+      ).toBe(false);
     } finally {
       await act(async () => root.unmount());
       container.remove();

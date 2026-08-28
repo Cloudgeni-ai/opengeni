@@ -523,13 +523,11 @@ function repositoryApiUrl(path) {
 }
 
 async function terminalVersionIdentity(api, context) {
-  const [main, pull, versionBranch, headCommit] = await Promise.all([
-    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+  const [pull, versionBranch, headCommit] = await Promise.all([
     api.get(repositoryPath(`/pulls/${context.prNumber}`)),
     api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.versionBranch}`)),
     api.get(repositoryPath(`/git/commits/${context.headSha}`)),
   ]);
-  assertMainRef(main, context.baseSha, "terminal default branch");
   assertVersionPull(pull, context);
   invariant(
     versionBranchProjection(versionBranch) === context.headSha,
@@ -749,14 +747,12 @@ export async function validateVersionPrCiAdmission(options = {}) {
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const context = automationCiContext(env, options.inputs);
   const api = githubClient(fetchImpl, context.token);
-  const [repository, main, pull, sourceRun] = await Promise.all([
+  const [repository, pull, sourceRun] = await Promise.all([
     api.get(repositoryPath("")),
-    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
     api.get(repositoryPath(`/pulls/${context.prNumber}`)),
     api.get(repositoryPath(`/actions/runs/${context.sourceRunId}`)),
   ]);
   assertRepository(repository);
-  assertMainRef(main, context.baseSha);
   assertVersionPull(pull, context);
   assertSourceRun(sourceRun, context);
 

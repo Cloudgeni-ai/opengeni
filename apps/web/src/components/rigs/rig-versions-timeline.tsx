@@ -158,7 +158,12 @@ function VersionRow({
       {open ? (
         <div className="grid gap-3 border-t border-border/70 px-3.5 py-3">
           <DetailRow label="Base image">
-            <span className="font-mono text-xs">{version.image ?? "Default image"}</span>
+            <span className="text-xs">
+              Deployment-managed platform image
+              {version.image ? (
+                <span className="text-fg-subtle"> · legacy override ignored</span>
+              ) : null}
+            </span>
           </DetailRow>
           <DetailRow label="Setup script">
             {version.setupScript ? (

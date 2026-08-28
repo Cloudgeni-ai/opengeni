@@ -1,13 +1,50 @@
 import { describe, expect, test } from "bun:test";
 import type { SendMessageInput, SessionEvent } from "@opengeni/sdk";
+import { startTransition, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { useComposer } from "../src/hooks/use-composer";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
-import { actRun, flush, registerDom, renderHook } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 
 registerDom();
 
 describe("useComposer embedding policy", () => {
+  test("a synchronous host render cannot project an older composer state lane", async () => {
+    const projectedValues: string[] = [];
+    let setComposerValue!: (value: string) => void;
+    let forceHostRender!: () => void;
+
+    function Harness() {
+      const [, setHostRevision] = useState(0);
+      const composer = useComposer(SESSION_ID, {
+        client: fakeClient({}),
+        workspaceId: WORKSPACE_ID,
+        draftPersistence: "disabled",
+        initialPolicy: {
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+        },
+      });
+      projectedValues.push(composer.value);
+      setComposerValue = composer.setValue;
+      forceHostRender = () => setHostRevision((revision) => revision + 1);
+      return null;
+    }
+
+    const rendered = await renderComponent(<Harness />);
+    projectedValues.length = 0;
+    await actRun(() => {
+      startTransition(() => setComposerValue("alpha Xbeta gamma"));
+      flushSync(forceHostRender);
+    });
+
+    expect(projectedValues).not.toContain("");
+    expect(projectedValues.at(-1)).toBe("alpha Xbeta gamma");
+    await rendered.unmount();
+  });
+
   test("ordinary Send clears the draft immediately and preserves rapid messages through handoff", async () => {
     const sessionId = crypto.randomUUID();
     const attempts: SendMessageInput[] = [];
@@ -98,6 +135,48 @@ describe("useComposer embedding policy", () => {
     ]);
     await hook.rerender([...accepted, ...started]);
     expect(hook.result.current.optimisticMessages).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("ordinary Send clears its local draft before the host submission callback", async () => {
+    const draftVisibilityOnSubmitted: boolean[] = [];
+    let readDraftContent = () => true;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => ({
+        id: crypto.randomUUID(),
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        sequence: 1,
+        type: "user.message",
+        clientEventId: typeof input === "string" ? undefined : input.clientEventId,
+        payload: input,
+        occurredAt: new Date().toISOString(),
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: {
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          },
+          onSubmitted: () => {
+            draftVisibilityOnSubmitted.push(readDraftContent());
+          },
+        }),
+      undefined,
+    );
+    readDraftContent = () => hook.result.current.hasDraftContent();
+
+    await actRun(() => hook.result.current.setValue("submitted once"));
+    expect(await actRun(() => hook.result.current.send())).toBe(true);
+
+    expect(draftVisibilityOnSubmitted).toEqual([false]);
+    expect(hook.result.current.value).toBe("");
     await hook.unmount();
   });
 

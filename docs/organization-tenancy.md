@@ -30,6 +30,14 @@ receives no direct table DML. Privileged migration/operator connections can
 inspect the scaffold. No API, SDK, worker, MCP, UI, or resource DAO uses it in
 Slice A.
 
+Advisory related-work discovery does not create another visibility lane. A
+session and its typed work claims can influence matches, totals, cursors, or
+ancestor labels only after the existing workspace/session-tenancy,
+`user_private`, Slack-private, subject, and optional host-scope predicates admit
+that session. Claim provenance, shared subject identity, or an exact subject
+match never grants access or changes an authority epoch. See
+[`work-discovery.md`](work-discovery.md).
+
 ## Common owner grant lifecycle
 
 Migration `0253_common_user_resource_authority_lifecycle.sql` activates the
@@ -822,6 +830,65 @@ roster and shared-workspace grants. Workspace settings performs no raw human
 roster read or edit; it shows only the notice/link back to Organization
 settings, while its separate Slack access-request queue keeps its existing
 workspace-admin lifecycle.
+
+### Recovery custody and permanent workspace ownership
+
+The complete security, notification, rollout, self-hosting, and unsupported
+operation contract is in
+[`organization-recovery.md`](organization-recovery.md).
+
+Migration `0363_organization_recovery_custody.sql` adds the organization-owner
+recovery boundary. A policy names exactly three distinct active non-owner
+canonical-human memberships. Each person must accept against the exact policy,
+membership, subject, identity, and authentication revisions before the policy
+becomes active. A later membership suspension, role change, identity merge, or
+authentication revision makes that evidence ineligible instead of silently
+retargeting it.
+
+Any eligible custodian may start one recovery operation for an existing active
+non-owner canonical-human member. Two distinct accepted custodians must approve;
+the target cannot approve their own promotion even when they are also a
+custodian. The second valid approval starts one fixed seven-day cooldown. The
+operation expires after 30 days, and an existing owner can cancel it before
+execution. Execution revalidates the complete policy, target, approvals,
+cooldown, expiry, canonical identity, and managed actor fence in one
+transaction. Its only authority change is promoting the target membership to
+an additional organization owner. It never removes or demotes an existing
+owner, moves or shares Personal content, transfers a workspace, changes billing
+ownership, or rewrites workspace access.
+
+Configuration, acceptance, starting, approval, cancellation, and execution
+require a current canonical managed-browser human plus a selected-slot
+`complete_reauth` receipt from the selected account slot within ten minutes. Every mutation takes
+the managed actor fence before the canonical `organization-membership:<account>`
+advisory lock, then locks the account, recovery state, membership, canonical
+identity, and append-only evidence in deterministic order. Operation ids are
+body-bound replay keys. FORCE-RLS policy/head/custodian/acceptance/operation/
+approval/receipt/event/outbox tables grant the application role no direct DML;
+schema-local, PUBLIC-revoked SECURITY DEFINER functions own the lifecycle.
+Notification intent is committed with the recovery event through an outbox,
+and each provider attempt is journaled as started then sent, failed, or
+outcome-unknown under a stable idempotency key. The repository fake provider is
+the conformance transport; a production provider remains an operator-selected
+adapter rather than part of the custody authority decision.
+
+The public surface is rooted at
+`/v1/organizations/:organizationId/recovery`: read overview, replace/disable a
+policy, accept custody, start an operation, and approve/cancel/execute one exact
+operation. Contracts and SDK types expose server-owned capabilities so the web
+Recovery section never reconstructs authorization in the browser. Conflict
+responses require a fresh read and a new user action rather than replay with a
+new body. The section shows the three acceptances, two-person quorum, exact
+cooldown/expiry, target, notification evidence, and promotion-only consequence.
+
+Workspace organization ownership is permanent. Migration 0363 installs a
+`BEFORE UPDATE OF account_id` trigger that rejects every distinct organization
+change even for migration-owner direct SQL. Authorized
+`PATCH /v1/workspaces/:workspaceId` requests containing `accountId` receive the
+stable `workspace_transfer_unsupported` conflict before any database update.
+Same-organization handoff uses workspace grants. Cross-organization workspace
+transfer, billing transfer, Personal-workspace transfer, and ownership
+replacement remain unsupported operations.
 
 Migration `0351_organization_user_setup_delivery.sql` adds the rolling durable
 invitation-email delivery boundary described above. Its lock prefix is

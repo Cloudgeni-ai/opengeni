@@ -1,5 +1,139 @@
 # @opengeni/worker-bundle
 
+## 0.22.8
+
+### Patch Changes
+
+- 35db41b: Preserve the exact provider retry count when an operational database outage interrupts same-turn recovery, preventing stale replacement attempts from reopening an already-consumed retry generation.
+- Updated dependencies [7238fa4]
+  - @opengeni/config@0.22.0
+  - @opengeni/contracts@2.7.0
+  - @opengeni/db@3.6.0
+  - @opengeni/core@2.5.3
+  - @opengeni/documents@0.8.6
+  - @opengeni/github@0.6.1
+  - @opengeni/runtime@1.4.2
+  - @opengeni/storage@0.2.110
+  - @opengeni/codemode@0.4.17
+  - @opengeni/events@0.4.4
+  - @opengeni/observability@0.8.9
+
+## 0.22.7
+
+### Patch Changes
+
+- f8c7b3b: Keep a turn active when its post-compaction continuation ends without a terminal model response, recovering from the durable compacted checkpoint instead of emitting an empty completion and advancing queued prompts.
+- Updated dependencies [18afc44]
+- Updated dependencies [bc88a28]
+- Updated dependencies [3a004ff]
+  - @opengeni/db@3.5.2
+  - @opengeni/core@2.5.2
+  - @opengeni/documents@0.8.5
+  - @opengeni/events@0.4.3
+
+## 0.22.6
+
+### Patch Changes
+
+- Updated dependencies [da0c2d2]
+- Updated dependencies [09beefa]
+- Updated dependencies [92f227f]
+  - @opengeni/db@3.5.1
+  - @opengeni/observability@0.8.8
+  - @opengeni/core@2.5.1
+  - @opengeni/documents@0.8.4
+  - @opengeni/events@0.4.2
+
+## 0.22.5
+
+### Patch Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+- 3dfec4a: Checkpoint complete tool-call history before any follow-up model request reaches its provider dispatch boundary.
+- 96422ad: Quarantine repeatedly unresolvable retained-process provider bindings onto a long fail-closed recheck interval without releasing workspace blockers.
+- aaeffe9: Skip human-bound preference snapshot probes for service-only turns while preserving causal-human and legacy subject snapshots.
+- df38990: Recover the exact claimed turn after operational database failure before turn-start completion instead of terminally failing it.
+- a521e65: Preserve provider-reported tool-search call identities across durable receipts, runtime events, and replay sanitization.
+- Updated dependencies [a7912ea]
+- Updated dependencies [d7ab403]
+- Updated dependencies [9ef491b]
+- Updated dependencies [5d4edd4]
+- Updated dependencies [986f5fe]
+- Updated dependencies [03d1c6e]
+- Updated dependencies [f6375f2]
+- Updated dependencies [6e12f3a]
+- Updated dependencies [a521e65]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+  - @opengeni/core@2.5.0
+  - @opengeni/db@3.5.0
+  - @opengeni/github@0.6.0
+  - @opengeni/documents@0.8.3
+  - @opengeni/runtime@1.4.1
+  - @opengeni/storage@0.2.109
+  - @opengeni/codemode@0.4.16
+  - @opengeni/events@0.4.1
+  - @opengeni/observability@0.8.7
+
+## 0.22.4
+
+### Patch Changes
+
+- 76d6396: Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, custom-role and old-image rolling-compatible least-privilege database posture, and UI projections that never use raw initial prompts as display names. Durable title fanout now requires a versioned subscriber-recovery capability: managed NATS and supported embedded brokers coalesce one Postgres catch-up after reconnect, while legacy buses without that contract fail readiness/worker startup before durable rows can be acknowledged.
+- b5071cf: Require every Rig to layer setup and checks on the deployment-managed platform sandbox, reject new explicit Rig image overrides, keep provider-native image ids out of durable lease identity, and verify Browser, Terminal, and Computer services before publishing a Rig provider image.
+- Updated dependencies [76d6396]
+- Updated dependencies [b5071cf]
+  - @opengeni/contracts@2.5.0
+  - @opengeni/db@3.4.0
+  - @opengeni/events@0.4.0
+  - @opengeni/runtime@1.4.0
+  - @opengeni/core@2.4.0
+  - @opengeni/codemode@0.4.15
+  - @opengeni/config@0.20.1
+  - @opengeni/documents@0.8.2
+  - @opengeni/github@0.5.5
+  - @opengeni/observability@0.8.6
+  - @opengeni/storage@0.2.108
+
+## 0.22.3
+
+### Patch Changes
+
+- 8fabf12: Send first-party function tools through the Chat Completions tool transport for
+  Chat-based providers, including OpenCode, instead of encoding them as
+  Responses-only hosted tools.
+- Updated dependencies [8fabf12]
+- Updated dependencies [8fabf12]
+  - @opengeni/db@3.3.1
+  - @opengeni/core@2.3.1
+  - @opengeni/documents@0.8.1
+  - @opengeni/events@0.3.126
+
+## 0.22.2
+
+### Patch Changes
+
+- Updated dependencies [47b88d3]
+- Updated dependencies [d47da57]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [ba29352]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+- Updated dependencies [c10f396]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/core@2.3.0
+  - @opengeni/db@3.3.0
+  - @opengeni/documents@0.8.0
+  - @opengeni/config@0.20.0
+  - @opengeni/runtime@1.3.2
+  - @opengeni/codemode@0.4.14
+  - @opengeni/events@0.3.125
+  - @opengeni/github@0.5.4
+  - @opengeni/observability@0.8.5
+  - @opengeni/storage@0.2.107
+
 ## 0.22.1
 
 ### Patch Changes

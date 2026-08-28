@@ -93,6 +93,7 @@ import {
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
   isCompactionSummaryFailure,
+  PostCompactionContinuationEmptyError,
   shouldRecoverCompactionProviderFailure,
   classifyContextWindowOverflowError,
 } from "./errors";
@@ -101,6 +102,7 @@ import {
   toolCallProducesRetainableSessionImage,
   completedToolCallFromSdkEvent,
 } from "./history";
+import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
 import {
   modelUsageSourceKey,
   recordCompletedModelCallBeforeOwnershipFences,
@@ -459,10 +461,13 @@ export async function runTurnStreamAttempt(
   // the first no-response-ID fallback key and suppress a real model call.
   const modelResponseState = createModelResponseEventState(claimedModelUsageSourceKeys);
   let workerPreparationTotalRecorded = false;
-  const runStreamAttempt = async (): Promise<RunAgentTurnResult> => {
+  const runStreamAttempt = async (options: {
+    requireTerminalModelResponse: boolean;
+  }): Promise<RunAgentTurnResult> => {
     if (!runInput) {
       throw new Error("Run input was not prepared");
     }
+    const responseCountBeforeStream = modelResponseState.responseCount;
     eventing.stream = undefined;
     eventing.batcher = null;
     // The SDK emits every processed call item for one model response before
@@ -483,6 +488,7 @@ export async function runTurnStreamAttempt(
       resolvedModel?.provider.kind === "xai-subscription";
     let fallbackProviderRequestStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
+      await checkpointHistoryBeforeProviderDispatch(historySink);
       if (
         providerPublishesNativeRequestEvents ||
         eventing.firstModelRequestPreparationRecorded ||
@@ -1228,6 +1234,21 @@ export async function runTurnStreamAttempt(
       eventing.stream.completed.catch(() => undefined),
       cancellationSignal,
     );
+    if (
+      options.requireTerminalModelResponse &&
+      eventing.stream.interruptions.length === 0 &&
+      modelResponseState.responseCount === responseCountBeforeStream
+    ) {
+      // A fresh post-compaction stream may be returned already cancelled by
+      // the SDK/runtime without yielding an event or terminal response. That
+      // is not a completed logical turn: accepting finalOutput's undefined ->
+      // empty-string fallback would release the queue and start newer user
+      // work. Cancellation retains priority; otherwise checkpoint and recover
+      // this exact turn from the durable compacted history.
+      throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
+      throw new PostCompactionContinuationEmptyError();
+    }
     if (!streamSawPerResponseUsage) {
       const aggregateUsage = eventing.stream.state.usage;
       const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
@@ -1531,7 +1552,9 @@ export async function runTurnStreamAttempt(
   let retriedAfterCompaction = false;
   while (true) {
     try {
-      const result = await runStreamAttempt();
+      const result = await runStreamAttempt({
+        requireTerminalModelResponse: retriedAfterCompaction,
+      });
       if (retriedAfterCompaction) {
         observability.info("context compaction recovery succeeded after in-activity retry", {
           sessionId: input.sessionId,

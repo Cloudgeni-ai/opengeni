@@ -60,9 +60,13 @@ Settlement is first-writer-wins under a database lock and compare-and-set:
 - a response is accepted only for the current execution generation;
 - a recovery may advance that generation but cannot change the persisted
   questions, Skip policy, or deadline for the same stable tool call;
-- a client event id makes response retries idempotent;
+- a client event id makes response retries idempotent. Replaying the same key
+  or submitting a later duplicate returns the already-committed terminal event
+  without appending another event or registering another workflow wake;
 - Steer, cancellation, supersession, terminal failure, and completion close
-  any still-pending request as `cancelled`;
+  any still-pending request as `cancelled` and append its canonical terminal
+  response event. If an older/event-drifted cancelled row lacks that event, the
+  first terminal replay repairs it once without waking terminal work;
 - Pause preserves an unexecuted request, just as it preserves an ordinary
   pending approval. Resume admits that same frozen turn;
 - expiry is enforced by a replay-safe Temporal timer and remains correct across
@@ -121,6 +125,10 @@ Pending or historical requests are readable with `sessions:read`:
   (optional `status` query)
 - `GET /v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests/:requestId`
 
+The `status=pending` list is the actionable projection: elapsed deadlines and
+rows waiting for the workflow to re-freeze a remaining parallel interruption
+are omitted until they can truthfully accept a response.
+
 A response uses the ordinary controlled event endpoint and therefore requires
 `sessions:control`:
 
@@ -139,8 +147,16 @@ A response uses the ordinary controlled event endpoint and therefore requires
 ```
 
 The SDK exposes `listHumanInputRequests`, `getHumanInputRequest`, and
-`submitHumanInputResponse`. A stale, settled, or wrong-generation response is a
-`409`; a malformed answer is a `422`; an unknown request is a `404`.
+`submitHumanInputResponse`. A settled response returns the already-committed
+terminal event. A pending request that no longer owns the current
+requires-action generation is a `409`; a malformed answer is a `422`; an
+unknown request is a `404`.
+
+Slack treats a reply as a structured answer only when the committed outcome is
+`answered` or `skipped`. If expiry or cancellation wins after Slack reads the
+actionable request, OpenGeni still publishes that terminal settlement but then
+submits the incoming text as an ordinary message so the conversation never
+silently consumes it.
 
 ## React and embedded hosts
 

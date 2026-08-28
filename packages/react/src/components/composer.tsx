@@ -20,6 +20,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -51,6 +52,7 @@ import {
 } from "../lib/composer-responsive-context";
 import { composerSubmissionErrorMessage, formatBytes, formatRelativeTime } from "../lib/format";
 import type { PickerModelRow } from "../model-policy";
+import { useLightboxOptional } from "../timeline/screenshot-lightbox";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
 import { ModelPicker as ModelPickerView } from "./model-picker";
@@ -134,6 +136,10 @@ export type ChatComposerMessages = {
   removeRestoredResource: (index: number) => string;
   uploading: string;
   uploadFailed: string;
+  previewAttachment: (name: string) => string;
+  attachmentPreviewLabel: string;
+  downloadAttachment: (name: string) => string;
+  closeAttachmentPreview: string;
   retryAttachment: (name: string) => string;
   retryUpload: string;
   removeAttachment: (name: string) => string;
@@ -197,6 +203,10 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   removeRestoredResource: (index) => `Remove restored resource ${index + 1}`,
   uploading: "Uploading",
   uploadFailed: "Upload failed",
+  previewAttachment: (name) => `Preview ${name}`,
+  attachmentPreviewLabel: "Attachment preview",
+  downloadAttachment: (name) => `Download ${name}`,
+  closeAttachmentPreview: "Close",
   retryAttachment: (name) => `Retry ${name}`,
   retryUpload: "Retry upload",
   removeAttachment: (name) => `Remove ${name}`,
@@ -366,7 +376,32 @@ export function useChatComposerController({
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const controlOperationRef = useRef(false);
+  const deliveryValue = delivery.value;
+  const setDeliveryValue = delivery.setValue;
   const mountedRef = useRef(true);
+  const deliveredValueRef = useRef(deliveryValue);
+  const liveValueRef = useRef(deliveryValue);
+  const [renderedValue, setRenderedValue] = useState(deliveryValue);
+  const deliveryChanged = deliveryValue !== deliveredValueRef.current;
+  if (deliveryChanged) {
+    deliveredValueRef.current = deliveryValue;
+    liveValueRef.current = deliveryValue;
+  }
+  const setComposerValue = useCallback(
+    (next: string) => {
+      liveValueRef.current = next;
+      setRenderedValue(next);
+      setDeliveryValue(next);
+    },
+    [setDeliveryValue],
+  );
+  const visibleValue = deliveryChanged ? deliveryValue : renderedValue;
+
+  useLayoutEffect(() => {
+    if (renderedValue !== liveValueRef.current) {
+      setRenderedValue(liveValueRef.current);
+    }
+  }, [deliveryValue, renderedValue]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -468,7 +503,7 @@ export function useChatComposerController({
       applyComposerTextareaHeight(textarea, 220);
     });
   }, []);
-  useEffect(() => resizeInput(), [delivery.value, resizeInput]);
+  useEffect(() => resizeInput(), [resizeInput, visibleValue]);
   useEffect(
     () => () => {
       if (resizeInputRafRef.current !== null) {
@@ -505,8 +540,8 @@ export function useChatComposerController({
     commands,
     context: commandContext,
     handlers,
-    value: delivery.value,
-    setValue: delivery.setValue,
+    value: visibleValue,
+    setValue: setComposerValue,
   });
   const paletteEnabled = commandContext !== undefined;
   const commandDraftBlocked = paletteEnabled && palette.isCommandDraft;
@@ -696,8 +731,8 @@ export function useChatComposerController({
     handlePaste,
     handleFileChange,
     focusInput: () => textareaRef.current?.focus(),
-    setValue: delivery.setValue,
-    value: delivery.value,
+    setValue: setComposerValue,
+    value: visibleValue,
   };
 }
 
@@ -911,6 +946,7 @@ export function Attachments() {
       messages={controller.messages}
       onRemove={controller.attachments.remove}
       onRetry={controller.attachments.retry}
+      onRetainPreview={controller.attachments.retainPreview}
     />
   );
 }
@@ -1601,12 +1637,15 @@ function AttachmentChips({
   messages,
   onRemove,
   onRetry,
+  onRetainPreview,
 }: {
   attachments: UseFileAttachmentsResult["attachments"];
   messages: ChatComposerMessages;
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
+  onRetainPreview: UseFileAttachmentsResult["retainPreview"];
 }) {
+  const lightbox = useLightboxOptional();
   return (
     <div className="flex flex-wrap gap-2 px-3 py-2">
       {attachments.map((attachment) => {
@@ -1627,7 +1666,34 @@ function AttachmentChips({
                 : "border-og-border bg-og-surface-2",
             )}
           >
-            {attachment.previewUrl ? (
+            {attachment.previewUrl && lightbox ? (
+              <button
+                type="button"
+                className="size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
+                aria-label={messages.previewAttachment(attachment.name)}
+                onClick={(event) => {
+                  const releasePreview = onRetainPreview(attachment.id);
+                  lightbox.open(
+                    attachment.previewUrl!,
+                    attachment.name,
+                    event.currentTarget,
+                    messages.attachmentPreviewLabel,
+                    attachment.name,
+                    {
+                      download: messages.downloadAttachment(attachment.name),
+                      close: messages.closeAttachmentPreview,
+                    },
+                    releasePreview,
+                  );
+                }}
+              >
+                <img
+                  src={attachment.previewUrl}
+                  alt=""
+                  className="h-full w-full object-cover transition-opacity hover:opacity-80"
+                />
+              </button>
+            ) : attachment.previewUrl ? (
               <img
                 src={attachment.previewUrl}
                 alt=""

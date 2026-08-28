@@ -34,6 +34,7 @@ import {
   integer,
   jsonb,
   numeric,
+  pgSchema,
   pgTable,
   primaryKey,
   text,
@@ -45,6 +46,8 @@ import {
 import { losslessCodecVersion, losslessJsonb, losslessText } from "./lossless-columns";
 
 export * from "./editable-artifacts-schema";
+export * from "./managed-auth-session-set-schema";
+export * from "./organization-recovery-schema";
 
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
@@ -60,6 +63,8 @@ const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
     return "bytea";
   },
 });
+
+const opengeniPrivateSchema = pgSchema("opengeni_private");
 
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
@@ -3786,6 +3791,10 @@ export const sessions = pgTable(
     // write the result through the epoch-fenced setActiveSandbox CAS. Legacy
     // rows may still be null/relative and are resolved at establishment.
     workingDir: text("working_dir"),
+    // Ordered low-to-high precedence source for public/session/runtime reads.
+    // session_variable_set_attachments is the FK-backed lifecycle projection;
+    // the session trigger maintains it and the legacy singular alias atomically.
+    variableSetIds: jsonb("variable_set_ids").$type<string[]>().notNull().default([]),
     variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, {
       onDelete: "set null",
     }),
@@ -4019,6 +4028,63 @@ export const sessions = pgTable(
       "sessions_initial_model_context_check",
       sql`${table.initialModelContext} is null
         or opengeni_private.model_context_value_valid(${table.initialModelContext})`,
+    ),
+  }),
+);
+
+export const sessionVariableSetAttachments = pgTable(
+  "session_variable_set_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    variableSetId: uuid("variable_set_id")
+      .notNull()
+      .references(() => workspaceVariableSets.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    sessionStatus: text("session_status").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_variable_set_attachments_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    session: foreignKey({
+      name: "session_variable_set_attachments_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    sessionPosition: uniqueIndex("session_variable_set_attachments_session_position_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.position,
+    ),
+    sessionVariableSet: uniqueIndex("session_variable_set_attachments_session_set_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.variableSetId,
+    ),
+    variableSetSessions: index("session_variable_set_attachments_set_sessions_idx").on(
+      table.variableSetId,
+      table.sessionStatus,
+      table.workspaceId,
+      table.sessionId,
+    ),
+    positionValid: check(
+      "session_variable_set_attachments_position_check",
+      sql`${table.position} >= 0 and ${table.position} < 25`,
+    ),
+    statusValid: check(
+      "session_variable_set_attachments_status_check",
+      sql`${table.sessionStatus} in (
+        'queued', 'running', 'idle', 'requires_action', 'recovering',
+        'waiting_capacity', 'failed', 'cancelled'
+      )`,
     ),
   }),
 );
@@ -5997,7 +6063,7 @@ export const turnPersonalResourceAttachmentReceipts = pgTable(
       sql`${table.sessionAuthorityEpoch} > 0
         and octet_length(${table.initiatingHumanSubjectId}) between 1 and 512
         and ${table.membershipAuthorizationRevision} > 0
-        and ${table.resourceCount} between 1 and 28
+        and ${table.resourceCount} between 1 and 52
         and ${table.grantMode} in ('once', 'session', 'always')
         and ${table.sessionVisibility} in ('user_private', 'workspace_shared')
         and ${table.sharedOutputWarningVersion} = 1
@@ -6063,7 +6129,7 @@ export const turnPersonalResourceSnapshots = pgTable(
       sql`${table.membershipAuthorizationRevision} > 0
         and ${table.authorityGeneration} > 0
         and ${table.grantGeneration} > 0
-        and cardinality(${table.selectionSources}) between 1 and 26`,
+        and cardinality(${table.selectionSources}) between 1 and 50`,
     ),
     grantShape: check(
       "turn_personal_resource_snapshots_grant_chk",
@@ -7820,6 +7886,50 @@ export const sessionEvents = pgTable(
       "session_events_duplicate_reason_bytes_check",
       sql`${table.duplicateReason} is null or octet_length(${table.duplicateReason}) <= 4096`,
     ),
+  }),
+);
+
+/**
+ * Durable fanout obligation for the migration-owned automatic-title
+ * quarantine event. The deployment-wide workflow-wake dispatcher publishes
+ * these exact committed events and marks them delivered; duplicate publication
+ * after a process crash is safe because consumers sequence-fence every event.
+ */
+export const automaticSessionTitleFanoutOutboxV1 = opengeniPrivateSchema.table(
+  "automatic_session_title_fanout_outbox_v1",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    eventId: uuid("event_id").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    attemptsValid: check("automatic_title_fanout_attempts_chk", sql`${table.attempts} >= 0`),
+    workspaceAccount: foreignKey({
+      name: "automatic_title_fanout_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "automatic_title_fanout_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    workspaceEvent: foreignKey({
+      name: "automatic_title_fanout_workspace_event_fk",
+      columns: [table.workspaceId, table.eventId],
+      foreignColumns: [sessionEvents.workspaceId, sessionEvents.id],
+    }).onDelete("cascade"),
+    event: uniqueIndex("automatic_title_fanout_event_uq").on(table.eventId),
+    pending: index("automatic_title_fanout_pending_idx")
+      .on(table.createdAt, table.id)
+      .where(sql`${table.deliveredAt} is null`),
   }),
 );
 
@@ -10329,6 +10439,14 @@ export const prReviewAppRegistrations = pgTable(
     provider: text("provider").notNull(),
     providerBaseUrl: text("provider_base_url").notNull(),
     appId: text("app_id"),
+    installationId: text("installation_id"),
+    providerAccountLogin: text("provider_account_login"),
+    providerAccountType: text("provider_account_type"),
+    githubActorId: text("github_actor_id"),
+    authorityKind: text("authority_kind"),
+    authorityCheckedAt: timestamp("authority_checked_at", { withTimezone: true }),
+    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }),
+    authorityNonce: text("authority_nonce"),
     credentialKind: text("credential_kind").notNull(),
     credentialEncrypted: text("credential_encrypted"),
     accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
@@ -10356,6 +10474,12 @@ export const prReviewAppRegistrations = pgTable(
       table.workspaceId,
       table.status,
     ),
+    managedGithubInstallation: uniqueIndex("pr_review_managed_github_workspace_installation_uq")
+      .on(table.workspaceId, table.installationId)
+      .where(sql`${table.credentialKind} = 'managed_github_app'`),
+    managedGithubAuthorityNonce: uniqueIndex("pr_review_managed_github_authority_nonce_uq")
+      .on(table.authorityNonce)
+      .where(sql`${table.authorityNonce} is not null`),
     providerCheck: check(
       "pr_review_app_registrations_provider_chk",
       sql`${table.provider} in ('github', 'gitlab', 'azure_devops')`,
@@ -10363,9 +10487,11 @@ export const prReviewAppRegistrations = pgTable(
     credentialCheck: check(
       "pr_review_app_registrations_credential_chk",
       sql`(
-        (${table.provider} = 'github' and ${table.credentialKind} = 'github_app' and ${table.credentialEncrypted} is not null and ${table.appId} is not null)
+        (${table.provider} = 'github' and ${table.credentialKind} = 'github_app' and ${table.credentialEncrypted} is not null and ${table.appId} is not null and ${table.installationId} is null)
         or
-        (${table.provider} in ('gitlab', 'azure_devops') and ${table.credentialKind} = 'provider_token' and ${table.credentialEncrypted} is not null)
+        (${table.provider} = 'github' and ${table.credentialKind} = 'managed_github_app' and ${table.credentialEncrypted} is null and ${table.appId} is not null and ${table.installationId} is not null and ${table.providerAccountType} in ('User', 'Organization') and ${table.githubActorId} ~ '^[1-9][0-9]*$' and ${table.authorityKind} in ('personal_owner', 'organization_owner') and ${table.authorityCheckedAt} is not null and ${table.authorityExpiresAt} is not null and ${table.authorityExpiresAt} > ${table.authorityCheckedAt} and octet_length(${table.authorityNonce}) between 16 and 256)
+        or
+        (${table.provider} in ('gitlab', 'azure_devops') and ${table.credentialKind} = 'provider_token' and ${table.credentialEncrypted} is not null and ${table.installationId} is null)
       )`,
     ),
     webhookAuthCheck: check(
@@ -10451,6 +10577,86 @@ export const prReviewRepositoryBindings = pgTable(
         prReviewAppRegistrations.provider,
       ],
       name: "pr_review_repository_bindings_registration_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Append-only successful OAuth-state consumption receipts. The latest receipt
+ * is also projected on the registration, but this ledger owns durable replay
+ * rejection across later reconnects. */
+export const prReviewManagedGithubAuthorityNonces = pgTable(
+  "pr_review_managed_github_authority_nonces",
+  {
+    authorityNonce: text("authority_nonce").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    installationId: text("installation_id").notNull(),
+    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identityCheck: check(
+      "pr_review_managed_github_authority_nonces_identity_chk",
+      sql`octet_length(${table.authorityNonce}) between 16 and 256
+        and ${table.installationId} ~ '^[1-9][0-9]*$'
+        and ${table.authorityExpiresAt} > ${table.consumedAt}`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "pr_review_managed_github_authority_nonces_workspace_account_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Credential-free routing for the deployment-owned PR-review GitHub App.
+ * Signature verification happens before provider ids reach this table. */
+export const prReviewManagedGithubRoutes = pgTable(
+  "pr_review_managed_github_routes",
+  {
+    bindingId: uuid("binding_id")
+      .primaryKey()
+      .references(() => prReviewRepositoryBindings.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    registrationId: uuid("registration_id").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    installationId: text("installation_id").notNull(),
+    providerRepositoryId: text("provider_repository_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    routeIdentity: uniqueIndex("pr_review_managed_github_route_identity_uq").on(
+      table.installationId,
+      table.providerRepositoryId,
+    ),
+    identityCheck: check(
+      "pr_review_managed_github_routes_identity_chk",
+      sql`${table.installationId} ~ '^[1-9][0-9]*$'
+        and ${table.providerRepositoryId} ~ '^[1-9][0-9]*$'`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "pr_review_managed_github_routes_workspace_account_fk",
+    }).onDelete("cascade"),
+    registration: foreignKey({
+      columns: [table.workspaceId, table.registrationId],
+      foreignColumns: [prReviewAppRegistrations.workspaceId, prReviewAppRegistrations.id],
+      name: "pr_review_managed_github_routes_registration_fk",
+    }).onDelete("cascade"),
+    source: foreignKey({
+      columns: [table.workspaceId, table.sourceId],
+      foreignColumns: [automationSources.workspaceId, automationSources.id],
+      name: "pr_review_managed_github_routes_source_fk",
     }).onDelete("cascade"),
   }),
 );
@@ -12189,6 +12395,8 @@ export const rigVersions = pgTable(
       .notNull()
       .references(() => rigs.id, { onDelete: "cascade" }),
     version: integer("version").notNull(),
+    // Legacy audit field only. Migration 0356 rejects new non-null values;
+    // runtime always uses the deployment platform sandbox image.
     image: text("image"),
     setupScript: text("setup_script"),
     // Self-declared health checks: [{ name, command }].
@@ -12275,6 +12483,7 @@ export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
 export * from "./task-notes-schema";
+export * from "./work-claims-schema";
 export * from "./company-brain-context-selection-schema";
 export * from "./governed-learning-evaluator-schema";
 export * from "./governed-learning-activation-schema";

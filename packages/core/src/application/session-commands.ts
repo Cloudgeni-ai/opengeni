@@ -511,26 +511,38 @@ export async function controlAgentSessionWorkstream(
     },
   );
   scheduleSessionCommandPostCommit(deps, "agent_control", [
-    {
-      kind: "session_event_fanout",
-      run: async () =>
-        await publishSessionEventIds(deps, context.workspaceId, input.targetSessionId, [
-          result.sessionControlEventId,
-        ]),
-    },
-    {
-      kind: "workspace_control_fanout",
-      run: async () =>
-        await publishWorkspaceControlEvent(
-          deps,
-          context.workspaceId,
-          result.workspaceControlEventId,
-        ),
-    },
-    {
-      kind: "workflow_wake",
-      run: async () => await requestControlWakeDispatch(deps, result.wakeCount),
-    },
+    ...(result.sessionControlEventId
+      ? [
+          {
+            kind: "session_event_fanout" as const,
+            run: async () =>
+              await publishSessionEventIds(deps, context.workspaceId, input.targetSessionId, [
+                result.sessionControlEventId!,
+              ]),
+          },
+        ]
+      : []),
+    ...(result.workspaceControlEventId
+      ? [
+          {
+            kind: "workspace_control_fanout" as const,
+            run: async () =>
+              await publishWorkspaceControlEvent(
+                deps,
+                context.workspaceId,
+                result.workspaceControlEventId!,
+              ),
+          },
+        ]
+      : []),
+    ...(result.wakeCount > 0
+      ? [
+          {
+            kind: "workflow_wake" as const,
+            run: async () => await requestControlWakeDispatch(deps, result.wakeCount),
+          },
+        ]
+      : []),
     {
       kind: "workflow_wake",
       run: async () => {
@@ -832,7 +844,11 @@ export async function controlHumanSessionWorkstreamWithOutcome(
   } & SessionCommandPostCommitDeps,
   context: HumanSessionCommandContext,
   input: SessionControlRequest,
-): Promise<{ response: SessionControlResponse; replay: boolean }> {
+): Promise<{
+  response: SessionControlResponse;
+  outcome: "changed" | "unchanged" | "replayed";
+  replay: boolean;
+}> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.control");
   const result = await runSessionCommandPersistenceTransaction(
     deps,
@@ -879,19 +895,27 @@ export async function controlHumanSessionWorkstreamWithOutcome(
           affected.eventIds,
         ),
     })),
-    {
-      kind: "workspace_control_fanout",
-      run: async () =>
-        await publishWorkspaceControlEvent(
-          deps,
-          context.workspaceId,
-          result.workspaceControlEventId,
-        ),
-    },
-    {
-      kind: "workflow_wake",
-      run: async () => await requestControlWakeDispatch(deps, result.wakeCount),
-    },
+    ...(result.workspaceControlEventId
+      ? [
+          {
+            kind: "workspace_control_fanout" as const,
+            run: async () =>
+              await publishWorkspaceControlEvent(
+                deps,
+                context.workspaceId,
+                result.workspaceControlEventId!,
+              ),
+          },
+        ]
+      : []),
+    ...(result.wakeCount > 0
+      ? [
+          {
+            kind: "workflow_wake" as const,
+            run: async () => await requestControlWakeDispatch(deps, result.wakeCount),
+          },
+        ]
+      : []),
     {
       kind: "workflow_wake",
       run: async () => {
@@ -909,7 +933,7 @@ export async function controlHumanSessionWorkstreamWithOutcome(
       },
     },
   ]);
-  return { response, replay: result.replay };
+  return { response, outcome: result.outcome, replay: result.replay };
 }
 
 /** Backward-compatible response path used by the REST control route. */
@@ -952,19 +976,27 @@ export async function controlHumanWorkspace(
     wakeCount: result.wakeCount,
   };
   scheduleSessionCommandPostCommit(deps, "human_workspace_control", [
-    {
-      kind: "workspace_control_fanout",
-      run: async () =>
-        await publishWorkspaceControlEvent(
-          deps,
-          context.workspaceId,
-          result.workspaceControlEventId,
-        ),
-    },
-    {
-      kind: "workflow_wake",
-      run: async () => await requestControlWakeDispatch(deps, result.wakeCount),
-    },
+    ...(result.workspaceControlEventId
+      ? [
+          {
+            kind: "workspace_control_fanout" as const,
+            run: async () =>
+              await publishWorkspaceControlEvent(
+                deps,
+                context.workspaceId,
+                result.workspaceControlEventId!,
+              ),
+          },
+        ]
+      : []),
+    ...(result.wakeCount > 0
+      ? [
+          {
+            kind: "workflow_wake" as const,
+            run: async () => await requestControlWakeDispatch(deps, result.wakeCount),
+          },
+        ]
+      : []),
   ]);
   return response;
 }

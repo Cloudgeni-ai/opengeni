@@ -10,6 +10,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   type RemoveEnrollmentResponse,
   type Session,
+  type SessionLineageResponse,
   OPENGENI_CORRELATION_HEADER,
   type ComposerDraft,
   type SaveComposerDraftRequest,
@@ -369,6 +370,23 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("replaces the ordered session Variable Set selection", async () => {
+    const variableSetIds = [
+      "00000000-0000-4000-8000-000000000011",
+      "00000000-0000-4000-8000-000000000012",
+    ];
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, variableSetIds }),
+    );
+    await client.updateSessionVariableSets(WORKSPACE_ID, SESSION_ID, { variableSetIds });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: "PUT",
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/variable-sets`,
+    });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ variableSetIds });
+  });
+
   test("gets and saves the actor-private new-session draft", async () => {
     const draft = {
       revision: 3,
@@ -414,6 +432,46 @@ describe("OpenGeniClient", () => {
       latencyMode: "standard",
       options: { sandboxBackend: "none" },
     });
+  });
+
+  test("actor-private draft and file reads forward AbortSignal cancellation", async () => {
+    const fileId = "00000000-0000-4000-8000-000000000011";
+    const received: Array<{ path: string; signal: AbortSignal | undefined }> = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const signal = init?.signal ?? undefined;
+        received.push({ path: new URL(String(input)).pathname, signal });
+        return await new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const abort = new AbortController();
+    const settled = Promise.allSettled([
+      client.getNewSessionDraft(WORKSPACE_ID, { signal: abort.signal }),
+      client.getFile(WORKSPACE_ID, fileId, { signal: abort.signal }),
+    ]);
+    abort.abort();
+
+    expect(received).toEqual([
+      {
+        path: `/v1/workspaces/${WORKSPACE_ID}/new-session-draft`,
+        signal: abort.signal,
+      },
+      {
+        path: `/v1/workspaces/${WORKSPACE_ID}/files/${fileId}`,
+        signal: abort.signal,
+      },
+    ]);
+    expect(await settled).toEqual([
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+    ]);
   });
 
   test("submits one exact revision-fenced established-session draft", async () => {
@@ -472,18 +530,28 @@ describe("OpenGeniClient", () => {
   });
 
   test("getSession and listEvents hit the expected paths and query params", async () => {
+    const variableSetIds = [
+      "00000000-0000-4000-8000-000000000011",
+      "00000000-0000-4000-8000-000000000012",
+    ];
     const { client, requests } = makeClient((request) =>
       request.url.includes("/events")
         ? jsonResponse([makeEvent(3)])
-        : jsonResponse({ id: SESSION_ID }),
+        : jsonResponse({
+            id: SESSION_ID,
+            variableSetIds,
+            variableSetId: variableSetIds[1]!,
+          }),
     );
-    await client.getSession(WORKSPACE_ID, SESSION_ID);
+    const session = await client.getSession(WORKSPACE_ID, SESSION_ID);
     const events = await client.listEvents(WORKSPACE_ID, SESSION_ID, {
       after: 2,
       before: 9,
       limit: 10,
       compact: true,
     });
+    expect(session.variableSetIds).toEqual(variableSetIds);
+    expect(session.variableSetId).toBe(variableSetIds[1]!);
     expect(events.map((event) => event.sequence)).toEqual([3]);
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
@@ -534,6 +602,184 @@ describe("OpenGeniClient", () => {
     expect(requests).toBe(4);
   });
 
+  test("replays a pre-settlement lineage start generation without restamping a late joiner", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    let markInitialStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    let causalGeneration = 0;
+    const joinedStarts: number[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: () => ++causalGeneration,
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) {
+          markInitialStarted();
+          await initialGate;
+        }
+        return jsonResponse({
+          ancestors: [{ id: `ancestor-${request}` }],
+          children: [],
+          truncated: false,
+        });
+      },
+    });
+
+    const active = client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    await initialStarted;
+    const acceptedMoveGeneration = ++causalGeneration;
+    const joined = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: (generation) => joinedStarts.push(generation ?? 0),
+    });
+
+    expect(requests).toBe(1);
+    expect(joinedStarts).toEqual([1]);
+    expect(joinedStarts[0]).toBeLessThan(acceptedMoveGeneration);
+    expect(causalGeneration).toBe(acceptedMoveGeneration);
+    releaseInitial();
+    expect((await active).ancestors[0]?.id).toBe("ancestor-1");
+    expect((await joined).ancestors[0]?.id).toBe("ancestor-1");
+  });
+
+  test("replays a post-settlement lineage start generation to an authority joiner", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    let markInitialStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    let causalGeneration = 0;
+    const acceptedMoveGeneration = ++causalGeneration;
+    const joinedStarts: number[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: () => ++causalGeneration,
+      fetch: async () => {
+        requests += 1;
+        markInitialStarted();
+        await initialGate;
+        return jsonResponse({
+          ancestors: [{ id: "ancestor-channel-c" }],
+          children: [],
+          truncated: false,
+        });
+      },
+    });
+
+    const active = client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    await initialStarted;
+    const joined = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: (generation) => joinedStarts.push(generation ?? 0),
+    });
+
+    expect(requests).toBe(1);
+    expect(joinedStarts).toEqual([2]);
+    expect(joinedStarts[0]).toBeGreaterThan(acceptedMoveGeneration);
+    expect(causalGeneration).toBe(2);
+    releaseInitial();
+    expect((await active).ancestors[0]?.id).toBe("ancestor-channel-c");
+    expect((await joined).ancestors[0]?.id).toBe("ancestor-channel-c");
+  });
+
+  test("shares the selected lineage read during request-start re-entry", async () => {
+    let requests = 0;
+    let causalGeneration = 0;
+    const observedGenerations: number[] = [];
+    let reentered!: Promise<SessionLineageResponse>;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: () => ++causalGeneration,
+      fetch: async () => {
+        requests += 1;
+        return jsonResponse({
+          ancestors: [{ id: "ancestor-shared" }],
+          children: [],
+          truncated: false,
+        });
+      },
+    });
+
+    const selected = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: (generation) => {
+        observedGenerations.push(generation ?? 0);
+        reentered = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+          onRequestStart: (joinedGeneration) => observedGenerations.push(joinedGeneration ?? 0),
+        });
+      },
+    });
+
+    expect((await selected).ancestors[0]?.id).toBe("ancestor-shared");
+    expect((await reentered).ancestors[0]?.id).toBe("ancestor-shared");
+    expect(requests).toBe(1);
+    expect(causalGeneration).toBe(1);
+    expect(observedGenerations).toEqual([1, 1]);
+  });
+
+  test("queues a re-entrant fresh read behind failure and cleans up for retry", async () => {
+    let requests = 0;
+    let causalGeneration = 0;
+    let rejectInitial!: (reason?: unknown) => void;
+    let markInitialStarted!: () => void;
+    const initialGate = new Promise<Response>((_resolve, reject) => {
+      rejectInitial = reject;
+    });
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    const observedGenerations: number[] = [];
+    let reenteredFresh!: Promise<Session>;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: () => ++causalGeneration,
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) {
+          markInitialStarted();
+          return await initialGate;
+        }
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, request });
+      },
+    });
+
+    const selected = client.getSession(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: (generation) => {
+        observedGenerations.push(generation ?? 0);
+        reenteredFresh = client.getSession(WORKSPACE_ID, SESSION_ID, {
+          fresh: true,
+          onRequestStart: (freshGeneration) => observedGenerations.push(freshGeneration ?? 0),
+        });
+      },
+    });
+    await initialStarted;
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+    expect(observedGenerations).toEqual([1]);
+
+    rejectInitial(new Error("initial read failed"));
+    await expect(selected).rejects.toThrow("initial read failed");
+    expect((reenteredFresh as Promise<Session & { request: number }>).then).toBeFunction();
+    expect(((await reenteredFresh) as Session & { request: number }).request).toBe(2);
+    expect(observedGenerations).toEqual([1, 2]);
+
+    expect(
+      ((await client.getSession(WORKSPACE_ID, SESSION_ID)) as Session & { request: number })
+        .request,
+    ).toBe(3);
+    expect(requests).toBe(3);
+    expect(causalGeneration).toBe(3);
+  });
+
   test("queues one fresh session read behind an existing projection read", async () => {
     let requests = 0;
     let release!: () => void;
@@ -563,6 +809,205 @@ describe("OpenGeniClient", () => {
     expect(reconciled.map((session) => (session as Session & { request: number }).request)).toEqual(
       [2, 2],
     );
+  });
+
+  test("shares a queued successor with a predecessor settlement reaction", async () => {
+    let requests = 0;
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        throw new Error("single-flight regression uses the selected read directly");
+      },
+    });
+    const sharedRead = (
+      client as unknown as {
+        sharedRead<T>(
+          key: string,
+          read: () => Promise<T>,
+          options?: { fresh?: boolean },
+        ): Promise<T>;
+      }
+    ).sharedRead.bind(client);
+    const read = async () => {
+      requests += 1;
+      const request = requests;
+      if (request === 1) await activeGate;
+      return { id: SESSION_ID, workspaceId: WORKSPACE_ID, request } as Session & {
+        request: number;
+      };
+    };
+
+    const active = sharedRead("session", read);
+    // Register this reaction before the fresh successor is queued. When the
+    // predecessor settles it must join that queued successor, not launch a
+    // competing request during the active-entry cleanup gap.
+    const reactionRead = active.then(() => sharedRead("session", read));
+    const queuedFresh = sharedRead("session", read, { fresh: true });
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+
+    releaseActive();
+    expect((await active).request).toBe(1);
+    const [reactionResult, queuedResult] = await Promise.all([reactionRead, queuedFresh]);
+    expect(requests).toBe(2);
+    expect([reactionResult, queuedResult].map((result) => result.request)).toEqual([2, 2]);
+  });
+
+  test("queues a new fresh generation behind an active trailing read", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    let releaseTrailing!: () => void;
+    let markTrailingStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const trailingGate = new Promise<void>((resolve) => {
+      releaseTrailing = resolve;
+    });
+    const trailingStarted = new Promise<void>((resolve) => {
+      markTrailingStarted = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) await initialGate;
+        if (request === 2) {
+          markTrailingStarted();
+          await trailingGate;
+        }
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, request });
+      },
+    });
+
+    const initial = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const preWriteFresh = client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true });
+    releaseInitial();
+    await trailingStarted;
+
+    const ordinaryDuringTrailing = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const postWriteFresh = [
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(2);
+
+    releaseTrailing();
+    expect(((await initial) as Session & { request: number }).request).toBe(1);
+    expect(((await preWriteFresh) as Session & { request: number }).request).toBe(2);
+    expect(((await ordinaryDuringTrailing) as Session & { request: number }).request).toBe(2);
+    expect(
+      (await Promise.all(postWriteFresh)).map(
+        (session) => (session as Session & { request: number }).request,
+      ),
+    ).toEqual([3, 3]);
+    expect(requests).toBe(3);
+  });
+
+  test("queues a fresh generation after a started successor clears its active slot", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    let releaseQueued!: () => void;
+    let markQueuedStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const queuedGate = new Promise<void>((resolve) => {
+      releaseQueued = resolve;
+    });
+    const queuedStarted = new Promise<void>((resolve) => {
+      markQueuedStarted = resolve;
+    });
+    let queuedRead!: Promise<Session & { request: number }>;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        throw new Error("single-flight regression uses the selected read directly");
+      },
+    });
+    const sharedRead = (
+      client as unknown as {
+        sharedRead<T>(
+          key: string,
+          read: () => Promise<T>,
+          options?: { fresh?: boolean },
+        ): Promise<T>;
+      }
+    ).sharedRead.bind(client);
+    const read = () => {
+      requests += 1;
+      const request = requests;
+      const result = { id: SESSION_ID, workspaceId: WORKSPACE_ID, request } as Session & {
+        request: number;
+      };
+      if (request === 1) return initialGate.then(() => result);
+      if (request === 2) {
+        queuedRead = queuedGate.then(() => result);
+        markQueuedStarted();
+        return queuedRead;
+      }
+      return Promise.resolve(result);
+    };
+
+    const initial = sharedRead("session", read);
+    const queuedFresh = sharedRead("session", read, { fresh: true });
+    releaseInitial();
+    await queuedStarted;
+
+    // launchSingleFlightRead's finally clears the active slot before the
+    // queued entry's public promise settles. A write continuation in that gap
+    // still requires a successor generation, not the completed queued read.
+    const postWriteFresh = queuedRead.then(() => sharedRead("session", read, { fresh: true }));
+    releaseQueued();
+
+    expect((await initial).request).toBe(1);
+    expect((await queuedFresh).request).toBe(2);
+    expect((await postWriteFresh).request).toBe(3);
+    expect(requests).toBe(3);
+  });
+
+  test("notifies queued fresh callers only when their shared GET actually starts", async () => {
+    let requests = 0;
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let channelId = "channel-old";
+    let causalGeneration = 0;
+    let queuedReadGeneration = 0;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        if (requests === 1) await activeGate;
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, channelId });
+      },
+    });
+
+    const active = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const queued = client.getSession(WORKSPACE_ID, SESSION_ID, {
+      fresh: true,
+      onRequestStart: () => {
+        queuedReadGeneration = ++causalGeneration;
+      },
+    });
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+    expect(queuedReadGeneration).toBe(0);
+
+    const laterListGeneration = ++causalGeneration;
+    channelId = "channel-new";
+    releaseActive();
+    await active;
+    expect((await queued).channelId).toBe("channel-new");
+    expect(requests).toBe(2);
+    expect(queuedReadGeneration).toBeGreaterThan(laterListGeneration);
   });
 
   test("updates an existing session MCP approval policy through the dedicated route", async () => {
@@ -1385,7 +1830,7 @@ describe("OpenGeniClient", () => {
     );
   });
 
-  test("lists compact topology roots, children, and searches through the dedicated endpoint", async () => {
+  test("lists compact topology roots, children, and scoped discovery through the dedicated endpoint", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ sessions: [], total: 0, hasMore: false, nextCursor: null }),
     );
@@ -1395,11 +1840,38 @@ describe("OpenGeniClient", () => {
       parentSessionId: SESSION_ID,
       cursor: "opaque",
     });
+    await client.listAgentTopology(WORKSPACE_ID, {
+      rootSessionId: SESSION_ID,
+      query: "  rollout  ",
+      statuses: ["running", "requires_action"],
+      activeOnly: true,
+      recentHours: 24,
+      claimLimit: 3,
+    });
+    await client.listAgentTopology(WORKSPACE_ID, {
+      subject: {
+        namespace: "github",
+        type: "pull_request",
+        canonicalKey: "cloudgeni-ai/opengeni#384",
+      },
+    });
     await client.listAgentTopology(WORKSPACE_ID, { search: "  rollout  " });
+    await expect(
+      client.listAgentTopology(WORKSPACE_ID, {
+        query: "rollout",
+        subject: {
+          namespace: "github",
+          type: "pull_request",
+          canonicalKey: "cloudgeni-ai/opengeni#384",
+        },
+      }),
+    ).rejects.toThrow("query cannot be combined with an exact subject");
     expect(requests.map((request) => request.url)).toEqual([
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?limit=25&parentSessionId=null`,
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?limit=10&parentSessionId=${SESSION_ID}&cursor=opaque`,
-      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?search=rollout`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?rootSessionId=${SESSION_ID}&query=rollout&statuses=running%2Crequires_action&activeOnly=true&recentHours=24&claimLimit=3`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?subjectNamespace=github&subjectType=pull_request&subjectKey=cloudgeni-ai%2Fopengeni%23384`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?query=rollout`,
     ]);
   });
 

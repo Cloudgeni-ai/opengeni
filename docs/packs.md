@@ -6,7 +6,7 @@ Capability Packs are role-oriented bundles that compose existing OpenGeni primit
 
 - exact Plugin, Skill, Integration-instance, and Integration-Facet components;
 - legacy inline Skills that the v2 installer migrates into ordinary immutable Skill components;
-- an explicit Rig requirement, including compatibility with a legacy `sandboxImage` declaration;
+- an explicit Rig requirement; legacy `sandboxImage` declarations are blocked for v2 installs while Rig image overrides are disabled;
 - MCP tool selections, connector requirements, and optional knowledge;
 - a Variable Set requirement;
 - scheduled-task templates and task metadata.
@@ -38,7 +38,7 @@ The portable Pack manifest is the **blueprint**. Installation preview resolves i
 2. **Review precedes mutation.** Component resolution, the exact manifest digest, Rig compatibility, and required Variable Set names are returned by installation preview. Install rejects source drift and unresolved required components.
 3. **Ownership is shared and reversible.** Pack ownership uses the same normalized component ledgers as direct installs and Plugins. Uninstall removes only the Pack's owner edges; exact components retained by another direct, Plugin, Pack, or migration owner remain active.
 4. **Only active owners affect runtime.** An `installing`, `needs_attention`, or `disabled` Pack owner does not make an otherwise unowned component executable. A partially completed Pack therefore cannot leak a half-installed runtime.
-5. **V2 runtime comes from components plus a Rig.** A v2 installation is identified by its frozen `manifestSnapshot` and `manifestDigest`. The worker does not directly load that manifest's inline Skills or `sandboxImage`; the installer already migrated those Skills and selected a Rig.
+5. **V2 runtime comes from components plus a Rig on the platform base.** A v2 installation is identified by its frozen `manifestSnapshot` and `manifestDigest`. The worker does not directly load that manifest's inline Skills or `sandboxImage`; the installer migrates those Skills and selects a Rig. A manifest that still requires `sandboxImage` is blocked instead of replacing the deployment-owned sandbox beneath that Rig.
 6. **Connections remain independent.** A Pack may adopt an exact named Integration instance or Facet binding, but uninstalling the Pack never deletes the underlying Connection.
 7. **Tenant boundaries are enforced twice.** Pack installation, selected Rig, component ledger, and operation rows are workspace/account scoped under FORCE RLS, and database triggers reject cross-tenant Rig or ledger references.
 
@@ -77,7 +77,7 @@ New Pack definitions should use `rig`:
 - `requireVerified` requires the selected Rig's active version health to be passing;
 - `description` explains the compute requirement in review UI.
 
-Legacy `sandboxImage` also makes Rig selection required. Preview accepts only a Rig whose active version has that exact logical image. The installer stores `selectedRigId`; Pack-created scheduled tasks inherit it, and each resulting session freezes the Rig version that is active when that session is created.
+Legacy `sandboxImage` still makes Rig selection required for a v2 manifest, but preview reports the installation blocked while explicit Rig images are disabled. Historical Rig image fields are not accepted as compatibility because runtime ignores them. The Pack must migrate to the deployment platform image. Once installable, the installer stores `selectedRigId`; Pack-created scheduled tasks inherit it, and each resulting session freezes the Rig version that is active when that session is created.
 
 `sandboxProviderImages` is retained as legacy manifest provenance. V2 installation does not copy or execute that Pack field directly. Provider-native acceleration belongs to the selected Rig's verified active version; see [`rigs.md`](rigs.md).
 

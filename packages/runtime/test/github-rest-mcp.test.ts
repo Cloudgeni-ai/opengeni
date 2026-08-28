@@ -129,6 +129,76 @@ describe("GitHubRestMcpServer", () => {
       ),
     ).rejects.toBeInstanceOf(GitHubRestMutationNotExecutedError);
   });
+
+  test("submits a review through the personal actor", async () => {
+    const server = buildServer(async (url, init) => {
+      expect(String(url)).toBe(
+        "https://api.github.com/repos/Cloudgeni-ai/opengeni/pulls/17/reviews",
+      );
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        event: "APPROVE",
+        body: "Looks good",
+        commit_id: "a".repeat(40),
+      });
+      return response({
+        id: 91,
+        state: "APPROVED",
+        body: "Looks good",
+        commit_id: "a".repeat(40),
+        user: { id: 7, login: "bendik" },
+      });
+    });
+    const result = await server.callToolResult("pull_request_review_submit", {
+      repository: repository.fullName,
+      pullNumber: 17,
+      event: "APPROVE",
+      body: "Looks good",
+      commitId: "a".repeat(40),
+    });
+    expect(result.structuredContent).toMatchObject({
+      data: { id: 91, state: "APPROVED", author: { login: "bendik" } },
+      attribution: { kind: "personal_oauth", login: "bendik" },
+    });
+  });
+
+  test("requires review text for comments and change requests before provider I/O", async () => {
+    let calls = 0;
+    const server = buildServer(async () => {
+      calls += 1;
+      return response({});
+    });
+    const result = await server.callToolResult("pull_request_review_submit", {
+      repository: repository.fullName,
+      pullNumber: 17,
+      event: "REQUEST_CHANGES",
+    });
+    expect(result.isError).toBe(true);
+    expect(githubRestConnectorActionOutcome(result)).toBe("not_executed");
+    expect(JSON.stringify(result.content)).toContain("body is required");
+    expect(calls).toBe(0);
+  });
+
+  test("merges only through the write-authorized repository", async () => {
+    const server = buildServer(async (url, init) => {
+      expect(String(url)).toBe("https://api.github.com/repos/Cloudgeni-ai/opengeni/pulls/17/merge");
+      expect(init?.method).toBe("PUT");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        merge_method: "squash",
+        sha: "b".repeat(40),
+      });
+      return response({ sha: "c".repeat(40), merged: true, message: "Pull Request merged" });
+    });
+    const result = await server.callToolResult("pull_request_merge", {
+      repository: repository.fullName,
+      pullNumber: 17,
+      method: "squash",
+      expectedHeadSha: "b".repeat(40),
+    });
+    expect(result.structuredContent).toMatchObject({
+      data: { sha: "c".repeat(40), merged: true },
+    });
+  });
 });
 
 function buildServer(fetchImpl: (url: URL | RequestInfo, init?: RequestInit) => Promise<Response>) {

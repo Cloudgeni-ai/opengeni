@@ -12,6 +12,8 @@ import {
   createDb,
   createSession,
   createSessionMcpServers,
+  createVariableSet,
+  deleteVariableSet,
   getActiveSessionHistoryItems,
   initializeSessionStartAtomically,
   listSessionEvents,
@@ -19,8 +21,11 @@ import {
   getSessionHumanInputRequest,
   mutateSessionControlInTransaction,
   submitHumanPromptInTransaction,
+  updateSessionTitle,
+  updateSessionVariableSets,
   withWorkspaceSubjectSessionActivityRls,
   withWorkspaceSessionActivityRls,
+  type Database,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -42,6 +47,7 @@ import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const SECRET = "session-authorization-route-test-secret";
+const ENVIRONMENTS_ENCRYPTION_KEY = Buffer.alloc(32, 73).toString("base64");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let available = true;
@@ -67,19 +73,25 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-function appWith(port?: SessionAuthorizationPort): Hono {
+function appWith(
+  port?: SessionAuthorizationPort,
+  database: Database = client.db,
+  settingsOverrides: Parameters<typeof testSettings>[0] = {},
+): Hono {
   const noop = async () => undefined;
   const app = new Hono();
   registerSessionRoutes(app, {
     settings: testSettings({
       productAccessMode: "managed",
       delegationSecret: SECRET,
+      environmentsEncryptionKey: ENVIRONMENTS_ENCRYPTION_KEY,
       sandboxBackend: "modal",
       sandboxDesktopEnabled: true,
       streamTokenSecret: "session-authorization-stream-secret",
       sandboxOwnershipEnabled: true,
+      ...settingsOverrides,
     }),
-    db: client.db,
+    db: database,
     bus: new MemoryEventBus(),
     workflowClient: {
       signalUserMessage: noop,
@@ -100,9 +112,42 @@ function appWith(port?: SessionAuthorizationPort): Hono {
   return app;
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settled) => {
+    resolve = settled;
+  });
+  return { promise, resolve };
+}
+
+async function waitForBlockedBackend(blockerPid: number, description: string): Promise<number> {
+  if (!shared) throw new Error("database unavailable");
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [row] = await shared.admin<Array<{ pid: number }>>`
+      select activity.pid
+      from pg_stat_activity activity
+      where activity.datname = current_database()
+        and activity.usename = 'opengeni_app'
+        and activity.state = 'active'
+        and activity.wait_event_type = 'Lock'
+        and ${blockerPid} = any(pg_blocking_pids(activity.pid))
+      order by activity.pid
+      limit 1
+    `;
+    if (row) return row.pid;
+    await Bun.sleep(10);
+  }
+  throw new Error(`${description} did not block behind backend ${blockerPid}`);
+}
+
 function fullAppWith(port: SessionAuthorizationPort): Hono {
   return createApp({
-    settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret: SECRET,
+      environmentsEncryptionKey: ENVIRONMENTS_ENCRYPTION_KEY,
+    }),
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {} as SessionWorkflowClient,
@@ -194,7 +239,432 @@ async function fixture() {
   return { grant, root, child, hidden, authorization };
 }
 
+async function variableSetControlAuthorization(value: Awaited<ReturnType<typeof fixture>>) {
+  return `Bearer ${await signDelegatedAccessToken(SECRET, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    subjectId: value.grant.subjectId,
+    permissions: ["sessions:read", "sessions:control", "variable-sets:attach", "variable-sets:use"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3_600,
+  })}`;
+}
+
+async function variableSetCreateAuthorization(value: Awaited<ReturnType<typeof fixture>>) {
+  return `Bearer ${await signDelegatedAccessToken(SECRET, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    subjectId: value.grant.subjectId,
+    permissions: ["sessions:create", "sessions:read", "variable-sets:attach", "variable-sets:use"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3_600,
+  })}`;
+}
+
+async function sessionCreateFootprint(
+  workspaceId: string,
+  sessionId: string,
+  createIdempotencyKey: string,
+) {
+  if (!shared) throw new Error("database unavailable");
+  const [state] = await shared.admin<
+    Array<{
+      sessionCount: number;
+      selectionCount: number;
+      attachmentCount: number;
+      eventCount: number;
+      auditCount: number;
+      turnCount: number;
+      historyCount: number;
+      wakeCount: number;
+      leaseCount: number;
+      runtimeMutationCount: number;
+      usageCount: number;
+      spawnDenialCount: number;
+    }>
+  >`
+    select
+      (select count(*)::int from sessions session_value
+        where session_value.workspace_id = ${workspaceId}
+          and session_value.id = ${sessionId}) as "sessionCount",
+      (select count(*)::int from sessions session_value
+        where session_value.workspace_id = ${workspaceId}
+          and session_value.id = ${sessionId}
+          and (session_value.variable_set_id is not null
+            or session_value.variable_set_ids <> '[]'::jsonb)) as "selectionCount",
+      (select count(*)::int from session_variable_set_attachments attachment
+        where attachment.workspace_id = ${workspaceId}
+          and attachment.session_id = ${sessionId}) as "attachmentCount",
+      (select count(*)::int from session_events event_value
+        where event_value.workspace_id = ${workspaceId}
+          and event_value.session_id = ${sessionId}) as "eventCount",
+      (select count(*)::int from audit_events audit_value
+        where audit_value.workspace_id = ${workspaceId}
+          and audit_value.target_id = ${sessionId}) as "auditCount",
+      (select count(*)::int from session_turns turn_value
+        where turn_value.workspace_id = ${workspaceId}
+          and turn_value.session_id = ${sessionId}) as "turnCount",
+      (select count(*)::int from session_history_items history_value
+        where history_value.workspace_id = ${workspaceId}
+          and history_value.session_id = ${sessionId}) as "historyCount",
+      (select count(*)::int from session_workflow_wake_outbox wake_value
+        where wake_value.workspace_id = ${workspaceId}
+          and wake_value.session_id = ${sessionId}) as "wakeCount",
+      (select count(*)::int from sandbox_leases lease_value
+        where lease_value.workspace_id = ${workspaceId}
+          and lease_value.sandbox_group_id = ${sessionId}) as "leaseCount",
+      (select count(*)::int from sandbox_workspace_mutation_admissions admission_value
+        where admission_value.workspace_id = ${workspaceId}
+          and admission_value.session_id = ${sessionId}) as "runtimeMutationCount",
+      (select count(*)::int from usage_events usage_value
+        where usage_value.workspace_id = ${workspaceId}
+          and usage_value.session_id = ${sessionId}) as "usageCount",
+      (select count(*)::int from session_spawn_denials denial_value
+        where denial_value.workspace_id = ${workspaceId}
+          and denial_value.idempotency_key = ${createIdempotencyKey}) as "spawnDenialCount"
+  `;
+  if (!state) throw new Error("session create footprint is unavailable");
+  return state;
+}
+
+async function sessionVariableSetMutationState(value: Awaited<ReturnType<typeof fixture>>) {
+  if (!shared) throw new Error("database unavailable");
+  const [state] = await shared.admin<
+    Array<{
+      status: string;
+      variableSetIds: string[];
+      variableSetId: string | null;
+      lastSequence: number;
+      updatedAt: string;
+      attachmentCount: number;
+      eventCount: number;
+      auditCount: number;
+      rotatedLeaseCount: number;
+    }>
+  >`
+    select session_value.status,
+      session_value.variable_set_ids as "variableSetIds",
+      session_value.variable_set_id as "variableSetId",
+      session_value.last_sequence as "lastSequence",
+      session_value.updated_at::text as "updatedAt",
+      (select count(*)::int from session_variable_set_attachments attachment
+        where attachment.workspace_id = ${value.grant.workspaceId}
+          and attachment.session_id = ${value.child.id}) as "attachmentCount",
+      (select count(*)::int from session_events event_value
+        where event_value.workspace_id = ${value.grant.workspaceId}
+          and event_value.session_id = ${value.child.id}
+          and event_value.type = 'session.variable_sets.updated') as "eventCount",
+      (select count(*)::int from audit_events audit_value
+        where audit_value.workspace_id = ${value.grant.workspaceId}
+          and audit_value.target_id = ${value.child.id}
+          and audit_value.action like 'session.variable_set%') as "auditCount",
+      (select count(*)::int from sandbox_leases lease
+        where lease.workspace_id = ${value.grant.workspaceId}
+          and lease.sandbox_group_id = session_value.sandbox_group_id
+          and lease.rotation_requested_at is not null) as "rotatedLeaseCount"
+    from sessions session_value
+    where session_value.workspace_id = ${value.grant.workspaceId}
+      and session_value.id = ${value.child.id}
+  `;
+  if (!state) throw new Error("session Variable Set state is unavailable");
+  return state;
+}
+
+async function expectControlledVariableSetRemovalRace(removal: "revoke" | "delete"): Promise<void> {
+  if (!shared) throw new Error("database unavailable");
+  const value = await fixture();
+  const retainedVariableSet = await createVariableSet(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    name: `session-${removal}-retained-${crypto.randomUUID()}`,
+  });
+  const variableSet = await createVariableSet(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    name: `session-${removal}-race-${crypto.randomUUID()}`,
+  });
+  expect(
+    await updateSessionVariableSets(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      sessionId: value.child.id,
+      subjectId: value.grant.subjectId,
+      variableSets: [
+        {
+          id: retainedVariableSet.id,
+          name: retainedVariableSet.name,
+          scope: retainedVariableSet.scope,
+        },
+      ],
+    }),
+  ).toMatchObject({ status: "updated" });
+  const before = await sessionVariableSetMutationState(value);
+  const routeClient = createDb(shared.appUrl, { max: 1 });
+  const removalClient = createDb(shared.appUrl, { max: 1 });
+  const blockerReady = deferred<number>();
+  const releaseBlocker = deferred();
+  let blocker: Promise<unknown> | null = null;
+  let request: Promise<Response> | null = null;
+  try {
+    blocker = shared.admin.begin(async (tx) => {
+      const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+      if (!backend) throw new Error("session mutation blocker backend is unavailable");
+      await tx`select id from sessions
+        where workspace_id = ${value.grant.workspaceId}
+          and id = ${value.child.id}
+        for update`;
+      blockerReady.resolve(backend.pid);
+      await releaseBlocker.promise;
+    });
+    const blockerPid = await blockerReady.promise;
+    const app = appWith(
+      {
+        authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      routeClient.db,
+    );
+    request = app.request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/variable-sets`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: await variableSetControlAuthorization(value),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          variableSetIds:
+            removal === "revoke"
+              ? [variableSet.id, retainedVariableSet.id]
+              : [retainedVariableSet.id, variableSet.id],
+        }),
+      },
+    );
+    expect(
+      await waitForBlockedBackend(blockerPid, `Variable Set ${removal} race request`),
+    ).toBeGreaterThan(0);
+
+    if (removal === "revoke") {
+      expect(
+        await deleteVariableSet(
+          removalClient.db,
+          {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId,
+            subjectId: value.grant.subjectId,
+          },
+          variableSet.id,
+        ),
+      ).toBe(true);
+    } else {
+      await shared.admin`
+        delete from workspace_variable_sets
+        where account_id = ${value.grant.accountId}
+          and id = ${variableSet.id}
+      `;
+    }
+    releaseBlocker.resolve();
+
+    const response = await request;
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain("no longer available");
+    expect(await sessionVariableSetMutationState(value)).toEqual(before);
+  } finally {
+    releaseBlocker.resolve();
+    await Promise.allSettled([...(blocker ? [blocker] : []), ...(request ? [request] : [])]);
+    await routeClient.close();
+    await removalClient.close();
+  }
+}
+
+async function expectControlledVariableSetCreateRemovalRace(
+  removal: "revoke" | "delete",
+): Promise<void> {
+  if (!shared) throw new Error("database unavailable");
+  const value = await fixture();
+  const retainedVariableSet = await createVariableSet(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    name: `session-create-${removal}-retained-${crypto.randomUUID()}`,
+  });
+  const variableSet = await createVariableSet(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    name: `session-create-${removal}-race-${crypto.randomUUID()}`,
+  });
+  const requestedSessionId = crypto.randomUUID();
+  const createIdempotencyKey = `session-create-${removal}-${crypto.randomUUID()}`;
+  const routeClient = createDb(shared.appUrl, { max: 1 });
+  const removalClient = createDb(shared.appUrl, { max: 1 });
+  const blockerReady = deferred<number>();
+  const releaseBlocker = deferred();
+  let blocker: Promise<unknown> | null = null;
+  let request: Promise<Response> | null = null;
+  try {
+    blocker = shared.admin.begin(async (tx) => {
+      const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+      if (!backend) throw new Error("session create blocker backend is unavailable");
+      await tx`select pg_advisory_xact_lock(
+        hashtextextended(${`workspace-control:${value.grant.workspaceId}`}, 0)
+      )`;
+      await tx`select workspace_id from workspace_inference_controls
+        where workspace_id = ${value.grant.workspaceId}
+        for update`;
+      blockerReady.resolve(backend.pid);
+      await releaseBlocker.promise;
+    });
+    const blockerPid = await blockerReady.promise;
+    const app = appWith(undefined, routeClient.db);
+    request = app.request(`/v1/workspaces/${value.grant.workspaceId}/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: await variableSetCreateAuthorization(value),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        requestedSessionId,
+        initialMessage: `Variable Set create ${removal} race`,
+        ...(removal === "revoke" ? { idempotencyKey: createIdempotencyKey } : {}),
+        variableSetIds:
+          removal === "revoke"
+            ? [variableSet.id, retainedVariableSet.id]
+            : [retainedVariableSet.id, variableSet.id],
+      }),
+    });
+    expect(
+      await waitForBlockedBackend(blockerPid, `Variable Set create ${removal} race request`),
+    ).toBeGreaterThan(0);
+
+    if (removal === "revoke") {
+      expect(
+        await deleteVariableSet(
+          removalClient.db,
+          {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId,
+            subjectId: value.grant.subjectId,
+          },
+          variableSet.id,
+        ),
+      ).toBe(true);
+    } else {
+      await shared.admin`
+        delete from workspace_variable_sets
+        where account_id = ${value.grant.accountId}
+          and id = ${variableSet.id}
+      `;
+    }
+    releaseBlocker.resolve();
+
+    const response = await request;
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({
+      code: "SESSION_CREATE_REJECTED",
+      message: "One or more selected Variable Sets are no longer available.",
+      details: { variableSetIds: [variableSet.id] },
+    });
+    expect(
+      await sessionCreateFootprint(
+        value.grant.workspaceId,
+        requestedSessionId,
+        createIdempotencyKey,
+      ),
+    ).toEqual({
+      sessionCount: 0,
+      selectionCount: 0,
+      attachmentCount: 0,
+      eventCount: 0,
+      auditCount: 0,
+      turnCount: 0,
+      historyCount: 0,
+      wakeCount: 0,
+      leaseCount: 0,
+      runtimeMutationCount: 0,
+      usageCount: 0,
+      spawnDenialCount: 0,
+    });
+  } finally {
+    releaseBlocker.resolve();
+    await Promise.allSettled([...(blocker ? [blocker] : []), ...(request ? [request] : [])]);
+    await routeClient.close();
+    await removalClient.close();
+  }
+}
+
 describe("embedding host session authorization routes", () => {
+  test("rejects operator-disabled HTTP relevance discovery before storage", async () => {
+    const accountId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const subjectId = `user:${crypto.randomUUID()}`;
+    const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId,
+      workspaceId,
+      subjectId,
+      permissions: ["sessions:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    let databaseTouches = 0;
+    const database = new Proxy(
+      {},
+      {
+        get() {
+          databaseTouches += 1;
+          throw new Error("disabled work discovery reached storage");
+        },
+      },
+    ) as Database;
+    const app = appWith(
+      {
+        authorizeSession: async () => ({ allowed: true }),
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      database,
+      { workDiscoveryEnabled: false },
+    );
+
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/agent-topology?query=permission-scoped`,
+      { headers: { authorization } },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("work discovery is disabled");
+    expect(databaseTouches).toBe(0);
+  });
+
+  test("projects the independent human-advisory rollout decision", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const app = appWith(
+      {
+        authorizeSession: async () => ({ allowed: true }),
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      client.db,
+      { workDiscoveryHumanAdvisoriesEnabled: false },
+    );
+
+    const response = await app.request(`/v1/workspaces/${value.grant.workspaceId}/agent-topology`, {
+      headers: { authorization: value.authorization },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      sessions: Array<{
+        relatedWork: { advisoryOnly: boolean; noAdditionalAccess: boolean };
+      }>;
+      humanAdvisoriesEnabled: boolean;
+    };
+    expect(body.humanAdvisoriesEnabled).toBe(false);
+    expect(body.sessions.length).toBeGreaterThan(0);
+    expect(
+      body.sessions.every(
+        (session) =>
+          session.relatedWork.advisoryOnly === true &&
+          session.relatedWork.noAdditionalAccess === true,
+      ),
+    ).toBe(true);
+  });
+
   test("keeps the legacy raw revision array and exposes pagination separately", async () => {
     if (!available || !shared) return;
     const value = await fixture();
@@ -363,6 +833,217 @@ describe("embedding host session authorization routes", () => {
       serverId: "external_tools",
       effectiveFrom: "next_attempt",
     });
+  });
+
+  test("replaces ordered Variable Sets only after exact session and resource authorization", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const first = await createVariableSet(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      name: `session-first-${crypto.randomUUID()}`,
+    });
+    const second = await createVariableSet(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      name: `session-second-${crypto.randomUUID()}`,
+    });
+    const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      subjectId: value.grant.subjectId,
+      permissions: [
+        "sessions:read",
+        "sessions:control",
+        "variable-sets:attach",
+        "variable-sets:use",
+      ],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const decisions: Array<{ operation: string; surface: string }> = [];
+    const app = appWith({
+      authorizeSession: async ({ operation, surface }) => {
+        decisions.push({ operation, surface });
+        return { allowed: true, relatedSessionAccess: "root" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const path = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/variable-sets`;
+    const response = await app.request(path, {
+      method: "PUT",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ variableSetIds: [first.id, second.id] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      id: value.child.id,
+      variableSetIds: [first.id, second.id],
+      variableSetId: second.id,
+    });
+    expect(decisions).toContainEqual({
+      operation: "session.variable_sets.write",
+      surface: "http",
+    });
+    const events = (
+      await listSessionEvents(client.db, value.grant.workspaceId, value.child.id)
+    ).filter((event) => event.type === "session.variable_sets.updated");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.payload).toMatchObject({
+      variableSets: [
+        { id: first.id, name: first.name },
+        { id: second.id, name: second.name },
+      ],
+      collisionPolicy: "later_selected_set_wins",
+    });
+  });
+
+  test("returns 422 without session mutation when Variable Set revoke wins after validation", async () => {
+    if (!available || !shared) return;
+    await expectControlledVariableSetRemovalRace("revoke");
+  });
+
+  test("returns 422 without session mutation when Variable Set delete wins after validation", async () => {
+    if (!available || !shared) return;
+    await expectControlledVariableSetRemovalRace("delete");
+  });
+
+  test("returns structured 422 with no partial create when Variable Set revoke wins after validation", async () => {
+    if (!available || !shared) return;
+    await expectControlledVariableSetCreateRemovalRace("revoke");
+  });
+
+  test("returns structured 422 with no partial create when Variable Set delete wins after validation", async () => {
+    if (!available || !shared) return;
+    await expectControlledVariableSetCreateRemovalRace("delete");
+  });
+
+  test("preserves unrelated create-time foreign key failures", async () => {
+    if (!available || !shared) return;
+    const value = await fixture();
+    const variableSet = await createVariableSet(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      name: `session-create-unrelated-fk-${crypto.randomUUID()}`,
+    });
+    let failure: unknown;
+    try {
+      await createSession(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        initialMessage: "unrelated create FK",
+        resources: [],
+        metadata: {},
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "modal",
+        variableSetIds: [variableSet.id],
+        variableSetId: variableSet.id,
+        createdBy: { kind: "subject", subjectId: value.grant.subjectId, label: "Test owner" },
+        createdByContext: {},
+        subjectId: value.grant.subjectId,
+        beforeCreateCommit: async () => {
+          await shared.admin`
+            insert into session_variable_set_attachments (
+              account_id,
+              workspace_id,
+              session_id,
+              variable_set_id,
+              position,
+              session_status
+            ) values (
+              ${value.grant.accountId},
+              ${value.grant.workspaceId},
+              ${crypto.randomUUID()},
+              ${variableSet.id},
+              0,
+              'queued'
+            )
+          `;
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect((failure as { code?: string } | undefined)?.code).toBe("23503");
+    expect((failure as { constraint_name?: string } | undefined)?.constraint_name).toBe(
+      "session_variable_set_attachments_session_fk",
+    );
+  });
+
+  test("rejects Variable Set replacement after a prompt has been accepted but not claimed", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const variableSet = await createVariableSet(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      name: `session-queued-${crypto.randomUUID()}`,
+    });
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      value.grant.workspaceId,
+      value.grant.subjectId,
+      (db) =>
+        submitHumanPromptInTransaction(db, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId,
+          sessionId: value.child.id,
+          subjectId: value.grant.subjectId,
+          actor: { type: "human", subjectId: value.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "accepted before Variable Set replacement",
+          resources: [],
+          model: "test-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+    );
+    const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      subjectId: value.grant.subjectId,
+      permissions: [
+        "sessions:read",
+        "sessions:control",
+        "variable-sets:attach",
+        "variable-sets:use",
+      ],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const app = appWith({
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const response = await app.request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/variable-sets`,
+      {
+        method: "PUT",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({ variableSetIds: [variableSet.id] }),
+      },
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain("no accepted, queued, claimed, or pending work");
+    const [session] = await shared!.admin<
+      Array<{ variableSetIds: string[]; variableSetId: string | null }>
+    >`
+      select variable_set_ids as "variableSetIds", variable_set_id as "variableSetId"
+      from sessions
+      where workspace_id = ${value.grant.workspaceId}
+        and id = ${value.child.id}
+    `;
+    expect(session).toEqual({ variableSetIds: [], variableSetId: null });
+    const events = (
+      await listSessionEvents(client.db, value.grant.workspaceId, value.child.id)
+    ).filter((event) => event.type === "session.variable_sets.updated");
+    expect(events).toHaveLength(0);
   });
 
   test("updates the durable session tool policy and returns a version conflict", async () => {
@@ -866,6 +1547,16 @@ describe("embedding host session authorization routes", () => {
   test("applies exact host scope to first-party MCP target reads and discovery", async () => {
     if (!available) return;
     const value = await fixture();
+    for (const sessionId of [value.child.id, value.hidden.id]) {
+      expect(
+        await updateSessionTitle(client.db, {
+          workspaceId: value.grant.workspaceId,
+          sessionId,
+          title: "Shared host search target",
+          source: "user",
+        }),
+      ).toMatchObject({ updated: true });
+    }
     const calls: Array<{ sessionId: string; operation: string; surface: string }> = [];
     const port: SessionAuthorizationPort = {
       authorizeSession: async ({ target, operation, surface }) => {
@@ -880,6 +1571,18 @@ describe("embedding host session authorization routes", () => {
         sessionIds: [value.child.id],
       }),
     };
+    const topologyResponse = await appWith(port).request(
+      `/v1/workspaces/${value.grant.workspaceId}/agent-topology?query=${encodeURIComponent("Shared host search target")}`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(topologyResponse.status).toBe(200);
+    const topology = (await topologyResponse.json()) as {
+      sessions: Array<{ id: string }>;
+      total: number;
+    };
+    expect(topology.total).toBe(1);
+    expect(topology.sessions).toEqual([expect.objectContaining({ id: value.child.id })]);
+
     const noop = async () => undefined;
     const server = buildOpenGeniMcpServer(
       {
@@ -915,7 +1618,9 @@ describe("embedding host session authorization routes", () => {
 
     const listed = await callMcpTool<{
       sessions: Array<{ id: string; parentSessionId: string | null }>;
-    }>(server, "sessions_list", {});
+      total: number;
+    }>(server, "sessions_list", { query: "Shared host search target" });
+    expect(listed.total).toBe(1);
     expect(listed.sessions).toEqual([
       expect.objectContaining({ id: value.child.id, parentSessionId: null }),
     ]);
@@ -994,12 +1699,47 @@ describe("embedding host session authorization routes", () => {
       sessionId: target.id,
       idempotencyKey: crypto.randomUUID(),
     });
-    expect(paused.resource.state).toBe("paused");
+    expect(paused).toMatchObject({
+      operation: "session_pause",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "paused" },
+      idempotency: { status: "applied" },
+    });
+    const unchangedPauseKey = crypto.randomUUID();
+    const unchangedPause = await callMcpTool<McpMutationReceiptType>(server, "session_pause", {
+      sessionId: target.id,
+      idempotencyKey: unchangedPauseKey,
+    });
+    expect(unchangedPause).toMatchObject({
+      operation: "session_pause",
+      outcome: "unchanged",
+      changed: false,
+      resource: { type: "session", id: target.id, state: "paused" },
+      idempotency: { status: "applied" },
+    });
+    const replayedPause = await callMcpTool<McpMutationReceiptType>(server, "session_pause", {
+      sessionId: target.id,
+      idempotencyKey: unchangedPauseKey,
+    });
+    expect(replayedPause).toMatchObject({
+      operation: "session_pause",
+      outcome: "replayed",
+      changed: false,
+      resource: { type: "session", id: target.id, state: "paused" },
+      idempotency: { status: "replayed" },
+    });
+    expect(replayedPause.relatedResources).toEqual(unchangedPause.relatedResources);
     const resumed = await callMcpTool<McpMutationReceiptType>(server, "session_resume", {
       sessionId: target.id,
       idempotencyKey: crypto.randomUUID(),
     });
-    expect(resumed.resource.state).toBe("active");
+    expect(resumed).toMatchObject({
+      operation: "session_resume",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "active" },
+    });
     const steered = await callMcpTool<{ updateId: string }>(server, "session_steer", {
       sessionId: target.id,
       instruction: "Take the newest direction exactly once",
@@ -1011,22 +1751,51 @@ describe("embedding host session authorization routes", () => {
       ...value.grant,
       permissions: ["workspace:read", "sessions:read", "sessions:control"],
     });
-    const operatorPaused = await callMcpTool<{
-      effectiveControl: { state: string };
-    }>(operatorServer, "session_pause", {
-      sessionId: target.id,
-      idempotencyKey: crypto.randomUUID(),
+    const operatorPaused = await callMcpTool<McpMutationReceiptType>(
+      operatorServer,
+      "session_pause",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(operatorPaused).toMatchObject({
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_pause",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "paused" },
+      relatedResources: [{ type: "session_command_receipt" }],
     });
-    expect(operatorPaused.effectiveControl.state).toBe("paused");
-    const operatorResumed = await callMcpTool<{
-      effectiveControl: { state: string };
-    }>(operatorServer, "session_resume", {
-      sessionId: target.id,
-      idempotencyKey: crypto.randomUUID(),
+    expect(operatorPaused).not.toHaveProperty("effectiveControl");
+    const operatorResumed = await callMcpTool<McpMutationReceiptType>(
+      operatorServer,
+      "session_resume",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(operatorResumed).toMatchObject({
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_resume",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "active" },
     });
-    expect(operatorResumed.effectiveControl.state).toBe("active");
+    expect(operatorResumed).not.toHaveProperty("effectiveControl");
 
     expect(decisions).toEqual([
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
       {
         operation: "session.control",
         surface: "first_party_mcp",

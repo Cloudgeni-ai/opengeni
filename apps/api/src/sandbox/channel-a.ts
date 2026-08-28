@@ -32,6 +32,7 @@ import {
   getSandboxSessionEnvelope,
   getLiveEnrollmentConnection,
   getSandbox,
+  getScheduledScopedRigVersionMetadata,
   touchLeaseHolder,
   loadWorkspaceEnvironmentForRun,
   markWarmLeaseInstanceLost,
@@ -539,19 +540,45 @@ async function withChannelAOperation<T>(
 
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below.
-  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
-    accountId,
-    workspaceId,
-    variableSetId: session.environmentId,
-    authority: { kind: "session_attach", sessionId: session.id, subjectId: ctx.subjectId },
-  });
+  const workspaceEnvironmentValues: Record<string, string> = {};
+  const rigVersion =
+    session.rigId && session.rigVersionId
+      ? await getScheduledScopedRigVersionMetadata(
+          db,
+          {
+            accountId,
+            workspaceId,
+            subjectId: ctx.subjectId ?? "session-attach",
+          },
+          session.rigId,
+          session.rigVersionId,
+        )
+      : null;
+  for (const variableSetId of rigVersion?.version.defaultVariableSetIds ?? []) {
+    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
+      accountId,
+      workspaceId,
+      variableSetId,
+      authority: { kind: "session_attach", sessionId: session.id, subjectId: ctx.subjectId },
+    });
+    Object.assign(workspaceEnvironmentValues, workspaceEnvironment?.values ?? {});
+  }
+  for (const variableSetId of session.variableSetIds) {
+    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, {
+      accountId,
+      workspaceId,
+      variableSetId,
+      authority: { kind: "session_attach", sessionId: session.id, subjectId: ctx.subjectId },
+    });
+    Object.assign(workspaceEnvironmentValues, workspaceEnvironment?.values ?? {});
+  }
   const settingsForSession =
     session.sandboxBackend !== settings.sandboxBackend
       ? { ...settings, sandboxBackend: session.sandboxBackend }
       : settings;
   const environment = stableSandboxEnvironmentForRun(
     settingsForSession,
-    workspaceEnvironment?.values ?? {},
+    workspaceEnvironmentValues,
     { workspaceId },
   );
   if (hasGitCredentialRepositorySelection(session.resources)) {

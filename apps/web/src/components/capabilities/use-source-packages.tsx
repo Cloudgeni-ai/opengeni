@@ -7,7 +7,7 @@
  * flows need. The Bundles section renders the rows; nothing about how a row
  * looks lives here.
  */
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   lazy,
   Suspense,
@@ -82,7 +82,7 @@ export function useSourcePackages({
   canManage,
   onChanged,
 }: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
   canManage: boolean;

@@ -26,7 +26,7 @@ export function WorkspaceNav() {
 
   return (
     <nav
-      aria-label="Workspace"
+      aria-label="Settings"
       className={cn("grid gap-0.5 px-2", rail.collapsed && "justify-center")}
     >
       <Link
@@ -34,7 +34,7 @@ export function WorkspaceNav() {
         params={{ workspaceId: rail.workspaceId }}
         search={{ section: "general" }}
         aria-current={active ? "page" : undefined}
-        title={rail.collapsed ? "Workspace" : undefined}
+        title={rail.collapsed ? "Settings" : undefined}
         onClick={() => rail.setDrawerOpen(false)}
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted outline-none transition-colors pointer-coarse:h-10",
@@ -51,7 +51,7 @@ export function WorkspaceNav() {
           )}
         />
         <SlidersHorizontalIcon className="size-4 shrink-0" />
-        {rail.collapsed ? null : <span className="min-w-0 truncate">Workspace</span>}
+        {rail.collapsed ? null : <span className="min-w-0 truncate">Settings</span>}
       </Link>
     </nav>
   );

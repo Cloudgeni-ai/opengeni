@@ -7,7 +7,11 @@ import {
   repositoryBindingPresentation,
 } from "@/components/repository-picker";
 import { registerDom, renderComponent } from "../../../packages/react/test/render-hook";
-import type { GitHubRepository } from "@/types";
+import type {
+  GitHubRepository,
+  PersonalGitHubConnectionStatusResponse,
+  PersonalGitHubRepositoryCatalogItem,
+} from "@/types";
 
 registerDom();
 
@@ -76,6 +80,27 @@ describe("repository picker GitHub binding status", () => {
 });
 
 describe("additive repository picker", () => {
+  const personalRepository: PersonalGitHubRepositoryCatalogItem = {
+    repositoryId: "9007199254740993123",
+    fullName: "octocat/private-repository",
+    canonicalUrl: "https://github.com/octocat/private-repository",
+    defaultBranch: "main",
+    visibility: "private",
+    private: true,
+    archived: false,
+    disabled: false,
+    permissions: { pull: true, push: true, admin: false, maintain: false, triage: false },
+    selectedAccess: "write",
+  };
+  const personalStatus = {
+    enabled: true,
+    connection: {
+      status: "active",
+      metadata: { githubLogin: "octocat" },
+    },
+    reviewUrl: null,
+  } as unknown as PersonalGitHubConnectionStatusResponse;
+
   test("keeps one selected repository identifiable in the compact trigger", async () => {
     const repository: GitHubRepository = {
       id: 456,
@@ -196,5 +221,67 @@ describe("additive repository picker", () => {
         ?.disabled,
     ).toBe(true);
     await rendered.unmount();
+  });
+
+  test("keeps a selected personal identity compact and locks it after mounting", async () => {
+    const props = {
+      setupMode: "platform" as const,
+      configured: false,
+      status: "disabled" as const,
+      installUrl: null,
+      linkUrl: null,
+      installations: [],
+      repositories: [],
+      groups: [],
+      personalGitHubStatus: personalStatus,
+      personalGitHubRepositories: [personalRepository],
+      selectedPersonalGitHubRepoIds: new Set([personalRepository.repositoryId]),
+      selectedPersonalGitHubRepoRefs: { [personalRepository.repositoryId]: "main" },
+      selectedRepoIds: new Set<number>(),
+      selectedRepoRefs: {},
+      selectedInstallationId: null,
+      manualRepos: [],
+      manualOpen: false,
+      githubAppOpen: false,
+      org: "",
+      pending: false,
+      repoBusy: false,
+      githubAppBusy: false,
+      onRefresh: async () => {},
+      onConnectPersonalGitHub: () => {},
+      onTogglePersonalGitHubRepo: () => {},
+      onPersonalGitHubRefChange: () => {},
+      onToggleRepo: () => {},
+      onRefChange: () => {},
+      onManualOpenChange: () => {},
+      onManualAdd: () => {},
+      onManualUpdate: () => {},
+      onManualRemove: () => {},
+      onGitHubAppOpenChange: () => {},
+      onOrgChange: () => {},
+      onStartGitHubApp: () => {},
+      onDisconnectInstallation: async () => {},
+    };
+    const trigger = await renderComponent(createElement(RepositoryContextPicker, props));
+    expect(
+      trigger.container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Repository context: octocat/private-repository"]',
+      )?.textContent,
+    ).toContain("octocat/private-repository");
+    await trigger.unmount();
+
+    const mounted = await renderComponent(
+      createElement(FollowUpRepositoryMenuBody, {
+        ...props,
+        lockedPersonalGitHubRepoIds: new Set([personalRepository.repositoryId]),
+      }),
+    );
+    const row = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="octocat/private-repository mounted as you"]',
+    );
+    expect(row?.disabled).toBe(true);
+    expect(mounted.container.textContent).toContain("@octocat");
+    expect(mounted.container.textContent).toContain("Mounted");
+    await mounted.unmount();
   });
 });

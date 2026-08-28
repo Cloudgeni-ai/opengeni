@@ -22,6 +22,26 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+Session display titles are durable session metadata, not a truncation of model
+history. Creation and migration use the prompt-free `New conversation` fallback.
+While a session still has that fallback (or a legacy null title), and its exact
+selected first-party tool and permission policy permits `set_session_title`, the
+worker projects only that exact operation through the attempt-local tool server
+and removes it from the broader remote first-party catalog for the attempt. The
+request-local one-shot instruction can therefore call `set_session_title` on the
+first model request without waiting for the remaining first-party `tools/list`;
+all other selected first-party schemas stay deferred and searchable. This does
+not grant or attach any new tool authority. The attempt-local operation uses the
+canonical title mutation, which updates the session row and appends
+`session.title_set`; a human title remains protected from later agent writes.
+The hint is based on durable title state rather than history length: turn claim
+persists the accepted user item before agent construction, so history count
+cannot identify a first turn.
+Historical fallback sessions therefore self-heal on their next eligible model
+turn. Read projections encountering malformed legacy nulls use an explicit
+factual session or agent identifier and never copy prompt text into title
+metadata.
+
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
 `clientEventId`, clears the visible draft immediately, and renders that snapshot
@@ -301,6 +321,15 @@ filter is agent-monitoring only: REST event pages (which the browser composer
 uses to reconcile an outcome-unknown Send by `clientEventId`), SSE, and forensic
 reads stay byte-identical, and stored events are never rewritten.
 
+Related-work search is another compact projection over this same durable state,
+not a new run-lifecycle input. It searches semantic titles, active goals, and
+bounded typed work claims only after ordinary authorization/host narrowing; it
+never searches opening prompts or makes a claim control the turn, goal, queue,
+or worker. Terminal goal/session lifecycle settles active claim evidence while
+Pause and recovery preserve it. See
+[`work-discovery.md`](work-discovery.md) for the complete authority, ranking,
+mutation, and rollout contract.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
@@ -328,6 +357,15 @@ not necessarily the provider request id: `codex/gpt-5.6-sol`, for example,
 routes upstream as `gpt-5.6-sol`. Billing and Codex allocator eligibility are
 derived from the explicit accepted attribution, never from a model prefix or a
 mutable active-credential snapshot; malformed present metadata fails closed.
+If operational database access fails after the atomic attempt claim but before
+turn-start completion, the activity exports only the exact turn, trigger,
+generation, and safe database failure class. The workflow's unbounded-retry
+DB-only control lane revalidates that identity, closes the same attempt as
+recovering, and backs off before a replacement claim; it never converts the
+claimed inference into a terminal failure or a new prompt.
+The same database-owned transition covers a lost claim commit response: if the
+activity reports retryable pre-claim failure but the control lane finds its
+exact active attempt, that durable attempt wins and is recovered.
 
 SuperGrok/xAI connected-subscription work separately freezes an identifier-free
 `workspace | user` provider-account authority snapshot. Workspace is the
@@ -342,6 +380,9 @@ The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
 policy and preference-descriptor snapshots reconstructed from lifecycle events
 as of the turn's immutable `created_at`, not from mutable heads at claim time.
+Service-only turns have no human preference scope and skip the preference
+snapshot capability entirely; service continuations carrying a frozen causal
+human and legacy subject turns still snapshot that human's applicable entries.
 The session's normalized policy role is independent of workspace membership and
 memory roles. Service-initiated goal continuations and compactions may preserve
 the causal human in `initiating_human_subject_id` solely for personal
@@ -442,7 +483,13 @@ replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
 exhaustion evidence. This is an infrastructure retry budget, not a goal,
 continuation, model-call, or run-length cap; a later human/API prompt may retry as
-new accepted work. Every Steer commits a control wake revision, including when
+new accepted work. If an operational database outage interrupts the recovery
+checkpoint itself, the existing post-claim failure wire carries the immutable
+turn identity, classified provider cause, and exact next recovery count into the
+DB-only control lane. That lane accepts the checkpoint only when the identity
+still owns the attempt and the count is exactly one beyond durable turn metadata;
+ambiguous commits and stale replays therefore cannot reset the retry budget.
+Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes
 the new direction immediately.
@@ -518,16 +565,12 @@ preserved. It never drops history units, folds chunks, or falls back to portable
 A Codex terminal SSE failure carried
 on HTTP 200 is converted to one bounded, marked, non-retried provider error; it
 cannot masquerade as an empty successful summary. After a fenced durable
-replacement, the same activity, turn, attempt, and sandbox normally rebuild
-model input and continue; compaction never creates queue or recovery work.
-Steer admission is immediate but deliberately does not interrupt while the
-latest exact-attempt compaction landmark is `started`, because an interruption
-row would also fence the terminal checkpoint write. Once
-`session.context.compacted` or `session.context.compaction.skipped` is durable,
-a waiting human/API or Agent Steer cooperatively settles the ordinary turn as
-`superseded` before another model request. A claimed standalone compaction
-instead completes its maintenance turn, then the waiting Steer is first to
-claim. Pause and Cancel remain immediate interruption fences.
+replacement, the same activity, turn, attempt, and sandbox rebuild model input
+and continue; compaction itself never creates queue or recovery work. If that
+fresh continuation ends without any terminal model response, it is not accepted
+as an empty completion: cancellation still wins, otherwise the compacted
+checkpoint enters the ordinary bounded same-turn recovery path while newer
+queued prompts remain behind it.
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
@@ -791,17 +834,25 @@ terminal event on a unique contiguous durable sequence. The operator output is
 limited to safe IDs, event counts, sequences, and model name; credentials and
 event payloads are never printed.
 Pause closes the exact live attempt as `interrupted_recoverable` and leaves its
-logical turn `recovering`; Steer normally closes it as `superseded`, makes the
-steered human prompt first, and does not revive the old turn. The exact
-exception is active compaction: while the latest exact-attempt landmark is
-`session.context.compaction.started`, and for the whole lifetime of a claimed
-standalone compaction turn, Steer records durable waiting work but inserts no
-interruption. The terminal checkpoint write therefore remains authorized; its
-first safe boundary supersedes the ordinary turn before another model request,
-or completes standalone maintenance before the Steer claim. A missing or
-already closed owner is an event-free stale no-op. This prevents a superseded
-activity that keeps running from publishing contradictory history or terminal
-truth without creating a compaction/Steer retry loop.
+logical turn `recovering`; Steer closes it as `superseded`, makes the steered
+human prompt first, and does not revive the old turn. A missing or already
+closed owner is an event-free stale no-op. This prevents a superseded activity
+that keeps running from publishing contradictory history or terminal truth.
+
+Pause/Resume command persistence distinguishes `changed`, `unchanged`, and
+`replayed` before allocating a control revision. A fresh Pause is unchanged
+only when the selected direct recursive blocker is already represented, no
+newer descendant run override must be invalidated, every live attempt is
+already covered by an actionable Pause interruption, and no adopted command is
+still running. A fresh Resume is unchanged only when the selected branch has no
+undefeated blocker and every currently continuable descendant already has an
+undelivered workflow wake; otherwise it advances the override and repairs wake
+delivery. Workspace Pause/Resume applies the same rules across the workspace.
+An unchanged result writes only its operation receipt: no control revision,
+control/session event, audit event, child notice, interruption, command stop,
+or workflow wake. Reusing that exact operation key remains `replayed`, not
+`unchanged`.
+
 If provider failure races with an accepted exact-attempt Pause or Steer, that
 control request owns the attempt: recovery returns stale and the normal
 settlement/quiescence path completes the transition. The workspace-control lock
@@ -965,13 +1016,18 @@ best-effort live fanout; a NATS failure cannot trigger proof recovery or undo a
 committed receipt.
 
 Settling or stale-rejecting an interruption atomically commits its own durable
-control wake. While the receipt is absent, wake acknowledgement remains pending,
+control wake. Activity-owned recoverable shutdown commits an ordinary durable
+wake in the same transaction as `turn.recovery.requested`. While the receipt is
+absent, wake acknowledgement remains pending for either recovery form,
 `peekSessionWork` returns `cancellation-wait`, and every claim path remains
 `control-pending` from the interruption ledger alone—queue presentation metadata
 is never admission authority. The workflow waits up to five seconds for a wake
 and may then close without running another turn activity; the outbox continues
-bounded redelivery until the exact activity disappears or supplies its proof. A
-proof accepted at that timeout boundary is persisted before close. Once the
+bounded redelivery until the exact activity disappears or supplies its proof.
+When an attempt-owned retained process was the final writer, its terminal
+settlement advances that outbox revision atomically, so settlement racing the
+workflow's last reconciliation check cannot be lost. A proof accepted at that
+timeout boundary is persisted before close. Once the
 receipt commits, its coalescing outbox wake uses immediate `signalWithStart` on
 the same stable workflow id, which restarts the exact
 session and admits the replacement once. This event-driven path needs no
@@ -1132,6 +1188,11 @@ UUID, parent admission, process holder, lease/group, provider backend/instance,
 lease epoch, route target/epoch, and provider session; exact replays are
 idempotent and cannot touch a successor. This reconciliation never calls a
 provider terminate/kill API and never captures or rotates a workspace snapshot.
+Repeated Modal binding-missing or binding-mismatch observations enter a durable
+24-hour reconciliation quarantine after five claimed probes. Quarantine is
+only backoff: the process remains active, retains every blocker, carries no
+exit/loss proof, and is periodically eligible for a later positive binding
+lookup and ordinary reconciliation.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 
@@ -1686,9 +1747,17 @@ Provider request lifecycle diagnostics are synchronous, bounded, and best-effort
 Native diagnostic observers run before the existing awaited
 `agent.model.request` durable audit callback and cannot block or change it.
 Durable append/publish fencing and ordering therefore remain the source of audit
-truth. For generic providers, an attempt-local async context instead awaits the
-durable `started` checkpoint at the literal pre-fetch boundary; request bytes
-cannot reach the wire first. Model-preparation `started` is durable before
+truth. Every provider path first awaits a mandatory reconciliation of the SDK's
+complete prior history at the follow-up request boundary. A provider can
+therefore consume a completed tool batch only after its call/result pair is
+replay-safe; the first request has no prior model/tool history to append.
+When a Responses terminal omits its output array, completed stream items are
+reassembled by numeric `output_index`; sparse provider positions are compacted
+to the observed items rather than treated as missing output, while duplicate
+indices still fail closed.
+For generic providers, an attempt-local async context then awaits the durable
+`started` checkpoint at the literal pre-fetch boundary; request bytes cannot
+reach the wire first. Model-preparation `started` is durable before
 `runStream` is invoked, including an immediately-calling native transport. A
 semantic terminal is latched before downstream stream cleanup; if the consumer
 cancels after parsing it, the audit remains `completed` rather than producing a

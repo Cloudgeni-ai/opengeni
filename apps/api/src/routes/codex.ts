@@ -195,7 +195,11 @@ async function managedCookieHuman(
   ) {
     return null;
   }
-  const session = await getManagedSession(c, deps.managedAuth);
+  const session = await getManagedSession(c, deps.managedAuth, {
+    db: deps.db,
+    sessionAdapter: deps.managedAuthSessionAdapter,
+    sessionSetMode: deps.settings.managedAuthSessionSetMode,
+  });
   if (!session?.user?.id || !session.session?.id) return null;
   return {
     subjectId: `user:${session.user.id}`,

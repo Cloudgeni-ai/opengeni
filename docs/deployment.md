@@ -2,12 +2,22 @@
 
 OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
 
+Managed deployments using organization recovery must first complete the
+provider-neutral browser-slot rollout and then follow the migration,
+fake-provider conformance, rollback, and unsupported-operation contract in
+[`organization-recovery.md`](organization-recovery.md). Repository delivery does
+not enable an external recovery notification provider or perform a production
+mutation.
+
 ## Personal GitHub OAuth
 
 Personal GitHub is disabled by default. Managed staging and production must use
 different GitHub OAuth Apps and configure the exact API-origin callback
-`/v1/integrations/github-personal/oauth/callback`. Keep device flow disabled and
-store each client secret only in that environment's secret manager. Runtime
+`/v1/integrations/github-personal/oauth/callback`. Local and self-hosted
+operators create one OAuth App for their own installation; localhost HTTP is
+accepted in local/test, while non-local environments require HTTPS. Keep device
+flow disabled and store each client secret only in that environment's secret
+manager. Runtime
 artifacts pass through `OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED`,
 `OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID`, and
 `OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET`; enabling the feature also
@@ -453,6 +463,24 @@ needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
 `OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
 checked before the invitation row commits and reported as `503`.
 
+### Browser login session-set rollout (0362)
+
+`0362_managed_auth_session_sets.sql` is rolling and deliberately activation-free.
+It backfills exact Better Auth login-binding stamps, installs hash-only/FORCE-RLS
+browser session-set authority, and leaves
+`OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`. Apply it with the owner migration
+job and provision the restricted runtime routines before deploying the matching
+API/web generation. Do not change the mode as part of migration or PR merge.
+
+`dual` and `broker` require a fresh deployment authorization, one canonical HTTPS
+web/API origin, consistent Better Auth signing/origin/cookie configuration, the
+same mode on every API replica, and the complete real PostgreSQL/Better Auth plus
+Chromium/Firefox/WebKit `accounts` acceptance lane. `dual` is the measured
+coexistence state; `broker` is a later all-replica cutover. Never mix modes or
+restart an arbitrary old image after broker activation. The complete rollout,
+rollback, self-hosting, header/proxy, and security contract is
+[`browser-login-session-sets.md`](browser-login-session-sets.md).
+
 ### Durable invited-user email delivery (0351)
 
 Migration 0351 is rolling and additive. Before inviting users, configure
@@ -849,16 +877,32 @@ Current profiles:
 - `preview-branch`: operator-managed branch preview variable set shape.
 - `self-contained-kubernetes`: Kubernetes-hosted dependencies for demos or air-gapped evaluation.
 
-## Local Docker Compose
+## Local Development Stack
 
-`bun run dev` is the primary local Docker Compose path. It starts Postgres,
-NATS, Temporal, Garage, migrations, imports the fingerprinted reviewed
-integrations catalog, builds the sandbox image, and starts the API, control and
-turn workers, artifact materializer, artifact outbox dispatcher, and web. The
-two artifact roles receive distinct generated least-privilege database logins
-and independently selected health ports (defaults `9465` and `9466`). Their
-ignored local values are written to `.env.runtime`, not `.env`. Set
+`bun run dev` is the primary full local path. `OPENGENI_DEV_BACKEND=auto`
+prefers Docker only when its daemon answers a bounded server probe, then falls
+back to native PostgreSQL, NATS, Temporal, and pinned MinIO processes. Set
+`OPENGENI_DEV_BACKEND=docker` or `native` to require one path. The native path
+is Linux-only, changes a copied Docker sandbox default to the credentials-free
+in-process local provider, and preserves explicit remote sandbox providers.
+
+Both infrastructure paths run migrations, import the fingerprinted reviewed
+integrations catalog, and start the API, control and turn workers, Connected
+Machines relay, artifact materializer, artifact outbox dispatcher, and web.
+Docker additionally builds the local sandbox image when that sandbox backend is
+selected. The two artifact roles receive distinct generated least-privilege
+database logins and independently selected health ports (defaults `9465` and
+`9466`). Ignored local values, including the resolved infrastructure and
+sandbox backends, are written to `.env.runtime`, not `.env`. Set
 `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
+
+Native dependencies remain running after `Ctrl-C`, matching Compose's warm
+restart behavior. `bun run dev:down` stops only the infrastructure recorded for
+this worktree. `bun run dev:clean -- --yes` also removes its PostgreSQL/object
+storage data and `.env.runtime`. On a mode-0700 sandbox repository mount, the
+unprivileged PostgreSQL server stores its exact hashed project cluster under
+`/var/tmp/opengeni-native-postgres`; clean removes that directory without
+loosening repository permissions.
 
 The script prepares one canonical current-host development artifact bundle only
 when its exact source/toolchain fingerprint or native receipt is absent or
@@ -875,7 +919,15 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices. The MinIO opt-in uses `OPENGENI_MINIO_HOST_PORT` and `OPENGENI_MINIO_CONSOLE_HOST_PORT`.
+When a common host port is already occupied, `bun run dev` auto-selects a nearby
+free port and rewrites the in-memory runtime URLs for that run. Set
+`OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`,
+`OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`,
+`OPENGENI_TEMPORAL_UI_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`,
+`OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or
+`OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local choices.
+MinIO uses `OPENGENI_MINIO_HOST_PORT` and
+`OPENGENI_MINIO_CONSOLE_HOST_PORT`.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure
@@ -932,6 +984,12 @@ live `main` stay mergeable). Drop `Current-base source admission` from the
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
 required by the manually dispatched `.github/workflows/release-candidate.yml`.
+Once trusted CI admits the exact Version PR head and its generating `main` base,
+later commits on `main` do not invalidate that run. The immutable head, its
+single parent, deterministic version tree, automation identity, and retained
+controller remain fenced; ordinary protected-branch movement is not a release
+freeze. A regenerated Version PR head still supersedes and cancels CI for the
+older head.
 
 Ordinary candidate and operator admission bind the **merged associated PR**, not
 a later GitHub `APPROVE` or structured PASS body on the exact head:
@@ -2055,6 +2113,25 @@ described in [Rig operational rollout](rigs.md#operational-rollout). Enable lazy
 provisioning only after the credential/resource eager-path canaries for the
 target release are green.
 
+## Advisory work-discovery rollout
+
+Related-work discovery and durable typed work claims use additive rolling
+migrations and four independent runtime settings. For a conservative rollout,
+deploy the schema/application with all four settings explicitly false, enable
+claim mutations first to collect evidence, enable discovery for selected
+API/MCP consumers after observing its bounded metrics, and enable human
+advisories last. The automatic-nudge setting remains false: no automatic nudge
+producer is shipped.
+
+Rollback is forward-only and flag-based. Disable human advisories, then
+discovery, then claim mutations as needed. Ordinary session browsing remains
+available when discovery is off, existing evidence remains durable, and
+lifecycle settlement continues when mutation tools are off. Do not delete claim
+rows, reverse the migration ledger, or drop the search indexes as a feature
+rollback. The exact flags, benchmark commands, metrics, alert guidance, and
+authority boundaries are in
+[`work-discovery.md`](work-discovery.md).
+
 ## Observability
 
 OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
@@ -2132,6 +2209,8 @@ helm upgrade --install opengeni deploy/helm/opengeni \
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
+- Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
+- Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`.

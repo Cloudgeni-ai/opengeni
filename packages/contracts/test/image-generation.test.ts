@@ -64,6 +64,8 @@ describe("GenerateImageToolInput", () => {
     expect(serialized).not.toContain("(?<=");
     expect(serialized).not.toContain("(?<!");
     expect(serialized).toContain(String.raw`^\\/workspace\\/.+$`);
+    expect(serialized).toContain("PNG, JPEG, or WebP");
+    expect(serialized).toContain("Convert SVG or other formats");
   });
 });
 

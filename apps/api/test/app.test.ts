@@ -43,7 +43,7 @@ import { CODEX_APPS_MCP_URL } from "@opengeni/codex";
 import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
 import { createSignedState } from "@opengeni/github";
-import { testSettings } from "@opengeni/testing";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
   ClientConfig,
@@ -517,6 +517,29 @@ describe("API helpers", () => {
     expect(trusted.status).toBe(204);
     expect(trusted.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
     expect(trusted.headers.get("access-control-allow-credentials")).toBe("true");
+
+    const managed = await app.request("http://localhost/v1/auth/session-set/select", {
+      method: "OPTIONS",
+      headers: {
+        origin: "http://localhost:5173",
+        "access-control-request-method": "POST",
+        "access-control-request-headers":
+          "content-type,x-opengeni-api-contract,x-opengeni-session-csrf,x-opengeni-actor-epoch",
+      },
+    });
+    expect(managed.status).toBe(204);
+    expect(managed.headers.get("access-control-allow-headers")?.toLowerCase()).toContain(
+      "x-opengeni-session-csrf",
+    );
+    expect(managed.headers.get("access-control-allow-headers")?.toLowerCase()).toContain(
+      "x-opengeni-actor-epoch",
+    );
+    expect(externalResponse.headers.get("access-control-expose-headers")?.toLowerCase()).toContain(
+      "x-opengeni-actor-epoch",
+    );
+    expect(externalResponse.headers.get("access-control-expose-headers")?.toLowerCase()).toContain(
+      "x-opengeni-actor-state",
+    );
   });
 
   test("normalizes dynamic route labels for metrics", () => {
@@ -808,7 +831,7 @@ describe("API helpers", () => {
     const app = createApp({
       settings: testSettings(),
       db: {} as never,
-      bus: { isConnected: () => true } as never,
+      bus: new MemoryEventBus(),
       workflowClient: {} as never,
       managedAuth: null,
       readinessChecks: {
@@ -832,6 +855,27 @@ describe("API helpers", () => {
     expect(JSON.stringify(body)).not.toContain(sentinel);
   });
 
+  test("readyz rejects an EventBus without durable subscriber recovery", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: { isConnected: () => true } as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      readinessChecks: {
+        db: async () => {},
+        temporal: async () => {},
+      },
+    });
+
+    const response = await app.request("/readyz");
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      checks: { nats: { ok: false, error: "dependency_unavailable" } },
+    });
+  });
+
   test("traffic-readyz stays routable through a NATS or Temporal outage", async () => {
     let natsChecks = 0;
     let temporalChecks = 0;
@@ -843,7 +887,7 @@ describe("API helpers", () => {
         authAllowHealth: true,
       },
       db: {} as never,
-      bus: { isConnected: () => false } as never,
+      bus: new MemoryEventBus(),
       workflowClient: {} as never,
       managedAuth: null,
       readinessChecks: {
@@ -1685,6 +1729,7 @@ describe("GET /v1/config/client", () => {
     const config = await fetchClientConfig(settings);
 
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
+    expect(config.managedAuthSessionSetMode).toBe("legacy");
     expect(config.models.length).toBeGreaterThan(0);
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
     // Built-in deployment topology stays private in the client projection.
@@ -1697,6 +1742,17 @@ describe("GET /v1/config/client", () => {
     });
     expect(defaultModel).not.toHaveProperty("deployment");
     expect(defaultModel).not.toHaveProperty("credentialSource");
+  });
+
+  test("projects the safe dual/broker session-set rollout discriminator", async () => {
+    expect(
+      (await fetchClientConfig(testSettings({ managedAuthSessionSetMode: "dual" })))
+        .managedAuthSessionSetMode,
+    ).toBe("dual");
+    expect(
+      (await fetchClientConfig(testSettings({ managedAuthSessionSetMode: "broker" })))
+        .managedAuthSessionSetMode,
+    ).toBe("broker");
   });
 
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {
@@ -1786,6 +1842,246 @@ describe("GET /v1/config/client", () => {
     expect(glm).not.toHaveProperty("deployment");
     expect(glm).not.toHaveProperty("credentialSource");
     expect(JSON.stringify(config)).not.toContain("fw_test");
+  });
+});
+
+describe("managed session-set route ownership", () => {
+  function boundaryApp(
+    providerHandler: (request: Request) => Response | Promise<Response>,
+    options: {
+      mode?: "dual" | "broker";
+      db?: AppDependencies["db"];
+      adapter?: AppDependencies["managedAuthSessionAdapter"];
+    } = {},
+  ) {
+    return createApp({
+      settings: testSettings({
+        environment: "production",
+        productAccessMode: "managed",
+        managedAuthSessionSetMode: options.mode ?? "dual",
+        publicBaseUrl: "https://opengeni.test",
+        betterAuthSecret: "managed-session-set-boundary-secret-32-bytes",
+      }),
+      db: options.db ?? ({} as never),
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: {
+        handler: providerHandler,
+        api: {},
+      } as never,
+      managedAuthSessionAdapter: options.adapter ?? ({} as never),
+    });
+  }
+
+  test("lets the nested session-set contract own a production mismatch envelope", async () => {
+    const response = await boundaryApp(() => new Response("provider should not run")).request(
+      "/v1/auth/session-set/bootstrap",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-opengeni-api-contract": "stale-contract",
+          cookie: `opengeni.session_set=${"a".repeat(43)}`,
+        },
+        body: JSON.stringify({
+          operationId: "11111111-1111-4111-8111-111111111111",
+          expectedGeneration: "1",
+        }),
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { details: { managedAuthCode: "api_contract_changed" } },
+    });
+  });
+
+  test("blocks provider session capabilities and strips provider tokens from allowed auth", async () => {
+    let providerCalls = 0;
+    const app = boundaryApp(() => {
+      providerCalls += 1;
+      return Response.json(
+        {
+          token: "provider-token-must-not-cross",
+          session: { id: "provider-session" },
+          user: { id: "user-1", email: "user@example.test" },
+        },
+        { headers: { "set-cookie": "better-auth.session_token=signed; Path=/; HttpOnly" } },
+      );
+    });
+    const blocked = await app.request("/v1/auth/list-sessions");
+    expect(blocked.status).toBe(409);
+    expect(providerCalls).toBe(0);
+    expect(await blocked.json()).toMatchObject({
+      error: { details: { managedAuthCode: "provider_route_blocked" } },
+    });
+
+    const signIn = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "user@example.test", password: "password1234" }),
+    });
+    expect(signIn.status).toBe(200);
+    expect(providerCalls).toBe(1);
+    expect(await signIn.json()).toEqual({ user: { id: "user-1", email: "user@example.test" } });
+    expect(signIn.headers.get("set-cookie")).toContain("better-auth.session_token=");
+    expect(signIn.headers.get("cache-control")).toBe("no-store");
+    expect(signIn.headers.get("pragma")).toBe("no-cache");
+  });
+
+  test("clears provider cookies in broker mode for JSON and non-JSON auth responses", async () => {
+    const clearCookie =
+      "better-auth.session_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly";
+    let responseKind: "json" | "redirect" = "json";
+    const app = boundaryApp(
+      (request) => {
+        expect(request.headers.get("cookie")).toBeNull();
+        return responseKind === "json"
+          ? Response.json(
+              { token: "unselected-token", user: { id: "user-1" } },
+              { headers: { "set-cookie": "better-auth.session_token=unselected; Path=/" } },
+            )
+          : new Response(null, {
+              status: 302,
+              headers: {
+                location: "https://opengeni.test/",
+                "set-cookie": "better-auth.session_token=unselected; Path=/",
+              },
+            });
+      },
+      {
+        mode: "broker",
+        adapter: {
+          createLegacySelectedSessionCookies: async (selected, currentCookies) => {
+            expect(selected).toBeNull();
+            expect(currentCookies).toContain("better-auth.session_token=old-selected");
+            return [clearCookie];
+          },
+        } as never,
+      },
+    );
+    const request = () =>
+      app.request("/v1/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: "better-auth.session_token=old-selected",
+        },
+        body: JSON.stringify({ email: "user@example.test", password: "password1234" }),
+      });
+
+    const json = await request();
+    expect(await json.json()).toEqual({ user: { id: "user-1" } });
+    expect(json.headers.getSetCookie()).toEqual([clearCookie]);
+    expect(json.headers.get("cache-control")).toBe("no-store");
+    expect(json.headers.get("pragma")).toBe("no-cache");
+
+    responseKind = "redirect";
+    const redirect = await request();
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.getSetCookie()).toEqual([clearCookie]);
+    expect(redirect.headers.get("cache-control")).toBe("no-store");
+    expect(redirect.headers.get("pragma")).toBe("no-cache");
+  });
+
+  test("keeps an active dual set's exact selected mirror across wildcard sign-in", async () => {
+    const slotId = "7438e162-ded0-45fe-94f1-f4548ca532f8";
+    const selected = {
+      slotId,
+      authSessionId: "selected-session",
+      authUserId: "selected-user",
+      token: "selected-token",
+      email: "selected@example.test",
+      name: "Selected user",
+      emailVerified: true,
+    };
+    const exactMirror = "better-auth.session_token=selected-mirror; Path=/; HttpOnly";
+    const app = boundaryApp(
+      () =>
+        Response.json(
+          { token: "unadopted-token", user: { id: "unadopted-user" } },
+          { headers: { "set-cookie": "better-auth.session_token=unadopted; Path=/" } },
+        ),
+      {
+        db: {
+          execute: async () => [
+            {
+              result: {
+                projection: {
+                  mode: "dual",
+                  generation: "3",
+                  actorEpoch: "2",
+                  selectedSlotId: slotId,
+                  state: "ready",
+                  slots: [
+                    {
+                      id: slotId,
+                      displayName: selected.name,
+                      verifiedClaim: { kind: "email", value: selected.email },
+                      state: "active",
+                    },
+                  ],
+                },
+                selected,
+                internalSlots: [selected],
+              },
+            },
+          ],
+        } as never,
+        adapter: {
+          createLegacySelectedSessionCookies: async (candidate) => {
+            expect(candidate).toEqual(selected);
+            return [exactMirror];
+          },
+        } as never,
+      },
+    );
+    const response = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: `opengeni.session_set=${"a".repeat(43)}; better-auth.session_token=selected-mirror`,
+      },
+      body: JSON.stringify({ email: "other@example.test", password: "password1234" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ user: { id: "unadopted-user" } });
+    expect(response.headers.getSetCookie()).toEqual([exactMirror]);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  test("clears an unselected provider cookie for a database-absent dual authority", async () => {
+    const providerCookie = "better-auth.session_token=unadopted; Path=/";
+    const clearCookie =
+      "better-auth.session_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly";
+    const app = boundaryApp(
+      () =>
+        Response.json(
+          { token: "unadopted-token", user: { id: "unadopted-user" } },
+          { headers: { "set-cookie": providerCookie } },
+        ),
+      {
+        db: { execute: async () => [] } as never,
+        adapter: {
+          createLegacySelectedSessionCookies: async (selected) => {
+            expect(selected).toBeNull();
+            return [clearCookie];
+          },
+        } as never,
+      },
+    );
+    const response = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: `opengeni.session_set=${"a".repeat(43)}`,
+      },
+      body: JSON.stringify({ email: "other@example.test", password: "password1234" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ user: { id: "unadopted-user" } });
+    expect(response.headers.getSetCookie()).toEqual([clearCookie]);
   });
 });
 

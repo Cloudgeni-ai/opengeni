@@ -7,11 +7,7 @@ const DEFAULT_DATABASE_URL = "postgres://opengeni:opengeni@127.0.0.1:5432/openge
 const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
 const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
 const DEFAULT_APPLICATION_DATABASE_ROLE = "opengeni_app";
-const GOAL_REVISION_CUTOVER_MIGRATION = "0257_goal_revision_decisions_and_root_constraints.sql";
-const ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION = "0306_atomic_personal_resource_attachments.sql";
-const UNREGISTERED_INVITATION_CUTOVER_MIGRATION = "0314_unregistered_organization_invitations.sql";
-const ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machine_attachments.sql";
-const NAMED_SIGNUP_CUTOVER_MIGRATION = "0348_named_signup_and_user_setup.sql";
+const MIGRATION_APPLICATION_ROLES_SETTING = "opengeni.migration_application_roles";
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
@@ -40,7 +36,9 @@ export type MigrationRuntimeOptions = {
   /**
    * Exact database login roles that may run an OpenGeni API or worker against
    * this target. Maintenance cutovers use this list to reject a live mixed-
-   * version fleet. Dedicated-schema and custom-role deployments must supply it.
+   * version fleet, and rolling ACL migrations use it to preserve old-binary
+   * readiness until later role provisioning converges. Dedicated-schema and
+   * custom-role deployments must supply it.
    */
   applicationDatabaseRoles?: string[];
 };
@@ -175,7 +173,16 @@ async function executeMigrationFile(
     await sql`select set_config('statement_timeout', ${batchedBackfill.statementTimeout}, false)`;
     try {
       for (;;) {
-        const result = await sql.unsafe(batchedBackfill.statement);
+        const result = await sql.begin(async (transaction) => {
+          await transaction`select
+            pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+            pg_catalog.set_config(
+              'opengeni.session_variable_set_attachments_v1',
+              '1',
+              true
+            )`;
+          return await transaction.unsafe(batchedBackfill.statement);
+        });
         if (result.length === 0) break;
       }
     } finally {
@@ -191,9 +198,12 @@ async function executeMigrationFile(
     // query as the migration body: setting it in a prior statement would end
     // that implicit transaction and silently lose the LOCAL value. This also
     // makes a fresh database capable of applying maintenance migration 0138
+    // and later migrations capable of crossing the 0352 sessions policy
     // without a process-global PGOPTIONS escape hatch.
     await sql.unsafe(
-      `SELECT pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true);\n${sqlText}`,
+      `SELECT
+  pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n${sqlText}`,
     );
     return;
   }
@@ -263,7 +273,7 @@ function migrationApplicationRoles(
     ].filter((role): role is string => Boolean(role) && role !== DEFAULT_APPLICATION_DATABASE_ROLE);
     if (schema || configuredRuntimeRoles.length > 0) {
       throw new Error(
-        "Migration 0257 requires the exact application database roles via " +
+        "Pending migrations require the exact application database roles via " +
           "MigrationRuntimeOptions.applicationDatabaseRoles or " +
           "OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES for dedicated-schema or custom-role deployments",
       );
@@ -375,16 +385,25 @@ export async function migrate(
     );
     const appliedRows = await sql`SELECT "name" FROM "schema_migrations"`;
     const applied = new Set(appliedRows.map((row) => row.name as string));
+    const pendingMigrationSources = new Map<string, string>();
+    for (const file of files) {
+      if (!applied.has(file)) {
+        pendingMigrationSources.set(file, await readFile(join(migrationsDir, file), "utf8"));
+      }
+    }
+    // Initialize this session GUC for every pending migration that consumes it,
+    // instead of maintaining a second filename list that can silently lag the
+    // shipped migration chain. The conservative source marker is intentional:
+    // setting the bounded role list for a migration that only mentions the GUC
+    // is harmless, while omitting it makes an otherwise valid upgrade fail.
     if (
-      !applied.has(GOAL_REVISION_CUTOVER_MIGRATION) ||
-      !applied.has(ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION) ||
-      !applied.has(UNREGISTERED_INVITATION_CUTOVER_MIGRATION) ||
-      !applied.has(ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION) ||
-      !applied.has(NAMED_SIGNUP_CUTOVER_MIGRATION)
+      Array.from(pendingMigrationSources.values()).some((source) =>
+        source.includes(MIGRATION_APPLICATION_ROLES_SETTING),
+      )
     ) {
       const applicationRoles = migrationApplicationRoles(schema, runtimeOptions);
       await sql`select set_config(
-        'opengeni.migration_application_roles',
+        ${MIGRATION_APPLICATION_ROLES_SETTING},
         ${JSON.stringify(applicationRoles)},
         false
       )`;
@@ -393,7 +412,10 @@ export async function migrate(
       if (applied.has(file)) {
         continue;
       }
-      const sqlText = await readFile(join(migrationsDir, file), "utf8");
+      const sqlText = pendingMigrationSources.get(file);
+      if (sqlText === undefined) {
+        throw new Error(`Pending migration source was not loaded: ${file}`);
+      }
       await executeMigrationFile(sql, file, sqlText);
       await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;
     }

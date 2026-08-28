@@ -1,5 +1,88 @@
 # @opengeni/documents
 
+## 0.8.6
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/config@0.22.0
+  - @opengeni/contracts@2.7.0
+  - @opengeni/db@3.6.0
+  - @opengeni/storage@0.2.110
+
+## 0.8.5
+
+### Patch Changes
+
+- Updated dependencies [18afc44]
+- Updated dependencies [bc88a28]
+- Updated dependencies [3a004ff]
+  - @opengeni/db@3.5.2
+
+## 0.8.4
+
+### Patch Changes
+
+- Updated dependencies [da0c2d2]
+- Updated dependencies [92f227f]
+  - @opengeni/db@3.5.1
+
+## 0.8.3
+
+### Patch Changes
+
+- 9ef491b: Add the Agent Knowledge product surface, Personal workspace knowledge views and defaults, workspace learning-autonomy administration, explicit routing guidance between Memory, Skills, and Workspace instructions, authority-first organization Document search, exact replay-safe confirmed Memory materialization, and the narrower organization identity/mission boundary with richer facts retrieved from organization knowledge.
+- Updated dependencies [a7912ea]
+- Updated dependencies [d7ab403]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [03d1c6e]
+- Updated dependencies [6e12f3a]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+  - @opengeni/db@3.5.0
+  - @opengeni/storage@0.2.109
+
+## 0.8.2
+
+### Patch Changes
+
+- Updated dependencies [76d6396]
+- Updated dependencies [b5071cf]
+  - @opengeni/contracts@2.5.0
+  - @opengeni/db@3.4.0
+  - @opengeni/config@0.20.1
+  - @opengeni/storage@0.2.108
+
+## 0.8.1
+
+### Patch Changes
+
+- Updated dependencies [8fabf12]
+- Updated dependencies [8fabf12]
+  - @opengeni/db@3.3.1
+
+## 0.8.0
+
+### Minor Changes
+
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+
+### Patch Changes
+
+- Updated dependencies [47b88d3]
+- Updated dependencies [d47da57]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [ba29352]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/db@3.3.0
+  - @opengeni/config@0.20.0
+  - @opengeni/storage@0.2.107
+
 ## 0.7.0
 
 ### Minor Changes

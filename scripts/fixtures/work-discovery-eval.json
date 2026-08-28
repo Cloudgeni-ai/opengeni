@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "textQuery": "Permission scoped discovery",
+  "expectedTextOrder": [
+    { "label": "title", "matchClass": "title" },
+    { "label": "goal", "matchClass": "goal" },
+    { "label": "claim", "matchClass": "fuzzy" }
+  ],
+  "promptOnlyLabel": "prompt_only",
+  "exactSubject": {
+    "namespace": "github",
+    "type": "pull_request",
+    "canonicalKey": "Cloudgeni-ai/opengeni#384"
+  }
+}

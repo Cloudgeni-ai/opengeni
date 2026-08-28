@@ -7,8 +7,12 @@ import {
   createSession,
   createWorkspaceLearningPolicyRevision,
   ensureManagedAccessForUser,
+  getKnowledgeMemory,
   getWorkspaceInstructionPolicyBaseline,
   listGovernedLearningActivationHistory,
+  searchWorkspaceMemories,
+  saveWorkspaceMemory,
+  updateKnowledgeMemory,
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
@@ -192,7 +196,10 @@ describe("remember router (real PostgreSQL)", () => {
     if (!shared || !client) return;
     const f = await fixture("automatic");
     const router = createRememberRouter({ db: client.db });
-    const receipt = await router.remember({ attempt: f.attempt, request: preferenceRequest() });
+    const receipt = await router.remember({
+      attempt: f.attempt,
+      request: preferenceRequest(),
+    });
     expect(receipt.status).toBe("activated");
     if (receipt.status !== "activated") return;
     expect(receipt.activation).toMatchObject({
@@ -232,7 +239,10 @@ describe("remember router (real PostgreSQL)", () => {
     expect(receipt.humanInput.questions[0]!.helpText).toBe(request.content);
     // The card names the cost before a human agrees to it.
     expect(receipt.humanInput.questions[0]!.label).toBe(
-      rememberConfirmationLabel({ lane: "preference", contentChars: request.content.length }),
+      rememberConfirmationLabel({
+        lane: "preference",
+        contentChars: request.content.length,
+      }),
     );
     expect(receipt.learning?.outcome).toBe("suggest");
     // Replaying the same remember converges on the same proposal.
@@ -289,7 +299,10 @@ describe("remember router (real PostgreSQL)", () => {
       decisionReceiptId,
       humanInputRequestId: answered,
     };
-    const confirmed = await router.confirm({ attempt: f.attempt, request: confirmRequest });
+    const confirmed = await router.confirm({
+      attempt: f.attempt,
+      request: confirmRequest,
+    });
     expect(confirmed).toMatchObject({
       status: "activated",
       proposalId: receipt.proposalId,
@@ -300,7 +313,10 @@ describe("remember router (real PostgreSQL)", () => {
         undo: "learning_history",
       },
     });
-    const confirmReplay = await router.confirm({ attempt: f.attempt, request: confirmRequest });
+    const confirmReplay = await router.confirm({
+      attempt: f.attempt,
+      request: confirmRequest,
+    });
     expect(confirmReplay).toEqual(confirmed);
     // The human-confirmed activation records a truthful review reason, not the
     // automatic wording.
@@ -375,8 +391,14 @@ describe("remember router (real PostgreSQL)", () => {
     }
 
     const off = await fixture("off");
-    const blocked = await router.remember({ attempt: off.attempt, request: preferenceRequest() });
-    expect(blocked).toMatchObject({ status: "blocked", reason: "learning_policy_off" });
+    const blocked = await router.remember({
+      attempt: off.attempt,
+      request: preferenceRequest(),
+    });
+    expect(blocked).toMatchObject({
+      status: "blocked",
+      reason: "learning_policy_off",
+    });
   }, 180_000);
 
   test("knowledge facts approve through the review lifecycle only after the bound human answer", async () => {
@@ -427,13 +449,25 @@ describe("remember router (real PostgreSQL)", () => {
       ["save"],
       knowledgePrompt,
     );
+    const normalizedLookalike = await saveWorkspaceMemory(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      text: "  ACME'S   LARGEST CUSTOMER IS GLOBEX.  ",
+      kind: "semantic",
+      confidence: 1,
+      sessionId: f.session.id,
+      origin: "human",
+    });
     const confirmRequest = {
       target: "knowledge_claim" as const,
       operationId: crypto.randomUUID(),
       claimId: receipt.claimId,
       humanInputRequestId: answered,
     };
-    const confirmed = await router.confirm({ attempt: f.attempt, request: confirmRequest });
+    const confirmed = await router.confirm({
+      attempt: f.attempt,
+      request: confirmRequest,
+    });
     expect(confirmed).toMatchObject({
       status: "activated",
       proposalId: null,
@@ -442,11 +476,68 @@ describe("remember router (real PostgreSQL)", () => {
         destination: "knowledge",
         claimId: receipt.claimId,
         authorityKind: "human_confirmed",
-        undo: "knowledge_review",
+        undo: "memory_management",
       },
     });
-    const replay = await router.confirm({ attempt: f.attempt, request: confirmRequest });
+    expect(confirmed.activation.destination).toBe("knowledge");
+    if (confirmed.activation.destination !== "knowledge") return;
+    expect(confirmed.activation.memoryId).not.toBe(normalizedLookalike.memory.id);
+    const memories = await searchWorkspaceMemories(client.db, f.grant.workspaceId, {
+      query: "Globex",
+      mode: "keyword",
+      limit: 10,
+    });
+    expect(memories.map((memory) => memory.memory.id)).toContain(confirmed.activation.memoryId);
+    expect(
+      memories.find((memory) => memory.memory.id === confirmed.activation.memoryId)?.memory,
+    ).toMatchObject({
+      text: content,
+      status: "active",
+      metadata: {
+        origin: "human",
+        source: "remember_confirmation",
+        confirmationReceiptId: confirmed.activation.receiptId,
+        claimId: receipt.claimId,
+      },
+    });
+    const replay = await router.confirm({
+      attempt: f.attempt,
+      request: confirmRequest,
+    });
     expect(replay).toEqual(confirmed);
+    const [materialization] = await shared.admin<
+      Array<{
+        confirmation_receipt_id: string;
+        memory_id: string;
+        task_note_text_hash: string;
+      }>
+    >`
+      select confirmation_receipt_id, memory_id, task_note_text_hash
+      from remember_knowledge_memory_materializations
+      where confirmation_receipt_id = ${confirmed.activation.receiptId}
+    `;
+    expect(materialization).toMatchObject({
+      confirmation_receipt_id: confirmed.activation.receiptId,
+      memory_id: confirmed.activation.memoryId,
+    });
+    expect(materialization?.task_note_text_hash).toMatch(/^[0-9a-f]{64}$/u);
+
+    const archived = await updateKnowledgeMemory(
+      client.db,
+      f.grant.workspaceId,
+      confirmed.activation.memoryId,
+      { status: "archived" },
+    );
+    expect(archived.status).toBe("archived");
+    const replayAfterArchive = await router.confirm({
+      attempt: f.attempt,
+      request: confirmRequest,
+    });
+    expect(replayAfterArchive).toEqual(confirmed);
+    expect(
+      (await getKnowledgeMemory(client.db, f.grant.workspaceId, confirmed.activation.memoryId))
+        ?.status,
+    ).toBe("archived");
     const [latestReview] = await shared.admin<
       Array<{ state: string; actor_kind: string; reason: string }>
     >`

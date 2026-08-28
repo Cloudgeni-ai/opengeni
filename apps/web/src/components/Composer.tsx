@@ -7,7 +7,7 @@ import {
   type SlashCommandContext,
   type UseFileAttachmentsResult,
 } from "@opengeni/react";
-import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/sdk/core";
+import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/sdk/browser";
 import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { type ReactNode } from "react";
 import { useAppContext } from "@/context";

@@ -1262,25 +1262,25 @@ describe("standalone context compaction execution", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
   });
 
-  test("Steer waits for in-turn compaction and supersedes before inference resumes", async () => {
+  test("a post-compaction stream without a terminal response recovers before queued input advances", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
       accountExternalId: `account-${suffix}`,
-      accountName: "Deferred Steer compaction test",
+      accountName: "Empty post-compaction continuation test",
       workspaceExternalSource: "test",
       workspaceExternalId: `workspace-${suffix}`,
-      workspaceName: "Deferred Steer compaction test",
+      workspaceName: "Empty post-compaction continuation test",
       subjectId: `subject-${suffix}`,
     });
     const grant = access.workspaceGrants[0]!;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
-      initialMessage: "continue after safely compacting the prior work",
+      initialMessage: "finish the active task after compacting",
       resources: [],
       metadata: {},
-      model: "scripted-compactor",
+      model: "scripted-model",
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
@@ -1303,89 +1303,114 @@ describe("standalone context compaction execution", () => {
           type: "message",
           role: "assistant",
           status: "completed",
-          content: [{ type: "output_text", text: "large prior work ".repeat(2_000) }],
+          content: [{ type: "output_text", text: "durable completed work ".repeat(1_000) }],
         },
       });
     });
-    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const queued = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      grant.workspaceId!,
+      grant.subjectId,
+      async (db) =>
+        await submitHumanPromptInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "this must remain queued until the active turn actually finishes",
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+    );
+    expect(queued.routing).toBe("queued_for_execution");
 
-    let signalSummaryStarted!: () => void;
-    const summaryStarted = new Promise<void>((resolve) => {
-      signalSummaryStarted = resolve;
-    });
-    let releaseSummary!: () => void;
-    const summaryRelease = new Promise<void>((resolve) => {
-      releaseSummary = resolve;
-    });
-    let compactionCalls = 0;
-    let forbiddenInferenceCalls = 0;
-    const runtime = {
-      configure: () => undefined,
-      resolveTurnModel: () => ({
-        client: {
-          chat: {
-            completions: {
-              create: async () => {
-                compactionCalls += 1;
-                signalSummaryStarted();
-                await summaryRelease;
-                return {
-                  id: "chatcmpl-deferred-steer",
-                  usage: {
-                    prompt_tokens: 2_000,
-                    completion_tokens: 20,
-                    total_tokens: 2_020,
-                  },
-                  choices: [
-                    {
-                      message: {
-                        content: "The prior work was compacted before changing direction.",
-                      },
-                    },
-                  ],
-                };
+    const scriptedModel = new ScriptedModel([
+      {
+        error: new CompactionNeededError({
+          signalTokens: 250_000,
+          thresholdTokens: 225_000,
+          signalSource: "provider",
+        }),
+      },
+      { outputText: "a cancelled continuation must not settle this text" },
+    ]);
+    let summaryCalls = 0;
+    const summarizerClient = {
+      chat: {
+        completions: {
+          create: async () => {
+            summaryCalls += 1;
+            return {
+              id: "chatcmpl-post-compaction-checkpoint",
+              usage: {
+                prompt_tokens: 321,
+                completion_tokens: 12,
+                total_tokens: 333,
               },
-            },
+              choices: [
+                {
+                  message: {
+                    content: "The active task and its durable completed work must continue.",
+                  },
+                  finish_reason: "stop",
+                },
+              ],
+            };
           },
         },
+      },
+    } as unknown as NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>["client"];
+    const productionRuntime = createProductionAgentRuntime({ model: scriptedModel });
+    let runStreamCalls = 0;
+    const runtime: OpenGeniRuntime = {
+      ...productionRuntime,
+      configure: () => undefined,
+      resolveTurnModel: () => ({
         provider: {
           id: "test-chat",
+          label: "Test chat",
           kind: "api-key",
           api: "chat",
           builtin: false,
         },
+        client: summarizerClient,
+        model: scriptedModel,
         configured: {
-          id: "scripted-compactor",
+          id: "scripted-model",
+          label: "Scripted model",
+          providerId: "test-chat",
+          providerLabel: "Test chat",
+          api: "chat",
           contextWindowTokens: 250_000,
           effectiveContextWindowTokens: 250_000,
-          autoCompactLimitTokens: 225_000,
+          autoCompactTokenLimit: 225_000,
+          reasoningEffort: false,
           hostedWebSearch: false,
         },
       }),
-      prepareTools: async () => ({
-        mcpServers: [],
-        resolvedMcpConnectionIds: new Map<string, string>(),
-        codexConnectorNamespaces: new Set<string>(),
-        close: async () => undefined,
-      }),
-      buildAgent: () => ({ instructions: "" }),
-      prepareInput: () => {
-        forbiddenInferenceCalls += 1;
-        throw new Error("deferred Steer prepared inference after compaction");
+      runStream: async (agent, preparedInput, settings, options) => {
+        runStreamCalls += 1;
+        if (runStreamCalls === 1) {
+          return await productionRuntime.runStream(agent, preparedInput, settings, options);
+        }
+        const cancelledContinuation = new AbortController();
+        cancelledContinuation.abort(new Error("synthetic cancelled post-compaction stream"));
+        return await productionRuntime.runStream(agent, preparedInput, settings, {
+          ...options,
+          signal: cancelledContinuation.signal,
+        });
       },
-      runStream: () => {
-        forbiddenInferenceCalls += 1;
-        throw new Error("deferred Steer started inference after compaction");
-      },
-      serializeApprovals: () => {
-        throw new Error("deferred Steer serialized approvals");
-      },
-    } as unknown as OpenGeniRuntime;
+    };
     const bus = new MemoryEventBus();
     const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
-        openaiModel: "scripted-compactor",
+        openaiModel: "scripted-model",
         sandboxBackend: "none",
       }),
       db: client.db,
@@ -1394,7 +1419,7 @@ describe("standalone context compaction execution", () => {
     });
 
     const attemptId = crypto.randomUUID();
-    const runPromise = activities.runAgentTurn({
+    const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
@@ -1403,86 +1428,52 @@ describe("standalone context compaction execution", () => {
       attemptId,
       trigger: { kind: "next" },
     });
-    await summaryStarted;
 
-    let steered: Awaited<ReturnType<typeof submitHumanPromptInTransaction>>;
-    try {
-      steered = await withWorkspaceSubjectSessionActivityRls(
-        client.db,
-        grant.workspaceId!,
-        grant.subjectId,
-        (db) =>
-          db.transaction((tx) =>
-            submitHumanPromptInTransaction(tx as unknown as Database, {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId!,
-              sessionId: session.id,
-              subjectId: grant.subjectId,
-              actor: { type: "human", subjectId: grant.subjectId },
-              operationKey: `steer-during-compaction-${crypto.randomUUID()}`,
-              delivery: "steer",
-              text: "take the new direction immediately after compaction",
-              resources: [],
-              reasoningEffortFallback: "low",
-              source: "user",
-            }),
-          ),
-      );
-      expect(steered).toMatchObject({
-        interruptionCount: 0,
-        routing: "accepted_for_steering",
-      });
-      expect(steered.receipt.result.deferredUntilCompaction).toBe(true);
-      expect(
-        await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id),
-      ).toMatchObject({
-        stoppingPreviousAttempt: false,
-        items: [],
-      });
-    } finally {
-      releaseSummary();
-    }
-
-    const result = await runPromise;
-    expect(result).toMatchObject({ status: "idle", attemptId });
+    expect(result).toMatchObject({
+      status: "recovering",
+      attemptId,
+      continueDelayMs: 2_000,
+    });
     if (result.status === "unclaimed") throw new Error("User turn was not claimed");
-    expect(compactionCalls).toBe(1);
-    expect(forbiddenInferenceCalls).toBe(0);
-    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
-      false,
-    );
+    expect(runStreamCalls).toBe(2);
+    expect(summaryCalls).toBe(1);
     expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
       source: "user",
-      status: "superseded",
+      status: "recovering",
     });
     expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
-      status: "queued",
-      activeTurnId: null,
+      status: "recovering",
+      activeTurnId: result.turnId,
     });
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items.map(
+        (turn) => turn.id,
+      ),
+    ).toEqual([queued.turnId]);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, queued.turnId)).toMatchObject({
+      status: "queued",
+    });
+    const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    expect(JSON.stringify(history.map((row) => row.item))).toContain(
+      "The active task and its durable completed work must continue.",
+    );
     const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
       after: 0,
-      limit: 100,
+      limit: 200,
     });
-    const eventTypes = events.map((event) => event.type);
-    expect(eventTypes.indexOf("session.context.compaction.started")).toBeGreaterThanOrEqual(0);
-    expect(eventTypes.indexOf("session.context.compacted")).toBeGreaterThan(
-      eventTypes.indexOf("session.context.compaction.started"),
-    );
-    expect(eventTypes.indexOf("turn.superseded")).toBeGreaterThan(
-      eventTypes.indexOf("session.context.compacted"),
-    );
-    const next = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
-      dispatchId: `dispatch-${crypto.randomUUID()}`,
-      trigger: { kind: "next" },
-    });
-    expect(next).toMatchObject({
-      action: "claimed",
-      turn: { id: steered.turnId, source: "user" },
-    });
+    expect(events).toContainEqual(expect.objectContaining({ type: "session.context.compacted" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
+    expect(
+      events.some((event) => event.type === "turn.completed" && event.turnId === result.turnId),
+    ).toBe(false);
+    expect(
+      events.some(
+        (event) => event.type === "agent.message.completed" && event.turnId === result.turnId,
+      ),
+    ).toBe(false);
+    expect(
+      events.some((event) => event.type === "turn.started" && event.turnId === queued.turnId),
+    ).toBe(false);
   });
 
   test("same-turn empty-summary recovery settles once and waits for actionable durable input", async () => {

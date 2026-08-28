@@ -1,10 +1,8 @@
 import {
-  AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES,
   AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS,
   AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS,
   AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE,
   AgentAuthoredCompanyProfileContent,
-  COMPANY_PROFILE_ENTRY_MAX_COUNT,
   COMPANY_PROFILE_REASON_MAX_CHARS,
   COMPANY_PROFILE_STABLE_KEY_MAX_CHARS,
   normalizeCompanyProfileStableKey,
@@ -32,9 +30,9 @@ export type RegisterCompanyProfileAgentAdminToolsInput = {
   router?: Pick<ReturnType<typeof createCompanyProfileAgentAdminRouter>, "propose" | "confirm">;
 };
 
-// Agent-only bounds. The human `account:admin` route keeps the wider
-// `COMPANY_PROFILE_*` limits; this profile is the largest always-on prompt
-// surface in the product, so an agent gets a much smaller budget for it.
+// Agent-only bounds. The human `account:admin` API keeps the wider historical
+// `COMPANY_PROFILE_*` limits; the current agent tool authors only the two
+// always-on identity fields and therefore gets a much smaller budget.
 const scalar = z
   .string()
   .trim()
@@ -55,8 +53,7 @@ const entry = z.object({
       AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE,
     ),
 });
-const entries = z.array(entry).max(COMPANY_PROFILE_ENTRY_MAX_COUNT);
-const DEFAULT_PROPOSAL_REASON = "Activate agent-proposed organization company profile";
+const DEFAULT_PROPOSAL_REASON = "Activate agent-proposed organization identity";
 const STABLE_KEY_WORDS = 6;
 
 type EntryInput = z.infer<typeof entry>;
@@ -127,18 +124,14 @@ export function registerCompanyProfileAgentAdminTools(
     "company_profile_propose",
     {
       description:
-        "Prepare one complete organization company profile covering identity, mission, products, customers, strategic goals, and critical constraints. Omitted list keys are derived from content. " +
-        "Once activated, every field here is mandatory prompt context in every session for the whole organization, so write it as a concise profile rather than a document: one plain descriptive statement per field, no numbered procedure and no marketing copy. Longer source material belongs in organization Documents and is retrieved as evidence; never copy it into the profile. " +
-        `Bounds for this tool are ${AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS} characters for identity and mission, ${AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS} per list entry, ${COMPANY_PROFILE_ENTRY_MAX_COUNT} entries per list, and ${AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES} UTF-8 bytes for the whole profile. ` +
+        "Prepare the organization's small, stable identity: identity says who the organization is, and mission says why it exists. " +
+        "Once activated, both fields are mandatory prompt context in every root session for the whole organization, so use one plain descriptive statement per field with no products, customers, goals, constraints, procedures, or marketing copy. Those details belong in organization-scoped Documents and are retrieved only when relevant. " +
+        `Each field is bounded to ${AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS} characters for agent-authored proposals. ` +
         "This creates only an immutable inactive proposal for the exact live turn initiated by the organization owner and does not use workspace learning policy. The receipt returns the exact `humanInput` payload; call `request_human_input` with it verbatim, then call `company_profile_confirm` with the returned requestId.",
       inputSchema: {
         operationId: z.string().uuid(),
         identity: scalar,
         mission: scalar,
-        products: entries,
-        customers: entries,
-        goals: entries,
-        constraints: entries,
         reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS).optional(),
       },
     },
@@ -147,10 +140,10 @@ export function registerCompanyProfileAgentAdminTools(
       const parsed = AgentAuthoredCompanyProfileContent.safeParse({
         identity: request.identity,
         mission: request.mission,
-        products: resolveCompanyProfileEntries(request.products),
-        customers: resolveCompanyProfileEntries(request.customers),
-        goals: resolveCompanyProfileEntries(request.goals),
-        constraints: resolveCompanyProfileEntries(request.constraints),
+        products: [],
+        customers: [],
+        goals: [],
+        constraints: [],
       });
       if (!parsed.success) {
         return input.json({

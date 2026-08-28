@@ -18,6 +18,7 @@ const implementationModules = [
   "model-provider-routing",
   "model-provider-transport",
   "run-events",
+  "tool-call-identity",
 ] as const;
 
 type ImplementationModule = (typeof implementationModules)[number];
@@ -93,11 +94,12 @@ describe("runtime implementation module boundaries", () => {
   });
 
   test("the public facade re-exports each domain without wrappers", async () => {
-    const [barrel, modelInput, modelProvider, runEvents] = await Promise.all([
+    const [barrel, modelInput, modelProvider, runEvents, toolCallIdentity] = await Promise.all([
       import("../src/index"),
       import("../src/model-input"),
       import("../src/model-provider"),
       import("../src/run-events"),
+      import("../src/tool-call-identity"),
     ]);
 
     for (const name of [
@@ -121,5 +123,6 @@ describe("runtime implementation module boundaries", () => {
     ] as const) {
       expect(barrel[name]).toBe(runEvents[name]);
     }
+    expect(barrel.toolCallIdFromSdkItem).toBe(toolCallIdentity.toolCallIdFromSdkItem);
   });
 });

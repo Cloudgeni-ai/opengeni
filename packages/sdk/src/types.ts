@@ -637,6 +637,7 @@ export type McpPersonalConnectionSummary = Pick<
 
 export type ConnectionMetadata = {
   id: string;
+  authorityId?: string | undefined;
   accountId: string;
   workspaceId: string;
   subjectId: string | null;
@@ -1206,6 +1207,8 @@ export type ForkSessionRequest = {
   idempotencyKey: string;
   visibility: SessionVisibility;
   workspaceSharedAcknowledged: boolean;
+  rigId?: string | null | undefined;
+  variableSetIds?: string[] | undefined;
 };
 
 export type ForkSessionResponse = {
@@ -1285,6 +1288,8 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
+  /** Ordered low-to-high precedence; the final entry is the legacy singular alias. */
+  variableSetIds?: string[] | undefined;
   variableSetId: string | null;
   /** @deprecated use variableSetId */
   environmentId: string | null;
@@ -1385,6 +1390,64 @@ export type SessionListResponse = {
   nextCursor: string | null;
 };
 
+export type WorkClaimSubjectType =
+  | "repository"
+  | "branch"
+  | "pull_request"
+  | "issue"
+  | "artifact"
+  | "release"
+  | "ci_run"
+  | "other";
+
+export type WorkClaimDiscoverySummary = {
+  id: string;
+  sessionId: string;
+  subject: {
+    namespace: string;
+    type: WorkClaimSubjectType;
+    canonicalKey: string;
+    displayLabel: string | null;
+  };
+  role: "working" | "reviewing" | "monitoring" | "delivering";
+  state: "active" | "released" | "superseded" | "stale";
+  revision: number;
+  provenance:
+    | "explicit_agent"
+    | "user_api"
+    | "trusted_integration"
+    | "session_resource"
+    | "system_lifecycle";
+  version: {
+    kind:
+      | "git_commit"
+      | "branch_head"
+      | "pull_request_head"
+      | "artifact_version"
+      | "release_version"
+      | "ci_run"
+      | "other";
+    value: string;
+  } | null;
+  observedAt: string;
+  updatedAt: string;
+  settledAt: string | null;
+};
+
+export type WorkDiscoveryProjection = {
+  claims: WorkClaimDiscoverySummary[];
+  claimsTruncated: boolean;
+  match: {
+    class: "exact_subject" | "title" | "goal" | "fuzzy";
+    field: "subject" | "title" | "goal" | "claim_key" | "claim_label";
+    scoreBand: "exact" | "strong" | "related";
+    claimId: string | null;
+  } | null;
+  possibleOverlap: boolean;
+  advisoryOnly: true;
+  noAdditionalAccess: true;
+};
+
 /** Compact, bounded session projection for workspace agent-topology browsers. */
 export type AgentTopologySession = {
   id: string;
@@ -1399,6 +1462,11 @@ export type AgentTopologySession = {
     titleTruncated: boolean;
   }>;
   status: SessionStatus;
+  goal: {
+    status: SessionGoalStatus;
+    summary: string;
+    summaryTruncated: boolean;
+  } | null;
   pause: {
     state: "active" | "paused";
     additionalBlockerCount: number;
@@ -1419,6 +1487,7 @@ export type AgentTopologySession = {
     failedDescendants: number;
     truncated: boolean;
   };
+  relatedWork: WorkDiscoveryProjection;
   createdAt: string;
   updatedAt: string;
 };
@@ -1427,6 +1496,8 @@ export type AgentTopologyPageResponse = {
   sessions: AgentTopologySession[];
   total: number;
   hasMore: boolean;
+  /** Operator rollout decision for human advisory presentation. */
+  humanAdvisoriesEnabled?: boolean | undefined;
   nextCursor: string | null;
 };
 
@@ -1627,6 +1698,8 @@ export type SessionHumanInputRequest = {
 
 export const SESSION_EVENT_TYPES = [
   "session.created",
+  "session.variable_sets.updated",
+  "session.runtime.configured",
   // Defensive bounded projection for malformed/legacy oversized envelopes.
   "session.event.envelope_omitted",
   "session.status.changed",
@@ -2657,6 +2730,8 @@ export type CreateSessionRequest = {
   // Host working directory for a connected-machine target (the agent runs here;
   // default = the machine's launch dir). Ignored for managed sandboxes.
   workingDir?: string | undefined;
+  /** Ordered low-to-high precedence; later sets win name collisions. */
+  variableSetIds?: string[] | undefined;
   variableSetId?: string | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | undefined;
@@ -2768,6 +2843,8 @@ export type FirstPartyMcpToolName =
   | "task_note_save"
   | "task_note_archive"
   | "task_note_replace"
+  | "work_claim_upsert"
+  | "work_claim_release"
   | "knowledge_propose"
   | "knowledge_correct"
   | "task_note_promote_knowledge"
@@ -3395,8 +3472,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION =
-  "2026-08-personal-only-organization-setup-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -3429,6 +3505,7 @@ export type ClientConfig = {
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;
+  managedAuthSessionSetMode: "legacy" | "dual" | "broker";
   auth: ClientAuthConfig;
   analytics: {
     consentRequired: boolean;
@@ -3795,7 +3872,10 @@ export type OrganizationPrivateSessionSettings = {
   updatedAt: string;
   changed?: boolean;
 };
-export type CreateOrganizationWorkspaceRequest = { name: string; operationId: string };
+export type CreateOrganizationWorkspaceRequest = {
+  name: string;
+  operationId: string;
+};
 export type UpdateOrganizationWorkspaceRequest = {
   name: string;
   expectedUpdatedAt: string;
@@ -3817,7 +3897,10 @@ export type RevokeOrganizationWorkspaceMemberRequest = {
   expectedUpdatedAt: string;
   operationId: string;
 };
-export type RevokeOrganizationWorkspaceMemberResponse = { removed: boolean; replay: boolean };
+export type RevokeOrganizationWorkspaceMemberResponse = {
+  removed: boolean;
+  replay: boolean;
+};
 export type CreateOrganizationRequest = {
   name: string;
   operationId: string;
@@ -3842,6 +3925,108 @@ export type OrganizationRetentionPolicy = {
   retentionDays: number | null;
   version: number;
   updatedAt: string;
+};
+export type OrganizationRecoveryPolicyState =
+  | "pending_acceptance"
+  | "active"
+  | "degraded"
+  | "superseded"
+  | "disabled";
+export type OrganizationRecoveryOperationState =
+  | "collecting"
+  | "cooling"
+  | "executed"
+  | "cancelled"
+  | "expired"
+  | "superseded";
+export type OrganizationRecoveryUnavailableReason =
+  | "no_policy"
+  | "pending_acceptance"
+  | "degraded"
+  | "disabled"
+  | "identity_unavailable";
+export type OrganizationRecoveryMemberSummary = {
+  membershipId: string;
+  name: string | null;
+  email: string | null;
+};
+export type OrganizationRecoveryCustodian = OrganizationRecoveryMemberSummary & {
+  ordinal: number;
+  enrollmentState: "pending_acceptance" | "accepted" | "ineligible";
+  acceptedAt: string | null;
+};
+export type OrganizationRecoveryPolicy = {
+  id: string;
+  organizationId: string;
+  revision: number;
+  state: OrganizationRecoveryPolicyState;
+  custodians: OrganizationRecoveryCustodian[];
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationRecoveryApproval = OrganizationRecoveryMemberSummary & {
+  approvedAt: string;
+};
+export type OrganizationRecoveryOperation = {
+  id: string;
+  organizationId: string;
+  policyId: string;
+  policyRevision: number;
+  revision: number;
+  state: OrganizationRecoveryOperationState;
+  target: OrganizationRecoveryMemberSummary;
+  approvals: OrganizationRecoveryApproval[];
+  approvalCount: number;
+  quorumAt: string | null;
+  executableAt: string | null;
+  expiresAt: string;
+  executedAt: string | null;
+  cancelledAt: string | null;
+  notificationJournaled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationRecoveryCapabilities = {
+  configure: boolean;
+  accept: boolean;
+  disable: boolean;
+  start: boolean;
+  approve: boolean;
+  cancel: boolean;
+  execute: boolean;
+};
+export type OrganizationRecoveryOverview = {
+  organizationId: string;
+  availability: "available" | "recovery_unavailable";
+  unavailableReason: OrganizationRecoveryUnavailableReason | null;
+  recentReauthenticationAt: string | null;
+  eligibleMembers: OrganizationRecoveryMemberSummary[];
+  policy: OrganizationRecoveryPolicy | null;
+  operation: OrganizationRecoveryOperation | null;
+  capabilities: OrganizationRecoveryCapabilities;
+};
+export type ConfigureOrganizationRecoveryPolicyRequest = {
+  custodianMembershipIds: [string, string, string];
+  expectedPolicyRevision: number;
+  operationId: string;
+};
+export type AcceptOrganizationRecoveryCustodyRequest = {
+  expectedPolicyRevision: number;
+  operationId: string;
+};
+export type DisableOrganizationRecoveryPolicyRequest = AcceptOrganizationRecoveryCustodyRequest;
+export type StartOrganizationRecoveryOperationRequest = {
+  targetMembershipId: string;
+  expectedPolicyRevision: number;
+  operationId: string;
+};
+export type OrganizationRecoveryOperationCommandRequest = {
+  expectedOperationRevision: number;
+  operationId: string;
+};
+export type OrganizationRecoveryMutationResponse = {
+  replay: boolean;
+  overview: OrganizationRecoveryOverview;
 };
 export type CreateOrganizationInvitationRequest = {
   email: string;
@@ -3891,7 +4076,9 @@ export type ListOrganizationInvitationsPageResponse = {
   invitations: OrganizationInvitation[];
   nextCursor: string | null;
 };
-export type ListOrganizationMembersResponse = { members: OrganizationAdministrationMember[] };
+export type ListOrganizationMembersResponse = {
+  members: OrganizationAdministrationMember[];
+};
 export type ListOrganizationAdministrationMembersResponse = {
   members: OrganizationAdministrationMember[];
 };
@@ -4282,6 +4469,11 @@ export type UpdateSessionRequest = {
   title: string;
 };
 
+/** Replace the complete ordered low-to-high precedence Variable Set selection. */
+export type UpdateSessionVariableSetsRequest = {
+  variableSetIds: string[];
+};
+
 // --- Operator context controls (/clear, /compact) ----------------------------
 
 /** Outcome of a manual /compact trigger. */
@@ -4366,6 +4558,7 @@ export type NewSessionDraftOptions = {
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
   workingDir?: string | undefined;
+  variableSetIds?: string[] | undefined;
   variableSetId?: string | undefined;
   rigId?: string | undefined;
   goal?: GoalSpec | undefined;
@@ -4743,6 +4936,20 @@ export type VariableSet = {
   updatedAt: string;
 };
 
+/** Exact-ID attachment metadata; intentionally excludes catalog and secret metadata. */
+export type VariableSetAttachmentMetadata = {
+  id: string;
+  scope: "organization" | "workspace" | "user";
+};
+
+export type ResolveVariableSetAttachmentsRequest = {
+  variableSetIds: string[];
+};
+
+export type ResolveVariableSetAttachmentsResponse = {
+  variableSets: VariableSetAttachmentMetadata[];
+};
+
 /** @deprecated use VariableSetVariableMetadata */
 export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 
@@ -4910,6 +5117,7 @@ export type RigChangeVerification = {
   startedAt?: string | undefined;
   finishedAt?: string | undefined;
   log?: string | undefined;
+  platformCheckResults?: RigCheckResult[] | undefined;
   checkResults?: RigCheckResult[] | undefined;
   [key: string]: unknown;
 };
@@ -4932,7 +5140,7 @@ export type CreateRigRequest = {
   scope?: ResourceAuthorityScope;
   name: string;
   description?: string | undefined;
-  image?: string | undefined;
+  image?: never;
   setupScript?: string | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;
@@ -4950,7 +5158,7 @@ export type RigSetupAppendPayload = {
 };
 
 export type RigDefinitionEditPayload = {
-  image?: string | null | undefined;
+  image?: never;
   setupScript?: string | null | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;
@@ -5511,6 +5719,7 @@ export type DocumentSearchRequest = {
   baseIds?: string[] | undefined;
   mode?: DocumentSearchMode | undefined;
   sourceKinds?: KnowledgeSourceKind[] | undefined;
+  authorityKinds?: DocumentAuthorityKind[] | undefined;
   aclTags?: string[] | undefined;
   limit?: number | undefined;
 };
@@ -5931,7 +6140,7 @@ export type PackInstallation = {
 // --- OpenGeni Review Bot ------------------------------------------------------------
 
 export type PrReviewProvider = GitCredentialProvider;
-export type PrReviewCredentialKind = "github_app" | "provider_token";
+export type PrReviewCredentialKind = "github_app" | "managed_github_app" | "provider_token";
 export type PrReviewWebhookAuthKind = "hmac_sha256" | "shared_token" | "basic";
 
 export type CreatePrReviewAppRegistrationRequest = {
@@ -5966,6 +6175,9 @@ export type PrReviewAppRegistration = {
   provider: PrReviewProvider;
   providerBaseUrl: string;
   appId: string | null;
+  installationId: string | null;
+  providerAccountLogin: string | null;
+  providerAccountType: "User" | "Organization" | null;
   credentialKind: PrReviewCredentialKind;
   hasCredential: boolean;
   accessTokenExpiresAt: string | null;
@@ -6020,6 +6232,23 @@ export type PrReviewRepositoryBinding = {
 export type ListPrReviewConfigurationResponse = {
   registrations: PrReviewAppRegistration[];
   repositories: PrReviewRepositoryBinding[];
+};
+
+export type PrReviewManagedGitHubInstallation = {
+  registrationId: string;
+  installationId: string;
+  accountLogin: string | null;
+  configureUrl: string | null;
+  repositoryCount: number;
+};
+
+export type PrReviewManagedGitHubSetup = {
+  configured: boolean;
+  status: "unavailable" | "not_connected" | "connected";
+  appName: "OpenGeni Lens";
+  connectUrl: string | null;
+  installations: PrReviewManagedGitHubInstallation[];
+  missing: string[];
 };
 
 export type EnablePackRequest = {

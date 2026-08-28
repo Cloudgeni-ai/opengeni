@@ -1,5 +1,64 @@
 # @opengeni/runtime
 
+## 1.4.2
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/config@0.22.0
+  - @opengeni/contracts@2.7.0
+  - @opengeni/sdk@3.1.0
+  - @opengeni/codemode@0.4.17
+
+## 1.4.1
+
+### Patch Changes
+
+- 9ef491b: Add the Agent Knowledge product surface, Personal workspace knowledge views and defaults, workspace learning-autonomy administration, explicit routing guidance between Memory, Skills, and Workspace instructions, authority-first organization Document search, exact replay-safe confirmed Memory materialization, and the narrower organization identity/mission boundary with richer facts retrieved from organization knowledge.
+- f6375f2: Accept sparse Responses output indices while preserving numeric provider order and duplicate-index rejection.
+- a521e65: Preserve provider-reported tool-search call identities across durable receipts, runtime events, and replay sanitization.
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+- Updated dependencies [9a8c822]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+  - @opengeni/sdk@2.6.0
+  - @opengeni/codemode@0.4.16
+
+## 1.4.0
+
+### Minor Changes
+
+- 76d6396: Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, custom-role and old-image rolling-compatible least-privilege database posture, and UI projections that never use raw initial prompts as display names. Durable title fanout now requires a versioned subscriber-recovery capability: managed NATS and supported embedded brokers coalesce one Postgres catch-up after reconnect, while legacy buses without that contract fail readiness/worker startup before durable rows can be acknowledged.
+
+### Patch Changes
+
+- Updated dependencies [76d6396]
+- Updated dependencies [d741f38]
+- Updated dependencies [b5071cf]
+  - @opengeni/contracts@2.5.0
+  - @opengeni/sdk@2.5.0
+  - @opengeni/codemode@0.4.15
+  - @opengeni/config@0.20.1
+
+## 1.3.2
+
+### Patch Changes
+
+- c10f396: Keep one completed commentary reply visible when a tool-bearing turn settles without a final answer, including goal-wait holds, while preserving ordinary finals and avoiding disclosure duplicates.
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/sdk@2.4.0
+  - @opengeni/config@0.20.0
+  - @opengeni/codemode@0.4.14
+
 ## 1.3.1
 
 ### Patch Changes

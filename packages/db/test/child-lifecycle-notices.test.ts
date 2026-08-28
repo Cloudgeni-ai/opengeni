@@ -1043,6 +1043,15 @@ describe("child lifecycle notices", () => {
       error: "permanent admission failure",
     });
     expect(failed.action).toBe("failed");
+    expect(failed.events).toContainEqual(
+      expect.objectContaining({
+        type: "user.humanInputResponse",
+        payload: {
+          requestId: parallelRequestId,
+          response: { outcome: "cancelled" },
+        },
+      }),
+    );
     expect(
       await outbox(
         grant,
@@ -1056,6 +1065,20 @@ describe("child lifecycle notices", () => {
       ),
     ).toMatchObject({
       payload: { requestId: parallelRequestId, outcome: "cancelled", respondedByKind: "system" },
+    });
+    const replayed = await acceptSessionHumanInputResponse(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: child.session.id,
+      requestId: parallelRequestId,
+      response: { outcome: "skipped" },
+      respondedBy: grant.subjectId,
+    });
+    expect(replayed).toMatchObject({
+      action: "completed",
+      request: { status: "cancelled", response: { outcome: "cancelled" } },
+      events: [],
+      workflowWakeRevision: null,
     });
   });
 

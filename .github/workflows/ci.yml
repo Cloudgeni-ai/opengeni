@@ -35,8 +35,9 @@ on:
 
 concurrency:
   # A Version PR has one authoritative latest head. When a newer main push
-  # regenerates that head, continuing to build the superseded head can only
-  # waste capacity and produce a predictably stale terminal-main failure.
+  # actually regenerates that head, continuing to build the superseded head can
+  # only waste capacity. Movement on main alone does not invalidate an admitted
+  # Version PR head or cancel its CI.
   # Pull-request heads are mutable in the same way: only the newest head can be
   # merged. Main pushes remain independent because an ancestor can still be an
   # admitted release source after a newer merge lands.
@@ -232,7 +233,7 @@ jobs:
           echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
-          echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none"}] else map({lane:.}) end' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none",engine:"chromium"}] else map(if . == "accounts" then [{lane:.,engine:"chromium"},{lane:.,engine:"firefox"},{lane:.,engine:"webkit"}] else [{lane:.,engine:"chromium"}] end) | add end' impact-plan.json)" >> "$GITHUB_OUTPUT"
           {
             echo '### Change-impact plan'
             echo
@@ -315,7 +316,7 @@ jobs:
           set -euo pipefail
           plan="$RUNNER_TEMP/changeset-status.json"
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-          git update-ref refs/heads/main refs/remotes/origin/main
+          version_base_ref=refs/remotes/origin/main
 
           # `changeset status` deliberately exits non-zero on the generated
           # Version PR: its package files changed and the consumed changeset is
@@ -326,13 +327,15 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "${GITHUB_HEAD_REF:-}" = "changeset-release/main" ]; then
             is_version_pr=true
           elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            [ "$(git rev-parse refs/remotes/origin/main)" = "$AUTOMATION_BASE_SHA" ]
             [ "$(git rev-parse HEAD)" = "$AUTOMATION_HEAD_SHA" ]
+            git cat-file -e "$AUTOMATION_BASE_SHA^{commit}"
+            version_base_ref="$AUTOMATION_BASE_SHA"
             is_version_pr=true
           fi
+          git update-ref refs/heads/main "$version_base_ref"
           if [ "$is_version_pr" = "true" ]; then
             expected="$RUNNER_TEMP/changeset-version-expected"
-            git worktree add --detach "$expected" refs/remotes/origin/main
+            git worktree add --detach "$expected" "$version_base_ref"
             trap 'git worktree remove --force "$expected"' EXIT
 
             (
@@ -346,7 +349,7 @@ jobs:
             expected_tree="$(git -C "$expected" write-tree)"
             actual_tree="$(git rev-parse 'HEAD^{tree}')"
             if [ "$actual_tree" != "$expected_tree" ]; then
-              echo "::error::Version PR tree does not exactly reproduce 'changeset version' from origin/main"
+              echo "::error::Version PR tree does not exactly reproduce 'changeset version' from its admitted base"
               git -C "$expected" diff --cached --stat
               exit 1
             fi
@@ -665,7 +668,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -717,7 +720,24 @@ jobs:
         uses: ./.github/actions/playwright-browsers
         timeout-minutes: 17
         with:
-          browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}
+          browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}
+
+      - name: Browser account session-set acceptance
+        if: ${{ matrix.lane == 'accounts' }}
+        id: browser_accounts
+        timeout-minutes: 14
+        env:
+          # This lane must prove the migrated owner plus restricted opengeni_app
+          # FORCE-RLS boundary. A missing real database is a hard failure.
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_ACCOUNT_BROWSER_ENGINE: ${{ matrix.engine }}
+          OPENGENI_ACCOUNT_EVIDENCE_DIR: /tmp/opengeni-account-acceptance
+        run: |
+          bun test --max-concurrency=1 --timeout 180000 \
+            ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \
+            ./apps/api/test/managed-auth-session-sets.integration.test.ts
+          bun scripts/run-browser-e2e.ts \
+            ./test/e2e/browser-accounts-acceptance.e2e.ts
 
       - name: Editable artifact browser acceptance
         if: ${{ matrix.lane == 'workbench' }}
@@ -766,6 +786,13 @@ jobs:
         if: ${{ matrix.lane == 'interaction' }}
         run: bun scripts/run-browser-e2e.ts ./test/e2e/user-message-disclosure.browser.e2e.ts
 
+      - name: Timeline pagination and tip-follow browser regressions
+        if: ${{ matrix.lane == 'interaction' }}
+        run: |
+          bun scripts/run-browser-e2e.ts \
+            ./test/e2e/timeline-scroll.browser.e2e.ts \
+            ./test/e2e/timeline-tip-follow.browser.e2e.ts
+
       - name: Public realtime SDK demo browser acceptance
         if: ${{ matrix.lane == 'interaction' }}
         env:
@@ -808,6 +835,15 @@ jobs:
         id: workbench_browser
         timeout-minutes: 4
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
+
+      - name: Upload browser account acceptance evidence
+        if: ${{ matrix.lane == 'accounts' && steps.browser_accounts.outcome == 'success' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: browser-account-acceptance-${{ matrix.engine }}
+          if-no-files-found: error
+          retention-days: 14
+          path: /tmp/opengeni-account-acceptance
 
       - name: Upload session pin visual evidence
         # A preceding repository-wide gate may fail before the browser command
@@ -864,14 +900,10 @@ jobs:
             /tmp/knowledge-surfaces-768-dark-documents.png
             /tmp/knowledge-surfaces-desktop-light-memory.png
             /tmp/knowledge-surfaces-desktop-dark-memory.png
-            /tmp/company-brain-320-light-overview.png
-            /tmp/company-brain-320-light-attention.png
-            /tmp/company-brain-375-dark-overview.png
-            /tmp/company-brain-375-dark-attention.png
-            /tmp/company-brain-768-light-overview.png
-            /tmp/company-brain-768-light-attention.png
-            /tmp/company-brain-desktop-dark-overview.png
-            /tmp/company-brain-desktop-dark-attention.png
+            /tmp/agent-knowledge-320-light-overview.png
+            /tmp/agent-knowledge-375-dark-overview.png
+            /tmp/agent-knowledge-768-light-overview.png
+            /tmp/agent-knowledge-desktop-dark-overview.png
 
       - name: Upload organization onboarding evidence
         if: >-

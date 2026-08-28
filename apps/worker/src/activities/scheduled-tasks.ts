@@ -1,4 +1,5 @@
 import {
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
@@ -6,6 +7,7 @@ import {
   resolveWorkspaceCodexCompactionDefault,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   ScheduledTaskRunAcceptedExecution,
+  normalizeAutomaticSessionTitle,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
   type ScheduledTask,
@@ -56,7 +58,7 @@ import {
   settleScheduledTaskRunInTransaction,
   SessionSpawnDeniedDbError,
   updateScheduledTaskRun,
-  updateSessionTitle,
+  updateSessionTitleWithEvent,
   upsertScheduledSessionGoalForRun,
   withSessionActivityRlsContext,
 } from "@opengeni/db";
@@ -122,16 +124,12 @@ export function scheduledTaskRunProducerKey(
   })}`;
 }
 
-// Same bound the manual rename field and the set_session_title tool enforce.
-const SCHEDULED_SESSION_TITLE_MAX_LENGTH = 200;
-
 /**
  * Display title for a session the scheduler generates for a task.
  *
  * A scheduled session's `initialMessage` is the task prompt, byte-identical for
- * every run, so an untitled scheduled session falls back to that prompt in the
- * rail and reads exactly like every other run of the task. The task name is the
- * short human-chosen label that actually identifies it, so that is the title.
+ * every run. The task name is the short human-chosen label that actually
+ * identifies it, so that is the title.
  *
  * The title is the task name and NOTHING else. It deliberately does not name the
  * run's fire instant, for two independent reasons:
@@ -162,24 +160,21 @@ const SCHEDULED_SESSION_TITLE_MAX_LENGTH = 200;
  * texts differ.
  */
 export function scheduledTaskSessionTitle(taskName: string): string {
-  // `ScheduledTask.name` has no length bound of its own, so it is bounded here
-  // to the same ceiling a human rename and set_session_title are held to.
-  const name = taskName.trim() || "Scheduled run";
-  if (name.length <= SCHEDULED_SESSION_TITLE_MAX_LENGTH) return name;
-  return `${name.slice(0, SCHEDULED_SESSION_TITLE_MAX_LENGTH - 1).trimEnd()}…`;
+  return normalizeAutomaticSessionTitle(taskName) ?? "Scheduled run";
 }
 
 /**
  * Title a session the scheduler generated, and emit the same `session.title_set`
  * event every other title write in the product emits.
  *
- * This is the write half of the shared path in `@opengeni/core`
- * `updateSessionTitle`: the db `updateSessionTitle` UPDATE (which is where the
- * clobber guard lives in full) followed by the identical `session.title_set`
- * append, emitted only on a real write. Without the event a live subscriber sees
- * nothing: `packages/react/src/hooks/use-session.ts` patches an open session's
- * title exclusively on `session.title_set`, so a bare row write leaves the
- * viewer on the stale title until an unrelated refetch.
+ * This uses the same database operation as `@opengeni/core`
+ * `updateSessionTitle`: the clobber/CAS guarded row update and its identical
+ * `session.title_set` append commit together under the session event lock. A
+ * newer writer therefore cannot land between the authoritative row change and
+ * an older event. Without the event a live subscriber sees nothing:
+ * `packages/react/src/hooks/use-session.ts` patches an open session's title
+ * exclusively on `session.title_set`, so a bare row write leaves the viewer on
+ * the stale title until an unrelated refetch.
  *
  * The core wrapper itself is not called, because its only additional behavior is
  * `requireSessionAuthorization(grant, ...)` - a check on an HTTP/MCP caller's
@@ -191,10 +186,12 @@ export function scheduledTaskSessionTitle(taskName: string): string {
  * session into a way to fail a dispatch. Authorization belongs to callers with
  * grants; the durable write and its event are the part that is shared.
  *
- * Only an untitled row is stamped. A keyed create replay can hand back a session
- * that has already run, and recovery re-enters this path for a session the dead
- * dispatch may already have titled; in both cases whatever the agent or a human
- * chose is newer truth than this stamp.
+ * Only the neutral create fallback is replaced. A keyed create replay can hand
+ * back a session that has already run, and recovery re-enters this path for a
+ * session the dead dispatch may already have titled; in both cases whatever the
+ * agent or a human chose is newer truth than this stamp. The fallback check is
+ * part of the UPDATE itself, not a stale session-object precheck, so a title
+ * committed between dispatch read and stamp cannot be overwritten.
  *
  * `source: "agent"` is deliberate, and is the only system-assigned value the
  * schema offers (`Session.titleSource` is "user" | "agent" | null). The database
@@ -206,26 +203,26 @@ export function scheduledTaskSessionTitle(taskName: string): string {
  * Returns the appended events so the caller can route them through the same
  * defer-or-publish path as every other event this dispatch produces.
  */
-async function stampScheduledSessionTitle(
+export async function stampScheduledSessionTitle(
   db: Database,
   input: {
     workspaceId: string;
-    session: { id: string; title: string | null };
+    sessionId: string;
     taskName: string;
   },
-): Promise<Awaited<ReturnType<typeof appendSessionEvents>>> {
-  if (input.session.title !== null) return [];
+): Promise<Awaited<ReturnType<typeof updateSessionTitleWithEvent>>["events"]> {
   const title = scheduledTaskSessionTitle(input.taskName);
-  const result = await updateSessionTitle(db, {
+  const result = await updateSessionTitleWithEvent(db, {
     workspaceId: input.workspaceId,
-    sessionId: input.session.id,
+    sessionId: input.sessionId,
     title,
     source: "agent",
+    expectedCurrent: {
+      title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+      source: "agent",
+    },
   });
-  if (!result.updated) return [];
-  return await appendSessionEvents(db, input.workspaceId, input.session.id, [
-    { type: "session.title_set", payload: { title: result.title ?? title, source: "agent" } },
-  ]);
+  return result.events;
 }
 
 export function createScheduledTaskActivities(services: () => Promise<ControlActivityServices>) {
@@ -618,6 +615,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 tools: targetSessionExecution.tools,
                 firstPartyMcpTools: targetSessionExecution.firstPartyMcpTools,
                 firstPartyMcpPermissions: targetSessionExecution.firstPartyMcpPermissions,
+                variableSetIds: targetSessionExecution.variableSets.map(
+                  (variableSet) => variableSet.id,
+                ),
                 variableSetId: targetSessionExecution.variableSetId,
                 rigId: targetSessionExecution.rigId,
                 rigVersionId: targetSessionExecution.rigVersionId,
@@ -1221,7 +1221,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             // into the rail, and this lands on its heels.
             const titleEvents = await stampScheduledSessionTitle(dispatchDb, {
               workspaceId: task.workspaceId,
-              session,
+              sessionId: session.id,
               taskName: task.name,
             });
             if (titleEvents.length > 0) {
@@ -1704,6 +1704,9 @@ async function prepareIncidentTelemetrySource(input: {
                   input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
                 firstPartyMcpPermissions:
                   input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
+                variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
+                  (variableSet) => variableSet.id,
+                ),
                 variableSetId: input.acceptedExecution.targetSessionExecution.variableSetId,
                 rigId: input.acceptedExecution.targetSessionExecution.rigId,
                 rigVersionId: input.acceptedExecution.targetSessionExecution.rigVersionId,
@@ -2084,7 +2087,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
     // already titled is left alone.
     const titleEvents = await stampScheduledSessionTitle(input.db, {
       workspaceId: task.workspaceId,
-      session,
+      sessionId: session.id,
       taskName: task.name,
     });
     if (titleEvents.length > 0) {
