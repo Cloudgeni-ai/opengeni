@@ -75,6 +75,10 @@ type PendingFiniteRead = {
 };
 
 type BrowserProblems = {
+  acceptedRequestFailures: Array<{
+    pathnameAndSearch: string;
+    responsePhase: string;
+  }>;
   activeStreams: Map<object, string>;
   actorDispatches: Array<{ actorEpoch: string; startedAt: number }>;
   actorFenceResponses: string[];
@@ -499,6 +503,7 @@ async function authSessionCount(email: string): Promise<number> {
 
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
+    acceptedRequestFailures: [],
     activeStreams: new Map(),
     actorDispatches: [],
     actorFenceResponses: [],
@@ -644,6 +649,8 @@ function observeBrowser(page: Page): BrowserProblems {
     const failedAt = performance.now();
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
+    const responsePhase = problems.phase;
+    const failedUrl = new URL(request.url());
     problems.activeStreams.delete(request);
     problems.retiredFiniteReadTombstones.delete(request);
     // A failed finite read is terminal whether expected or not. Remove it from
@@ -658,12 +665,19 @@ function observeBrowser(page: Page): BrowserProblems {
         failedAt,
         failure,
         method: request.method(),
-        responsePhase: problems.phase,
+        responsePhase,
         sessionSetAuthorityHash: dispatch ? await dispatch.sessionSetAuthorityHash : null,
         startedAt: dispatch?.startedAt,
         url: request.url(),
       });
-      if (problem !== null) problems.failedRequests.push(problem);
+      if (problem !== null) {
+        problems.failedRequests.push(problem);
+      } else {
+        problems.acceptedRequestFailures.push({
+          pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
+          responsePhase,
+        });
+      }
     })();
     problems.pendingRequestFailureChecks.add(check);
     void check.finally(() => problems.pendingRequestFailureChecks.delete(check));
@@ -800,10 +814,14 @@ async function retirePendingReadsAfterConfirmedActorTransition(
   }
 }
 
-async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void> {
+async function settlePendingRequestFailureChecks(problems: BrowserProblems): Promise<void> {
   while (problems.pendingRequestFailureChecks.size > 0) {
     await Promise.all([...problems.pendingRequestFailureChecks]);
   }
+}
+
+async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void> {
+  await settlePendingRequestFailureChecks(problems);
   expect({
     actorFenceResponses: problems.actorFenceResponses,
     actorTransitionResponses: problems.actorTransitionResponses,
@@ -899,9 +917,22 @@ function optionalWebKitReauthenticationReloadError(
     .slice(0, 1);
 }
 
-function isWebKitReauthenticationAccessControlPageError(message: string): boolean {
-  return /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/turns\?latestStarted=1 due to access control checks\.$/u.test(
-    message,
+function isWebKitReauthenticationAccessControlPageError(
+  message: string,
+  acceptedRequestFailures: BrowserProblems["acceptedRequestFailures"],
+): boolean {
+  const match =
+    /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_./?=&%-]+) due to access control checks\.$/u.exec(
+      message,
+    );
+  const pathnameAndSearch = match?.groups?.pathnameAndSearch;
+  return (
+    pathnameAndSearch !== undefined &&
+    acceptedRequestFailures.some(
+      (failure) =>
+        failure.responsePhase === "slot-revocation-reauthentication" &&
+        failure.pathnameAndSearch === pathnameAndSearch,
+    )
   );
 }
 
@@ -911,9 +942,15 @@ function optionalWebKitReauthenticationAccessControlPageError(
 ): string[] {
   if (engine !== "webkit") return [];
   // WebKit can surface one read from the deliberately replaced document as a
-  // page error instead of a request cancellation. Keep the phase, origin,
-  // endpoint shape, query, browser, and maximum count exact.
-  return problems.pageErrors.filter(isWebKitReauthenticationAccessControlPageError).slice(0, 1);
+  // page error in addition to its request-cancellation event. The endpoint is
+  // timing-dependent, so accept it only when the independent request ledger
+  // already proved the exact URL was a fenced old-actor cancellation. Keep
+  // the phase, origin, browser, request correlation, and maximum count exact.
+  return problems.pageErrors
+    .filter((message) =>
+      isWebKitReauthenticationAccessControlPageError(message, problems.acceptedRequestFailures),
+    )
+    .slice(0, 1);
 }
 
 async function expectAndConsumeActorTransitionResponse(
@@ -1546,12 +1583,38 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
   );
 }
 
+async function launchAccountBrowser(engine: EngineName): Promise<Browser> {
+  return await ENGINES[engine].launch(
+    engine === "chromium" && process.env.OPENGENI_BROWSER_BIN
+      ? { executablePath: process.env.OPENGENI_BROWSER_BIN }
+      : undefined,
+  );
+}
+
 async function captureResponsiveEvidence(
-  browser: Browser,
   context: BrowserContext,
   engine: EngineName,
 ): Promise<void> {
   const storageState = await context.storageState();
+  // Keep responsive evidence out of the multi-tab journey's native connection
+  // pool. The journey deliberately retains live transports in two pages while
+  // these short-lived contexts exercise seven viewport/mode combinations; a
+  // shared Chromium process can otherwise queue a bootstrap read behind those
+  // unrelated transports and turn visual capture into a transport-liveness
+  // test. The journey itself continues to prove the shared-tab behavior.
+  const evidenceBrowser = await launchAccountBrowser(engine);
+  try {
+    await captureResponsiveEvidenceInBrowser(evidenceBrowser, storageState, engine);
+  } finally {
+    await evidenceBrowser.close();
+  }
+}
+
+async function captureResponsiveEvidenceInBrowser(
+  browser: Browser,
+  storageState: Awaited<ReturnType<BrowserContext["storageState"]>>,
+  engine: EngineName,
+): Promise<void> {
   const captures = [
     { width: 320, height: 780, scheme: "light" as const },
     { width: 768, height: 900, scheme: "dark" as const },
@@ -1993,7 +2056,10 @@ describe("provider-neutral browser account acceptance", () => {
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(longLivedOldActorStream)).toBeNull();
     expect(
-      requestFailureProblem({ ...longLivedOldActorStream, failure: "NS_ERROR_NET_RESET" }),
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        failure: "NS_ERROR_NET_RESET",
+      }),
     ).toBeNull();
     expect(
       requestFailureProblem({
@@ -2139,16 +2205,39 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/config/other`,
       }),
     ).toContain("/v1/config/other");
+    const acceptedWebKitCancellation = {
+      pathnameAndSearch:
+        "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1",
+      responsePhase: "slot-revocation-reauthentication",
+    };
+    const correlatedWebKitPageError =
+      "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.";
     expect(
-      isWebKitReauthenticationAccessControlPageError(
-        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
-      ),
+      isWebKitReauthenticationAccessControlPageError(correlatedWebKitPageError, [
+        acceptedWebKitCancellation,
+      ]),
     ).toBe(true);
+    expect(isWebKitReauthenticationAccessControlPageError(correlatedWebKitPageError, [])).toBe(
+      false,
+    );
     expect(
       isWebKitReauthenticationAccessControlPageError(
         "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+        [acceptedWebKitCancellation],
       ),
     ).toBe(false);
+    expect(
+      isWebKitReauthenticationAccessControlPageError(
+        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog due to access control checks.",
+        [
+          {
+            pathnameAndSearch:
+              "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog",
+            responsePhase: "slot-revocation-reauthentication",
+          },
+        ],
+      ),
+    ).toBe(true);
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
@@ -2199,13 +2288,21 @@ describe("provider-neutral browser account acceptance", () => {
     expect(finiteReadMayRetireAfterActorTransition(retirement)).toBe(true);
     const retiredDescription = "GET /v1/workspaces/old-workspace/sessions";
     expect(
-      retiredFiniteReadTerminalProblem(retiredDescription, { kind: "response", status: 200 }),
+      retiredFiniteReadTerminalProblem(retiredDescription, {
+        kind: "response",
+        status: 200,
+      }),
     ).toContain("unexpected-late-response=200");
-    expect(retiredFiniteReadTerminalProblem(retiredDescription, { kind: "finished" })).toContain(
-      "unexpected-late-finish",
-    );
     expect(
-      retiredFiniteReadTerminalProblem(undefined, { kind: "response", status: 200 }),
+      retiredFiniteReadTerminalProblem(retiredDescription, {
+        kind: "finished",
+      }),
+    ).toContain("unexpected-late-finish");
+    expect(
+      retiredFiniteReadTerminalProblem(undefined, {
+        kind: "response",
+        status: 200,
+      }),
     ).toBeNull();
     expect(
       finiteReadMayRetireAfterActorTransition({
@@ -2285,11 +2382,7 @@ describe("provider-neutral browser account acceptance", () => {
   test("real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state", async () => {
     if (!owned) throw new Error("database fixture unavailable");
     const engine = requestedEngine as EngineName;
-    const browser = await ENGINES[engine].launch(
-      engine === "chromium" && process.env.OPENGENI_BROWSER_BIN
-        ? { executablePath: process.env.OPENGENI_BROWSER_BIN }
-        : undefined,
-    );
+    const browser = await launchAccountBrowser(engine);
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
     });
@@ -2384,7 +2477,7 @@ describe("provider-neutral browser account acceptance", () => {
 
       if (engine === "chromium") {
         setBrowserPhase(pageProblems, "responsive-accessibility-evidence");
-        await captureResponsiveEvidence(browser, context, engine);
+        await captureResponsiveEvidence(context, engine);
       }
 
       setBrowserPhase(pageProblems, "cross-tab-select-race");
@@ -2586,6 +2679,7 @@ describe("provider-neutral browser account acceptance", () => {
         ],
         [],
       );
+      await settlePendingRequestFailureChecks(pageProblems);
       await expectAndConsumePageErrors(
         page,
         pageProblems,
