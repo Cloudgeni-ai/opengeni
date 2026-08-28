@@ -9,11 +9,15 @@ describe("model picker shared ordering", () => {
       { billingClass: "opengeni_credits" as const, selectable: false, label: "Beta" },
       { billingClass: "opengeni_credits" as const, selectable: true, label: "Alpha" },
       { billingClass: "external" as const, selectable: true, label: "External" },
+      { billingClass: "codex_subscription" as const, selectable: true, label: "Codex" },
+      { billingClass: "supergrok_subscription" as const, selectable: true, label: "SuperGrok" },
     ];
     expect([...rows].sort(compareModelPickerOrder).map((row) => row.label)).toEqual([
       "Alpha",
       "Beta",
       "External",
+      "Codex",
+      "SuperGrok",
       "Zulu",
     ]);
   });

@@ -1766,7 +1766,7 @@ describe("validateSettings registry checks", () => {
         },
         () => getSettings(),
       ),
-    ).toThrow("collides with the built-in provider id");
+    ).toThrow("reserved for a reviewed OpenGeni provider");
   });
 
   test("rejects duplicate registry provider ids", () => {
