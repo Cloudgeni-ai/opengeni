@@ -212,6 +212,8 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   CreateVariableSetRequest,
+  ResolveVariableSetAttachmentsRequest,
+  ResolveVariableSetAttachmentsResponse,
   CreateRigRequest,
   CreateWorkspaceRequest,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
@@ -4892,6 +4894,18 @@ export class OpenGeniClient {
     return await this.requestJson<VariableSet[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/variable-sets`,
+    );
+  }
+
+  /** Resolve only caller-supplied attachment ids without enumerating the catalog. */
+  async resolveVariableSetAttachments(
+    workspaceId: string,
+    request: ResolveVariableSetAttachmentsRequest,
+  ): Promise<ResolveVariableSetAttachmentsResponse> {
+    return await this.requestJson<ResolveVariableSetAttachmentsResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/variable-sets/resolve-attachments`,
+      request,
     );
   }
 

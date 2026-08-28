@@ -749,6 +749,25 @@ describe("OpenGeniClient scheduled tasks", () => {
 });
 
 describe("OpenGeniClient variable sets", () => {
+  test("resolves only caller-supplied attachment ids through the narrow endpoint", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        variableSets: [{ id: ENVIRONMENT_ID, scope: "user" }],
+      }),
+    );
+
+    expect(
+      await client.resolveVariableSetAttachments(WORKSPACE_ID, {
+        variableSetIds: [ENVIRONMENT_ID],
+      }),
+    ).toEqual({ variableSets: [{ id: ENVIRONMENT_ID, scope: "user" }] });
+    expect(requests).toHaveLength(1);
+    expect(`${requests[0]!.method} ${new URL(requests[0]!.url).pathname}`).toBe(
+      `POST /v1/workspaces/${WORKSPACE_ID}/variable-sets/resolve-attachments`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ variableSetIds: [ENVIRONMENT_ID] });
+  });
+
   test("variable set CRUD + dedicated value read/PUT/DELETE", async () => {
     const exactValue = `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`;
     const { client, requests } = makeClient((request) =>

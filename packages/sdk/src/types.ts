@@ -4868,6 +4868,20 @@ export type VariableSet = {
   updatedAt: string;
 };
 
+/** Exact-ID attachment metadata; intentionally excludes catalog and secret metadata. */
+export type VariableSetAttachmentMetadata = {
+  id: string;
+  scope: "organization" | "workspace" | "user";
+};
+
+export type ResolveVariableSetAttachmentsRequest = {
+  variableSetIds: string[];
+};
+
+export type ResolveVariableSetAttachmentsResponse = {
+  variableSets: VariableSetAttachmentMetadata[];
+};
+
 /** @deprecated use VariableSetVariableMetadata */
 export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 

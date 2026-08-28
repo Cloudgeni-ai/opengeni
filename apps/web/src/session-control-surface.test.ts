@@ -94,6 +94,49 @@ describe("session control surface architecture", () => {
     expect(setupImplementation).not.toContain("<ModelPicker");
   });
 
+  test("keeps Variable Set access inside the multi-select setup instead of a status box", async () => {
+    const [route, establishedControl] = await Promise.all([
+      source("routes/sessions-index.tsx"),
+      source("components/personal-resource-attachment-control.tsx"),
+    ]);
+    expect(route).toContain("Add Variable Set…");
+    expect(route).toContain("<SelectedVariableSetList");
+    expect(route).toContain(
+      "const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets",
+    );
+    expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
+    expect(route).toContain("PersonalResourceAccessInline");
+    expect(route).not.toContain("PersonalResourceAttachmentControl");
+    expect(route).not.toContain("Your resource access");
+    expect(route).not.toContain("loadPersonalResourceCatalog");
+    expect(route).toContain("reconcileNewSessionFixedResources");
+    expect(route).toContain("newSessionFixedResourceCatalogFailed");
+    expect(route).toContain('"variable-sets:list"');
+    expect(route).toContain('"secrets:list"');
+    expect(route).toContain("resolveVariableSetAttachments");
+    expect(route).toContain("fixedResourceSelection.selectionResolved");
+    expect(route).toContain("personalResourceSelectionIdentityKey");
+    expect(route).toContain("recoverPersonalResourceAttachment(error, request)");
+    expect(route).toContain("recoverNewSessionPersonalResourceAttachment");
+    expect(route).toContain("refreshPersonalResourceCatalogs");
+    expect(route).toContain("canLoadVariableSetCatalog");
+    expect(route).toContain("canResolveVariableSetAttachments");
+    expect(route).toContain(
+      "newSessionDraftOptionsFromSessionDraft(\n        draft,\n        defaultFirstPartyMcpTools,\n        newSessionCreateVisibility(personalWorkspace, draft.visibility),\n      )",
+    );
+    expect(route).toContain("const selectedRigDefaultVariableSetIds =");
+    expect(route).toContain("selectedRigDefaultVariableSetIds,");
+    expect(route).toContain(
+      "selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey",
+    );
+    expect(route).toContain("Couldn’t verify the selected Variable Set or Rig");
+    expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
+    expect(establishedControl).not.toContain("<fieldset");
+    expect(establishedControl).toContain("aria-labelledby={durationLabelId}");
+    expect(establishedControl).not.toContain("Your resource access");
+    expect(establishedControl).not.toContain("couldn’t check access");
+  });
+
   test("announces pin results through an independent live region", async () => {
     const [header, list] = await Promise.all([
       source("components/rail/session-header.tsx"),
