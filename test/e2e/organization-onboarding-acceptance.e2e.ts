@@ -425,7 +425,13 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(await page.getByLabel(/workspace/i).count()).toBe(0);
     expect(await page.getByText(/create another organization/i).count()).toBe(0);
     await page.getByLabel("Organization name").fill("Onboarding Greenfield Org");
+    const setupSettled = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/v1/auth/organization-onboarding",
+    );
     await page.getByRole("button", { name: "Create organization" }).click();
+    expect((await setupSettled).ok()).toBe(true);
 
     const ownerCookie = await cookieHeader(context);
     const owner = sdk(ownerCookie);
