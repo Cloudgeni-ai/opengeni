@@ -41,7 +41,9 @@ describe("web API auth helpers", () => {
     });
     let cleaned = 0;
     const response = managedActorTrackedResponse(
-      new Response(source, { headers: { "content-type": "text/event-stream" } }),
+      new Response(source, {
+        headers: { "content-type": "text/event-stream" },
+      }),
       new AbortController().signal,
       () => {
         cleaned += 1;
@@ -80,7 +82,9 @@ describe("web API auth helpers", () => {
         },
       });
       const response = managedActorTrackedResponse(
-        new Response(source, { headers: { "content-type": "text/event-stream" } }),
+        new Response(source, {
+          headers: { "content-type": "text/event-stream" },
+        }),
         new AbortController().signal,
         () => {
           cleaned += 1;
@@ -124,7 +128,9 @@ describe("web API auth helpers", () => {
       const actor = new AbortController();
       const source = new ReadableStream<Uint8Array>();
       const response = managedActorTrackedResponse(
-        new Response(source, { headers: { "content-type": "text/event-stream" } }),
+        new Response(source, {
+          headers: { "content-type": "text/event-stream" },
+        }),
         actor.signal,
         () => undefined,
         () => signalNativeAbort(),
@@ -373,7 +379,10 @@ describe("web API auth helpers", () => {
       await Promise.resolve();
       expect(observed.signal?.aborted).toBe(false);
       bodyController.enqueue(new Uint8Array([1]));
-      await expect(read).resolves.toEqual({ done: false, value: new Uint8Array([1]) });
+      await expect(read).resolves.toEqual({
+        done: false,
+        value: new Uint8Array([1]),
+      });
       await reader.cancel();
     } finally {
       configureManagedActorEpoch(null);
@@ -423,6 +432,71 @@ describe("web API auth helpers", () => {
     }
   });
 
+  test("drains a known-length HTTP/1 SSE batch before exposing it", async () => {
+    const originalFetch = globalThis.fetch;
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+    let source!: ReadableStream<Uint8Array>;
+    globalThis.fetch = (async () => {
+      source = new ReadableStream<Uint8Array>({
+        start(controller) {
+          bodyController = controller;
+        },
+      });
+      return new Response(source, {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "content-length": "14",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("finite-sse");
+      let exposed = false;
+      const pending = managedActorFetch("https://api.example.test/v1/sessions/live").then(
+        (response) => {
+          exposed = true;
+          return response;
+        },
+      );
+      await Promise.resolve();
+      bodyController.enqueue(new TextEncoder().encode(": connected\n\n"));
+      await Promise.resolve();
+      expect(exposed).toBe(false);
+      bodyController.close();
+      const response = await pending;
+      expect(source.locked).toBe(false);
+      await expect(response.text()).resolves.toBe(": connected\n\n");
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("does not buffer an SSE response whose claimed length exceeds the batch bound", async () => {
+    const originalFetch = globalThis.fetch;
+    let source!: ReadableStream<Uint8Array>;
+    globalThis.fetch = (async () => {
+      source = new ReadableStream<Uint8Array>();
+      return new Response(source, {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "content-length": String(512 * 1024 + 1),
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("oversized-sse");
+      const response = await managedActorFetch("https://api.example.test/v1/sessions/live");
+      await response.body!.cancel();
+      expect(source.locked).toBe(false);
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("aborts a finite JSON drain when the accepted actor changes", async () => {
     const originalFetch = globalThis.fetch;
     const observed: { signal?: AbortSignal | null } = {};
@@ -437,7 +511,9 @@ describe("web API auth helpers", () => {
           controller.enqueue(new TextEncoder().encode('{"partial":'));
         },
       });
-      return new Response(source, { headers: { "content-type": "application/json" } });
+      return new Response(source, {
+        headers: { "content-type": "application/json" },
+      });
     }) as unknown as typeof fetch;
 
     try {

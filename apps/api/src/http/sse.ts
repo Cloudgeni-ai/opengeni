@@ -27,6 +27,7 @@ export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
 export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 export const HTTP1_BROWSER_SSE_LIFETIME_MS = 5_000;
+export const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
 type SseStreamKind = "session" | "workspace_control" | "workspace_interaction";
 const activeSseStreams: Record<SseStreamKind, number> = {
   session: 0,
@@ -477,20 +478,7 @@ export async function sseSessionStream(
     detachAbortListener = () => signal.removeEventListener("abort", abort);
   }
 
-  return new Response(channel.stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      // A clean authorization close must also retire the HTTP/1 transport.
-      // Reusing that socket can leave Chromium accounting the ended SSE as an
-      // active per-origin connection while a replacement document is already
-      // dispatching finite reads. HTTP/2 front doors strip this hop-by-hop
-      // header; direct Bun/self-hosted HTTP/1 clients receive an unambiguous
-      // connection end after the stream's terminal chunk.
-      Connection: "close",
-      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
-    },
-  });
+  return await sseHttpResponse(channel.stream, options);
 }
 
 export async function replaySessionEvents(
@@ -658,14 +646,7 @@ export async function sseWorkspaceControlStream(
     detachAbortListener = () => signal.removeEventListener("abort", abort);
   }
 
-  return new Response(channel.stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "close",
-      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
-    },
-  });
+  return await sseHttpResponse(channel.stream, options);
 }
 
 export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
@@ -713,6 +694,7 @@ export async function sseWorkspaceLiveStream(
   const upstreamOptions: WorkspaceInteractionSseOptions = {
     ...options,
     connectionLifetimeMs: undefined,
+    finiteResponseMaxBytes: undefined,
     reauthorize: undefined,
     reauthorizeAfterMs: undefined,
   };
@@ -786,14 +768,7 @@ export async function sseWorkspaceLiveStream(
     }
   })();
 
-  return new Response(channel.stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "close",
-      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
-    },
-  });
+  return await sseHttpResponse(channel.stream, options);
 }
 
 /**
@@ -844,7 +819,10 @@ export async function sseWorkspaceInteractionRevisionStream(
       if (!(await write(": connected\n\n"))) return;
       for (;;) {
         if (stopRequested || signal.aborted || channel.stopped()) return;
-        const state = await getWorkspaceInteractionRevisionState(db, { accountId, workspaceId });
+        const state = await getWorkspaceInteractionRevisionState(db, {
+          accountId,
+          workspaceId,
+        });
         if (state.revision > lastSent) {
           const event = WorkspaceInteractionRevisionEvent.parse({
             workspaceId,
@@ -874,14 +852,7 @@ export async function sseWorkspaceInteractionRevisionStream(
     detachAbortListener = () => signal.removeEventListener("abort", abort);
   }
 
-  return new Response(channel.stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "close",
-      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
-    },
-  });
+  return await sseHttpResponse(channel.stream, options);
 }
 
 function observeSseConnection(
@@ -962,6 +933,8 @@ async function reauthorizeSseOrClose(
 
 export type SseDeliveryOptions = {
   connectionLifetimeMs?: number | undefined;
+  /** Return a known-length batch instead of a chunked response. HTTP/1 only. */
+  finiteResponseMaxBytes?: number | undefined;
   maxQueuedBytes?: number;
   stallTimeoutMs?: number;
   heartbeatIntervalMs?: number;
@@ -976,10 +949,82 @@ export type SseDeliveryOptions = {
 
 export function browserSseDeliveryOptions(
   transport: string | undefined,
-): Pick<SseDeliveryOptions, "connectionLifetimeMs"> {
+): Pick<SseDeliveryOptions, "connectionLifetimeMs" | "finiteResponseMaxBytes"> {
   return transport === "http1-bounded"
-    ? { connectionLifetimeMs: HTTP1_BROWSER_SSE_LIFETIME_MS }
+    ? {
+        connectionLifetimeMs: HTTP1_BROWSER_SSE_LIFETIME_MS,
+        finiteResponseMaxBytes: HTTP1_BROWSER_SSE_BATCH_MAX_BYTES,
+      }
     : {};
+}
+
+async function sseHttpResponse(
+  stream: ReadableStream<Uint8Array>,
+  options: SseDeliveryOptions,
+): Promise<Response> {
+  const maxBytes = options.finiteResponseMaxBytes;
+  let body: ReadableStream<Uint8Array> | ArrayBuffer = stream;
+  let contentLength: number | null = null;
+  if (maxBytes !== undefined) {
+    if (
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < SESSION_EVENT_SSE_FRAME_MAX_BYTES ||
+      maxBytes > HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
+    ) {
+      throw new RangeError(
+        `finite SSE batch limit must be between ${SESSION_EVENT_SSE_FRAME_MAX_BYTES} and ${HTTP1_BROWSER_SSE_BATCH_MAX_BYTES} bytes`,
+      );
+    }
+    body = await collectFiniteSseBatch(stream, maxBytes);
+    contentLength = body.byteLength;
+  }
+  return new Response(body, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      // A clean authorization close must also retire the HTTP/1 transport.
+      // Reusing that socket can leave Chromium accounting the ended SSE as an
+      // active per-origin connection while a replacement document is already
+      // dispatching finite reads. HTTP/2 front doors strip this hop-by-hop
+      // header; direct Bun/self-hosted HTTP/1 clients receive an unambiguous
+      // connection end after the stream's terminal chunk.
+      Connection: "close",
+      ...(contentLength === null ? {} : { "Content-Length": String(contentLength) }),
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
+    },
+  });
+}
+
+async function collectFiniteSseBatch(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<ArrayBuffer> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      // Each source chunk is one complete SSE frame. End before an overflowing
+      // frame so reconnect replay starts from the consumer's last whole cursor.
+      if (length + next.value.byteLength > maxBytes) {
+        await reader.cancel("finite SSE batch reached its byte limit");
+        break;
+      }
+      chunks.push(next.value);
+      length += next.value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer;
 }
 
 export type SessionSseDeliveryOptions = SseDeliveryOptions;
