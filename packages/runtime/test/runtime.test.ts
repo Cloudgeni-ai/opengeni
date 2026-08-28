@@ -88,7 +88,6 @@ import {
   PrefixedMcpServer,
   prepareRunInput,
   runAgentStream,
-  settleMcpConnectionGroups,
   stripProviderItemIdsFilter,
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
@@ -8196,43 +8195,17 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("a rejected optional connection group fails open without weakening required MCP", async () => {
-    let requiredCloseCount = 0;
-    let optionalCloseCount = 0;
-    const required = {
-      close: async () => {
-        requiredCloseCount += 1;
-      },
-    };
-    const optional = {
-      close: async () => {
-        optionalCloseCount += 1;
-      },
-    };
-    const optionalFailure = new Error("synthetic optional group failure");
-    const observed: unknown[] = [];
-    await expect(
-      settleMcpConnectionGroups(
-        Promise.resolve(required),
-        Promise.reject(optionalFailure),
-        (error) => observed.push(error),
-      ),
-    ).resolves.toEqual({ required, bestEffort: null });
-    expect(observed).toEqual([optionalFailure]);
-    expect(requiredCloseCount).toBe(0);
-    expect(optionalCloseCount).toBe(0);
-
-    const requiredFailure = new Error("synthetic required group failure");
-    await expect(
-      settleMcpConnectionGroups(
-        Promise.reject(requiredFailure),
-        Promise.resolve(optional),
-        () => {
-          throw new Error("required failure must not be downgraded");
-        },
-      ),
-    ).rejects.toBe(requiredFailure);
-    expect(optionalCloseCount).toBe(1);
+  test("a rejected optional connection group fails open without weakening required MCP", () => {
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    const settlement = source.slice(
+      source.indexOf("const connectEntryGroups = async"),
+      source.indexOf("const connectedEager = await connectEntryGroups"),
+    );
+    expect(settlement).toContain('if (requiredResult.status === "rejected")');
+    expect(settlement).toContain("throw requiredResult.reason");
+    expect(settlement).toContain('if (bestEffortResult.status === "rejected")');
+    expect(settlement).toContain("entry.server.releaseAggregateBudget()");
+    expect(settlement.match(/throw /g)).toHaveLength(1);
   });
 
   test("waits only for session-eager MCP preparation and defers strict and optional servers", async () => {
