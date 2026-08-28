@@ -18,6 +18,7 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
+import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
@@ -42,6 +43,7 @@ const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null
  * the value the cookie branch produced.
  */
 const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
+const canonicalLocalHumanContexts = new WeakSet<AccessContext>();
 const resolvedAccessGrantAuthorizations = new WeakSet<object>();
 
 /**
@@ -61,6 +63,7 @@ export type AccessDeps = {
   db: Database;
   settings: Settings;
   managedAuth?: ManagedAuth | null;
+  managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
 };
 
 export async function requireAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext> {
@@ -117,6 +120,8 @@ export type AccessGrantAuthorization = {
    * principal, and for any future path that does not verify a cookie.
    */
   canonicalManagedHumanSession: boolean;
+  /** Exact in-process single-user local bootstrap, never a delegated bearer. */
+  canonicalLocalHumanSession: boolean;
 };
 
 export function accessGrantAuthorizationFromContext(
@@ -149,6 +154,7 @@ export function accessGrantAuthorizationFromContext(
     authenticatedSubjectId: context.subjectId,
     contextIntegrity,
     canonicalManagedHumanSession: isCanonicalManagedHumanSession(context, grant),
+    canonicalLocalHumanSession: isCanonicalLocalHumanSession(context, grant),
   };
   resolvedAccessGrantAuthorizations.add(authorization);
   return authorization;
@@ -260,6 +266,18 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
   );
 }
 
+function isCanonicalLocalHumanSession(context: AccessContext, grant: AccessGrant): boolean {
+  return (
+    canonicalLocalHumanContexts.has(context) &&
+    context.mode === "local" &&
+    context.subjectId === "dev" &&
+    grant.subjectId === context.subjectId &&
+    grant.principalKind === "human_session" &&
+    grant.metadata?.delegated !== true &&
+    !grant.serviceInitiator
+  );
+}
+
 function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session" | undefined {
   if (context.mode !== "managed" || context.workspaceGrants.length === 0) {
     return undefined;
@@ -328,7 +346,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
     if (delegated) {
       return delegated;
     }
-    return await bootstrapWorkspace(deps.db, {
+    const context = await bootstrapWorkspace(deps.db, {
       accountExternalSource: "opengeni:local",
       accountExternalId: "default",
       accountName: "Local",
@@ -338,6 +356,8 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
       subjectId: "dev",
       subjectLabel: "Local dev",
     });
+    canonicalLocalHumanContexts.add(context);
+    return context;
   }
 
   if (deps.settings.productAccessMode === "configured") {
@@ -377,7 +397,11 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await getManagedSession(c, deps.managedAuth, { db: deps.db });
+    const session = await getManagedSession(c, deps.managedAuth, {
+      db: deps.db,
+      sessionSetMode: deps.settings.managedAuthSessionSetMode,
+      sessionAdapter: deps.managedAuthSessionAdapter,
+    });
     if (session?.user) {
       // THE canonical managed-cookie (Better Auth) branch, and the only place
       // that may stamp a context as such. Every `return` above this point leaves
@@ -388,6 +412,8 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         email: session.user.email,
         name: session.user.name,
         emailVerified: session.user.emailVerified,
+        provisionFallbackOrganization: false,
+        bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
       return context;

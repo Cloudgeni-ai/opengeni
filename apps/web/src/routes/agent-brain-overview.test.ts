@@ -80,7 +80,7 @@ describe("Company Brain attention derivation", () => {
     input.policyInventoryPartial = true;
     input.preferenceInventoryPartial = true;
     expect(deriveBrainAttention(input)).toEqual([
-      "Company Brain refresh failed",
+      "Agent Knowledge refresh failed",
       "An inactive policy revision needs review",
       "Policy review is partial",
       "Preference summaries are partially shown",

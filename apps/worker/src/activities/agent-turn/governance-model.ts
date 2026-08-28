@@ -26,7 +26,6 @@ import {
   resolveWorkspacePackRuntime,
   resolveWorkspaceInstalledSkillRuntime,
   settingsWithPackSandboxImage,
-  settingsWithRigImage,
 } from "../packs";
 import { createModelHistoryAttachmentProjector } from "../run-input";
 import type {
@@ -129,6 +128,33 @@ export type GovernanceModelOk = {
 
 export type GovernanceModelOutcome = { exit: RunAgentTurnResult } | { ok: GovernanceModelOk };
 
+type PreferenceSnapshotTurn = Pick<ClaimTurnOk["turn"], "initiatingHumanSubjectId" | "initiator">;
+
+export function preferenceSnapshotHumanSubjectId(turn: PreferenceSnapshotTurn): string | null {
+  return (
+    turn.initiatingHumanSubjectId ??
+    (turn.initiator.kind === "subject" ? turn.initiator.subjectId : null)
+  );
+}
+
+/**
+ * Preferences are scoped partly to the frozen initiating human. A service-only
+ * turn has no such scope, so avoid calling the human-bound snapshot capability
+ * merely to catch its expected authority rejection.
+ */
+export async function preferenceSnapshotForTurn<T>(
+  turn: PreferenceSnapshotTurn,
+  load: () => Promise<T>,
+): Promise<T | null> {
+  if (!preferenceSnapshotHumanSubjectId(turn)) return null;
+  try {
+    return await load();
+  } catch (error) {
+    if (error instanceof PreferenceRegistryInitiatorError) return null;
+    throw error;
+  }
+}
+
 export async function prepareGovernanceAndModel(
   deps: GovernanceModelDeps,
 ): Promise<GovernanceModelOutcome> {
@@ -198,10 +224,10 @@ export async function prepareGovernanceAndModel(
       getWorkspace(db, input.workspaceId),
       getOrCreateCompanyProfileSnapshot(db, governanceClaims),
       getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
-      getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
-        if (error instanceof PreferenceRegistryInitiatorError) return null;
-        throw error;
-      }),
+      preferenceSnapshotForTurn(
+        turn,
+        async () => await getOrCreatePreferenceRegistrySnapshot(db, governanceClaims),
+      ),
     ]),
     getWorkspaceModelPolicy(db, input.workspaceId),
   ]);
@@ -263,14 +289,15 @@ export async function prepareGovernanceAndModel(
   } catch {
     // Contribution telemetry must never change model execution semantics.
   }
-  const logicalSandboxSettings = settingsWithRigImage(
-    settingsWithPackSandboxImage(
-      capabilitySettings,
-      packRuntime.sandboxImage,
-      packRuntime.sandboxProviderImages,
-    ),
-    rigVersion?.image ?? null,
-  );
+  // A Rig is always a setup/check layer over the deployment platform sandbox.
+  // The pre-v2 Pack image path remains only for rig-less compatibility sessions.
+  const logicalSandboxSettings = rigVersion
+    ? capabilitySettings
+    : settingsWithPackSandboxImage(
+        capabilitySettings,
+        packRuntime.sandboxImage,
+        packRuntime.sandboxProviderImages,
+      );
   const providerImageSelection = await resolveRigProviderImageForRun(
     logicalSandboxSettings,
     rigVersion,
@@ -282,12 +309,10 @@ export async function prepareGovernanceAndModel(
       ? (providerImageSelection.imageId ?? undefined)
       : undefined;
   const baseRunSettings = {
-    // IMAGE PRECEDENCE: rig > pre-V2 Pack compatibility > deployment.
-    // resolveWorkspacePackRuntime returns no image for V2 Pack rows, so
-    // settingsWithRigImage runs outermost over only the intentionally
-    // retained legacy fallback. A matching verified provider-native ID is
-    // then applied only to fresh creation without changing the logical
-    // lease image.
+    // IMAGE PRECEDENCE: a Rig uses the deployment platform base; a rig-less
+    // pre-v2 Pack may retain its compatibility image. A matching verified
+    // provider-native ID is then applied only to fresh creation without
+    // changing the logical lease image.
     ...providerImageSettings,
     openaiModel: turn.model,
     openaiReasoningEffort: turn.reasoningEffort,

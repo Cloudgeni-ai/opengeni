@@ -17,6 +17,7 @@ export default defineConfig({
     "src/domain/connection-authority.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifact-live.ts",
+    "src/managed-auth-session-sets.ts",
   ],
   format: ["esm"],
   target: "es2022",

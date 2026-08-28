@@ -17,13 +17,12 @@
 // lightweight local opt-in.
 import {
   FILE_ONLY_MESSAGE_TEXT,
+  LightboxProvider,
   useChannels,
   useRigs,
   useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
-  type UseRigsResult,
-  type UseVariableSetsResult,
 } from "@opengeni/react";
 import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
@@ -34,8 +33,12 @@ import {
 } from "@opengeni/react/realtime";
 import {
   OpenGeniApiError,
+  PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING,
   type NewSessionSelectionHistory,
+  type Rig,
   type SessionRealtimeModel,
+  type VariableSet,
+  type VariableSetAttachmentMetadata,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -48,18 +51,31 @@ import {
   ServerCogIcon,
   ServerIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  createElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 
 import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { PersonalResourceAttachmentControl } from "@/components/personal-resource-attachment-control";
 import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
-import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
+import {
+  RepositoryContextMenuBody,
+  RepositoryContextPicker,
+  type RepositoryContextPickerProps,
+} from "@/components/repository-picker";
+import { SelectedVariableSetList } from "@/components/session/selected-variable-set-list";
 import { Button } from "@/components/ui/button";
+import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -74,6 +90,7 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
+import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchKey,
@@ -91,6 +108,17 @@ import {
 } from "@/lib/model-policy";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { hasWorkspacePermission } from "@/lib/permissions";
+import {
+  isPersonalAttachmentConflict,
+  newSessionFixedResourceCatalogFailed,
+  newSessionPersonalResourceAttachment,
+  personalResourceSelectionIdentityKey,
+  reconcileNewSessionFixedResources,
+  recoverNewSessionPersonalResourceAttachment,
+  resolvePersonalResourceOwnerScope,
+  selectableSessionVariableSets,
+} from "@/lib/personal-resource-attachments";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import {
   useWorkspaceModelCatalog,
@@ -99,6 +127,7 @@ import {
 import {
   emptySessionDraft,
   isSessionDraftComputeReady,
+  newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
   rememberedMachineFolder,
   rememberedProjectCompute,
@@ -117,10 +146,6 @@ import {
   repositorySelectionFromResources,
 } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
-import {
-  usePersonalResourceAttachment,
-  type PersonalResourceAttachmentController,
-} from "@/lib/use-personal-resource-attachment";
 import { cn } from "@/lib/utils";
 import {
   runNewSessionRouteSubmission,
@@ -192,12 +217,34 @@ function SessionsIndexRouteContent({
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
-  const variableSets = useVariableSets({ enabled: fixedResourceCatalogEnabled });
-  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
-  const selectedVariableSet = variableSets.variableSets.find(
-    (candidate) => candidate.id === draft.variableSetId,
+  const canAttachVariableSets = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "variable-sets:attach",
   );
-  const selectedRig = rigs.rigs.find((candidate) => candidate.id === draft.rigId);
+  const canUseVariableSets = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "variable-sets:use",
+  );
+  const canListVariableSets = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "variable-sets:list",
+  );
+  const canListVariableSetSecrets = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "secrets:list",
+  );
+  const canLoadVariableSetCatalog =
+    canAttachVariableSets && canUseVariableSets && canListVariableSets && canListVariableSetSecrets;
+  const canResolveVariableSetAttachments =
+    canAttachVariableSets && canUseVariableSets && !canLoadVariableSetCatalog;
+  const variableSets = useVariableSets({
+    enabled: fixedResourceCatalogEnabled && canLoadVariableSetCatalog,
+  });
+  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
@@ -238,6 +285,191 @@ function SessionsIndexRouteContent({
         );
       });
   }, [context.client, personalWorkspace, workspaceId]);
+  const personalOwnerScope = resolvePersonalResourceOwnerScope({
+    authMode: context.clientConfig.auth.mode,
+    authSession: context.authSession,
+    accessSubjectId: context.accessContext.subjectId,
+    managedSelfContext: context.managedSelfContext,
+    workspace,
+  });
+  const personalResourcesAvailable =
+    personalOwnerScope !== null && (personalWorkspace || tenancyCapabilities?.activated === true);
+  const selectableVariableSets = canLoadVariableSetCatalog
+    ? selectableSessionVariableSets(variableSets.variableSets, {
+        canAttach: canAttachVariableSets,
+        canUse: canUseVariableSets,
+        personalResourcesAvailable,
+      })
+    : [];
+  const personalResourceEligibilitySettled =
+    personalWorkspace || personalOwnerScope === null || tenancyCapabilities !== null;
+  const selectableRigs = rigs.rigs.filter(
+    (rig) => rig.scope !== "user" || personalResourcesAvailable,
+  );
+  const selectedRig = selectableRigs.find((candidate) => candidate.id === draft.rigId);
+  const selectedRigDefaultVariableSetIds = selectedRig?.activeVersion?.defaultVariableSetIds ?? [];
+  const selectedRigDefaultVariableSetIdsKey = selectedRigDefaultVariableSetIds.join("\u0000");
+  const variableSetAttachmentIds = [
+    ...new Set([...draft.variableSetIds, ...selectedRigDefaultVariableSetIds]),
+  ];
+  const variableSetAttachmentIdsKey = variableSetAttachmentIds.join("\u0000");
+  const variableSetAttachmentResolutionGeneration = useRef(0);
+  const [variableSetAttachmentResolution, setVariableSetAttachmentResolution] = useState<{
+    key: string;
+    variableSets: VariableSetAttachmentMetadata[];
+    error: Error | null;
+  }>({ key: "", variableSets: [], error: null });
+  const resolveVariableSetAttachments = useLatestCallback(async (): Promise<void> => {
+    const generation = ++variableSetAttachmentResolutionGeneration.current;
+    if (
+      !fixedResourceCatalogEnabled ||
+      !canResolveVariableSetAttachments ||
+      variableSetAttachmentIds.length === 0
+    ) {
+      setVariableSetAttachmentResolution({
+        key: variableSetAttachmentIdsKey,
+        variableSets: [],
+        error: null,
+      });
+      return;
+    }
+    setVariableSetAttachmentResolution({ key: "", variableSets: [], error: null });
+    try {
+      const result = await context.client.resolveVariableSetAttachments(workspaceId, {
+        variableSetIds: variableSetAttachmentIds,
+      });
+      if (variableSetAttachmentResolutionGeneration.current !== generation) return;
+      setVariableSetAttachmentResolution({
+        key: variableSetAttachmentIdsKey,
+        variableSets: result.variableSets,
+        error: null,
+      });
+    } catch (cause) {
+      if (variableSetAttachmentResolutionGeneration.current !== generation) return;
+      setVariableSetAttachmentResolution({
+        key: variableSetAttachmentIdsKey,
+        variableSets: [],
+        error: cause instanceof Error ? cause : new Error(String(cause)),
+      });
+    }
+  });
+  useEffect(() => {
+    void resolveVariableSetAttachments();
+  }, [
+    resolveVariableSetAttachments,
+    variableSetAttachmentIdsKey,
+    canResolveVariableSetAttachments,
+    fixedResourceCatalogEnabled,
+  ]);
+  const variableSetAttachmentResolutionCurrent =
+    variableSetAttachmentResolution.key === variableSetAttachmentIdsKey;
+  const resolvedVariableSetAttachments = variableSetAttachmentResolutionCurrent
+    ? variableSetAttachmentResolution.variableSets
+    : [];
+  const resolvedVariableSetIds = canLoadVariableSetCatalog
+    ? selectableVariableSets.map((variableSet) => variableSet.id)
+    : canResolveVariableSetAttachments
+      ? resolvedVariableSetAttachments.map((variableSet) => variableSet.id)
+      : [];
+  const resolvedVariableSetIdsKey = resolvedVariableSetIds.join("\u0000");
+  const variableSetResolutionLoading = canLoadVariableSetCatalog
+    ? variableSets.loading
+    : canResolveVariableSetAttachments
+      ? !variableSetAttachmentResolutionCurrent
+      : false;
+  const variableSetResolutionError = canLoadVariableSetCatalog
+    ? variableSets.error
+    : canResolveVariableSetAttachments && variableSetAttachmentResolutionCurrent
+      ? variableSetAttachmentResolution.error
+      : null;
+  const variableSetsSettled =
+    (canLoadVariableSetCatalog || canResolveVariableSetAttachments) &&
+    personalResourceEligibilitySettled &&
+    !variableSetResolutionLoading &&
+    variableSetResolutionError === null;
+  const selectableRigIdsKey = selectableRigs.map((rig) => rig.id).join("\u0000");
+  const selectedFixedResourceKey = [...draft.variableSetIds, `rig:${draft.rigId}`].join("\u0000");
+  const fixedResourceSelection = reconcileNewSessionFixedResources({
+    selectedVariableSetIds: draft.variableSetIds,
+    selectedRigId: draft.rigId,
+    selectedRigDefaultVariableSetIds,
+    selectableVariableSetIds: fixedResourceCatalogEnabled
+      ? resolvedVariableSetIds
+      : draft.variableSetIds,
+    selectableRigIds: fixedResourceCatalogEnabled
+      ? selectableRigs.map((rig) => rig.id)
+      : draft.rigId
+        ? [draft.rigId]
+        : [],
+    variableSetsSettled: !fixedResourceCatalogEnabled || variableSetsSettled,
+    rigsSettled:
+      !fixedResourceCatalogEnabled ||
+      (personalResourceEligibilitySettled && !rigs.loading && rigs.error === null),
+  });
+  const fixedResourceCatalogError =
+    draft.compute.kind === "sandbox" &&
+    newSessionFixedResourceCatalogFailed({
+      selectedVariableSetIds: draft.variableSetIds,
+      selectedRigId: draft.rigId,
+      selectionResolved: fixedResourceSelection.selectionResolved,
+      variableSetCatalogFailed: variableSetResolutionError !== null,
+      rigCatalogFailed: rigs.error !== null,
+    });
+  useEffect(() => {
+    setDraft((current) => {
+      if (current.compute.kind !== "sandbox") return current;
+      const reconciled = reconcileNewSessionFixedResources({
+        selectedVariableSetIds: current.variableSetIds,
+        selectedRigId: current.rigId,
+        selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey
+          ? selectedRigDefaultVariableSetIdsKey.split("\u0000")
+          : [],
+        selectableVariableSetIds: resolvedVariableSetIdsKey
+          ? resolvedVariableSetIdsKey.split("\u0000")
+          : [],
+        selectableRigIds: selectableRigIdsKey ? selectableRigIdsKey.split("\u0000") : [],
+        variableSetsSettled,
+        rigsSettled: personalResourceEligibilitySettled && !rigs.loading && rigs.error === null,
+      });
+      if (
+        reconciled.variableSetIds.length === current.variableSetIds.length &&
+        reconciled.variableSetIds.every((id, index) => id === current.variableSetIds[index]) &&
+        reconciled.rigId === current.rigId
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        variableSetIds: reconciled.variableSetIds,
+        variableSetId: reconciled.variableSetIds.at(-1) ?? "",
+        rigId: reconciled.rigId,
+      };
+    });
+  }, [
+    personalResourceEligibilitySettled,
+    rigs.error,
+    rigs.loading,
+    selectedFixedResourceKey,
+    selectedRigDefaultVariableSetIdsKey,
+    selectableRigIdsKey,
+    resolvedVariableSetIdsKey,
+    variableSetsSettled,
+  ]);
+  const personalAttachmentVariableSetIds = [
+    ...new Set([
+      ...(selectedRig?.activeVersion?.defaultVariableSetIds ?? []),
+      ...draft.variableSetIds,
+    ]),
+  ];
+  const selectedPersonalVariableSets = personalAttachmentVariableSetIds.flatMap((variableSetId) => {
+    const variableSet = selectableVariableSets.find((candidate) => candidate.id === variableSetId);
+    if (variableSet?.scope === "user") return [{ id: variableSet.id, name: variableSet.name }];
+    return resolvedVariableSetAttachments.some(
+      (candidate) => candidate.id === variableSetId && candidate.scope === "user",
+    )
+      ? [{ id: variableSetId, name: "Personal Variable Set" }]
+      : [];
+  });
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
   const fleet = useMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
@@ -254,27 +486,66 @@ function SessionsIndexRouteContent({
     ? (machines.find((machine) => machine.sandboxId === selectedMachineSandboxId) ?? null)
     : null;
   const personalMachineSelected = selectedMachine?.scope === "user";
-  const personalAttachment = usePersonalResourceAttachment({
-    client: context.client,
-    authMode: context.clientConfig.auth.mode,
-    authSession: context.authSession,
-    accessSubjectId: context.accessContext.subjectId,
-    managedSelfContext: context.managedSelfContext,
-    workspace,
-    fixed: {
-      variableSetId: draft.compute.kind === "sandbox" ? draft.variableSetId || null : null,
-      variableSetScope:
-        draft.compute.kind === "sandbox" ? (selectedVariableSet?.scope ?? null) : null,
-      rigId: draft.compute.kind === "sandbox" ? draft.rigId || null : null,
-      rigScope: draft.compute.kind === "sandbox" ? (selectedRig?.scope ?? null) : null,
-      connectedMachine:
-        selectedMachine?.scope === "user" && selectedMachine.enrollmentId
-          ? { enrollmentId: selectedMachine.enrollmentId, name: selectedMachine.name }
-          : null,
-    },
-    personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
-    createVisibility: personalWorkspace ? "private" : draft.visibility,
+  const selectedPersonalResourceNames =
+    draft.compute.kind === "sandbox"
+      ? [
+          ...selectedPersonalVariableSets.map((variableSet) => variableSet.name),
+          ...(selectedRig?.scope === "user" ? [selectedRig.name] : []),
+        ]
+      : personalMachineSelected && selectedMachine
+        ? [selectedMachine.name]
+        : [];
+  const personalResourceSelectionKey = personalResourceSelectionIdentityKey({
+    variableSetIds: selectedPersonalVariableSets.map((variableSet) => variableSet.id),
+    rigId: selectedRig?.scope === "user" ? selectedRig.id : null,
+    connectedMachineId:
+      personalMachineSelected && selectedMachine ? selectedMachine.enrollmentId : null,
   });
+  const selectedPersonalResourceCount = personalResourceSelectionKey
+    ? personalResourceSelectionKey.split("\u0000").length
+    : 0;
+  const [personalResourcesSharedAcknowledged, setPersonalResourcesSharedAcknowledged] =
+    useState(false);
+  const [personalResourceCatalogRefreshPending, setPersonalResourceCatalogRefreshPending] =
+    useState(false);
+  const personalResourceCatalogRefreshGeneration = useRef(0);
+  useEffect(() => {
+    setPersonalResourcesSharedAcknowledged(false);
+  }, [personalResourceSelectionKey, draft.visibility]);
+  const personalResourceAttachment = newSessionPersonalResourceAttachment({
+    personalResourceCount: selectedPersonalResourceCount,
+    visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
+    sharedAcknowledged: personalResourcesSharedAcknowledged,
+  });
+  const refreshPersonalResourceCatalogs = useLatestCallback(async (): Promise<void> => {
+    const generation = ++personalResourceCatalogRefreshGeneration.current;
+    setPersonalResourceCatalogRefreshPending(true);
+    try {
+      await Promise.all([
+        canLoadVariableSetCatalog
+          ? variableSets.refresh()
+          : canResolveVariableSetAttachments
+            ? resolveVariableSetAttachments()
+            : Promise.resolve(),
+        rigs.refresh(),
+      ]);
+    } finally {
+      if (personalResourceCatalogRefreshGeneration.current === generation) {
+        setPersonalResourceCatalogRefreshPending(false);
+      }
+    }
+  });
+  const recoverPersonalResourceAttachment = useLatestCallback(
+    (error: unknown, attemptedInput: Parameters<typeof isPersonalAttachmentConflict>[1]): void => {
+      if (!isPersonalAttachmentConflict(error, attemptedInput)) return;
+      void recoverNewSessionPersonalResourceAttachment({
+        error,
+        attemptedInput,
+        resetAcknowledgement: () => setPersonalResourcesSharedAcknowledged(false),
+        refreshCatalogs: refreshPersonalResourceCatalogs,
+      });
+    },
+  );
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
@@ -357,7 +628,11 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
-      options: newSessionDraftOptionsFromSessionDraft(draft, defaultFirstPartyMcpTools),
+      options: newSessionDraftOptionsFromSessionDraft(
+        draft,
+        defaultFirstPartyMcpTools,
+        newSessionCreateVisibility(personalWorkspace, draft.visibility),
+      ),
     }),
     [
       attachments.readyResources,
@@ -368,12 +643,31 @@ function SessionsIndexRouteContent({
       draft,
       defaultFirstPartyMcpTools,
       message,
+      personalWorkspace,
       persistedToolPolicy,
     ],
   );
+  useEffect(() => {
+    if (
+      context.selectedPersonalGitHubRepoIds.size > 0 &&
+      !context.personalGitHubAuthority &&
+      context.personalGitHubCatalogReady
+    ) {
+      void context.ensurePersonalGitHubAuthority(workspaceId);
+    }
+  }, [
+    context,
+    context.ensurePersonalGitHubAuthority,
+    context.personalGitHubAuthority,
+    context.personalGitHubCatalogReady,
+    context.selectedPersonalGitHubRepoIds.size,
+    workspaceId,
+  ]);
   const hydrateResources = useLatestCallback((resources: NewSessionDraftEditable["resources"]) =>
     rehydrateRepositoryResources(resources, context.githubRepos, {
       catalogReady: context.githubCatalogReady,
+      personalRepositories: context.personalGitHubRepositories,
+      personalCatalogReady: context.personalGitHubCatalogReady,
     }),
   );
   const setModel = context.setModel;
@@ -383,6 +677,8 @@ function SessionsIndexRouteContent({
   const setManualRepos = context.setManualRepos;
   const setSelectedRepoIds = context.setSelectedRepoIds;
   const setSelectedRepoRefs = context.setSelectedRepoRefs;
+  const setSelectedPersonalGitHubRepoIds = context.setSelectedPersonalGitHubRepoIds;
+  const setSelectedPersonalGitHubRepoRefs = context.setSelectedPersonalGitHubRepoRefs;
   const githubRepos = context.githubRepos;
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
@@ -411,6 +707,8 @@ function SessionsIndexRouteContent({
       setManualRepos(repositorySelection.manualRepos);
       setSelectedRepoIds(repositorySelection.selectedRepoIds);
       setSelectedRepoRefs(repositorySelection.selectedRepoRefs);
+      setSelectedPersonalGitHubRepoIds(repositorySelection.selectedPersonalRepoIds);
+      setSelectedPersonalGitHubRepoRefs(repositorySelection.selectedPersonalRepoRefs);
     },
     [
       setManualRepos,
@@ -420,6 +718,8 @@ function SessionsIndexRouteContent({
       setSelectedCapabilityToolIds,
       setSelectedRepoIds,
       setSelectedRepoRefs,
+      setSelectedPersonalGitHubRepoIds,
+      setSelectedPersonalGitHubRepoRefs,
       githubRepos,
       defaultFirstPartyMcpTools,
       launch.channelId,
@@ -499,9 +799,9 @@ function SessionsIndexRouteContent({
         newSessionDraft.conflict ||
         !newSessionPolicyValid ||
         privateCreateUnavailable ||
-        (createdSessionAuthority === null && personalAttachment.requiresDecision) ||
-        (createdSessionAuthority === null && personalAttachment.loading) ||
-        (createdSessionAuthority === null && personalAttachment.refreshing)
+        personalResourceCatalogRefreshPending ||
+        (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved) ||
+        (createdSessionAuthority === null && personalResourceAttachment.requiresAcknowledgement)
       )
         return false;
       if (realtimeModel && personalMachineSelected) {
@@ -540,7 +840,11 @@ function SessionsIndexRouteContent({
                 });
                 return null;
               }
-              const submission = submissionFromSessionDraft(draft, defaultFirstPartyMcpTools);
+              const submission = submissionFromSessionDraft(
+                draft,
+                defaultFirstPartyMcpTools,
+                personalResourceAttachment.intent,
+              );
               const created = await context.startSession(
                 workspaceId,
                 {
@@ -559,7 +863,12 @@ function SessionsIndexRouteContent({
                   omitWorkspaceResources: submission.omitWorkspaceResources,
                   startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
-                  visibility: personalWorkspace ? "workspace" : submission.options.visibility,
+                  visibility: newSessionCreateVisibility(
+                    personalWorkspace,
+                    submission.options.visibility ?? "workspace",
+                  ),
+                  onFailure: ({ error, request }) =>
+                    recoverPersonalResourceAttachment(error, request),
                 },
               );
               if (!created) return null;
@@ -583,7 +892,7 @@ function SessionsIndexRouteContent({
             const submission = submissionFromSessionDraft(
               draft,
               defaultFirstPartyMcpTools,
-              personalAttachment.intent,
+              personalResourceAttachment.intent,
             );
             const created = await context.startSession(
               workspaceId,
@@ -602,9 +911,12 @@ function SessionsIndexRouteContent({
                 channelId: selectedChannelId,
                 omitWorkspaceResources: submission.omitWorkspaceResources,
                 expectedNewSessionDraftRevision: flushed.revision,
-                visibility: personalWorkspace ? "workspace" : submission.options.visibility,
+                visibility: newSessionCreateVisibility(
+                  personalWorkspace,
+                  submission.options.visibility ?? "workspace",
+                ),
                 onFailure: ({ error, request }) =>
-                  personalAttachment.onDeliveryError(error, request, "create"),
+                  recoverPersonalResourceAttachment(error, request),
               },
             );
             if (!created) return null;
@@ -731,9 +1043,9 @@ function SessionsIndexRouteContent({
       !newSessionDraft.loading &&
       !newSessionDraft.conflict &&
       newSessionPolicyValid &&
-      (createdSessionAuthority !== null || !personalAttachment.requiresDecision) &&
-      (createdSessionAuthority !== null || !personalAttachment.loading) &&
-      (createdSessionAuthority !== null || !personalAttachment.refreshing) &&
+      !personalResourceCatalogRefreshPending &&
+      (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
+      (createdSessionAuthority !== null || !personalResourceAttachment.requiresAcknowledgement) &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
     pausing: false,
@@ -771,8 +1083,33 @@ function SessionsIndexRouteContent({
       return await createComposer.send();
     },
   };
+  useBrowserAccountBridgeBlocker(`new-session-composer:${workspaceId}`, () => {
+    if (attachments.hasUnresolved) {
+      return {
+        id: "ignored",
+        label: "A file upload is not settled",
+        detail: "Wait for the upload or remove it before changing accounts.",
+      };
+    }
+    if (busy || submitting || newSessionDraft.saving) {
+      return {
+        id: "ignored",
+        label: "A new-session mutation is still running",
+        detail: "Wait for the current save or session creation to finish.",
+      };
+    }
+    return createComposer.hasDraftContent()
+      ? {
+          id: "ignored",
+          label: "The new-session composer has an unsent draft",
+          detail: "Continuing clears the account-bound draft.",
+        }
+      : null;
+  });
 
-  return (
+  return createElement(
+    LightboxProvider,
+    null,
     // The canvas parent is overflow-hidden, so this route owns its scrolling —
     // without it the page clips (recent sessions were unreachable below the fold).
     <div data-workspace-scroll-owner="self-managed" className="min-h-0 flex-1 overflow-y-auto">
@@ -816,6 +1153,7 @@ function SessionsIndexRouteContent({
                       repositories: {
                         selectedCount:
                           context.selectedRepoIds.size +
+                          context.selectedPersonalGitHubRepoIds.size +
                           context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
                         disabled: busy || newSessionDraft.loading,
                         panel: (
@@ -924,17 +1262,23 @@ function SessionsIndexRouteContent({
             draft={draft}
             onChange={setDraft}
             disabled={busy || newSessionDraft.loading}
-            personalAttachment={personalAttachment}
+            personalResourceAccess={{
+              names: selectedPersonalResourceNames,
+              visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
+              sharedAcknowledged: personalResourcesSharedAcknowledged,
+              onSharedAcknowledgedChange: setPersonalResourcesSharedAcknowledged,
+            }}
             fleet={fleet}
             machines={machines}
-            variableSets={variableSets}
-            rigs={rigs}
+            variableSets={selectableVariableSets}
+            rigs={selectableRigs}
+            catalogRecovery={{
+              error: fixedResourceCatalogError,
+              refreshing: personalResourceCatalogRefreshPending,
+              onRetry: () => void refreshPersonalResourceCatalogs(),
+            }}
             selectedChannelId={selectedChannelId}
             selectionHistory={selectionHistory}
-          />
-          <PersonalResourceAttachmentControl
-            controller={personalAttachment}
-            disabled={busy || newSessionDraft.loading}
           />
         </div>
 
@@ -951,7 +1295,7 @@ function SessionsIndexRouteContent({
         }}
         onSubmit={() => void createProject()}
       />
-    </div>
+    </div>,
   );
 }
 
@@ -1046,7 +1390,7 @@ function RecentSessionRow({
   session: Session;
   catalogRows: readonly PickerModelRow[];
 }) {
-  const title = session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
+  const title = sessionDisplayTitle(session);
   const model = recentSessionModelPresentation(session.model, catalogRows);
   const repo = sessionRepoLabel(session);
   const metaBits = [model.label, repo].filter(Boolean);
@@ -1227,7 +1571,7 @@ function workspaceRepositoryPickerProps(
   context: ReturnType<typeof useAppContext>,
   workspaceId: string,
   disabled: boolean,
-) {
+): RepositoryContextPickerProps {
   return {
     setupMode:
       context.githubStatus?.setupMode ??
@@ -1238,6 +1582,11 @@ function workspaceRepositoryPickerProps(
     linkUrl: context.githubStatus?.linkUrl ?? null,
     installations: context.githubStatus?.installations ?? [],
     repositories: context.githubRepos,
+    personalGitHubStatus: context.personalGitHubStatus,
+    personalGitHubRepositories: context.personalGitHubRepositories,
+    selectedPersonalGitHubRepoIds: context.selectedPersonalGitHubRepoIds,
+    selectedPersonalGitHubRepoRefs: context.selectedPersonalGitHubRepoRefs,
+    personalGitHubBusy: context.personalGitHubBusy,
     groups: context.repositoryGroups,
     selectedRepoIds: context.selectedRepoIds,
     selectedRepoRefs: context.selectedRepoRefs,
@@ -1249,7 +1598,20 @@ function workspaceRepositoryPickerProps(
     pending: context.busy || disabled,
     repoBusy: context.repoBusy,
     githubAppBusy: context.githubAppBusy,
-    onRefresh: () => context.refreshGitHub(workspaceId, undefined, { sync: true }),
+    onRefresh: async () => {
+      await Promise.all([
+        context.refreshGitHub(workspaceId, undefined, { sync: true }),
+        context.refreshPersonalGitHub(workspaceId),
+      ]);
+    },
+    onConnectPersonalGitHub: () => void context.connectPersonalGitHub(workspaceId),
+    onTogglePersonalGitHubRepo: (repository) =>
+      void context.togglePersonalGitHubRepository(workspaceId, repository),
+    onPersonalGitHubRefChange: (repositoryId: string, ref: string) =>
+      context.setSelectedPersonalGitHubRepoRefs((current) => ({
+        ...current,
+        [repositoryId]: ref,
+      })),
     onToggleRepo: context.toggleGitHubRepository,
     onRefChange: (repoId: number, ref: string) =>
       context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref })),
@@ -1312,16 +1674,30 @@ function WorkspaceRepositoryMenuBody({
 
 // ── The promoted top-level compute target (the parent that gates the band) ────
 
+type NewSessionPersonalResourceAccess = {
+  names: string[];
+  visibility: "private" | "workspace";
+  sharedAcknowledged: boolean;
+  onSharedAcknowledgedChange: (acknowledged: boolean) => void;
+};
+
+type FixedResourceCatalogRecovery = {
+  error: boolean;
+  refreshing: boolean;
+  onRetry: () => void;
+};
+
 function ComputeTargetControl(props: {
   workspaceId: string;
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
-  personalAttachment: PersonalResourceAttachmentController;
+  personalResourceAccess: NewSessionPersonalResourceAccess;
   fleet: ReturnType<typeof useMachines>;
   machines: MachineView[];
-  variableSets: UseVariableSetsResult;
-  rigs: UseRigsResult;
+  variableSets: VariableSet[];
+  rigs: Rig[];
+  catalogRecovery: FixedResourceCatalogRecovery;
   selectedChannelId: string | null;
   selectionHistory: NewSessionSelectionHistory;
 }) {
@@ -1454,9 +1830,10 @@ function ComputeTargetControl(props: {
             draft={draft}
             onChange={onChange}
             disabled={props.disabled}
-            personalAttachment={props.personalAttachment}
+            personalResourceAccess={props.personalResourceAccess}
             variableSets={props.variableSets}
             rigs={props.rigs}
+            catalogRecovery={props.catalogRecovery}
           />
           <FleetErrorNotice onRetry={() => void fleet.refresh()} />
         </section>
@@ -1467,9 +1844,10 @@ function ComputeTargetControl(props: {
         draft={draft}
         onChange={onChange}
         disabled={props.disabled}
-        personalAttachment={props.personalAttachment}
+        personalResourceAccess={props.personalResourceAccess}
         variableSets={props.variableSets}
         rigs={props.rigs}
+        catalogRecovery={props.catalogRecovery}
       />
     );
   }
@@ -1511,9 +1889,10 @@ function ComputeTargetControl(props: {
           draft={draft}
           onChange={onChange}
           disabled={props.disabled}
-          personalAttachment={props.personalAttachment}
+          personalResourceAccess={props.personalResourceAccess}
           variableSets={props.variableSets}
           rigs={props.rigs}
+          catalogRecovery={props.catalogRecovery}
         />
       ) : (
         <ConnectedMachineFields
@@ -1526,6 +1905,12 @@ function ComputeTargetControl(props: {
           selectionHistory={props.selectionHistory}
         />
       )}
+      {draft.compute.kind === "machine" ? (
+        <PersonalResourceAccessInline
+          access={props.personalResourceAccess}
+          disabled={props.disabled}
+        />
+      ) : null}
     </section>
   );
 }
@@ -1588,22 +1973,29 @@ function ManagedSandboxFields(props: {
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
-  personalAttachment: PersonalResourceAttachmentController;
-  variableSets: UseVariableSetsResult;
-  rigs: UseRigsResult;
+  personalResourceAccess: NewSessionPersonalResourceAccess;
+  variableSets: VariableSet[];
+  rigs: Rig[];
+  catalogRecovery: FixedResourceCatalogRecovery;
 }) {
   const { draft, onChange } = props;
-  const personalRigs = props.personalAttachment.catalog?.rigs ?? [];
-  const personalVariableSets = props.personalAttachment.catalog?.variableSets ?? [];
-  const personalRigIds = new Set(personalRigs.map((resource) => resource.id));
-  const personalVariableSetIds = new Set(personalVariableSets.map((resource) => resource.id));
-  const workspaceRigs = props.rigs.rigs.filter((resource) => !personalRigIds.has(resource.id));
-  const workspaceVariableSets = props.variableSets.variableSets.filter(
-    (resource) => !personalVariableSetIds.has(resource.id),
-  );
+  const personalRigs = props.rigs.filter((resource) => resource.scope === "user");
+  const personalVariableSets = props.variableSets.filter((resource) => resource.scope === "user");
+  const workspaceRigs = props.rigs.filter((resource) => resource.scope !== "user");
+  const workspaceVariableSets = props.variableSets.filter((resource) => resource.scope !== "user");
   const showRigs = workspaceRigs.length > 0 || personalRigs.length > 0;
-  const showVariableSets = workspaceVariableSets.length > 0 || personalVariableSets.length > 0;
-  if (!showRigs && !showVariableSets) {
+  const hasEnumerableVariableSets =
+    workspaceVariableSets.length > 0 || personalVariableSets.length > 0;
+  const availableWorkspaceVariableSets = workspaceVariableSets.filter(
+    (variableSet) => !draft.variableSetIds.includes(variableSet.id),
+  );
+  const availablePersonalVariableSets = personalVariableSets.filter(
+    (variableSet) => !draft.variableSetIds.includes(variableSet.id),
+  );
+  const hasVariableSetChoices =
+    availableWorkspaceVariableSets.length > 0 || availablePersonalVariableSets.length > 0;
+  const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets;
+  if (!showRigs && !showVariableSets && !props.catalogRecovery.error) {
     return null;
   }
 
@@ -1611,6 +2003,31 @@ function ManagedSandboxFields(props: {
     // One flat card: hairline-separated rows, controls right-aligned, no
     // nested boxes and no restating helper text — the controls speak.
     <div className="mt-5 overflow-hidden rounded-lg border border-border bg-surface/40">
+      {props.catalogRecovery.error ? (
+        <div
+          role="alert"
+          className={cn((showRigs || showVariableSets) && "border-b border-border/70", "p-2.5")}
+        >
+          <Notice
+            tone="failed"
+            className="p-2.5 text-xs"
+            title="Couldn’t verify the selected Variable Set or Rig"
+            action={
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={props.disabled || props.catalogRecovery.refreshing}
+                onClick={props.catalogRecovery.onRetry}
+              >
+                Retry
+              </Button>
+            }
+          >
+            Retry to reload your available resources before starting this session.
+          </Notice>
+        </div>
+      ) : null}
       {/* Rig picker — offered only when the workspace has at least one rig.
           Picking a rig preselects its default variable sets in the control
           below (still user-overridable). Empty ⇒ the workspace default rig,
@@ -1626,15 +2043,9 @@ function ManagedSandboxFields(props: {
             disabled={props.disabled}
             onChange={(event) => {
               const rigId = event.target.value;
-              const picked = [...workspaceRigs, ...personalRigs].find((rig) => rig.id === rigId);
-              const defaultVariableSetId = picked?.activeVersion?.defaultVariableSetIds[0];
-              props.personalAttachment.setMode(null);
               onChange({
                 ...draft,
                 rigId,
-                // Preselect the rig's first default variable set into the single
-                // session-level control; the rest still apply server-side.
-                ...(defaultVariableSetId ? { variableSetId: defaultVariableSetId } : {}),
               });
             }}
             className="h-8 w-auto max-w-56 text-xs"
@@ -1660,8 +2071,8 @@ function ManagedSandboxFields(props: {
         </div>
       ) : null}
 
-      {/* Offer variableSets only when some exist — configuration UI for
-          resources you don't have is clutter (same rule as machines). */}
+      {/* Keep restored selections visible even when the caller may attach/use
+          exact IDs but cannot enumerate the Variable Set catalog. */}
       {showVariableSets ? (
         <div
           className={cn(
@@ -1669,38 +2080,105 @@ function ManagedSandboxFields(props: {
             showRigs && "border-t border-border/70",
           )}
         >
-          <Label className="flex shrink-0 items-center gap-1.5 text-xs">
+          <Label className="flex shrink-0 items-center gap-1.5 self-start pt-1.5 text-xs">
             <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
-            Variable set
+            Variable sets
           </Label>
-          <Select
-            value={draft.variableSetId}
-            disabled={props.disabled}
-            onChange={(event) => {
-              props.personalAttachment.setMode(null);
-              onChange({ ...draft, variableSetId: event.target.value });
-            }}
-            className="h-8 w-auto max-w-56 text-xs"
-          >
-            <option value="">No variable set</option>
-            {workspaceVariableSets.map((variableSet) => (
-              <option key={variableSet.id} value={variableSet.id}>
-                {variableSet.name} ({variableSet.variables.length} vars)
-              </option>
-            ))}
-            {personalVariableSets.length > 0 ? (
-              <optgroup label="Only me">
-                {personalVariableSets.map((variableSet) => (
+          <div className="min-w-0 max-w-80 flex-1 space-y-2">
+            {draft.variableSetIds.length > 0 ? (
+              <SelectedVariableSetList
+                selectedIds={draft.variableSetIds}
+                variableSets={[...workspaceVariableSets, ...personalVariableSets]}
+                disabled={props.disabled}
+                onChange={(variableSetIds) => {
+                  onChange({
+                    ...draft,
+                    variableSetIds,
+                    variableSetId: variableSetIds.at(-1) ?? "",
+                  });
+                }}
+              />
+            ) : (
+              <p className="text-right text-xs text-fg-subtle">No Variable Sets selected</p>
+            )}
+            {hasVariableSetChoices && draft.variableSetIds.length < 25 ? (
+              <Select
+                value=""
+                disabled={props.disabled}
+                onChange={(event) => {
+                  const variableSetId = event.target.value;
+                  if (!variableSetId) return;
+                  const next = [...draft.variableSetIds, variableSetId];
+                  onChange({ ...draft, variableSetIds: next, variableSetId });
+                }}
+                className="h-8 w-full text-xs"
+              >
+                <option value="">Add Variable Set…</option>
+                {availableWorkspaceVariableSets.map((variableSet) => (
                   <option key={variableSet.id} value={variableSet.id}>
                     {variableSet.name} ({variableSet.variables.length} vars)
                   </option>
                 ))}
-              </optgroup>
+                {availablePersonalVariableSets.length > 0 ? (
+                  <optgroup label="Only me">
+                    {availablePersonalVariableSets.map((variableSet) => (
+                      <option key={variableSet.id} value={variableSet.id}>
+                        {variableSet.name} ({variableSet.variables.length} vars)
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null}
+              </Select>
             ) : null}
-          </Select>
+            <p className="text-right text-2xs text-fg-subtle">
+              Later sets override earlier sets when names collide.
+            </p>
+          </div>
         </div>
       ) : null}
+      <PersonalResourceAccessInline
+        access={props.personalResourceAccess}
+        disabled={props.disabled}
+        embedded
+      />
     </div>
+  );
+}
+
+function PersonalResourceAccessInline(props: {
+  access: NewSessionPersonalResourceAccess;
+  disabled: boolean;
+  embedded?: boolean;
+}) {
+  if (props.access.names.length === 0) return null;
+  const content =
+    props.access.visibility === "workspace" ? (
+      <label className="flex cursor-pointer items-start gap-2 text-xs text-fg-muted">
+        <input
+          type="checkbox"
+          checked={props.access.sharedAcknowledged}
+          disabled={props.disabled}
+          onChange={(event) => props.access.onSharedAcknowledgedChange(event.target.checked)}
+          className="mt-0.5 size-4 shrink-0 accent-brand"
+        />
+        <span>
+          <span className="block font-medium text-fg">
+            Use {props.access.names.join(", ")} in this workspace-visible session
+          </span>
+          <span className="mt-0.5 block text-2xs leading-4 text-fg-subtle">
+            {PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING}
+          </span>
+        </span>
+      </label>
+    ) : (
+      <p className="text-2xs text-fg-subtle">
+        {props.access.names.join(", ")} will be available only to this session.
+      </p>
+    );
+  return props.embedded ? (
+    <div className="border-t border-border/70 px-3 py-2.5">{content}</div>
+  ) : (
+    <div className="px-0.5">{content}</div>
   );
 }
 

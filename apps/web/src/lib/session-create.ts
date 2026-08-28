@@ -98,6 +98,8 @@ export type SessionDraft = {
   compute: ComputeTarget;
   // Injected at start on a managed sandbox; ignored when compute.kind==="machine"
   // (a connected machine uses its own variable set & git credentials — D2).
+  variableSetIds: string[];
+  /** @deprecated local compatibility alias for older saved drafts/tests. */
   variableSetId: string;
   // The rig the session materializes (managed sandbox only; a connected machine
   // is the user's own box, so it never rides a rig). "" ⇒ the workspace default
@@ -117,6 +119,7 @@ export function emptySessionDraft(
   return {
     visibility: "workspace",
     compute: { kind: "sandbox", backend: "" },
+    variableSetIds: [],
     variableSetId: "",
     rigId: "",
     goalText: "",
@@ -145,6 +148,15 @@ function explicitFirstPartyTools(
  *  machine; a managed sandbox is always ready. */
 export function isSessionDraftComputeReady(draft: SessionDraft): boolean {
   return draft.compute.kind !== "machine" || draft.compute.sandboxId !== null;
+}
+
+/** Personal workspaces are presented as Only me and must create the matching
+ * private tenancy instead of silently persisting a workspace-visible row. */
+export function newSessionCreateVisibility(
+  personalWorkspace: boolean,
+  selectedVisibility: "private" | "workspace",
+): "private" | "workspace" {
+  return personalWorkspace ? "private" : selectedVisibility;
 }
 
 export type SessionDraftSubmission = {
@@ -268,7 +280,14 @@ export function buildCreateSessionRequest(
     clientEventId: input.clientEventId,
     idempotencyKey: input.idempotencyKey,
     ...(input.submission.sandboxBackend ? { sandboxBackend: input.submission.sandboxBackend } : {}),
-    ...(input.submission.variableSetId ? { variableSetId: input.submission.variableSetId } : {}),
+    ...(input.submission.variableSetIds?.length
+      ? {
+          variableSetIds: input.submission.variableSetIds,
+          variableSetId: input.submission.variableSetIds.at(-1),
+        }
+      : input.submission.variableSetId
+        ? { variableSetId: input.submission.variableSetId }
+        : {}),
     ...(input.submission.rigId ? { rigId: input.submission.rigId } : {}),
     ...(input.submission.goal ? { goal: input.submission.goal } : {}),
     ...(input.submission.firstPartyMcpPermissions
@@ -281,6 +300,9 @@ export function buildCreateSessionRequest(
       ? {
           personalResourceAttachment: input.submission.personalResourceAttachment,
         }
+      : {}),
+    ...(input.submission.connectionAuthorities
+      ? { connectionAuthorities: input.submission.connectionAuthorities }
       : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
@@ -372,7 +394,14 @@ export function submissionFromSessionDraft(
   return {
     extras: {
       ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
-      ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
+      ...(draft.variableSetIds.length
+        ? {
+            variableSetIds: draft.variableSetIds,
+            variableSetId: draft.variableSetIds.at(-1),
+          }
+        : draft.variableSetId
+          ? { variableSetId: draft.variableSetId }
+          : {}),
       ...(draft.rigId ? { rigId: draft.rigId } : {}),
       ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
       ...(goal ? { goal } : {}),
@@ -396,6 +425,7 @@ export function submissionFromSessionDraft(
 export function newSessionDraftOptionsFromSessionDraft(
   draft: SessionDraft,
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  effectiveVisibility: "private" | "workspace" = draft.visibility,
 ): NewSessionDraftOptions {
   const goal = goalFromDraft(draft);
   const permissions = draft.customMcpPermissions
@@ -410,7 +440,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   if (draft.compute.kind === "machine") {
     const workingDir = workingDirFromFolder(draft.compute.folder);
     return {
-      visibility: draft.visibility,
+      visibility: effectiveVisibility,
       ...(draft.compute.sandboxId ? { targetSandboxId: draft.compute.sandboxId } : {}),
       ...(workingDir ? { workingDir } : {}),
       ...(goal ? { goal } : {}),
@@ -420,9 +450,16 @@ export function newSessionDraftOptionsFromSessionDraft(
   }
 
   return {
-    visibility: draft.visibility,
+    visibility: effectiveVisibility,
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
-    ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
+    ...(draft.variableSetIds.length
+      ? {
+          variableSetIds: draft.variableSetIds,
+          variableSetId: draft.variableSetIds.at(-1),
+        }
+      : draft.variableSetId
+        ? { variableSetId: draft.variableSetId }
+        : {}),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
     ...(goal ? { goal } : {}),
     ...permissions,
@@ -456,7 +493,9 @@ export function sessionDraftFromNewSessionDraftOptions(
           // offers that control; always use the deployment default.
           backend: "",
         },
-    variableSetId: options.variableSetId ?? "",
+    variableSetIds:
+      options.variableSetIds ?? (options.variableSetId ? [options.variableSetId] : []),
+    variableSetId: options.variableSetId ?? options.variableSetIds?.at(-1) ?? "",
     rigId: options.rigId ?? "",
     goalText: options.goal?.text ?? "",
     goalSuccessCriteria: options.goal?.successCriteria ?? "",

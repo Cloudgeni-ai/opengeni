@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { act } from "react";
+import { act, Profiler } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { CopyButton } from "../src/components/copy-button";
 import { Markdown } from "../src/components/markdown";
@@ -9,6 +9,21 @@ import { TooltipProvider } from "../src/components/tooltip";
 registerDom();
 
 describe("CopyButton", () => {
+  test("a closed tooltip does not publish its trigger through a mount-time update", async () => {
+    let commits = 0;
+    const r = await renderComponent(
+      <Profiler id="copy-tooltip" onRender={() => (commits += 1)}>
+        <TooltipProvider delayDuration={400}>
+          <CopyButton text="settled history" label="Copy message" />
+        </TooltipProvider>
+      </Profiler>,
+    );
+    await flush();
+
+    expect(commits).toBe(2);
+    await r.unmount();
+  });
+
   test("copies plain text and flashes Copied", async () => {
     const writes: string[] = [];
     Object.defineProperty(navigator, "clipboard", {

@@ -153,7 +153,7 @@ describe("organization company-profile manual editor", () => {
     const { container, root } = await renderInventory();
     try {
       const form = container.querySelector<HTMLFormElement>(
-        'form[aria-label="Edit organization company profile"]',
+        'form[aria-label="Edit organization identity"]',
       );
       expect(form).not.toBeNull();
       const identity = form!.querySelector<HTMLTextAreaElement>("textarea");
@@ -180,11 +180,9 @@ describe("organization company-profile manual editor", () => {
       context.accessContext = accessContext(role);
       const { container, root } = await renderInventory();
       try {
-        expect(
-          container.querySelector('form[aria-label="Edit organization company profile"]'),
-        ).toBeNull();
+        expect(container.querySelector('form[aria-label="Edit organization identity"]')).toBeNull();
         expect(container.textContent).toContain(
-          "Only organization owners and admins can edit or activate the company profile.",
+          "Only organization owners and admins can edit or activate the organization identity.",
         );
       } finally {
         await act(async () => root.unmount());
@@ -200,7 +198,7 @@ describe("organization company-profile manual editor", () => {
     const { container, root } = await renderInventory();
     try {
       const form = container.querySelector<HTMLFormElement>(
-        'form[aria-label="Edit organization company profile"]',
+        'form[aria-label="Edit organization identity"]',
       )!;
       const button = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
       await act(async () => {

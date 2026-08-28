@@ -11,9 +11,12 @@ import { ChatComposer } from "../src/components/chat-composer";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { FileAttachment, UseFileAttachmentsResult } from "../src/hooks/use-file-attachments";
 import { COMPOSER_PAYMENT_REQUIRED_MESSAGE } from "../src/lib/format";
+import { LightboxProvider } from "../src/timeline/screenshot-lightbox";
 import { registerDom } from "./render-hook";
 
 registerDom();
+
+const composerSource = await Bun.file(`${import.meta.dir}/../src/components/composer.tsx`).text();
 
 let mounted: { root: Root; container: HTMLElement } | null = null;
 
@@ -70,6 +73,7 @@ function makeAttachments(
     addFromPaste: () => {},
     restoreReadyFiles: () => {},
     retry: () => {},
+    retainPreview: () => undefined,
     remove: () => {},
     removeReadyFiles: () => {},
     clear: () => {},
@@ -84,6 +88,13 @@ function readyChip(name: string): FileAttachment {
     contentType: "image/png",
     sizeBytes: 2048,
     status: "ready",
+  };
+}
+
+function readyPreviewChip(name: string): FileAttachment {
+  return {
+    ...readyChip(name),
+    previewUrl: `blob:${name}`,
   };
 }
 
@@ -183,6 +194,76 @@ describe("ChatComposer attachments", () => {
       (b) => b.getAttribute("aria-label") === "Remove screenshot.png",
     );
     expect(remove).toBeTruthy();
+  });
+
+  test("renders an image attachment as a shared-lightbox preview trigger", async () => {
+    const attachment = readyPreviewChip("screenshot.png");
+    const retained: string[] = [];
+    const container = await mount(
+      <LightboxProvider>
+        <ChatComposer
+          composer={makeComposer()}
+          attachments={makeAttachments({
+            attachments: [attachment],
+            retainPreview: (id) => {
+              retained.push(id);
+              return () => {};
+            },
+          })}
+        />
+      </LightboxProvider>,
+    );
+
+    const preview = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Preview screenshot.png"]',
+    );
+    expect(preview).not.toBeNull();
+    expect(preview?.querySelector('img[src="blob:screenshot.png"]')).not.toBeNull();
+    await act(async () => {
+      preview?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(retained).toEqual([attachment.id]);
+  });
+
+  test("uses composer message overrides for all attachment preview accessible names", async () => {
+    const container = await mount(
+      <LightboxProvider>
+        <ChatComposer
+          composer={makeComposer()}
+          attachments={makeAttachments({ attachments: [readyPreviewChip("screenshot.png")] })}
+          messages={{
+            previewAttachment: (name) => `Vista previa de ${name}`,
+            attachmentPreviewLabel: "Vista previa del archivo adjunto",
+            downloadAttachment: (name) => `Descargar ${name}`,
+            closeAttachmentPreview: "Cerrar",
+          }}
+        />
+      </LightboxProvider>,
+    );
+
+    const preview = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Vista previa de screenshot.png"]',
+    );
+    expect(preview).not.toBeNull();
+    expect(container.querySelector('[aria-label="Preview screenshot.png"]')).toBeNull();
+
+    expect(composerSource).toContain("messages.attachmentPreviewLabel,");
+    expect(composerSource).toContain("download: messages.downloadAttachment(attachment.name),");
+    expect(composerSource).toContain("close: messages.closeAttachmentPreview,");
+    expect(composerSource).toContain("const releasePreview = onRetainPreview(attachment.id);");
+  });
+
+  test("degrades an image attachment to a non-interactive thumbnail without a lightbox host", async () => {
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer()}
+        attachments={makeAttachments({ attachments: [readyPreviewChip("screenshot.png")] })}
+      />,
+    );
+
+    expect(container.querySelector('[aria-label="Preview screenshot.png"]')).toBeNull();
+    expect(container.querySelector('img[src="blob:screenshot.png"]')).not.toBeNull();
   });
 
   test("a managed-credit rejection is actionable and keeps the ready attachment visible", async () => {

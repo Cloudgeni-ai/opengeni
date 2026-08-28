@@ -406,20 +406,28 @@ describe("company-profile agent administration", () => {
     expect(proposed.humanInput.questions[0]).toMatchObject({
       id: `company-profile:${proposed.revision.id}`,
       kind: "single_select",
+      prompt: "Activate this organization identity and retained legacy details?",
+      label: "Organization identity",
       allowOther: true,
       options: [
         { id: "activate", label: "Activate" },
         { id: "skip", label: "Do not activate" },
       ],
     });
+    expect(proposed.humanInput.questions[0]!.helpText).toContain(
+      "Legacy Products (retained compatibility context)",
+    );
+    expect(proposed.humanInput.questions[0]!.helpText).toContain(
+      "A real-time logistics control tower.",
+    );
     const helpText = proposed.humanInput.questions[0]!.helpText ?? "";
     expect(helpText).toContain(
       `Revision ${proposed.revision.revision}; SHA-256 ${proposed.revision.contentHash}.`,
     );
     expect(helpText).toContain("Identity: Acme builds reliable logistics software.");
     expect(helpText).toContain("Mission: Make critical supply chains predictable.");
-    expect(helpText).toContain("Products:\n- control-tower: A real-time logistics control tower.");
-    expect(helpText).toContain("Constraints:\n- safety: Never trade safety for delivery speed.");
+    expect(helpText).not.toContain("Products:");
+    expect(helpText).not.toContain("Constraints:");
     expect(helpText).not.toContain('{"identity"');
     expect(helpText.length).toBeLessThanOrEqual(2048);
     expect(

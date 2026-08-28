@@ -23,10 +23,15 @@ import "../src/styles.css";
 const accountId = "11111111-1111-4111-8111-111111111111";
 const secondAccountId = "22222222-2222-4222-8222-222222222222";
 
-function workspace(id: string, name: string, workspaceAccountId = accountId): Workspace {
+function workspace(
+  id: string,
+  name: string,
+  options: Readonly<{ accountId?: string; kind?: Workspace["kind"] }> = {},
+): Workspace {
   return {
     id,
-    accountId: workspaceAccountId,
+    accountId: options.accountId ?? accountId,
+    kind: options.kind ?? "shared",
     name,
     slug: null,
     externalSource: null,
@@ -48,8 +53,8 @@ function workspace(id: string, name: string, workspaceAccountId = accountId): Wo
 const workspaces = [
   workspace("workspace-default", "Default workspace"),
   workspace("workspace-product", "Product Testing"),
-  workspace("workspace-personal", "Personal workspace"),
-  workspace("workspace-research", "Research Sandbox", secondAccountId),
+  workspace("workspace-personal", "Personal workspace", { kind: "personal" }),
+  workspace("workspace-research", "Research Sandbox", { accountId: secondAccountId }),
 ];
 
 const organizations = [
@@ -124,7 +129,7 @@ function WorkspaceSwitcherFixture() {
                 <WorkspaceSwitcherTrigger
                   activeWorkspace={activeWorkspace}
                   activeOrganizationLabel="CloudGeni Product Engineering and Reliability"
-                  personal={activeWorkspace.id === "workspace-personal"}
+                  personal={activeWorkspace.kind === "personal"}
                   collapsed
                 />
               </WorkspaceMenu>
@@ -159,7 +164,7 @@ function WorkspaceSwitcherFixture() {
                   <WorkspaceSwitcherTrigger
                     activeWorkspace={activeWorkspace}
                     activeOrganizationLabel="CloudGeni Product Engineering and Reliability"
-                    personal={activeWorkspace.id === "workspace-personal"}
+                    personal={activeWorkspace.kind === "personal"}
                     collapsed={false}
                   />
                 </WorkspaceMenu>

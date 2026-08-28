@@ -18,7 +18,7 @@ import type { usePacks } from "@opengeni/react";
 import { PackagePlusIcon, PlusIcon, PuzzleIcon, SearchIcon, SparklesIcon } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
   catalogSkillBundleRow,
@@ -78,7 +78,7 @@ export function BundlesSection({
   onUnregisterPack,
   onChanged,
 }: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
   /** Workspace administrator authority: install, update, remove, register. */

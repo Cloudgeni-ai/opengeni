@@ -27,7 +27,18 @@ export type { OpenGeniProviderProps } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
+export { createEmbeddedSessionClient } from "./embedded-session-client";
+export type {
+  ComposerDraftMapContext,
+  CreateEmbeddedSessionClientOptions,
+} from "./embedded-session-client";
 export { usePageLiveActivity } from "./hooks/internal";
+export { filePathVisibility, visibleFileTree } from "./file-node-visibility";
+export type {
+  FileNodeVisibilityContext,
+  FileNodeVisibilityPredicate,
+  FilePathVisibility,
+} from "./file-node-visibility";
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
@@ -41,12 +52,14 @@ export {
   boundBrowserSessionEventWindow,
   useSessionEvents,
 } from "./hooks/use-session-events";
+export { createOlderHistoryLoadReceipt } from "./older-history";
 export type {
   BrowserSessionEventWindow,
   SessionEventsConnectionState,
   UseSessionEventsOptions,
   UseSessionEventsResult,
 } from "./hooks/use-session-events";
+export type { OlderHistoryLoader, OlderHistoryLoadReceipt } from "./older-history";
 export {
   useComposer,
   composeSendInput,
@@ -395,6 +408,7 @@ export type {
   TurnSummaryFacetResult,
   TurnSummaryOptions,
   TurnSummaryProps,
+  LightboxControlLabels,
 } from "./timeline";
 
 // Pure provider-shape parsers (exec banner, V4A diff, tool arguments, …)

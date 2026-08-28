@@ -1,5 +1,71 @@
 # @opengeni/react
 
+## 3.1.0
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/sdk@3.1.0
+
+## 3.0.0
+
+### Major Changes
+
+- c525324: Add clickable composer attachment previews through the shared route-level lightbox with safe retained object-URL lifetimes, localized preview and lightbox control messages, full-chat file drag-and-drop affordances, and the updated reduced-motion-aware working indicator.
+
+### Patch Changes
+
+- c52c841: Show the timeline's Jump to latest control while a pinned session is catching up from meaningful pre-existing tip debt.
+- 3887ad2: Bound composer draft read retries and ignore unchanged soft-reload projections to prevent request feedback loops during reconnects and transient gateway failures.
+- 3a004ff: Preserve optional structured human-input answers, replay terminal settlements idempotently, and retain Slack replies when expiry or cancellation wins a response race.
+
+## 2.6.0
+
+### Minor Changes
+
+- 5d4edd4: Add a public atomic composer application command shared by HTTP and in-process hosts, including atomic host-authorized resource augmentation without a trusted draft rewrite; add a receiver-safe narrow React session client constructor with host submit overrides and draft projection; and add presentation-only file-node filtering across the packaged workbench surfaces.
+- 986f5fe: Add provider-neutral browser login session sets with bounded independently revocable slots, explicit actor switching, isolated add and re-authentication, scoped logout, non-enumerating cross-slot deep-link recovery, and rolling legacy/dual/broker compatibility.
+
+### Patch Changes
+
+- f1f7c22: Keep controlled composer inputs on the latest local draft while older autosave settlements render.
+- 720ca4a: Render controlled composer edits synchronously before deferred host delivery settles.
+- 27f3364: Clear ordinary Send drafts before host submission callbacks can re-project the submitted text.
+- 82e72ce: Preserve the latest controlled composer edit across synchronous child-controller renders.
+- 1135a6b: Keep pinned session streaming at the rendered layout tip so the viewport no longer reveals already-rendered output through a delayed catch-up glide.
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+- Updated dependencies [9a8c822]
+  - @opengeni/sdk@2.6.0
+
+## 2.5.0
+
+### Minor Changes
+
+- 76d6396: Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, custom-role and old-image rolling-compatible least-privilege database posture, and UI projections that never use raw initial prompts as display names. Durable title fanout now requires a versioned subscriber-recovery capability: managed NATS and supported embedded brokers coalesce one Postgres catch-up after reconnect, while legacy buses without that contract fail readiness/worker startup before durable rows can be acknowledged.
+
+### Patch Changes
+
+- 85e4f3c: Release committed older-history pagination ownership when projected rows stay unchanged, while preserving the legacy public callback return compatibility.
+- d741f38: Make fresh session reads generation-aware, expose authoritative detail and list read revisions plus causal read generations, and keep retained pagination and independently polled pinned projections from overriding newer session channel authority.
+- Updated dependencies [d741f38]
+- Updated dependencies [b5071cf]
+  - @opengeni/sdk@2.5.0
+
+## 2.4.0
+
+### Patch Changes
+
+- c10f396: Keep one completed commentary reply visible when a tool-bearing turn settles without a final answer, including goal-wait holds, while preserving ordinary finals and avoiding disclosure duplicates.
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+  - @opengeni/sdk@2.4.0
+
 ## 2.3.0
 
 ### Patch Changes

@@ -7,14 +7,17 @@ import {
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+  type HumanInputQuestion,
   type Permission,
   type WorkspaceSlackOrchestrationNoticeSettings,
   type WorkspaceSlackReactionSummonSettings,
 } from "@opengeni/contracts";
 import {
   addSessionSystemUpdate,
+  applySessionTurnSettlement,
   appendSessionEvents,
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createConnection,
   createDb,
   encryptVariableSetValue,
@@ -37,6 +40,7 @@ import {
 import {
   acceptSessionUserMessage,
   createSessionForRequest,
+  updateSessionTitle,
   type ApiRouteDeps,
   type SessionWorkflowClient,
 } from "@opengeni/core";
@@ -993,11 +997,17 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
   test("App Home publishes only currently authorized tasks from the linked workspace", async () => {
     if (!available) return;
     const value = await fixture();
-    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
-      initialMessage: "Visible App Home task",
-      model: "gpt-5.6-terra",
-      sandboxBackend: "none",
-    });
+    const visible = await createSessionForRequest(
+      value.deps,
+      value.owner,
+      value.owner.workspaceId,
+      {
+        initialMessage: "Visible App Home task",
+        model: "gpt-5.6-terra",
+        sandboxBackend: "none",
+      },
+    );
+    await updateSessionTitle(value.deps, value.owner, visible.id, "Visible App Home task", "user");
     const crossWorkspace = await bootstrapWorkspace(client.db, {
       accountExternalSource: "slack-app-home-cross-workspace",
       accountExternalId: `account-${crypto.randomUUID()}`,
@@ -1008,7 +1018,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       subjectId: value.owner.subjectId,
     });
     const crossWorkspaceGrant = crossWorkspace.workspaceGrants[0]!;
-    await createSessionForRequest(
+    const hidden = await createSessionForRequest(
       value.deps,
       crossWorkspaceGrant,
       crossWorkspaceGrant.workspaceId,
@@ -1017,6 +1027,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-terra",
         sandboxBackend: "none",
       },
+    );
+    await updateSessionTitle(
+      value.deps,
+      crossWorkspaceGrant,
+      hidden.id,
+      "Cross-workspace task must stay hidden",
+      "user",
     );
 
     const event = {
@@ -1884,6 +1901,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       model: "gpt-5.6-terra",
       sandboxBackend: "none",
     });
+    await updateSessionTitle(
+      value.deps,
+      value.owner,
+      urgent.id,
+      "Older urgent task remains visible",
+      "user",
+    );
     await withWorkspaceSessionActivityRls(client.db, value.owner.workspaceId, async (db) => {
       await db.execute(sql`
         update sessions
@@ -4002,6 +4026,148 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         (select count(*)::int from knowledge_memories where workspace_id = ${value.owner.workspaceId}) as memories`;
     expect(persistence).toEqual({ documents: 0, memories: 0 });
   });
+
+  test("preserves a Slack reply as an ordinary message when cancellation wins after the pending read", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const rootTimestamp = "1712500000.000001";
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_DM_CANCEL_RACE_ROOT_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: "D_CANCEL_RACE",
+            ts: rootTimestamp,
+            text: "Start a task that will need one answer",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [interaction] = await interactions(value.owner.workspaceId);
+    if (!interaction) throw new Error("Slack route was not created");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId: interaction.session_id,
+      workflowId: `session-${interaction.session_id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") {
+      throw new Error(`Slack session was not claimable: ${claimed.reason}`);
+    }
+    const requestId = crypto.randomUUID();
+    const questions: HumanInputQuestion[] = [
+      {
+        id: "environment",
+        kind: "single_select",
+        prompt: "Which environment?",
+        options: [{ id: "staging", label: "Staging" }],
+        required: true,
+        allowOther: false,
+      },
+    ];
+    const settled = await applySessionTurnSettlement(client.db, value.owner.workspaceId, {
+      sessionId: interaction.session_id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: claimed.turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [],
+        humanInputRequests: [
+          {
+            id: requestId,
+            toolCallId: "slack-cancellation-race",
+            questions,
+            allowSkip: false,
+            expiresAt: null,
+          },
+        ],
+      },
+      events: [
+        {
+          type: "session.humanInput.requested",
+          payload: {
+            request: { id: requestId, questions, allowSkip: false, expiresAt: null },
+          },
+        },
+        { type: "session.status.changed", payload: { status: "requires_action" } },
+      ],
+    });
+    expect(settled.action).toBe("settled");
+
+    const replyEventId = `E_DM_CANCEL_RACE_REPLY_${crypto.randomUUID()}`;
+    const replyText = "keep this as an ordinary follow-up";
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: replyEventId,
+          event: {
+            type: "message",
+            user: value.ownerSlackUserId,
+            channel: "D_CANCEL_RACE",
+            ts: "1712500000.000002",
+            thread_ts: rootTimestamp,
+            text: replyText,
+          },
+        })
+      ).status,
+    ).toBe(200);
+
+    let drain!: Promise<boolean>;
+    await shared!.admin.begin(async (lockTx) => {
+      await lockTx`
+        select id
+        from session_human_input_requests
+        where workspace_id = ${value.owner.workspaceId}
+          and session_id = ${interaction.session_id}
+          and id = ${requestId}
+        for update`;
+      const [blocker] = await lockTx<{ pid: number }[]>`
+        select pg_backend_pid()::int as pid`;
+      if (!blocker) throw new Error("expected human-input lock backend");
+      drain = drainSlackInteractionsOnce(value.deps);
+      await waitForBlockedAppQueries(blocker.pid, 1);
+      await lockTx`
+        update session_human_input_requests
+        set status = 'cancelled', response = '{"outcome":"cancelled"}'::jsonb,
+          responded_by = 'system:slack_cancellation_race', responded_at = now(), updated_at = now()
+        where workspace_id = ${value.owner.workspaceId}
+          and session_id = ${interaction.session_id}
+          and id = ${requestId}`;
+    });
+    expect(await drain).toBe(true);
+    await drainAll(value.deps);
+
+    const events = await shared!.admin<
+      Array<{ client_event_id: string | null; request_id: string | null; text: string | null }>
+    >`
+      select client_event_id, payload ->> 'requestId' as request_id, payload ->> 'text' as text
+      from session_events
+      where workspace_id = ${value.owner.workspaceId}
+        and session_id = ${interaction.session_id}
+        and (
+          (type = 'user.humanInputResponse' and payload ->> 'requestId' = ${requestId})
+          or client_event_id = ${`slack:${replyEventId}`}
+        )
+      order by sequence`;
+    expect(events).toEqual([
+      { client_event_id: null, request_id: requestId, text: null },
+      { client_event_id: `slack:${replyEventId}`, request_id: null, text: replyText },
+    ]);
+  }, 60_000);
 
   test("ordinary Slack triggers retain sessions:create-only authorization", async () => {
     if (!available) return;

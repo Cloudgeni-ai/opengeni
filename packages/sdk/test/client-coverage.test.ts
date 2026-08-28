@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient } from "../src/artifact-client";
 import { OpenGeniApiError } from "../src/errors";
 import {
   OPENGENI_API_CONTRACT_REVISION,
@@ -440,6 +440,60 @@ describe("OpenGeniClient access + workspaces", () => {
     });
   });
 
+  test("organization recovery methods preserve resource and command operation identities", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const recoveryOperationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const commandOperationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const custodians: [string, string, string] = [
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+    ];
+    await client.getOrganizationRecovery(organizationId);
+    await client.configureOrganizationRecoveryPolicy(organizationId, {
+      custodianMembershipIds: custodians,
+      expectedPolicyRevision: 0,
+      operationId: commandOperationId,
+    });
+    await client.acceptOrganizationRecoveryCustody(organizationId, {
+      expectedPolicyRevision: 1,
+      operationId: commandOperationId,
+    });
+    await client.disableOrganizationRecoveryPolicy(organizationId, {
+      expectedPolicyRevision: 1,
+      operationId: commandOperationId,
+    });
+    await client.startOrganizationRecoveryOperation(organizationId, {
+      targetMembershipId: custodians[0],
+      expectedPolicyRevision: 1,
+      operationId: commandOperationId,
+    });
+    const command = { expectedOperationRevision: 2, operationId: commandOperationId };
+    await client.approveOrganizationRecoveryOperation(organizationId, recoveryOperationId, command);
+    await client.cancelOrganizationRecoveryOperation(organizationId, recoveryOperationId, command);
+    await client.executeOrganizationRecoveryOperation(organizationId, recoveryOperationId, command);
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/organizations/${organizationId}/recovery`,
+        `PUT /v1/organizations/${organizationId}/recovery/policy`,
+        `POST /v1/organizations/${organizationId}/recovery/policy/accept`,
+        `POST /v1/organizations/${organizationId}/recovery/policy/disable`,
+        `POST /v1/organizations/${organizationId}/recovery/operations`,
+        `POST /v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/approve`,
+        `POST /v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/cancel`,
+        `POST /v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/execute`,
+      ],
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      custodianMembershipIds: custodians,
+      expectedPolicyRevision: 0,
+      operationId: commandOperationId,
+    });
+    expect(JSON.parse(requests[7]!.body!)).toEqual(command);
+  });
+
   test("getAccessContext and workspace CRUD hit the expected endpoints", async () => {
     const { client, requests } = makeClient((request) => {
       if (request.url.endsWith("/v1/access/me")) {
@@ -512,6 +566,7 @@ describe("OpenGeniClient access + workspaces", () => {
       mcpServers: [{ id: "documents", name: "Documents" }],
       fileUploads: { enabled: true, maxSizeBytes: 26214400 },
       productAccessMode: "managed",
+      managedAuthSessionSetMode: "dual",
       auth: { mode: "managedSession", session: "cookie" },
     };
     const { client, requests } = makeClient(() => jsonResponse(config));
@@ -520,6 +575,7 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(requests[0]!.method).toBe("GET");
     expect(new URL(requests[0]!.url).pathname).toBe("/v1/config/client");
     expect(result.defaultModel).toBe("gpt-5.6-sol");
+    expect(result.managedAuthSessionSetMode).toBe("dual");
     expect(result.models.map((model) => `${model.provider}:${model.id}:${model.api}`)).toEqual([
       "openai:gpt-5.6-sol:responses",
       "fireworks:accounts/fireworks/models/glm-5p2:chat",
@@ -693,6 +749,25 @@ describe("OpenGeniClient scheduled tasks", () => {
 });
 
 describe("OpenGeniClient variable sets", () => {
+  test("resolves only caller-supplied attachment ids through the narrow endpoint", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        variableSets: [{ id: ENVIRONMENT_ID, scope: "user" }],
+      }),
+    );
+
+    expect(
+      await client.resolveVariableSetAttachments(WORKSPACE_ID, {
+        variableSetIds: [ENVIRONMENT_ID],
+      }),
+    ).toEqual({ variableSets: [{ id: ENVIRONMENT_ID, scope: "user" }] });
+    expect(requests).toHaveLength(1);
+    expect(`${requests[0]!.method} ${new URL(requests[0]!.url).pathname}`).toBe(
+      `POST /v1/workspaces/${WORKSPACE_ID}/variable-sets/resolve-attachments`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ variableSetIds: [ENVIRONMENT_ID] });
+  });
+
   test("variable set CRUD + dedicated value read/PUT/DELETE", async () => {
     const exactValue = `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`;
     const { client, requests } = makeClient((request) =>
@@ -1299,6 +1374,7 @@ describe("OpenGeniClient documents", () => {
     const knowledgeSearch = await client.searchKnowledge(WORKSPACE_ID, {
       query: "decision",
       mode: "keyword",
+      authorityKinds: ["organization"],
       limit: 2,
     });
     await client.listKnowledgeMemories(WORKSPACE_ID, {
@@ -1388,6 +1464,7 @@ describe("OpenGeniClient documents", () => {
     expect(JSON.parse(requests[10]!.body!)).toEqual({
       query: "decision",
       mode: "keyword",
+      authorityKinds: ["organization"],
       limit: 2,
     });
     expect(new URL(requests[11]!.url).searchParams.get("status")).toBe("approved");

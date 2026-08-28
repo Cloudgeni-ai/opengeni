@@ -247,6 +247,7 @@ function workspace() {
   return {
     id: workspaceId,
     accountId,
+    kind: "shared",
     name: "Binding Workspace",
     slug: "binding-workspace",
     externalSource: null,

@@ -27,6 +27,8 @@ Revision creation does not activate a policy. Activation and rollback require an
 
 Workspaces without an active revision snapshot deterministically as `off`, with no revision and no source overrides. This default applies only to the future governed derived-learning path; it does not disable `memory_search`.
 
+Migration `0364_workspace_learning_policy_snapshot_lock_order.sql` repairs the accepted-attempt snapshot lock order without changing policy semantics. Snapshot creation locks the workspace, session, turn, and attempt explicitly in the same order as ordinary session lifecycle writers, then revalidates the complete authority and interruption tuple in a fresh statement. The attempt `SHARE` lock remains held through commit and every supported interruption writer takes that attempt `FOR UPDATE` before insertion, so an interruption cannot cross the revalidation-to-insert interval. PostgreSQL query planning therefore cannot invert session and turn locks, while a Pause, Steer, replacement, or settlement that completed during a lock wait still causes the snapshot to fail closed.
+
 ## Effective resolution and governed evaluation
 
 `resolveWorkspaceLearningPolicyEffectiveMode(snapshot, source)` is the stable routing seam:
@@ -99,7 +101,7 @@ content, credentials, or another human's receipts.
 
 Policy revision creation, activation, and rollback plus exact governed-change
 undo require `workspace:admin` and an authenticated human session. The
-Learning & autonomy Workspace State view exposes only the workspace learning
+The Workspace settings **Learning & autonomy** section exposes only the workspace learning
 mode, mapped directly to the canonical backend modes (`Off`, `Review first` =
 `suggest`, and `Autonomous` = `automatic`); a mode change creates and activates
 a new revision under activation-version CAS and carries the active revision's
@@ -125,4 +127,4 @@ The controller deliberately does not implement:
 - runtime prompt composition or automatic snapshot installation;
 - Slack notification delivery.
 
-Canonical policy code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migration `0199_workspace_learning_policy.sql`. Canonical evaluator code: `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, and migration `0268_governed_learning_decision_receipts.sql`. Canonical activation code: `packages/contracts/src/governed-learning-activation.ts`, `packages/core/src/domain/governed-learning-activation.ts`, `packages/db/src/governed-learning-activation.ts`, and migration `0269_governed_learning_activation_controller.sql`. Canonical administration code: `packages/contracts/src/workspace-learning-administration.ts`, `apps/api/src/routes/workspace-learning.ts`, `packages/sdk/src/workspace-learning.ts`, `apps/web/src/routes/workspace-learning-admin.tsx`, and migration `0270_governed_learning_history_inspection.sql`.
+Canonical policy code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migrations `0199_workspace_learning_policy.sql` and `0364_workspace_learning_policy_snapshot_lock_order.sql`. Canonical evaluator code: `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, and migration `0268_governed_learning_decision_receipts.sql`. Canonical activation code: `packages/contracts/src/governed-learning-activation.ts`, `packages/core/src/domain/governed-learning-activation.ts`, `packages/db/src/governed-learning-activation.ts`, and migration `0269_governed_learning_activation_controller.sql`. Canonical administration code: `packages/contracts/src/workspace-learning-administration.ts`, `apps/api/src/routes/workspace-learning.ts`, `packages/sdk/src/workspace-learning.ts`, `apps/web/src/routes/workspace-learning-admin.tsx`, and migration `0270_governed_learning_history_inspection.sql`.

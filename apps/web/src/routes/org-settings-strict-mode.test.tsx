@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
@@ -41,7 +41,7 @@ const context = {
     getBillingEntitlements,
     createBillingCheckout,
     createBillingPortalSession,
-  } as unknown as OpenGeniCoreClient,
+  } as unknown as OpenGeniBrowserClient,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
   accessContext: {
@@ -64,6 +64,7 @@ const context = {
     {
       id: workspaceId,
       accountId,
+      kind: "shared",
       name: "Strict workspace",
       slug: null,
       externalSource: null,

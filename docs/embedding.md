@@ -44,6 +44,17 @@ their own standalone `.og-root`.
 ```ts
 createSessionForRequest(deps, grant, workspaceId, rawPayload);
 acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input);
+submitComposerDraftForRequest(
+  deps,
+  grant,
+  workspaceId,
+  sessionId,
+  submitComposerDraftRequest,
+  {
+    authorization,
+    additionalResources: hostAuthorizedResources,
+  },
+);
 controlHumanSessionWorkstream(deps, context, {
   action: "cancel",
   clientEventId: crypto.randomUUID(),
@@ -51,7 +62,66 @@ controlHumanSessionWorkstream(deps, context, {
 });
 ```
 
-The create/message helpers live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`; terminal control lives in `packages/core/src/application/session-commands.ts` and uses an explicit authenticated command context. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
+The create/message helpers live in `packages/core/src/domain/sessions.ts` and
+expect the documented dependency slice plus an `AccessGrant`.
+`submitComposerDraftForRequest` lives in
+`packages/core/src/application/composer-submit.ts`; it is the composer-shaped
+application boundary used by both the stock HTTP route and an in-process host.
+It validates/accepts the exact durable draft revision, appends the event,
+creates or steers the turn, rotates the draft, and returns the native
+`SubmitComposerDraftResponse`. An in-process host may provide
+`additionalResources`; they join the accepted command, idempotency hash, turn,
+and durable session resource set atomically while the saved actor draft remains
+the exact fence. This avoids a trusted draft PUT solely to add host-authorized
+repositories or files. Terminal control lives in
+`packages/core/src/application/session-commands.ts` and uses an explicit
+authenticated command context. Scheduled-task validation/sync helpers live in
+`packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing,
+but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
+
+### Host prepare → native accept → host project
+
+An embedding host may need its own business record before OpenGeni accepts
+work. Keep that integration as three explicit phases rather than rebuilding the
+composer protocol:
+
+1. **Prepare:** authenticate the host actor, authorize the product operation,
+   create or replay the host record with the browser's original
+   `clientEventId`, and freeze host-owned policy/context.
+2. **Native accept:** call `submitComposerDraftForRequest` once with the same
+   `clientEventId` and return its exact response. Do not PUT a trusted draft,
+   guess revisions, construct raw event JSON, or encode a host record id into
+   the OpenGeni operation key.
+3. **Project:** correlate the accepted event/turn/receipt back to the prepared
+   host record. A projection failure after native commit must not mark native
+   work failed; reconcile it from the idempotent receipt/export stream.
+
+Host preparation and OpenGeni acceptance are not a distributed transaction.
+A definite pre-acceptance failure may fail the host record. An ambiguous
+network/process outcome must remain retryable and use the same request bytes and
+`clientEventId`; OpenGeni then returns the committed replay or a hard
+idempotency conflict.
+
+For a host-rendered React session, construct the narrow client once instead of
+copying/binding methods manually:
+
+```ts
+import { createEmbeddedSessionClient } from "@opengeni/react/session";
+
+const sessionClient = createEmbeddedSessionClient(openGeniClient, {
+  overrides: {
+    // Calls the host's authenticated prepare/native-accept/project endpoint.
+    submitComposerDraft: hostSubmitComposerDraft,
+  },
+  // Optional presentation/policy projection for read/save/submit responses.
+  mapComposerDraft: (draft) => sanitizeHostDraft(draft),
+});
+```
+
+Delegated SDK methods retain their original receiver, overrides retain the
+override object as theirs, and construction fails immediately when a required
+session method is missing. The native submit response is not replaced with a
+fabricated success value.
 
 **Runtime dependency isolation.** `@opengeni/runtime` bundles its OpenAI Agents
 implementation together with the Zod 4 instance that defines those runtime
@@ -213,6 +283,14 @@ rows only. OpenGeni applies the scope inside search, pin, ordering, totals,
 snapshot continuation, and MCP discovery queries. It does not hydrate a broad
 page and filter afterward. Revocation between cursor pages skips newly hidden
 rows and continues scanning to fill the next authorized page.
+
+The same rule is load-bearing for advisory related-work discovery. The host
+scope, OpenGeni private-session checks, and exact live caller authority are
+materialized before title/active-goal/typed-claim matching, rank, counts,
+relevance cursors, or ancestor expansion. A host must not filter a completed
+discovery page in its adapter, because hidden rows would already have affected
+those aggregates. Work claims remain non-exclusive evidence and cannot grant a
+host or caller access; see [`work-discovery.md`](work-discovery.md).
 
 Once the port is bound, unknown session-addressed HTTP routes fail closed. The
 same policy is enforced by shared core mutation entrypoints, cross-session
@@ -818,6 +896,10 @@ Canonical sources: `EventBus` / `createNatsEventBus` in `packages/events/src/ind
 
 API and worker must share the same broker-backed EventBus binding. The production implementation is `createNatsEventBus(natsUrl, auth?)`; it handles session fanout, selfhosted request/reply, and agent events over one managed NATS connection. Postgres remains the durable event log, but live SSE depends on worker publishes reaching API subscribers cross-process.
 
+Every supported binding must expose `sessionEventDurableFanout` version 1. Its `subscribeRecovery` callback fires with a monotonically increasing generation only after the local subscriber transport and subscriptions have recovered. Session SSE coalesces that signal into its serialized Postgres reconciliation tail, so messages accepted by the broker while this API instance was disconnected cannot strand an already-open client. The worker refuses to start or become ready without this capability, the API reports failed readiness and refuses a session SSE stream without it, and durable title fanout checks it before claiming an outbox row.
+
+`publishConfirmed` remains optional for embedded brokers. When absent, the required `publish()` promise is the durable outbox acknowledgement and must resolve only after broker acceptance; failures must reject. This publish-only compatibility is supported only together with `sessionEventDurableFanout` v1. A formerly conforming custom bus that cannot notify subscriber recovery is intentionally no longer supported: add the capability before rolling this application version, rather than acknowledging publications that an API subscriber may have missed.
+
 Do not replace this with an in-memory bus in an embedded deployment. In-memory fanout only reaches subscribers in the same process and would make worker -> API live SSE silently disappear; clients would only recover on replay/gap backfill.
 
 For embedded UIs that page historical timelines, prefer `GET .../events?compact=1` (or SDK `listEvents(..., { compact: true })`) for windowed replay. It coalesces consecutive delta fragments in the page while preserving first-member `sequence`; use `payload.coalescedUntil` as the resume cursor for the live SSE stream. Streaming/gap backfill should keep using raw sequence replay.
@@ -870,6 +952,20 @@ Files, and Terminal while omitting Desktop, or render a completely custom
 timeline/composer from the session-only hooks and pure projection. Product
 metadata should remain in host slots/components rather than being added to
 OpenGeni contracts solely for one embedding.
+
+`FileBrowser.isNodeVisible`, `SandboxFiles.isNodeVisible`, and
+`SandboxWorkspace.isFileNodeVisible` provide a presentation-only file filter.
+The default shows every node. A hidden directory hides its complete subtree;
+selection and reveal requests for hidden paths are ignored. The predicate does
+not grant or revoke filesystem authority. For example, a host can hide only
+root dotfiles while preserving nested project dotfiles:
+
+```tsx
+<SandboxWorkspace
+  {...props}
+  isFileNodeVisible={(node, { depth }) => !(depth === 0 && node.name.startsWith("."))}
+/>
+```
 
 ## Trust model
 

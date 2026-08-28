@@ -14,7 +14,11 @@ import {
   type Database,
   type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
-import { createNatsEventBus, type EventBus } from "@opengeni/events";
+import {
+  createNatsEventBus,
+  requireSessionEventDurableFanoutCapability,
+  type EventBus,
+} from "@opengeni/events";
 import {
   createObservability,
   logStartupDependencyRetry,
@@ -777,6 +781,7 @@ export function workerOwnsInternalSchedules(
 export async function createOpenGeniWorkerService(
   options: OpenGeniWorkerServiceOptions,
 ): Promise<OpenGeniWorkerService> {
+  requireSessionEventDurableFanoutCapability(options.activityDependencies.bus);
   const settings = options.settings ?? getSettings();
   const observability =
     options.activityDependencies.observability ??

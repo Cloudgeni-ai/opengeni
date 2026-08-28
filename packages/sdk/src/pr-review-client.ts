@@ -5,6 +5,7 @@ import type {
   PrReviewAppRegistration,
   PrReviewRepositoryBinding,
   ListPrReviewConfigurationResponse,
+  PrReviewManagedGitHubSetup,
   UpdatePrReviewAppRegistrationRequest,
   UpdatePrReviewRepositoryBindingRequest,
 } from "./types";
@@ -19,6 +20,13 @@ export class OpenGeniPrReviewClient {
     return await this.client.requestJson<ListPrReviewConfigurationResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/pr-review/registrations`,
+    );
+  }
+
+  async getManagedGitHubSetup(workspaceId: string): Promise<PrReviewManagedGitHubSetup> {
+    return await this.client.requestJson<PrReviewManagedGitHubSetup>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/pr-review/github`,
     );
   }
 

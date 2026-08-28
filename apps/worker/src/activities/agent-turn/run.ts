@@ -44,6 +44,7 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
+import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
@@ -562,6 +563,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   if (!eventing.publish || !attempt.turnId) {
                     throw new Error("Codex model request started before the turn event producer");
                   }
+                  if (event.phase === "started") {
+                    await checkpointHistoryBeforeProviderDispatch(historySink);
+                  }
                   const shouldRecordStartedAudit =
                     event.phase === "started" && !firstModelRequestAuditRecorded;
                   if (shouldRecordStartedAudit) {
@@ -706,6 +710,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           onModelRequestEvent: async (event) => {
             if (!eventing.publish || !attempt.turnId) {
               throw new Error("SuperGrok model request started before the turn event producer");
+            }
+            if (event.phase === "started") {
+              await checkpointHistoryBeforeProviderDispatch(historySink);
             }
             const shouldRecordStartedAudit =
               event.phase === "started" && !firstModelRequestAuditRecorded;
@@ -861,6 +868,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         media,
         fileAuthoritySubjectId,
         runSettings,
+        logicalSandboxSettings,
       });
       const {
         routingOn,
@@ -1090,6 +1098,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptConnectorActionBindings,
         connectorActionIdentity,
         postToolPreparationStartedAt,
+        preparationIndependentToolNames,
       } = toolRuntime;
 
       const builtAgent = await buildTurnAgent({
@@ -1144,6 +1153,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         fileResourceDownloads,
         attemptConnectorActionBindings,
         connectorActionIdentity,
+        preparationIndependentToolNames,
         videoGenerationAcceptancesByCallId,
         activeSandboxBackend,
         groupBoxBackend,

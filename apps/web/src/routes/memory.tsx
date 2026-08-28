@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/common";
 import { MemoryPane } from "@/components/knowledge/memory-pane";
 import { ContentPage } from "@/components/ui/content-layout";
 import { useAppContext } from "@/context";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 
 /** First-class workspace memory: presentation only; hierarchy stays an API concern. */
 export function MemoryRoute({
@@ -17,16 +18,20 @@ export function MemoryRoute({
   returnToBrain?: boolean;
 }) {
   const context = useAppContext();
-  const memoryEnabled =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.settings
-      ?.memoryEnabled === true;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const memoryEnabled = workspace?.settings?.memoryEnabled === true;
+  const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
 
   return (
     <ContentPage width="standard">
       <PageHeader
         icon={<BrainCircuitIcon className="size-4" />}
-        title="Memory"
-        description="Review and curate durable facts, preferences, decisions, and procedures agents carry across sessions."
+        title={personalWorkspace ? "Your Memory" : "Memory"}
+        description={
+          personalWorkspace
+            ? "Review the private facts, incidents, decisions, and outcomes agents remember inside your personal workspace."
+            : "Review and curate durable facts, incidents, decisions, and outcomes agents carry across sessions."
+        }
       />
       {returnToBrain ? (
         <Link
@@ -36,12 +41,13 @@ export function MemoryRoute({
           className="mt-6 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
         >
           <ArrowLeftIcon className="size-3" />
-          Back to Company Brain
+          Back to Agent Knowledge
         </Link>
       ) : null}
       <MemoryPane
         workspaceId={workspaceId}
         memoryEnabled={memoryEnabled}
+        personalWorkspace={personalWorkspace}
         focusMemoryId={focusMemoryId}
       />
     </ContentPage>

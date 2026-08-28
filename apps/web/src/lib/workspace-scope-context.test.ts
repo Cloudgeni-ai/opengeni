@@ -16,6 +16,7 @@ function workspace(id: string, name: string): Workspace {
   return {
     id,
     accountId: organizationId,
+    kind: id === personalWorkspaceId ? "personal" : "shared",
     name,
     slug: null,
     externalSource: null,
@@ -163,7 +164,7 @@ describe("workspace scope context", () => {
     ).toMatchObject({ workspaceKind: "shared", personalWorkspaceId: null });
   });
 
-  test("a suspended organization membership neither classifies nor links Personal", () => {
+  test("a suspended organization membership does not link the canonical Personal workspace", () => {
     const suspended = {
       ...selfContext,
       memberships: [{ ...selfContext.memberships[0]!, status: "suspended" as const }],
@@ -175,6 +176,6 @@ describe("workspace scope context", () => {
         accessContext: access(),
         managedSelfContext: suspended,
       }),
-    ).toMatchObject({ workspaceKind: "shared", personalWorkspaceId: null });
+    ).toMatchObject({ workspaceKind: "personal", personalWorkspaceId: null });
   });
 });

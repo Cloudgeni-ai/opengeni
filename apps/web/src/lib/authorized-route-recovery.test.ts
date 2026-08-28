@@ -16,6 +16,7 @@ function workspace(id: string): Workspace {
   return {
     id,
     accountId,
+    kind: "shared",
     name: id === fallbackWorkspaceId ? "Default" : "Other",
     slug: null,
     externalSource: null,

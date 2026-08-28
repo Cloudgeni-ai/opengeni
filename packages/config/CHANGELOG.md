@@ -1,5 +1,58 @@
 # @opengeni/config
 
+## 0.22.0
+
+### Minor Changes
+
+- 7238fa4: Add permission-scoped advisory work discovery, durable non-exclusive typed work claims, bounded related-work projections, independent rollout controls, observability, and SDK topology filters.
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/contracts@2.7.0
+
+## 0.21.0
+
+### Minor Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+- 986f5fe: Add provider-neutral browser login session sets with bounded independently revocable slots, explicit actor switching, isolated add and re-authentication, scoped logout, non-enumerating cross-slot deep-link recovery, and rolling legacy/dual/broker compatibility.
+
+### Patch Changes
+
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+  - @opengeni/contracts@2.6.0
+
+## 0.20.1
+
+### Patch Changes
+
+- Updated dependencies [76d6396]
+- Updated dependencies [b5071cf]
+  - @opengeni/contracts@2.5.0
+
+## 0.20.0
+
+### Minor Changes
+
+- dc6cfff: Turn per-channel and per-DM Slack workspace routing on by default, and stop counting a personal workspace as a routing choice in a channel.
+
+  A personal workspace is now a candidate only in that person's own bot DM. It is the wrong destination for a channel - a shared thread routed into one member's private space is invisible to everyone else in the channel - and because managed tenancy provisions a personal workspace for every member, counting it meant nobody ever had exactly one candidate. That defeated the sole-candidate rule, so an organization with a single shared workspace would have been asked to choose in every channel despite having no choice to make.
+
+  With that fixed, an organization with one shared workspace sees no change. For an organization with several, an unrouted channel asks the first person who uses it and remembers the answer, and a bot DM goes to that person's own personal workspace. Two things are worth knowing before upgrading: someone who has lost live organization authority in the routed workspace now receives a refusal in their bot DM where the previous code failed silently, and someone whose only workspace is their own personal one is now refused in a channel rather than having channel work land somewhere nobody else can see. Apply migrations through 0342 before running the new image. Set `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=false` to restore the short-circuit to the installation's own workspace.
+
+### Patch Changes
+
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+  - @opengeni/contracts@2.4.0
+
 ## 0.19.1
 
 ### Patch Changes

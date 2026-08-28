@@ -55,6 +55,7 @@ import { createTurnHistorySink } from "./history-sink";
 import { BudgetExhaustedError } from "./admission";
 import {
   providerRecoveryExhaustedFailure,
+  postClaimDatabaseRecoveryFailure,
   providerRecoveryResult,
   providerRetryAfterMs,
   escapedMcpTimeoutRecoveryFailure,
@@ -1387,7 +1388,46 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         control.activityError = error;
         throw escaped;
       }
+      const postClaimRecovery =
+        recoveryResult.status === "recovering"
+          ? postClaimDatabaseRecoveryFailure({
+              error: recoveryError,
+              turnId: attempt.turnId,
+              triggerEventId: attempt.triggerEventId!,
+              executionGeneration: attempt.executionGeneration,
+              providerRecovery: {
+                failureCode: failure.code ?? "provider_unavailable",
+                providerRecoveryCount: nextProviderRecoveryCount,
+              },
+            })
+          : null;
+      if (postClaimRecovery) {
+        control.activityStatus = "recovering";
+        control.turnMetricOutcome = "recovering";
+        control.activityError = error;
+        throw postClaimRecovery;
+      }
       throw recoveryError;
+    }
+  }
+  if (
+    attempt.turnId &&
+    attempt.triggerEventId &&
+    attempt.executionGeneration > 0 &&
+    !eventing.turnStartedPublished &&
+    !attempt.modelRequestStarted
+  ) {
+    const recoveryFailure = postClaimDatabaseRecoveryFailure({
+      error,
+      turnId: attempt.turnId,
+      triggerEventId: attempt.triggerEventId,
+      executionGeneration: attempt.executionGeneration,
+    });
+    if (recoveryFailure) {
+      control.activityStatus = "recovering";
+      control.turnMetricOutcome = "recovering";
+      control.activityError = error;
+      throw recoveryFailure;
     }
   }
   control.activityStatus = "failed";

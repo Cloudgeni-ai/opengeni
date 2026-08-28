@@ -143,7 +143,9 @@ export function createSessionStateActivities(
       });
       if (attempt) return { action: "stale" };
 
-      if (input.preClaimFailureDisposition === "permanent" && input.trigger) {
+      const preClaimFailureDisposition =
+        input.preClaimFailure?.disposition ?? input.preClaimFailureDisposition;
+      if (preClaimFailureDisposition === "permanent" && input.trigger) {
         const failed = await failSessionWorkBeforeAttemptClaimFn(db, input.workspaceId, {
           accountId: input.accountId,
           sessionId: input.sessionId,
@@ -179,6 +181,72 @@ export function createSessionStateActivities(
         notBefore: new Date(Date.now() + retryDelayMs),
       });
       return { action: "unclaimed" };
+    }
+    const postClaimRecovery = input.postClaimDatabaseRecovery;
+    const postClaimIdentityMatches = Boolean(
+      postClaimRecovery &&
+      turn.id === postClaimRecovery.turnId &&
+      turn.triggerEventId === postClaimRecovery.triggerEventId &&
+      turn.executionGeneration === postClaimRecovery.executionGeneration,
+    );
+    const providerRecoveryCount = postClaimIdentityMatches
+      ? postClaimRecovery?.providerRecoveryCount
+      : undefined;
+    const providerFailureCode = postClaimIdentityMatches
+      ? postClaimRecovery?.providerFailureCode
+      : undefined;
+    const hasProviderRecoveryCount = providerRecoveryCount !== undefined;
+    const hasProviderFailureCode = providerFailureCode !== undefined;
+    if (hasProviderRecoveryCount !== hasProviderFailureCode) {
+      return { action: "stale" };
+    }
+    if (
+      providerRecoveryCount !== undefined &&
+      (!Number.isSafeInteger(providerRecoveryCount) ||
+        providerRecoveryCount <= 0 ||
+        providerRecoveryCount !== providerRecoveryCountFromMetadata(turn.metadata ?? {}) + 1 ||
+        providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
+        typeof providerFailureCode !== "string" ||
+        !/^[a-z][a-z0-9_]{0,63}$/.test(providerFailureCode))
+    ) {
+      return { action: "stale" };
+    }
+    const recoveredClaimCode = postClaimIdentityMatches
+      ? postClaimRecovery!.code
+      : input.preClaimFailure?.disposition === "retryable" &&
+          input.preClaimFailure.code !== "claim_invariant"
+        ? input.preClaimFailure.code
+        : null;
+    if (recoveredClaimCode) {
+      const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        triggerEventId: turn.triggerEventId,
+        attemptId: input.attemptId,
+        reason: providerFailureCode ?? "claimed_attempt_database_failure",
+        ...(providerRecoveryCount !== undefined ? { providerRecoveryCount } : {}),
+        detail: {
+          code: providerFailureCode ?? recoveredClaimCode,
+          retryable: true,
+          ...(providerRecoveryCount !== undefined
+            ? {
+                databaseFailureCode: recoveredClaimCode,
+                providerRecoveryCount,
+              }
+            : {}),
+          recoverySource: "workflow_activity_failure",
+        },
+        fromStatuses: ["running"],
+      });
+      if (recovery.action !== "recovering") return { action: "stale" };
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, recovery.events);
+      await refreshQueuedTurnsGauge(
+        db,
+        observability,
+        countQueuedTurnsFn,
+        recordTurnsQueuedGaugeFn,
+      );
+      return { action: "recovering" };
     }
     const trigger = await getSessionEventFn(db, input.workspaceId, turn.triggerEventId);
     const result = await applySessionTurnSettlementFn(db, input.workspaceId, {

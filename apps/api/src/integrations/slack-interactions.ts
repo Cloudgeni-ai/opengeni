@@ -3203,13 +3203,15 @@ async function continueSlackSession(
         respondedBy: grant.subjectId,
         clientEventId: `slack:${entry.providerEventId}`,
       });
-      if (accepted.action === "accepted") {
-        await publishDurableSessionEvents(
-          deps.bus,
-          grant.workspaceId,
-          interaction.sessionId,
-          accepted.events,
-        );
+      if (accepted.action === "accepted" || accepted.action === "completed") {
+        if (accepted.events.length > 0) {
+          await publishDurableSessionEvents(
+            deps.bus,
+            grant.workspaceId,
+            interaction.sessionId,
+            accepted.events,
+          );
+        }
         if (accepted.workflowWakeRevision !== null) {
           await deps.workflowClient.signalApprovalDecision({
             accountId: grant.accountId,
@@ -3220,7 +3222,8 @@ async function continueSlackSession(
             workflowWakeRevision: accepted.workflowWakeRevision,
           });
         }
-        return;
+        const committedOutcome = accepted.request.response?.outcome;
+        if (committedOutcome === "answered" || committedOutcome === "skipped") return;
       }
     }
   }
@@ -3502,19 +3505,21 @@ async function executeSlackAction(
       respondedBy: grant.subjectId,
       clientEventId: `slack-action:${handle.id}`,
     });
-    if (accepted.action !== "accepted") {
+    if (accepted.action === "not_found" || accepted.action === "conflict") {
       return {
         result: "stale",
         stale: true,
         text: `${mention}This question is no longer pending.`,
       };
     }
-    await publishDurableSessionEvents(
-      deps.bus,
-      grant.workspaceId,
-      handle.sessionId,
-      accepted.events,
-    );
+    if (accepted.events.length > 0) {
+      await publishDurableSessionEvents(
+        deps.bus,
+        grant.workspaceId,
+        handle.sessionId,
+        accepted.events,
+      );
+    }
     if (accepted.workflowWakeRevision !== null) {
       await deps.workflowClient.signalApprovalDecision({
         accountId: grant.accountId,
@@ -3525,9 +3530,17 @@ async function executeSlackAction(
         workflowWakeRevision: accepted.workflowWakeRevision,
       });
     }
+    const committedOutcome = accepted.request.response?.outcome ?? response.outcome;
+    if (committedOutcome !== "answered" && committedOutcome !== "skipped") {
+      return {
+        result: "stale",
+        stale: true,
+        text: `${mention}This question is already ${committedOutcome}.`,
+      };
+    }
     return {
-      result: response.outcome === "skipped" ? "skipped" : "answered",
-      text: `${mention}${response.outcome === "skipped" ? "Skipped the question" : "Answer submitted"}. OpenGeni will continue.`,
+      result: committedOutcome === "skipped" ? "skipped" : "answered",
+      text: `${mention}${committedOutcome === "skipped" ? "Skipped the question" : "Answer submitted"}. OpenGeni will continue.`,
     };
   }
   if (handle.actionKind === "session_pause" || handle.actionKind === "session_resume") {

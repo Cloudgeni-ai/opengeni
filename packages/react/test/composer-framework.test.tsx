@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act, useRef, useState } from "react";
+import { act, startTransition, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import * as Composer from "../src/composer";
@@ -74,6 +75,7 @@ function attachments(overrides: Partial<UseFileAttachmentsResult> = {}): UseFile
     addFromPaste: () => {},
     restoreReadyFiles: () => {},
     retry: () => {},
+    retainPreview: () => undefined,
     remove: () => {},
     removeReadyFiles: () => {},
     clear: () => {},
@@ -153,6 +155,34 @@ function ContainerDeliveryOnlyComposer() {
 }
 
 describe("compound composer framework", () => {
+  test("local controller renders retain a newer parent-delivery edit", async () => {
+    const projectedValues: string[] = [];
+    let controller!: Composer.ChatComposerController;
+
+    function Child({ value, setValue }: { value: string; setValue: (next: string) => void }) {
+      controller = Composer.useChatComposerController({
+        delivery: delivery(value, setValue),
+      });
+      projectedValues.push(controller.value);
+      return null;
+    }
+
+    function Parent() {
+      const [value, setValue] = useState("");
+      return <Child value={value} setValue={(next) => startTransition(() => setValue(next))} />;
+    }
+
+    mounted = await renderComponent(<Parent />);
+    projectedValues.length = 0;
+    await act(async () => {
+      controller.setValue("alpha Xbeta gamma");
+      flushSync(() => controller.setHelpOpen(true));
+    });
+
+    expect(projectedValues).not.toContain("");
+    expect(projectedValues.at(-1)).toBe("alpha Xbeta gamma");
+  });
+
   test("compound Root exposes the additive container basis", async () => {
     mounted = await renderComponent(<ContainerDeliveryOnlyComposer />);
     const root = mounted.container.querySelector(".og-composer");

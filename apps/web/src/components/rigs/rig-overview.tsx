@@ -1,6 +1,6 @@
-// Rig overview: what this machine IS at a glance — image, active version,
-// default variable sets, credential hooks — plus the most recent verification of
-// the active version's checks (derived from the change that produced it).
+// Rig overview: what this machine IS at a glance — platform base, active
+// version, default variable sets, credential hooks — plus the most recent
+// verification of the active version's checks.
 import { Loader2Icon, RotateCwIcon } from "lucide-react";
 import { toast } from "sonner";
 
@@ -64,7 +64,12 @@ export function RigOverview({
     <div className="grid gap-5">
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Base image">
-          <span className="font-mono text-xs">{active.image ?? "Default image"}</span>
+          <span className="text-xs">
+            Deployment-managed platform image
+            {active.image ? (
+              <span className="text-fg-subtle"> · legacy override ignored</span>
+            ) : null}
+          </span>
         </Field>
         <Field label="Active version">
           <span className="text-sm">

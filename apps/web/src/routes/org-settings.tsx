@@ -3,7 +3,7 @@
 // /v1/billing/entitlements), and members. The workspace-scoped API keys section
 // moved to Workspace settings; this surface is the tenant-level console.
 import { useBillingUsage } from "@opengeni/react";
-import { useNavigate } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { ActivityIcon, GaugeIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -16,6 +16,7 @@ import {
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
+import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
 import {
@@ -43,6 +44,116 @@ import type {
   OrganizationMembershipRole,
   UsageEvent,
 } from "@/types";
+import { OrganizationKnowledgePrompt } from "./organization-knowledge-prompt";
+import { useCompanyProfileInventory } from "./workspace-state-loader";
+
+function OrganizationKnowledgeSummary({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  const client = useAppContext().client;
+  const inventory = useCompanyProfileInventory(client, workspaceId);
+  const storedProfile = inventory.response?.activeRevision?.profile ?? null;
+  const profile = storedProfile?.identity || storedProfile?.mission ? storedProfile : null;
+  const legacyDetailCount = storedProfile
+    ? storedProfile.products.length +
+      storedProfile.customers.length +
+      storedProfile.goals.length +
+      storedProfile.constraints.length
+    : 0;
+
+  if (inventory.loading && !inventory.response) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-border bg-surface p-4 text-xs text-fg-muted">
+        <Loader2Icon className="size-3.5 animate-spin" />
+        Loading organization identity…
+      </div>
+    );
+  }
+  if (inventory.error && !inventory.response) {
+    return (
+      <LoadErrorState
+        title="Couldn't load the organization identity"
+        error={inventory.error}
+        onRetry={() => void inventory.reload()}
+      />
+    );
+  }
+  if (!profile) {
+    return (
+      <div className="grid gap-3">
+        <div className="rounded-lg border border-dashed border-border bg-surface-2/20 p-4 text-xs leading-5 text-fg-muted">
+          {canManage
+            ? "No organization identity has been saved yet. Describe who the organization is and why it exists below, and OpenGeni will prepare a concise version."
+            : "No organization identity has been saved yet. An organization owner can add one."}
+        </div>
+        {legacyDetailCount > 0 ? (
+          <p className="rounded-lg border border-status-waiting/30 bg-status-waiting/5 p-3 text-xs leading-5 text-fg-muted">
+            {legacyDetailCount} historical structured detail
+            {legacyDetailCount === 1 ? " is" : "s are"} still retained in agent context for
+            compatibility. An owner can move that information into Company Documents before
+            replacing this profile.
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-surface p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-medium text-fg">Current organization identity</h3>
+          <p className="mt-1 text-xs text-fg-muted">
+            Small, stable context available to top-level agents.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={inventory.loading}
+          onClick={() => void inventory.reload()}
+        >
+          <RefreshCwIcon className={inventory.loading ? "size-3.5 animate-spin" : "size-3.5"} />
+          Refresh
+        </Button>
+      </div>
+      {legacyDetailCount > 0 ? (
+        <p className="mt-4 rounded-lg border border-status-waiting/30 bg-status-waiting/5 p-3 text-xs leading-5 text-fg-muted">
+          {legacyDetailCount} historical structured detail
+          {legacyDetailCount === 1 ? " is" : "s are"} still retained in agent context for
+          compatibility. Move it into Company Documents before replacing this profile.
+        </p>
+      ) : null}
+
+      <div className="mt-4 grid gap-4">
+        {profile.identity ? (
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+              Identity
+            </h4>
+            <p className="mt-2 text-sm leading-6 text-fg">{profile.identity}</p>
+          </div>
+        ) : null}
+        {profile.mission ? (
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+              Mission
+            </h4>
+            <p className="mt-2 text-sm leading-6 text-fg">{profile.mission}</p>
+          </div>
+        ) : null}
+      </div>
+      {inventory.error ? (
+        <p className="mt-3 text-xs text-status-error">Refresh failed: {inventory.error.message}</p>
+      ) : null}
+    </section>
+  );
+}
 
 export function OrgSettingsRoute({
   workspaceId,
@@ -54,7 +165,6 @@ export function OrgSettingsRoute({
   section?: OrganizationAdminSection;
 }) {
   const context = useAppContext();
-  const navigate = useNavigate();
   const client = context.client;
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -75,6 +185,11 @@ export function OrgSettingsRoute({
   const canManageBilling = hasAccountPermission(context.accessContext, accountId, "billing:manage");
   const canReadBilling =
     canManageBilling || hasAccountPermission(context.accessContext, accountId, "billing:read");
+  const canManageOrganizationKnowledge = hasAccountPermission(
+    context.accessContext,
+    accountId,
+    "account:admin",
+  );
   const accountGrant =
     context.accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
   const actorRole: OrganizationMembershipRole | null =
@@ -278,18 +393,6 @@ export function OrgSettingsRoute({
                   operationId,
                 });
               }}
-              onCreateOrganization={async (name, operationId) => {
-                const created = await client.createOrganization({
-                  name,
-                  operationId,
-                });
-                context.revalidatePrincipalAccess();
-                toast.success(`${created.organization.name} created`);
-                await navigate({
-                  to: "/workspaces/$workspaceId/sessions",
-                  params: { workspaceId: created.workspaceId },
-                });
-              }}
             />
             <OrganizationPrivateSessionsSection
               key={`${identityKey}:private-sessions`}
@@ -312,12 +415,60 @@ export function OrgSettingsRoute({
           />
         ) : null}
 
+        {section === "knowledge" ? (
+          <section className="grid gap-3">
+            <div>
+              <h2 className="text-sm font-medium">Organization identity</h2>
+              <p className="mt-1 text-xs leading-5 text-fg-muted">
+                A concise answer to who the organization is and why it exists. This is always
+                available to top-level agents, so it should stay small and stable.
+              </p>
+            </div>
+            <OrganizationKnowledgeSummary
+              workspaceId={workspaceId}
+              canManage={canManageOrganizationKnowledge}
+            />
+            {canManageOrganizationKnowledge ? (
+              <OrganizationKnowledgePrompt workspaceId={workspaceId} />
+            ) : (
+              <p className="rounded-lg border border-border bg-surface p-4 text-xs leading-5 text-fg-muted">
+                Organization identity is read-only for you. An organization owner can update it.
+              </p>
+            )}
+            <section className="rounded-lg border border-border bg-surface p-4">
+              <h3 className="text-sm font-medium text-fg">Organization knowledge</h3>
+              <p className="mt-1 text-xs leading-5 text-fg-muted">
+                Products, customers, goals, constraints, strategy, and changing facts belong in
+                organization-scoped Documents. Agents search that knowledge when it is relevant
+                instead of receiving it in every prompt.
+              </p>
+              <Link
+                to="/workspaces/$workspaceId/documents"
+                params={{ workspaceId }}
+                search={{ authority: "organization" }}
+                className="mt-3 inline-flex text-xs font-medium text-brand hover:underline"
+              >
+                Explore organization knowledge
+              </Link>
+            </section>
+          </section>
+        ) : null}
+
         {section === "retention" ? (
           <OrganizationRetentionSection
             key={identityKey}
             client={client}
             identity={adminIdentity}
             actorRole={actorRole}
+            managedSession={context.clientConfig.auth.mode === "managedSession"}
+          />
+        ) : null}
+
+        {section === "recovery" ? (
+          <OrganizationRecoverySection
+            key={`${identityKey}:recovery`}
+            client={client}
+            identity={adminIdentity}
             managedSession={context.clientConfig.auth.mode === "managedSession"}
           />
         ) : null}

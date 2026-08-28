@@ -1,18 +1,28 @@
 import type { Settings } from "@opengeni/config";
-import { type ManagedAuth } from "@opengeni/core";
+import {
+  type ManagedAuth,
+  type ManagedEmailMessage,
+  type ManagedEmailTransport,
+} from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import { ensureManagedAccessForUser } from "@opengeni/db";
 import {
   ensureCanonicalHumanIdentityForAuthUser,
   getCanonicalHumanIdentityProjection,
+  getCanonicalHumanExactLoginBindingForAuthUser,
   synchronizeCanonicalHumanLoginBindings,
 } from "@opengeni/db/canonical-human-identities";
 import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
+import { hashPassword } from "better-auth/crypto";
+import { sql } from "drizzle-orm";
 import { Pool } from "pg";
-import { Resend } from "resend";
 
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
+import {
+  currentManagedAuthAttemptId,
+  shouldDiscardCurrentManagedAuthProviderSession,
+} from "./managed-auth-attempt-context";
 
 // `ManagedAuth` (the Better Auth `Auth<any>` alias) is owned by @opengeni/core
 // (`managed-auth-type.ts`) — `dependencies.ts`/`access` reference it as a
@@ -34,7 +44,16 @@ export function managedAuthUserCreateOverride(
   return { data: { ...user, emailVerified: true } };
 }
 
-export function createManagedAuth(settings: Settings, db: Database): ManagedAuth | null {
+/** Keep Better Auth password policy and storage format behind this boundary. */
+export async function hashManagedAuthPassword(password: string): Promise<string> {
+  return await hashPassword(password);
+}
+
+export function createManagedAuth(
+  settings: Settings,
+  db: Database,
+  managedEmailTransport: ManagedEmailTransport,
+): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
     return null;
   }
@@ -108,6 +127,25 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
           returned: false,
           bigint: true,
         },
+        loginBindingId: {
+          type: "string",
+          fieldName: "login_binding_id",
+          input: false,
+          returned: false,
+        },
+        loginBindingRevision: {
+          type: "number",
+          fieldName: "login_binding_revision",
+          input: false,
+          returned: false,
+          bigint: true,
+        },
+        managedAuthLoginTransactionId: {
+          type: "string",
+          fieldName: "managed_auth_login_transaction_id",
+          input: false,
+          returned: false,
+        },
       },
     },
     account: {
@@ -147,7 +185,8 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       onExistingUserSignUp: async ({ user }) => {
         if (requireEmailVerification && !user.emailVerified) {
           const url = await verificationUrl(settings, user.email);
-          await sendEmail(settings, {
+          await sendManagedAuthEmail(managedEmailTransport, {
+            kind: "email_verification",
             to: user.email,
             subject: "Verify your OpenGeni email",
             text: `Verify your OpenGeni email: ${url}`,
@@ -156,7 +195,8 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
         }
       },
       sendResetPassword: async ({ user, url }) => {
-        await sendEmail(settings, {
+        await sendManagedAuthEmail(managedEmailTransport, {
+          kind: "password_reset",
           to: user.email,
           subject: "Reset your OpenGeni password",
           text: `Reset your OpenGeni password: ${url}`,
@@ -167,7 +207,8 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
     emailVerification: {
       sendOnSignUp: requireEmailVerification,
       sendVerificationEmail: async ({ user, url }) => {
-        await sendEmail(settings, {
+        await sendManagedAuthEmail(managedEmailTransport, {
+          kind: "email_verification",
           to: user.email,
           subject: "Verify your OpenGeni email",
           text: `Verify your OpenGeni email: ${url}`,
@@ -180,6 +221,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
           email: user.email,
           name: user.name,
           emailVerified: true,
+          provisionFallbackOrganization: false,
         });
       },
     },
@@ -198,8 +240,13 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
               binding: null,
             });
             if (!preflight.allowed) {
+              const exactRecoveryBinding = await getCanonicalHumanExactLoginBindingForAuthUser(db, {
+                authUserId: session.userId,
+                providerId: "credential",
+              });
               const recoveryBinding = preflightProjection.loginBindings.find(
-                (binding) => binding.status === "recovery_pending",
+                (binding) =>
+                  binding.id === exactRecoveryBinding.id && binding.status === "recovery_pending",
               );
               const recoveryAdmission = decideCanonicalHumanSessionAdmission({
                 intent: "recovery_completion",
@@ -218,17 +265,27 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
               return {
                 data: {
                   ...session,
+                  ...(shouldDiscardCurrentManagedAuthProviderSession()
+                    ? { expiresAt: new Date(0) }
+                    : {}),
                   identityId: preflightProjection.activeIdentity.id,
                   identityRevision: preflightProjection.activeIdentity.identityRevision,
                   authRevision: preflightProjection.activeIdentity.authRevision,
+                  loginBindingId: recoveryBinding!.id,
+                  loginBindingRevision: recoveryBinding!.revision,
+                  managedAuthLoginTransactionId: currentManagedAuthAttemptId(),
                 },
               };
             }
 
             await synchronizeCanonicalHumanLoginBindings(db, session.userId);
             const projection = await getCanonicalHumanIdentityProjection(db, session.userId);
+            const exactBinding = await getCanonicalHumanExactLoginBindingForAuthUser(db, {
+              authUserId: session.userId,
+              providerId: "credential",
+            });
             const activeBinding = projection.loginBindings.find(
-              (binding) => binding.id === projection.activeIdentity.activeLoginBindingId,
+              (binding) => binding.id === exactBinding.id,
             );
             const admission = decideCanonicalHumanSessionAdmission({
               intent: "ordinary_session",
@@ -248,11 +305,21 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
             return {
               data: {
                 ...session,
+                ...(shouldDiscardCurrentManagedAuthProviderSession()
+                  ? { expiresAt: new Date(0) }
+                  : {}),
                 identityId: projection.activeIdentity.id,
                 identityRevision: projection.activeIdentity.identityRevision,
                 authRevision: projection.activeIdentity.authRevision,
+                loginBindingId: exactBinding.id,
+                loginBindingRevision: exactBinding.revision,
+                managedAuthLoginTransactionId: currentManagedAuthAttemptId(),
               },
             };
+          },
+          after: async (session) => {
+            if (!shouldDiscardCurrentManagedAuthProviderSession()) return;
+            await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
           },
         },
       },
@@ -266,6 +333,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
               email: user.email,
               name: user.name,
               emailVerified: true,
+              provisionFallbackOrganization: false,
             });
           },
         },
@@ -297,35 +365,12 @@ function betterAuthTrustedOrigins(settings: Settings): string[] {
   return [...origins];
 }
 
-async function sendEmail(
-  settings: Settings,
-  input: {
-    to: string;
-    subject: string;
-    text: string;
-    html: string;
-  },
+export async function sendManagedAuthEmail(
+  transport: ManagedEmailTransport,
+  input: Omit<ManagedEmailMessage, "from">,
 ): Promise<void> {
-  if (!settings.resendApiKey) {
-    if (settings.environment === "local" || settings.environment === "test") {
-      console.warn(
-        `[opengeni] Skipping email to ${input.to}: OPENGENI_RESEND_API_KEY is not configured`,
-      );
-      return;
-    }
-    throw new Error("OPENGENI_RESEND_API_KEY is required to send managed auth email");
-  }
-  const resend = new Resend(settings.resendApiKey);
-  const result = await resend.emails.send({
-    from: settings.emailFrom,
-    to: input.to,
-    subject: input.subject,
-    text: input.text,
-    html: input.html,
-  });
-  if (result.error) {
-    throw new Error(result.error.message);
-  }
+  const result = await transport.send({ ...input, from: transport.sender });
+  if (result.status !== "sent") throw new Error(`managed email ${result.status}`);
 }
 
 async function verificationUrl(settings: Settings, email: string): Promise<string> {

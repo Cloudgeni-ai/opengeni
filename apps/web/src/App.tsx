@@ -23,8 +23,10 @@
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
+//   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
+//   /dev/onboarding                          → DEV-only production onboarding components
 import {
   Navigate,
   RouterProvider,
@@ -38,8 +40,15 @@ import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
-type OrganizationAdminSection = "overview" | "people" | "retention" | "billing";
+type OrganizationAdminSection =
+  | "overview"
+  | "knowledge"
+  | "people"
+  | "recovery"
+  | "retention"
+  | "billing";
 type WorkspaceSettingsSection =
   | "general"
   | "members"
@@ -77,6 +86,18 @@ const LazyOrgSettingsRoute = lazyRouteComponent(
 const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
+);
+const LazySetupAccountRoute = lazyRouteComponent(
+  () => import("@/routes/setup-account"),
+  "SetupAccountRoute",
+);
+const LazyAccountAuthRoute = lazyRouteComponent(
+  () => import("@/routes/account-auth"),
+  "AccountAuthRoute",
+);
+const LazyOnboardingPreviewRoute = lazyRouteComponent(
+  () => import("@/routes/onboarding-preview"),
+  "OnboardingPreviewRoute",
 );
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyRigDetailRoute = lazyRouteComponent(
@@ -164,6 +185,19 @@ const resetPasswordRoute = createRoute({
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
+const setupAccountRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "setup-account",
+  component: SetupAccount,
+});
+const accountAuthRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "account-auth",
+  validateSearch: (search: Record<string, unknown>): { transaction?: string } => ({
+    ...(typeof search.transaction === "string" ? { transaction: search.transaction } : {}),
+  }),
+  component: AccountAuth,
+});
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
 // production route trees.
@@ -176,6 +210,11 @@ const agentTopologyPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/agent-topology",
   component: AgentTopologyPreview,
+});
+const onboardingPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/onboarding",
+  component: LazyOnboardingPreviewRoute,
 });
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -299,9 +338,16 @@ const workspaceDocumentsRoute = createRoute({
   // Memory used to live inside Documents, so existing timeline links and
   // bookmarks can still carry `?memory=<id>`. Preserve that public URL as a
   // compatibility redirect to the first-class Memory surface.
-  validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { memory?: string; from?: "brain"; authority?: DocumentAuthorityKind } => ({
     ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
     ...(search.from === "brain" ? { from: "brain" as const } : {}),
+    ...(search.authority === "organization" ||
+    search.authority === "workspace" ||
+    search.authority === "personal"
+      ? { authority: search.authority }
+      : {}),
   }),
   component: Documents,
 });
@@ -340,15 +386,8 @@ const workspaceSettingsRoute = createRoute({
 const workspaceStateRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "state",
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { view?: "company" | "instructions" | "preferences" | "learning" } =>
-    search.view === "company" ||
-    search.view === "instructions" ||
-    search.view === "preferences" ||
-    search.view === "learning"
-      ? { view: search.view }
-      : {},
+  validateSearch: (search: Record<string, unknown>): { view?: "instructions" | "skills" } =>
+    search.view === "instructions" || search.view === "skills" ? { view: search.view } : {},
   component: WorkspaceState,
 });
 const workspaceArtifactsRoute = createRoute({
@@ -377,7 +416,9 @@ const workspaceOrganizationRoute = createRoute({
     const checkout = parseCheckoutOutcome(search);
     const section =
       search.section === "overview" ||
+      search.section === "knowledge" ||
       search.section === "people" ||
+      search.section === "recovery" ||
       search.section === "retention" ||
       search.section === "billing"
         ? search.section
@@ -403,7 +444,11 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
-  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, agentTopologyPreviewRoute] : []),
+  setupAccountRoute,
+  accountAuthRoute,
+  ...(import.meta.env.DEV
+    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, onboardingPreviewRoute]
+    : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
@@ -584,7 +629,7 @@ function Schedules() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory, from } = workspaceDocumentsRoute.useSearch();
+  const { memory, from, authority } = workspaceDocumentsRoute.useSearch();
   if (memory) {
     return (
       <Navigate
@@ -595,7 +640,14 @@ function Documents() {
       />
     );
   }
-  return <LazyDocumentsRoute workspaceId={workspaceId} returnToBrain={from === "brain"} />;
+  return (
+    <LazyDocumentsRoute
+      key={`${workspaceId}:${authority ?? "all"}`}
+      workspaceId={workspaceId}
+      returnToBrain={from === "brain"}
+      authorityKind={authority}
+    />
+  );
 }
 
 function Memory() {
@@ -661,6 +713,15 @@ function Device() {
 function ResetPassword() {
   const { token } = resetPasswordRoute.useSearch();
   return <LazyResetPasswordRoute token={token} />;
+}
+
+function SetupAccount() {
+  return <LazySetupAccountRoute />;
+}
+
+function AccountAuth() {
+  const { transaction } = accountAuthRoute.useSearch();
+  return <LazyAccountAuthRoute transactionId={transaction} />;
 }
 
 function ComposerChromeGallery() {

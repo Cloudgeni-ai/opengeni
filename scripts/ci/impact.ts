@@ -15,7 +15,12 @@ import {
 import { changesetIgnoreSet } from "../publishable-workspaces";
 
 export type ImpactReason = { path: string; reason: string };
-export type BrowserAcceptanceLane = "interaction" | "knowledge" | "workbench";
+export type BrowserAcceptanceLane =
+  | "accounts"
+  | "interaction"
+  | "knowledge"
+  | "onboarding"
+  | "workbench";
 export type ImpactPlan = {
   schemaVersion: 1;
   mode: "focused" | "full" | "docs";
@@ -183,6 +188,10 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/organization-workspace-administration.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/testing",
+  ],
   "test/e2e/custom-api-control-center.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/editable-artifacts.browser.e2e.ts": [
     "@opengeni/api-router",
@@ -230,10 +239,41 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/source-packages-control-center.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/timeline-scroll.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/timeline-tip-follow.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/knowledge-surfaces.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
     "@opengeni/contracts",
+    "@opengeni/db",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/organization-onboarding-acceptance.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/organization-recovery.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/personal-github-identity.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/browser-accounts-acceptance.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/core",
     "@opengeni/db",
     "@opengeni/react",
     "@opengeni/sdk",
@@ -261,15 +301,19 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
 };
 
 const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly string[]>> = {
+  accounts: ["test/e2e/browser-accounts-acceptance.e2e.ts"],
   interaction: [
     "test/e2e/codex-overview.e2e.ts",
     "test/e2e/custom-api-control-center.browser.e2e.ts",
     "test/e2e/queue-surface.browser.e2e.ts",
+    "test/e2e/timeline-scroll.browser.e2e.ts",
+    "test/e2e/timeline-tip-follow.browser.e2e.ts",
     "test/e2e/user-message-disclosure.browser.e2e.ts",
     "test/e2e/realtime-demo.browser.e2e.ts",
     "test/e2e/source-packages-control-center.browser.e2e.ts",
   ],
   knowledge: ["test/e2e/session-pins.browser.e2e.ts", "test/e2e/knowledge-surfaces.browser.e2e.ts"],
+  onboarding: ["test/e2e/organization-onboarding-acceptance.e2e.ts"],
   workbench: [
     "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
     "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
@@ -346,7 +390,9 @@ function focusedArtifactRuntimeRequired(
 
 function importedWorkspaceDependencies(graph: WorkspaceGraph, path: string): Set<string> {
   const source = readFileSync(path, "utf8");
-  const imports = new Bun.Transpiler({ loader: path.endsWith(".tsx") ? "tsx" : "ts" })
+  const imports = new Bun.Transpiler({
+    loader: path.endsWith(".tsx") ? "tsx" : "ts",
+  })
     .scanImports(source)
     .map(({ path: specifier }) => specifier);
   const workspaceNames = new Set(graph.packages.map((pkg) => pkg.name));
@@ -443,7 +489,7 @@ function fullPlan(
     unitTests: tests.unit,
     integrationTests: tests.integration,
     e2eTests: tests.e2e,
-    browserAcceptanceLanes: ["interaction", "knowledge", "workbench"],
+    browserAcceptanceLanes: ["accounts", "interaction", "knowledge", "onboarding", "workbench"],
     artifactRuntimeRequired: true,
     buildPackages: graph.packages
       .filter((pkg) => pkg.name.startsWith("@opengeni/") && pkg.packageJson.private !== true)
@@ -480,7 +526,11 @@ function fullPlan(
 
 export function createImpactPlan(
   changedInput: readonly string[],
-  options: { forceFull?: boolean; base?: string | null; head?: string | null } = {},
+  options: {
+    forceFull?: boolean;
+    base?: string | null;
+    head?: string | null;
+  } = {},
 ): ImpactPlan {
   assertTestTierMapComplete();
   const graph = createWorkspaceGraph();
@@ -490,17 +540,26 @@ export function createImpactPlan(
   const changedFiles = [...new Set(changedInput.map((path) => path.trim()).filter(Boolean))].sort();
   const reasons: ImpactReason[] = [];
   if (options.forceFull) {
-    reasons.push({ path: "*", reason: "full mode requested (main/scheduled safety net)" });
+    reasons.push({
+      path: "*",
+      reason: "full mode requested (main/scheduled safety net)",
+    });
     return fullPlan(graph, changedFiles, reasons, base, head);
   }
   if (changedFiles.length === 0) {
-    reasons.push({ path: "*", reason: "no trustworthy changed-file set; failing closed" });
+    reasons.push({
+      path: "*",
+      reason: "no trustworthy changed-file set; failing closed",
+    });
     return fullPlan(graph, changedFiles, reasons, base, head);
   }
 
   for (const path of changedFiles) {
     if (path.startsWith("/") || path.includes("\\") || path.split("/").includes("..")) {
-      reasons.push({ path, reason: "invalid or non-repository path; failing closed" });
+      reasons.push({
+        path,
+        reason: "invalid or non-repository path; failing closed",
+      });
       return fullPlan(graph, changedFiles, reasons, base, head);
     }
     if (matchesAny(path, GLOBAL_FENCES)) {
@@ -534,7 +593,10 @@ export function createImpactPlan(
       buildPackages: [],
       exampleBuildProjects: [],
       guards: ["format", "docs-refs", "generated-fonts", "public-hygiene"],
-      reasons: changedFiles.map((path) => ({ path, reason: "documentation-only change" })),
+      reasons: changedFiles.map((path) => ({
+        path,
+        reason: "documentation-only change",
+      })),
     };
   }
 
@@ -595,7 +657,10 @@ export function createImpactPlan(
     if (dependencies) {
       changedTests.add(path);
       for (const name of dependencies) direct.add(name);
-      reasons.push({ path, reason: "explicit root integration/e2e dependency rule" });
+      reasons.push({
+        path,
+        reason: "explicit root integration/e2e dependency rule",
+      });
       continue;
     }
     reasons.push({ path, reason: "unmapped repository path; failing closed" });

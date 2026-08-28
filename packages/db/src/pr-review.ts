@@ -3,6 +3,7 @@ import {
   OPENGENI_PR_REVIEW_PACK_ID,
   OPENGENI_PR_REVIEW_SESSION_ROLE,
   type PrReviewAppRegistration,
+  type GitHubRepository,
   type PrReviewProvider,
   type PrReviewRepositoryBinding,
 } from "@opengeni/contracts";
@@ -32,8 +33,11 @@ export async function createPrReviewAppRegistration(
     provider: PrReviewProvider;
     providerBaseUrl: string;
     appId: string | null;
-    credentialKind: "github_app" | "provider_token";
+    credentialKind: "github_app" | "managed_github_app" | "provider_token";
     credentialEncrypted: string | null;
+    installationId?: string | null;
+    providerAccountLogin?: string | null;
+    providerAccountType?: "User" | "Organization" | null;
     accessTokenExpiresAt: Date | null;
     webhookAuthKind: "hmac_sha256" | "shared_token" | "basic";
     webhookSecretEncrypted: string;
@@ -83,6 +87,9 @@ export async function createPrReviewAppRegistration(
           provider: input.provider,
           providerBaseUrl: input.providerBaseUrl,
           appId: input.appId,
+          installationId: input.installationId ?? null,
+          providerAccountLogin: input.providerAccountLogin ?? null,
+          providerAccountType: input.providerAccountType ?? null,
           credentialKind: input.credentialKind,
           credentialEncrypted: input.credentialEncrypted,
           accessTokenExpiresAt: input.accessTokenExpiresAt,
@@ -246,6 +253,11 @@ export async function updatePrReviewAppRegistration(
           ),
         )
         .returning();
+      if (input.status === "disabled") {
+        await tx
+          .delete(schema.prReviewManagedGithubRoutes)
+          .where(eq(schema.prReviewManagedGithubRoutes.registrationId, input.registrationId));
+      }
       return row ? mapRegistration(row, source.endpointId) : null;
     });
   });
@@ -268,6 +280,9 @@ export async function deletePrReviewAppRegistration(
         )
         .returning({ sourceId: schema.prReviewAppRegistrations.sourceId });
       if (!registration) return false;
+      await tx
+        .delete(schema.prReviewManagedGithubRoutes)
+        .where(eq(schema.prReviewManagedGithubRoutes.registrationId, input.registrationId));
       await tx
         .update(schema.automationSources)
         .set({
@@ -381,6 +396,425 @@ export async function createPrReviewRepositoryBinding(
       return mapRepositoryBinding(row);
     });
   });
+}
+
+/** Atomically converge one owner-authorized installation of the deployment
+ * review App onto the Pack's ordinary source/trigger/binding model. Re-running
+ * the browser flow repairs disabled rows, follows GitHub repository selection,
+ * and removes shared-webhook routes for repositories no longer selected. */
+export async function syncManagedGitHubPrReviewInstallation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    installationId: number;
+    providerAccountLogin: string | null;
+    providerAccountType: "User" | "Organization";
+    githubActorId: number;
+    authorityKind: "personal_owner" | "organization_owner";
+    authorityCheckedAt: Date;
+    authorityExpiresAt: Date;
+    authorityNonce: string;
+    appId: string;
+    webhookSecretEncrypted: string;
+    repositories: GitHubRepository[];
+    createdBySubjectId: string;
+    packInstallationId: string;
+    packConnectorId: string;
+    packTemplateId: string;
+    adapterId: string;
+    eventTypes: string[];
+    configuration: Record<string, unknown>;
+    sessionTemplate: AutomationSessionTemplate;
+  },
+): Promise<{
+  registration: PrReviewAppRegistration;
+  repositories: PrReviewRepositoryBinding[];
+}> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [packInstallation] = await tx
+          .select({ id: schema.packInstallations.id })
+          .from(schema.packInstallations)
+          .where(
+            and(
+              eq(schema.packInstallations.workspaceId, input.workspaceId),
+              eq(schema.packInstallations.id, input.packInstallationId),
+              eq(schema.packInstallations.packId, OPENGENI_PR_REVIEW_PACK_ID),
+              eq(schema.packInstallations.status, "active"),
+            ),
+          )
+          .limit(1)
+          .for("update");
+        if (!packInstallation) {
+          throw new PrReviewDispatchAuthorityError("OpenGeni Review Bot Pack is not active");
+        }
+        const installationId = String(input.installationId);
+        const [nonceReceipt] = await tx
+          .insert(schema.prReviewManagedGithubAuthorityNonces)
+          .values({
+            authorityNonce: input.authorityNonce,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            installationId,
+            authorityExpiresAt: input.authorityExpiresAt,
+          })
+          .onConflictDoNothing()
+          .returning({
+            authorityNonce: schema.prReviewManagedGithubAuthorityNonces.authorityNonce,
+          });
+        if (!nonceReceipt) {
+          throw new PrReviewDispatchAuthorityError("OpenGeni Lens authorization was already used");
+        }
+        const [existingRegistration] = await tx
+          .select()
+          .from(schema.prReviewAppRegistrations)
+          .where(
+            and(
+              eq(schema.prReviewAppRegistrations.workspaceId, input.workspaceId),
+              eq(schema.prReviewAppRegistrations.credentialKind, "managed_github_app"),
+              eq(schema.prReviewAppRegistrations.installationId, installationId),
+            ),
+          )
+          .limit(1)
+          .for("update");
+
+        const registrationId = existingRegistration?.id ?? randomUUID();
+        const registrationName = `OpenGeni Lens · ${
+          input.providerAccountLogin ?? `installation ${installationId}`
+        } (${installationId})`;
+        let source: typeof schema.automationSources.$inferSelect;
+        let registration: typeof schema.prReviewAppRegistrations.$inferSelect;
+
+        if (existingRegistration) {
+          const nextSourceConfiguration = {
+            provider: "github",
+            providerBaseUrl: "https://github.com",
+            registrationId,
+            webhookUsername: null,
+          };
+          const [updatedSource] = await tx
+            .update(schema.automationSources)
+            .set({
+              name: `${registrationName} webhooks`,
+              adapterId: input.adapterId,
+              configuration: nextSourceConfiguration,
+              webhookSecretEncrypted: input.webhookSecretEncrypted,
+              status: "active",
+              packInstallationId: input.packInstallationId,
+              packConnectorId: input.packConnectorId,
+              version: sql`${schema.automationSources.version} + 1`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.automationSources.workspaceId, input.workspaceId),
+                eq(schema.automationSources.id, existingRegistration.sourceId),
+              ),
+            )
+            .returning();
+          if (!updatedSource) {
+            throw new PrReviewDispatchAuthorityError(
+              "OpenGeni Lens automation source is unavailable",
+            );
+          }
+          source = updatedSource;
+          const [updatedRegistration] = await tx
+            .update(schema.prReviewAppRegistrations)
+            .set({
+              name: registrationName,
+              appId: input.appId,
+              providerAccountLogin: input.providerAccountLogin,
+              providerAccountType: input.providerAccountType,
+              githubActorId: String(input.githubActorId),
+              authorityKind: input.authorityKind,
+              authorityCheckedAt: input.authorityCheckedAt,
+              authorityExpiresAt: input.authorityExpiresAt,
+              authorityNonce: input.authorityNonce,
+              status: "active",
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.prReviewAppRegistrations.id, existingRegistration.id))
+            .returning();
+          if (!updatedRegistration) throw new Error("Failed to update OpenGeni Lens registration");
+          registration = updatedRegistration;
+        } else {
+          const [createdSource] = await tx
+            .insert(schema.automationSources)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              name: `${registrationName} webhooks`,
+              adapterId: input.adapterId,
+              configuration: {
+                provider: "github",
+                providerBaseUrl: "https://github.com",
+                registrationId,
+                webhookUsername: null,
+              },
+              webhookSecretEncrypted: input.webhookSecretEncrypted,
+              packInstallationId: input.packInstallationId,
+              packConnectorId: input.packConnectorId,
+              createdBySubjectId: input.createdBySubjectId,
+            })
+            .returning();
+          if (!createdSource) throw new Error("Failed to create OpenGeni Lens automation source");
+          source = createdSource;
+          const [createdRegistration] = await tx
+            .insert(schema.prReviewAppRegistrations)
+            .values({
+              id: registrationId,
+              sourceId: source.id,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              name: registrationName,
+              provider: "github",
+              providerBaseUrl: "https://github.com",
+              appId: input.appId,
+              installationId,
+              providerAccountLogin: input.providerAccountLogin,
+              providerAccountType: input.providerAccountType,
+              githubActorId: String(input.githubActorId),
+              authorityKind: input.authorityKind,
+              authorityCheckedAt: input.authorityCheckedAt,
+              authorityExpiresAt: input.authorityExpiresAt,
+              authorityNonce: input.authorityNonce,
+              credentialKind: "managed_github_app",
+              credentialEncrypted: null,
+              accessTokenExpiresAt: null,
+              webhookAuthKind: "hmac_sha256",
+              webhookUsername: null,
+              createdBySubjectId: input.createdBySubjectId,
+            })
+            .returning();
+          if (!createdRegistration) throw new Error("Failed to create OpenGeni Lens registration");
+          registration = createdRegistration;
+        }
+
+        const existingBindings = await tx
+          .select({
+            binding: schema.prReviewRepositoryBindings,
+            trigger: schema.automationTriggers,
+            revision: schema.automationTriggerRevisions,
+          })
+          .from(schema.prReviewRepositoryBindings)
+          .innerJoin(
+            schema.automationTriggers,
+            and(
+              eq(
+                schema.automationTriggers.workspaceId,
+                schema.prReviewRepositoryBindings.workspaceId,
+              ),
+              eq(schema.automationTriggers.id, schema.prReviewRepositoryBindings.triggerId),
+            ),
+          )
+          .innerJoin(
+            schema.automationTriggerRevisions,
+            and(
+              eq(schema.automationTriggerRevisions.triggerId, schema.automationTriggers.id),
+              eq(
+                schema.automationTriggerRevisions.revision,
+                schema.automationTriggers.currentRevision,
+              ),
+            ),
+          )
+          .where(
+            and(
+              eq(schema.prReviewRepositoryBindings.workspaceId, input.workspaceId),
+              eq(schema.prReviewRepositoryBindings.registrationId, registrationId),
+            ),
+          )
+          .for("update", { of: schema.automationTriggers });
+        const existingByRepositoryId = new Map(
+          existingBindings.map((row) => [row.binding.providerRepositoryId, row] as const),
+        );
+        const selectedIds = new Set(input.repositories.map((repository) => String(repository.id)));
+        const synchronized: Array<typeof schema.prReviewRepositoryBindings.$inferSelect> = [];
+
+        for (const repository of input.repositories) {
+          if (repository.installationId !== input.installationId) {
+            throw new PrReviewDispatchAuthorityError(
+              "OpenGeni Lens repository does not belong to the authorized installation",
+            );
+          }
+          const providerRepositoryId = String(repository.id);
+          const current = existingByRepositoryId.get(providerRepositoryId);
+          if (!current) {
+            const bindingId = randomUUID();
+            const [trigger] = await tx
+              .insert(schema.automationTriggers)
+              .values({
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sourceId: source.id,
+                name: `Review ${repository.fullName}`,
+                status: "active",
+                packInstallationId: input.packInstallationId,
+                packTemplateId: input.packTemplateId,
+                createdBySubjectId: input.createdBySubjectId,
+              })
+              .returning();
+            if (!trigger) throw new Error("Failed to create OpenGeni Lens trigger");
+            const bindingShape = {
+              registrationId,
+              provider: "github" as const,
+              repositoryUri: repository.cloneUrl,
+              repositoryFullName: repository.fullName,
+              providerRepositoryId,
+              installationId,
+              projectId: null,
+              model: null,
+              additionalInstructions: null,
+            };
+            await tx.insert(schema.automationTriggerRevisions).values({
+              triggerId: trigger.id,
+              revision: 1,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              adapterId: input.adapterId,
+              eventTypes: input.eventTypes,
+              configuration: input.configuration,
+              parameters: prReviewTriggerParameters(bindingShape, bindingId),
+              sessionTemplate: input.sessionTemplate,
+              createdBySubjectId: input.createdBySubjectId,
+            });
+            const [binding] = await tx
+              .insert(schema.prReviewRepositoryBindings)
+              .values({
+                id: bindingId,
+                triggerId: trigger.id,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                ...bindingShape,
+                status: "active",
+                createdBySubjectId: input.createdBySubjectId,
+              })
+              .returning();
+            if (!binding) throw new Error("Failed to create OpenGeni Lens repository binding");
+            await tx.insert(schema.prReviewManagedGithubRoutes).values({
+              bindingId,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              registrationId,
+              sourceId: source.id,
+              installationId,
+              providerRepositoryId,
+            });
+            synchronized.push(binding);
+            continue;
+          }
+
+          const nextBinding = {
+            ...current.binding,
+            repositoryUri: repository.cloneUrl,
+            repositoryFullName: repository.fullName,
+            installationId,
+            status: "active" as const,
+          };
+          const nextRevision = current.trigger.currentRevision + 1;
+          await tx.insert(schema.automationTriggerRevisions).values({
+            triggerId: current.trigger.id,
+            revision: nextRevision,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            adapterId: input.adapterId,
+            eventTypes: input.eventTypes,
+            configuration: input.configuration,
+            parameters: prReviewTriggerParameters(nextBinding, current.binding.id),
+            sessionTemplate: input.sessionTemplate,
+            createdBySubjectId: input.createdBySubjectId,
+          });
+          await tx
+            .update(schema.automationTriggers)
+            .set({
+              name: `Review ${repository.fullName}`,
+              status: "active",
+              currentRevision: nextRevision,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.automationTriggers.id, current.trigger.id));
+          const [binding] = await tx
+            .update(schema.prReviewRepositoryBindings)
+            .set({
+              repositoryUri: repository.cloneUrl,
+              repositoryFullName: repository.fullName,
+              installationId,
+              status: "active",
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.prReviewRepositoryBindings.id, current.binding.id))
+            .returning();
+          if (!binding) throw new Error("Failed to update OpenGeni Lens repository binding");
+          await tx
+            .insert(schema.prReviewManagedGithubRoutes)
+            .values({
+              bindingId: binding.id,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              registrationId,
+              sourceId: source.id,
+              installationId,
+              providerRepositoryId,
+            })
+            .onConflictDoUpdate({
+              target: schema.prReviewManagedGithubRoutes.bindingId,
+              set: {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                registrationId,
+                sourceId: source.id,
+                installationId,
+                providerRepositoryId,
+              },
+            });
+          synchronized.push(binding);
+        }
+
+        for (const current of existingBindings) {
+          if (selectedIds.has(current.binding.providerRepositoryId)) continue;
+          await tx
+            .update(schema.prReviewRepositoryBindings)
+            .set({ status: "disabled", updatedAt: new Date() })
+            .where(eq(schema.prReviewRepositoryBindings.id, current.binding.id));
+          await tx
+            .update(schema.automationTriggers)
+            .set({ status: "disabled", updatedAt: new Date() })
+            .where(eq(schema.automationTriggers.id, current.trigger.id));
+          await tx
+            .delete(schema.prReviewManagedGithubRoutes)
+            .where(eq(schema.prReviewManagedGithubRoutes.bindingId, current.binding.id));
+        }
+
+        return {
+          registration: mapRegistration(registration, source.endpointId),
+          repositories: synchronized.map(mapRepositoryBinding),
+        };
+      }),
+  );
+}
+
+export async function resolveManagedGitHubPrReviewRoute(
+  db: Database,
+  input: { installationId: string; providerRepositoryId: string },
+): Promise<{ accountId: string; workspaceId: string; sourceId: string } | null> {
+  const [row] = await db
+    .select({
+      accountId: schema.prReviewManagedGithubRoutes.accountId,
+      workspaceId: schema.prReviewManagedGithubRoutes.workspaceId,
+      sourceId: schema.prReviewManagedGithubRoutes.sourceId,
+    })
+    .from(schema.prReviewManagedGithubRoutes)
+    .where(
+      and(
+        eq(schema.prReviewManagedGithubRoutes.installationId, input.installationId),
+        eq(schema.prReviewManagedGithubRoutes.providerRepositoryId, input.providerRepositoryId),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
 }
 
 export async function listPrReviewRepositoryBindings(
@@ -529,7 +963,7 @@ export async function resolvePrReviewGitCredential(
     }>;
   },
 ): Promise<{
-  credentialKind: "github_app" | "provider_token";
+  credentialKind: "github_app" | "managed_github_app" | "provider_token";
   appId: string | null;
   credentialEncrypted: string | null;
   expiresAt: string | null;
@@ -754,7 +1188,10 @@ export async function resolvePrReviewGitCredential(
     if (pack?.status !== "active")
       throw new PrReviewDispatchAuthorityError("OpenGeni Review Bot Pack is not active");
     return {
-      credentialKind: registration.credentialKind as "github_app" | "provider_token",
+      credentialKind: registration.credentialKind as
+        | "github_app"
+        | "managed_github_app"
+        | "provider_token",
       appId: registration.appId,
       credentialEncrypted: registration.credentialEncrypted,
       expiresAt: registration.accessTokenExpiresAt?.toISOString() ?? null,
@@ -851,13 +1288,19 @@ function mapRegistration(
     provider: row.provider as PrReviewProvider,
     providerBaseUrl: row.providerBaseUrl,
     appId: row.appId,
-    credentialKind: row.credentialKind as "github_app" | "provider_token",
-    hasCredential: row.credentialEncrypted !== null,
+    credentialKind: row.credentialKind as "github_app" | "managed_github_app" | "provider_token",
+    installationId: row.installationId,
+    providerAccountLogin: row.providerAccountLogin,
+    providerAccountType: row.providerAccountType as "User" | "Organization" | null,
+    hasCredential: row.credentialKind === "managed_github_app" || row.credentialEncrypted !== null,
     accessTokenExpiresAt: row.accessTokenExpiresAt?.toISOString() ?? null,
     webhookAuthKind: row.webhookAuthKind as "hmac_sha256" | "shared_token" | "basic",
     hasWebhookSecret: true,
     webhookUsername: row.webhookUsername,
-    webhookPath: `/v1/webhooks/automations/${endpointId}`,
+    webhookPath:
+      row.credentialKind === "managed_github_app"
+        ? "/v1/webhooks/pr-review/github"
+        : `/v1/webhooks/automations/${endpointId}`,
     status: row.status as "active" | "disabled",
     createdBySubjectId: row.createdBySubjectId,
     createdAt: row.createdAt.toISOString(),

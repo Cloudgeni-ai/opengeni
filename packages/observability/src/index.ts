@@ -235,6 +235,9 @@ const INTERACTION_INTERVENTION_OUTCOMES = new Set([
   "expired",
   "cancelled",
 ]);
+const WORKSPACE_INSIGHTS_RANGES = new Set(["today", "week", "month", "ytd"]);
+const WORKSPACE_INSIGHTS_OUTCOMES = new Set(["completed", "failed"]);
+const workspaceInsightsDurationHistogramBuckets = [0.05, 0.1, 0.25, 0.5, 1, 1.5, 2, 3, 5, 10, 30];
 const PUBLIC_STARTUP_DEPENDENCIES = new Set([
   "Modal private-registry image",
   "NATS",
@@ -337,6 +340,20 @@ const PUBLIC_CHANNEL_A_FAILURE_REASONS = new Set([
   "unexpected",
 ]);
 
+const PUBLIC_API_FATAL_PHASES = new Set(["startup", "running"]);
+const PUBLIC_API_FATAL_REASON_KINDS = new Set([
+  "bigint",
+  "boolean",
+  "error",
+  "function",
+  "null",
+  "number",
+  "object",
+  "string",
+  "symbol",
+  "undefined",
+]);
+
 /**
  * Public diagnostic values are protocol constants, never values inferred from
  * an exception's name, constructor, code, message, or enumerable properties.
@@ -344,6 +361,7 @@ const PUBLIC_CHANNEL_A_FAILURE_REASONS = new Set([
  * are omitted rather than copied through based on syntax.
  */
 const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
+  "ApiFatalOperationError",
   "OperationError",
   "CodexCheckpointOperationError",
   "CodexFleetShadowOperationError",
@@ -377,6 +395,9 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
 
 const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "agent_command_wake_failed",
+  "api_startup_failed",
+  "api_uncaught_exception",
+  "api_unhandled_rejection",
   "artifact_materializer_native_input_framing_failed",
   "artifact_materializer_native_snapshot_open_failed",
   "artifact_materializer_native_state_mismatch",
@@ -481,6 +502,7 @@ export class Observability {
   private readonly gauges = new Map<string, Gauge<string>>();
   private readonly histograms = new Map<string, Histogram<string>>();
   private readonly registrations = new Map<string, MetricRegistration>();
+  private readonly pendingExports = new Set<Promise<void>>();
   private readonly now: () => number;
   private readonly exporter: (
     url: string,
@@ -771,6 +793,13 @@ export class Observability {
     return await this.registry.metrics();
   }
 
+  /** Wait for every OTLP export accepted before or during this drain. */
+  async flush(): Promise<void> {
+    while (this.pendingExports.size > 0) {
+      await Promise.allSettled([...this.pendingExports]);
+    }
+  }
+
   private counter(name: string, help: string, labelNames: string[]): Counter<string> {
     const existing = this.counters.get(name);
     if (existing) {
@@ -879,15 +908,22 @@ export class Observability {
         },
       ],
     };
-    void this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)).catch(
-      () => {
+    let pendingExport: Promise<void>;
+    pendingExport = Promise.resolve()
+      .then(() =>
+        this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)),
+      )
+      .catch(() => {
         this.warn("OTLP span export failed", {
           errorClass: "TelemetryExportError",
           errorCode: "otlp_export_failed",
           origin: "observability",
         });
-      },
-    );
+      })
+      .finally(() => {
+        this.pendingExports.delete(pendingExport);
+      });
+    this.pendingExports.add(pendingExport);
   }
 }
 
@@ -1043,6 +1079,55 @@ export function interactionInterventionMetricObserver(
   };
 }
 
+export type WorkspaceInsightsMetricObservation = {
+  range: string;
+  providerFiltered: boolean;
+  modelFiltered: boolean;
+  outcome: string;
+  durationMs: number;
+};
+
+/**
+ * Identity-free route timing for Workspace Insights. The dedicated two-second
+ * bucket is the service target; fixed enums and filter-presence flags keep
+ * tenant ids and caller-supplied provider/model values out of telemetry.
+ */
+export function workspaceInsightsMetricObserver(
+  observability: Observability | null | undefined,
+): (observation: WorkspaceInsightsMetricObservation) => void {
+  if (!observability) return () => undefined;
+  return (observation) => {
+    const range = boundedMetricEnum(WORKSPACE_INSIGHTS_RANGES, observation.range);
+    const outcome = boundedMetricEnum(WORKSPACE_INSIGHTS_OUTCOMES, observation.outcome);
+    const providerFilter = observation.providerFiltered ? "filtered" : "all";
+    const modelFilter = observation.modelFiltered ? "filtered" : "all";
+    const durationSeconds = boundedMetricDuration(observation.durationMs);
+    try {
+      observability.observeHistogram({
+        name: "opengeni_workspace_insights_request_duration_seconds",
+        help: "Workspace Insights route service duration by bounded range, filter presence, and outcome.",
+        buckets: workspaceInsightsDurationHistogramBuckets,
+        labels: {
+          range,
+          provider_filter: providerFilter,
+          model_filter: modelFilter,
+          outcome,
+        },
+        value: durationSeconds,
+      });
+      observability.info("Workspace Insights request measured", {
+        surface: "workspace_insights",
+        eventType: "request_latency",
+        route: "/v1/workspaces/:workspaceId/insights",
+        outcome,
+        durationMs: Math.round(durationSeconds * 1_000),
+      });
+    } catch {
+      recordObserverFailure(observability, "workspace_insights");
+    }
+  };
+}
+
 function boundedMetricEnum(allowed: ReadonlySet<string>, value: string): string {
   return allowed.has(value) ? value : "unknown";
 }
@@ -1115,6 +1200,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
     return {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
+      ...projectApiFatalDiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
@@ -1126,6 +1212,18 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       return typeof value === "string" && pattern?.test(value) === true;
     }),
   );
+}
+
+function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "ApiFatalOperationError") return {};
+  const phase = attributes.phase;
+  const reasonKind = attributes.reasonKind;
+  return {
+    ...(typeof phase === "string" && PUBLIC_API_FATAL_PHASES.has(phase) ? { phase } : {}),
+    ...(typeof reasonKind === "string" && PUBLIC_API_FATAL_REASON_KINDS.has(reasonKind)
+      ? { reasonKind }
+      : {}),
+  };
 }
 
 function projectStartupDependencyAttributes(attributes: Attributes): Attributes {

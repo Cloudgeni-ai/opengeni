@@ -4,6 +4,7 @@ import { resolveCodexAppsCredentialIdForRun } from "@opengeni/core";
 import {
   createDb,
   encryptEnvironmentValue,
+  ensureManagedAccessForUserWithOrganizationMemberships,
   listCodexAccountStatuses,
   synchronizeCanonicalHumanLoginBindings,
   upsertCodexSubscriptionCredential,
@@ -262,6 +263,16 @@ beforeAll(async () => {
       insert into auth_identities (id, user_id, provider_id, account_id)
       values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})
     `;
+    // Before 0348 the managed-cookie access resolver materialised each of these
+    // organizations implicitly on the first `/v1/access/me`. The post-sign-in
+    // onboarding gate replaces that implicit provisioning, so the fixture now
+    // states the premise these Codex tests always relied on.
+    await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId,
+      email: `${userId}@example.com`,
+      name: userId === OWNER_USER_ID ? "Owner" : "Other admin",
+      emailVerified: true,
+    });
     const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
     const sessionIds =
       userId === OWNER_USER_ID
@@ -314,6 +325,18 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     expect(signup.status).toBeGreaterThanOrEqual(200);
     expect(signup.status).toBeLessThan(300);
     await admin`update auth_users set email_verified = true where email = ${email}`;
+    // After 0348 a real signup is an account create only: the organization is
+    // created by the separate post-sign-in onboarding lifecycle, not implicitly
+    // by the first `/v1/access/me`. This Codex test is about credential
+    // ownership, not onboarding, so complete that step for the real user.
+    const [signedUp] = await admin<Array<{ id: string }>>`
+      select id from auth_users where email = ${email}`;
+    await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId: signedUp!.id,
+      email,
+      name: "Real Codex quota Owner",
+      emailVerified: true,
+    });
     const signin = await actual.request("/v1/auth/sign-in/email", {
       method: "POST",
       headers: { "content-type": "application/json" },

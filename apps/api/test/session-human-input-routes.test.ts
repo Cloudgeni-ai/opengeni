@@ -71,7 +71,13 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function frozenFixture() {
+async function frozenFixture(
+  options: {
+    optionalText?: boolean;
+    allowSkip?: boolean;
+    expiresAt?: Date | null;
+  } = {},
+) {
   const suffix = crypto.randomUUID();
   const subjectId = `user:${suffix}`;
   const access = await bootstrapWorkspace(client.db, {
@@ -122,16 +128,29 @@ async function frozenFixture() {
   });
   if (claimed.action !== "claimed") throw new Error(`fixture claim failed: ${claimed.reason}`);
   const requestId = crypto.randomUUID();
-  const questions = [
-    {
-      id: "environment",
-      kind: "single_select" as const,
-      prompt: "Which environment?",
-      options: [{ id: "staging", label: "Staging" }],
-      required: true,
-      allowOther: false,
-    },
-  ];
+  const questions = options.optionalText
+    ? [
+        {
+          id: "note",
+          kind: "text" as const,
+          prompt: "Anything else?",
+          options: [],
+          required: false,
+          allowOther: false,
+        },
+      ]
+    : [
+        {
+          id: "environment",
+          kind: "single_select" as const,
+          prompt: "Which environment?",
+          options: [{ id: "staging", label: "Staging" }],
+          required: true,
+          allowOther: false,
+        },
+      ];
+  const allowSkip = options.allowSkip ?? false;
+  const expiresAt = options.expiresAt ?? null;
   await applySessionTurnSettlement(client.db, grant.workspaceId!, {
     sessionId: session.id,
     turnId: claimed.turn.id,
@@ -148,14 +167,22 @@ async function frozenFixture() {
           id: requestId,
           toolCallId: "human-call-api",
           questions,
-          allowSkip: false,
+          allowSkip,
+          expiresAt,
         },
       ],
     },
     events: [
       {
         type: "session.humanInput.requested",
-        payload: { request: { id: requestId, questions, allowSkip: false, expiresAt: null } },
+        payload: {
+          request: {
+            id: requestId,
+            questions,
+            allowSkip,
+            expiresAt: expiresAt?.toISOString() ?? null,
+          },
+        },
       },
       { type: "session.status.changed", payload: { status: "requires_action" } },
     ],
@@ -395,13 +422,28 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
     });
     expect(invalid.status).toBe(422);
 
-    const beforeSignals = approvalSignals;
-    const accepted = await app.request(`http://x${base}/events`, {
+    const disallowedSkip = await app.request(`http://x${base}/events`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({
         type: "user.humanInputResponse",
         clientEventId: crypto.randomUUID(),
+        payload: {
+          requestId: fixture.requestId,
+          response: { outcome: "skipped" },
+        },
+      }),
+    });
+    expect(disallowedSkip.status).toBe(409);
+
+    const beforeSignals = approvalSignals;
+    const responseClientEventId = crypto.randomUUID();
+    const accepted = await app.request(`http://x${base}/events`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "user.humanInputResponse",
+        clientEventId: responseClientEventId,
         payload: {
           requestId: fixture.requestId,
           response: {
@@ -412,7 +454,8 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
       }),
     });
     expect(accepted.status).toBe(202);
-    expect(await accepted.json()).toMatchObject({
+    const acceptedBody = await accepted.json();
+    expect(acceptedBody).toMatchObject({
       type: "user.humanInputResponse",
       payload: {
         requestId: fixture.requestId,
@@ -421,12 +464,13 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
     });
     expect(approvalSignals).toBe(beforeSignals + 1);
 
+    const signalsAfterAcceptance = approvalSignals;
     const duplicate = await app.request(`http://x${base}/events`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({
         type: "user.humanInputResponse",
-        clientEventId: crypto.randomUUID(),
+        clientEventId: responseClientEventId,
         payload: {
           requestId: fixture.requestId,
           response: {
@@ -436,6 +480,101 @@ describe("structured human-input HTTP surface (real PostgreSQL)", () => {
         },
       }),
     });
-    expect(duplicate.status).toBe(409);
+    expect(duplicate.status).toBe(200);
+    expect(await duplicate.json()).toMatchObject({
+      id: acceptedBody.id,
+      payload: { response: { outcome: "answered" } },
+    });
+    expect(approvalSignals).toBe(signalsAfterAcceptance);
+  });
+
+  test("accepts empty optional text, Skip, and deadline expiry as terminal outcomes", async () => {
+    const optional = await frozenFixture({ optionalText: true });
+    const optionalBase = `/v1/workspaces/${optional.workspaceId}/sessions/${optional.sessionId}`;
+    const optionalResponse = await app.request(`http://x${optionalBase}/events`, {
+      method: "POST",
+      headers: { authorization: optional.authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "user.humanInputResponse",
+        clientEventId: crypto.randomUUID(),
+        payload: {
+          requestId: optional.requestId,
+          response: { outcome: "answered", answers: [] },
+        },
+      }),
+    });
+    expect(optionalResponse.status).toBe(202);
+    expect(await optionalResponse.json()).toMatchObject({
+      payload: {
+        requestId: optional.requestId,
+        response: { outcome: "answered", answers: [] },
+      },
+    });
+
+    const skippable = await frozenFixture({ allowSkip: true });
+    const skipResponse = await app.request(
+      `http://x/v1/workspaces/${skippable.workspaceId}/sessions/${skippable.sessionId}/events`,
+      {
+        method: "POST",
+        headers: { authorization: skippable.authorization, "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "user.humanInputResponse",
+          clientEventId: crypto.randomUUID(),
+          payload: {
+            requestId: skippable.requestId,
+            response: { outcome: "skipped" },
+          },
+        }),
+      },
+    );
+    expect(skipResponse.status).toBe(202);
+    expect(await skipResponse.json()).toMatchObject({
+      payload: { requestId: skippable.requestId, response: { outcome: "skipped" } },
+    });
+
+    const expired = await frozenFixture({ expiresAt: new Date(Date.now() - 1_000) });
+    const expiredBase = `/v1/workspaces/${expired.workspaceId}/sessions/${expired.sessionId}`;
+    const pending = await app.request(
+      `http://x${expiredBase}/human-input-requests?status=pending`,
+      {
+        headers: { authorization: expired.authorization },
+      },
+    );
+    expect(pending.status).toBe(200);
+    expect(await pending.json()).toEqual({ requests: [] });
+
+    const expiryResponse = await app.request(`http://x${expiredBase}/events`, {
+      method: "POST",
+      headers: { authorization: expired.authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "user.humanInputResponse",
+        clientEventId: crypto.randomUUID(),
+        payload: {
+          requestId: expired.requestId,
+          response: { outcome: "answered", answers: [] },
+        },
+      }),
+    });
+    expect(expiryResponse.status).toBe(202);
+    expect(await expiryResponse.json()).toMatchObject({
+      payload: { requestId: expired.requestId, response: { outcome: "expired" } },
+    });
+
+    const repeatedExpiry = await app.request(`http://x${expiredBase}/events`, {
+      method: "POST",
+      headers: { authorization: expired.authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "user.humanInputResponse",
+        clientEventId: crypto.randomUUID(),
+        payload: {
+          requestId: expired.requestId,
+          response: { outcome: "skipped" },
+        },
+      }),
+    });
+    expect(repeatedExpiry.status).toBe(200);
+    expect(await repeatedExpiry.json()).toMatchObject({
+      payload: { requestId: expired.requestId, response: { outcome: "expired" } },
+    });
   });
 });

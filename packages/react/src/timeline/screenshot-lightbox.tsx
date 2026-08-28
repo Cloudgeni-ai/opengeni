@@ -1,6 +1,14 @@
 import { DownloadIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { Dialog } from "radix-ui";
 import { cn } from "../lib/cn";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
@@ -25,7 +33,14 @@ type LightboxController = {
     source?: HTMLElement | null,
     label?: string,
     downloadFilename?: string,
+    controlLabels?: LightboxControlLabels,
+    releaseSource?: () => void,
   ) => void;
+};
+
+export type LightboxControlLabels = {
+  download?: string | undefined;
+  close?: string | undefined;
 };
 
 const LightboxContext = createContext<LightboxController | null>(null);
@@ -45,6 +60,23 @@ export function useLightboxOptional(): LightboxController | null {
 }
 
 const NOOP: LightboxController = { open: () => {} };
+
+/** @internal Owns one optional retained lightbox source and releases it exactly once. */
+export function createLightboxSourceOwner() {
+  let releaseCurrent: (() => void) | null = null;
+  return {
+    replace(release?: (() => void) | undefined) {
+      const previous = releaseCurrent;
+      releaseCurrent = release ?? null;
+      previous?.();
+    },
+    release() {
+      const release = releaseCurrent;
+      releaseCurrent = null;
+      release?.();
+    },
+  };
+}
 
 /**
  * The app-level screenshot lightbox. Render once near the timeline; renderers
@@ -70,9 +102,17 @@ function LightboxRoot({ children }: { children: ReactNode }) {
     caption?: string;
     label: string;
     downloadFilename?: string;
+    controlLabels?: LightboxControlLabels;
   } | null>(null);
   const [tokenSource, setTokenSource] = useState<HTMLElement | null>(null);
+  const sourceOwner = useMemo(() => createLightboxSourceOwner(), []);
   const portalStyle = usePortalTokenStyle(tokenSource);
+
+  const releaseCurrentSource = useCallback(() => {
+    sourceOwner.release();
+  }, [sourceOwner]);
+
+  useEffect(() => releaseCurrentSource, [releaseCurrentSource]);
 
   const open = useCallback(
     (
@@ -81,22 +121,27 @@ function LightboxRoot({ children }: { children: ReactNode }) {
       source?: HTMLElement | null,
       label = "Screenshot",
       downloadFilename?: string,
+      controlLabels?: LightboxControlLabels,
+      releaseSource?: () => void,
     ) => {
+      sourceOwner.replace(releaseSource);
       setTokenSource(source ?? null);
       setState({
         src,
         label,
         ...(caption ? { caption } : {}),
         ...(downloadFilename ? { downloadFilename } : {}),
+        ...(controlLabels ? { controlLabels } : {}),
       });
     },
-    [],
+    [sourceOwner],
   );
 
   const close = useCallback(() => {
+    releaseCurrentSource();
     setState(null);
     setTokenSource(null);
-  }, []);
+  }, [releaseCurrentSource]);
 
   const controller = useMemo<LightboxController>(() => ({ open }), [open]);
 
@@ -159,32 +204,11 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                         alt={state.caption ?? state.label}
                         className="min-h-0 max-h-[82vh] w-auto max-w-full rounded-og-md border border-white/10 object-contain shadow-og-lg"
                       />
-                      <div className="absolute -right-3 -top-3 flex items-center gap-2">
-                        {state.downloadFilename ? (
-                          <a
-                            href={state.src}
-                            download={state.downloadFilename}
-                            className={cn(
-                              "inline-flex size-9 items-center justify-center rounded-full",
-                              "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
-                              "transition-colors hover:border-white/30 hover:text-white",
-                            )}
-                            aria-label={`Download ${state.downloadFilename}`}
-                          >
-                            <DownloadIcon className="size-4" />
-                          </a>
-                        ) : null}
-                        <Dialog.Close
-                          className={cn(
-                            "inline-flex size-9 items-center justify-center rounded-full",
-                            "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
-                            "transition-colors hover:border-white/30 hover:text-white",
-                          )}
-                          aria-label="Close"
-                        >
-                          <XIcon className="size-4" />
-                        </Dialog.Close>
-                      </div>
+                      <ScreenshotLightboxControls
+                        src={state.src}
+                        downloadFilename={state.downloadFilename}
+                        controlLabels={state.controlLabels}
+                      />
                     </div>
                     {state.caption ? (
                       <figcaption className="max-w-2xl text-center font-og-mono text-og-xs text-white/55">
@@ -203,5 +227,45 @@ function LightboxRoot({ children }: { children: ReactNode }) {
         </AnimatePresence>
       </Dialog.Root>
     </LightboxContext.Provider>
+  );
+}
+
+/** @internal Exact controls rendered by an open screenshot lightbox. */
+export function ScreenshotLightboxControls({
+  src,
+  downloadFilename,
+  controlLabels,
+}: {
+  src: string;
+  downloadFilename?: string | undefined;
+  controlLabels?: LightboxControlLabels | undefined;
+}) {
+  return (
+    <div className="absolute -right-3 -top-3 flex items-center gap-2">
+      {downloadFilename ? (
+        <a
+          href={src}
+          download={downloadFilename}
+          className={cn(
+            "inline-flex size-9 items-center justify-center rounded-full",
+            "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
+            "transition-colors hover:border-white/30 hover:text-white",
+          )}
+          aria-label={controlLabels?.download ?? `Download ${downloadFilename}`}
+        >
+          <DownloadIcon className="size-4" />
+        </a>
+      ) : null}
+      <Dialog.Close
+        className={cn(
+          "inline-flex size-9 items-center justify-center rounded-full",
+          "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
+          "transition-colors hover:border-white/30 hover:text-white",
+        )}
+        aria-label={controlLabels?.close ?? "Close"}
+      >
+        <XIcon className="size-4" />
+      </Dialog.Close>
+    </div>
   );
 }

@@ -151,7 +151,20 @@ Start the full local stack:
 bun run dev
 ```
 
-`bun run dev` installs dependencies, creates `.env` from `.env.example` when missing, starts Docker infrastructure, runs migrations, builds the local sandbox image, and starts the API, both workers (control and turn), and the web app.
+`bun run dev` installs dependencies, creates `.env` from `.env.example` when
+missing, runs migrations, and starts the API, both workers (control and turn),
+artifact services, Connected Machines relay, and web app. With
+`OPENGENI_DEV_BACKEND=auto` (the default), it uses Docker when the daemon is
+reachable and otherwise starts PostgreSQL, NATS, Temporal, and MinIO as native
+processes. Set the backend explicitly to `docker` or `native` when required.
+
+The native infrastructure path is intended for Linux sandboxes and other hosts
+without Docker. It changes a copied `OPENGENI_SANDBOX_BACKEND=docker` default to
+the in-process `local` sandbox provider, while preserving explicit remote
+providers such as Modal or OpenSandbox. It also selects MinIO instead of the
+Docker-only Garage fixture. `bun run dev:down` stops this worktree's selected
+infrastructure; `bun run dev:clean -- --yes` also removes its data and
+`.env.runtime` without touching another worktree or unrelated Docker state.
 
 The first development start also prepares the current-host editable-artifact
 kernel. OpenGeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
@@ -168,10 +181,10 @@ Open:
 - Web app: `http://127.0.0.1:3000`
 - API health: `http://127.0.0.1:8000/healthz`
 - NATS monitor: `http://127.0.0.1:8222`
-- Garage S3 API: `http://127.0.0.1:3900`
+- Object storage: Garage `http://127.0.0.1:3900` with Docker by default, or
+  MinIO `http://127.0.0.1:9000` with the native backend/explicit MinIO fixture
 - Temporal gRPC: `127.0.0.1:7233`
-
-If you run Temporal with the local dev server instead of Docker Compose, the Temporal UI is commonly available at `http://127.0.0.1:8233`.
+- Native Temporal UI: `http://127.0.0.1:8233`
 
 ## Manual Startup
 
@@ -201,6 +214,7 @@ Copy `.env.example` to `.env` and configure at least:
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` when using Temporal Cloud (enables TLS automatically)
 - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` if dependencies need longer startup windows
+- `OPENGENI_DEV_BACKEND` when automatic Docker/native selection is not desired
 - `OPENGENI_OPENAI_PROVIDER`
 - OpenAI or Azure OpenAI credentials
 - `OPENGENI_SANDBOX_BACKEND`
@@ -220,7 +234,11 @@ OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://garage:3900
 
 The public endpoint is embedded in browser-facing signed URLs. The internal endpoint is used by API and worker storage requests, while the sandbox endpoint is supplied to Docker agent containers. The two private endpoints may share the same address when those processes use one Docker network. Presigned URLs generated for one host are not safely interchangeable with another because the host is part of the S3 signature.
 
-`bun run dev` isolates each checkout/worktree (Compose project from the directory name, free host ports, loopback URL rewrite including `nats://`, `.env.runtime` overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless `OPENGENI_PIN_PORTS=1`. `bun run dev:down` stops only that worktree's containers; `bun run dev:clean` also removes its data volumes and sandbox image tags.
+`bun run dev` isolates each checkout/worktree (project from the directory name,
+free host ports, loopback URL rewrite including `nats://`, `.env.runtime`
+overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless
+`OPENGENI_PIN_PORTS=1`. Native and Docker warm restarts reuse only a healthy
+recorded stack's generated ports.
 
 For production deployments, use the native provider object store instead of running Garage or MinIO manually:
 
@@ -236,10 +254,12 @@ AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORA
 
 For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
 registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
-`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot, while v2 capability Packs
-select an explicit Rig whose active version owns its logical/provider image
-truth. Pre-v2 Pack rows retain their historical turn-time image warmup only for
-rollback compatibility. The registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
+`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot and remains the logical base
+for every Rig. A verified Rig provider image may accelerate physical cold create,
+but never replaces that logical lease identity. V2 capability Packs select a Rig
+for setup/check composition and cannot require an explicit sandbox image while
+Rig image overrides are disabled. Rig-less pre-v2 Pack rows retain their
+historical turn-time image warmup only for rollback compatibility. The registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
 `OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
 `~/.modal.toml` profile.

@@ -163,17 +163,7 @@ import type {
   UninstallPluginResult,
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
-  DocumentAuthorityReclassification,
-  DocumentDefaultCollectionBackfill,
-  DocumentDefaultCollectionBackfillAudit,
-  GetDocumentDefaultCollectionBackfillAuditOptions,
-  ListDocumentDefaultCollectionBackfillRunsResponse,
-  ListOrganizationDocumentAuthorityReclassificationsResponse,
-  ListDocumentAuthorityReclassificationsOptions,
-  ListDocumentAuthorityReclassificationsResponse,
   MoveDocumentRequest,
-  ReclassifyDocumentAuthorityRequest,
-  RunDocumentDefaultCollectionBackfillRequest,
   ClientConfig,
   WorkspaceModelAccessPolicy,
   WorkspaceModelCatalogResponse,
@@ -222,6 +212,8 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   CreateVariableSetRequest,
+  ResolveVariableSetAttachmentsRequest,
+  ResolveVariableSetAttachmentsResponse,
   CreateRigRequest,
   CreateWorkspaceRequest,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
@@ -258,10 +250,11 @@ import type {
   UserResourceGrantMutationResponse,
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
-  ListOrganizationMembersResponse,
+  ListOrganizationAdministrationMembersResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
-  AddOrganizationWorkspaceMemberRequest,
+  AcceptOrganizationRecoveryCustodyRequest,
+  ConfigureOrganizationRecoveryPolicyRequest,
   CreateOrganizationInvitationRequest,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
@@ -269,11 +262,22 @@ import type {
   OrganizationInvitation,
   OrganizationAdministrationOverview,
   OrganizationMember,
+  OrganizationRecoveryMutationResponse,
+  OrganizationRecoveryOperationCommandRequest,
+  OrganizationRecoveryOverview,
+  OrganizationWorkspaceAccess,
+  OrganizationWorkspaceAccessMember,
   OrganizationRetentionPolicy,
   OrganizationSummary,
   RevokeOrganizationInvitationRequest,
+  RevokeOrganizationWorkspaceMemberRequest,
+  RevokeOrganizationWorkspaceMemberResponse,
+  PutOrganizationWorkspaceMemberRequest,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
+  DisableOrganizationRecoveryPolicyRequest,
+  StartOrganizationRecoveryOperationRequest,
+  UpdateOrganizationWorkspaceRequest,
   UpdateOrganizationRetentionPolicyRequest,
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
@@ -319,6 +323,8 @@ import type {
   ForkSessionRequest,
   ForkSessionResponse,
   Session,
+  SessionStatus,
+  WorkClaimSubjectType,
   SessionBackgroundCommandListResponse,
   CancelSessionBackgroundCommandResult,
   SessionListResponse,
@@ -426,6 +432,7 @@ import type {
   UpdateSessionGoalRequest,
   ApplySessionGoalRevisionRequest,
   UpdateSessionRequest,
+  UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
@@ -565,6 +572,11 @@ export type OpenGeniClientOptions = {
   headers?: Record<string, string> | (() => Record<string, string>);
   /** Custom fetch implementation. Defaults to the global `fetch`. */
   fetch?: FetchLike;
+  /**
+   * Optional causal clock for shared session projection GETs. The selected
+   * request generation is retained for observers that join after launch.
+   */
+  beginSharedRead?: (() => number) | undefined;
   /** Positive deadline for interactive session commands. Defaults to 15 seconds. */
   sessionCommandTimeoutMs?: number;
 };
@@ -574,6 +586,55 @@ export type OpenGeniRequestOptions = {
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
 };
+
+export type SharedSessionReadOptions = {
+  /**
+   * Observe the selected shared network GET's actual start. A caller joining
+   * an already-started request receives its retained generation when the
+   * client has a `beginSharedRead` clock.
+   */
+  onRequestStart?: ((readGeneration?: number) => void) | undefined;
+};
+
+export type GetSessionOptions = SharedSessionReadOptions & {
+  /**
+   * Require a network read generation that starts no earlier than this call.
+   * Concurrent callers targeting the same successor generation still share it.
+   */
+  fresh?: boolean;
+};
+
+export type GetSessionLineageOptions = SharedSessionReadOptions;
+
+type SingleFlightReadEntry = {
+  generation: number;
+  promise: Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+  started: boolean;
+  stamp?: number | undefined;
+  listeners: Set<(readGeneration?: number) => void>;
+};
+
+function createSingleFlightReadEntry(
+  generation: number,
+  onRequestStart?: (readGeneration?: number) => void,
+): SingleFlightReadEntry {
+  let resolve!: (value: unknown) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<unknown>((entryResolve, entryReject) => {
+    resolve = entryResolve;
+    reject = entryReject;
+  });
+  return {
+    generation,
+    promise,
+    resolve,
+    reject,
+    started: false,
+    listeners: new Set(onRequestStart ? [onRequestStart] : []),
+  };
+}
 
 /** Follow-up prompt fields accepted by both queue and Steer. Session tools are updated separately. */
 export type SendMessageInput = UserMessageEventInput["payload"] & {
@@ -642,8 +703,9 @@ export class OpenGeniClient {
   private readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
-  private readonly readInFlight = new Map<string, Promise<unknown>>();
-  private readonly readTrailing = new Map<string, Promise<unknown>>();
+  private readonly active = new Map<string, SingleFlightReadEntry>();
+  private readonly generations = new Map<string, number>();
+  private readonly queued = new Map<string, SingleFlightReadEntry>();
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
   readonly interaction: OpenGeniInteractionClient;
 
@@ -889,10 +951,16 @@ export class OpenGeniClient {
     );
   }
 
-  async getNewSessionDraft(workspaceId: string): Promise<NewSessionDraft> {
+  async getNewSessionDraft(
+    workspaceId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<NewSessionDraft> {
     return await this.requestJson<NewSessionDraft>(
       "GET",
       `/v1/workspaces/${workspaceId}/new-session-draft`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -910,10 +978,10 @@ export class OpenGeniClient {
   async getSession(
     workspaceId: string,
     sessionId: string,
-    options: { fresh?: boolean } = {},
+    options: GetSessionOptions = {},
   ): Promise<Session> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
-    return await this.singleFlightRead(path, () => this.requestJson<Session>("GET", path), options);
+    return await this.sharedRead(path, () => this.requestJson<Session>("GET", path), options);
   }
 
   async updateSession(
@@ -924,6 +992,19 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+      request,
+    );
+  }
+
+  /** Replace the complete ordered Variable Set selection at a quiescent turn boundary. */
+  async updateSessionVariableSets(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionVariableSetsRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/variable-sets`,
       request,
     );
   }
@@ -1115,11 +1196,26 @@ export class OpenGeniClient {
     options: {
       limit?: number;
       parentSessionId?: string | null;
+      rootSessionId?: string;
       cursor?: string;
+      query?: string;
+      /** @deprecated use query. */
       search?: string;
+      statuses?: SessionStatus[];
+      activeOnly?: boolean;
+      recentHours?: number;
+      subject?: {
+        namespace: string;
+        type: WorkClaimSubjectType;
+        canonicalKey: string;
+      };
+      claimLimit?: number;
     } = {},
   ): Promise<AgentTopologyPageResponse> {
-    const search = options.search?.trim();
+    const query = options.query?.trim() || options.search?.trim();
+    if (query && options.subject) {
+      throw new TypeError("listAgentTopology query cannot be combined with an exact subject");
+    }
     return await this.requestJson<AgentTopologyPageResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/agent-topology`,
@@ -1129,8 +1225,22 @@ export class OpenGeniClient {
         ...(options.parentSessionId === undefined
           ? {}
           : { parentSessionId: options.parentSessionId ?? "null" }),
+        ...(options.rootSessionId ? { rootSessionId: options.rootSessionId } : {}),
         ...(options.cursor ? { cursor: options.cursor } : {}),
-        ...(search ? { search } : {}),
+        ...(query ? { query } : {}),
+        ...(options.statuses?.length ? { statuses: options.statuses.join(",") } : {}),
+        ...(options.activeOnly !== undefined
+          ? { activeOnly: options.activeOnly ? "true" : "false" }
+          : {}),
+        ...(options.recentHours !== undefined ? { recentHours: String(options.recentHours) } : {}),
+        ...(options.subject
+          ? {
+              subjectNamespace: options.subject.namespace,
+              subjectType: options.subject.type,
+              subjectKey: options.subject.canonicalKey,
+            }
+          : {}),
+        ...(options.claimLimit !== undefined ? { claimLimit: String(options.claimLimit) } : {}),
       },
     );
   }
@@ -1185,39 +1295,142 @@ export class OpenGeniClient {
     );
   }
 
-  async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
+  async getSessionLineage(
+    workspaceId: string,
+    sessionId: string,
+    options: GetSessionLineageOptions = {},
+  ): Promise<SessionLineageResponse> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
-    return await this.singleFlightRead(path, () =>
-      this.requestJson<SessionLineageResponse>("GET", path),
+    return await this.sharedRead(
+      path,
+      () => this.requestJson<SessionLineageResponse>("GET", path),
+      options,
     );
   }
 
-  private singleFlightRead<T>(
+  private sharedRead<T>(
     key: string,
     read: () => Promise<T>,
-    options: { fresh?: boolean } = {},
+    options: GetSessionOptions = {},
   ): Promise<T> {
-    const existing = this.readInFlight.get(key);
+    const existing = this.active.get(key);
     if (existing) {
-      if (!options.fresh) return existing as Promise<T>;
-      const queued = this.readTrailing.get(key);
-      if (queued) return queued as Promise<T>;
-      const trailing = existing.then(
-        () => this.singleFlightRead(key, read),
-        () => this.singleFlightRead(key, read),
-      );
-      this.readTrailing.set(key, trailing);
-      const clear = () => {
-        if (this.readTrailing.get(key) === trailing) this.readTrailing.delete(key);
-      };
-      void trailing.then(clear, clear);
-      return trailing;
+      if (!options.fresh) {
+        this.observeRead(existing, options.onRequestStart);
+        return existing.promise as Promise<T>;
+      }
+      const requiredGeneration = existing.generation + 1;
+      const queued = this.queued.get(key);
+      if (queued && queued.generation >= requiredGeneration) {
+        this.observeRead(queued, options.onRequestStart);
+        return queued.promise as Promise<T>;
+      }
+      const predecessor = queued?.promise ?? existing.promise;
+      return this.queueRead(key, predecessor, requiredGeneration, read, options.onRequestStart);
     }
-    const promise = read().finally(() => {
-      if (this.readInFlight.get(key) === promise) this.readInFlight.delete(key);
-    });
-    this.readInFlight.set(key, promise);
-    return promise;
+    // The active entry clears in its finally before reactions on its public
+    // promise run. During that settlement gap a successor may already be
+    // queued but not yet launched; every caller must join that exact successor
+    // instead of bypassing it with a competing GET for the same generation.
+    const queued = this.queued.get(key);
+    if (queued && (!options.fresh || !queued.started)) {
+      this.observeRead(queued, options.onRequestStart);
+      return queued.promise as Promise<T>;
+    }
+    if (queued) {
+      return this.queueRead(
+        key,
+        queued.promise,
+        queued.generation + 1,
+        read,
+        options.onRequestStart,
+      );
+    }
+    const generation = (this.generations.get(key) ?? 0) + 1;
+    const entry = createSingleFlightReadEntry(generation, options.onRequestStart);
+    this.launchRead(key, entry, read);
+    return entry.promise as Promise<T>;
+  }
+
+  private queueRead<T>(
+    key: string,
+    predecessor: Promise<unknown>,
+    generation: number,
+    read: () => Promise<T>,
+    onRequestStart?: (readGeneration?: number) => void,
+  ): Promise<T> {
+    const entry = createSingleFlightReadEntry(generation, onRequestStart);
+    this.queued.set(key, entry);
+    const launch = () => this.launchRead(key, entry, read);
+    void predecessor.then(launch, launch);
+    const clear = () => {
+      if (this.queued.get(key) !== entry) return;
+      this.queued.delete(key);
+      if (!this.active.has(key)) this.generations.delete(key);
+    };
+    void entry.promise.then(clear, clear);
+    return entry.promise as Promise<T>;
+  }
+
+  private launchRead<T>(key: string, entry: SingleFlightReadEntry, read: () => Promise<T>): void {
+    entry.started = true;
+    this.generations.set(key, entry.generation);
+    this.active.set(key, entry);
+    try {
+      entry.stamp = this.options.beginSharedRead?.();
+    } catch {
+      // Causal metadata cannot cancel or replace the selected network GET.
+    }
+    for (const listener of entry.listeners) {
+      try {
+        listener(entry.stamp);
+      } catch {
+        // Read metadata observers cannot cancel or replace the selected GET.
+      }
+    }
+    entry.listeners.clear();
+    const settle = () => {
+      if (this.active.get(key) !== entry) return;
+      this.active.delete(key);
+      if (!this.queued.has(key)) this.generations.delete(key);
+    };
+    let request: Promise<T>;
+    try {
+      request = read();
+    } catch (error) {
+      settle();
+      entry.reject(error);
+      return;
+    }
+    void request.then(
+      (value) => {
+        settle();
+        entry.resolve(value);
+      },
+      (error: unknown) => {
+        settle();
+        entry.reject(error);
+      },
+    );
+  }
+
+  private observeRead(
+    entry: SingleFlightReadEntry,
+    listener: ((readGeneration?: number) => void) | undefined,
+  ): void {
+    if (!listener) return;
+    if (!entry.started) {
+      entry.listeners.add(listener);
+      return;
+    }
+    // Without a client-wide clock there is no launch-time identity to replay;
+    // invoking the observer now would fabricate a causally later generation.
+    if (entry.stamp === undefined) return;
+    try {
+      listener(entry.stamp);
+    } catch {
+      // Read metadata observers cannot cancel or replace the selected GET.
+    }
   }
 
   /** Negotiate one server-mediated connected-Codex GPT-Live V3 WebRTC call. */
@@ -1877,7 +2090,7 @@ export class OpenGeniClient {
 
   async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`;
-    return await this.singleFlightRead(path, () =>
+    return await this.sharedRead(path, () =>
       this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
     );
   }
@@ -2213,7 +2426,7 @@ export class OpenGeniClient {
   /** The session's goal. 404s when the session never had one. */
   async getGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`;
-    return await this.singleFlightRead(path, () => this.requestJson<SessionGoal>("GET", path));
+    return await this.sharedRead(path, () => this.requestJson<SessionGoal>("GET", path));
   }
 
   async updateGoal(
@@ -3830,11 +4043,20 @@ export class OpenGeniClient {
     );
   }
 
-  async listOrganizationMembers(organizationId: string): Promise<ListOrganizationMembersResponse> {
-    return await this.requestJson<ListOrganizationMembersResponse>(
+  async listOrganizationAdministrationMembers(
+    organizationId: string,
+  ): Promise<ListOrganizationAdministrationMembersResponse> {
+    return await this.requestJson<ListOrganizationAdministrationMembersResponse>(
       "GET",
       `/v1/organizations/${organizationId}/members`,
     );
+  }
+
+  /** @deprecated Use listOrganizationAdministrationMembers for its privacy-safe projection. */
+  async listOrganizationMembers(
+    organizationId: string,
+  ): Promise<ListOrganizationAdministrationMembersResponse> {
+    return await this.listOrganizationAdministrationMembers(organizationId);
   }
 
   /** Canonical organization identity and every non-personal workspace access roster. */
@@ -3847,42 +4069,27 @@ export class OpenGeniClient {
     );
   }
 
-  /** Rename the organization under an exact optimistic-concurrency fence. */
-  async updateOrganizationName(
-    organizationId: string,
-    request: UpdateOrganizationNameRequest,
-  ): Promise<OrganizationSummary> {
-    return await this.requestJson<OrganizationSummary>(
-      "PATCH",
-      `/v1/organizations/${organizationId}`,
-      request,
-    );
-  }
-
-  /**
-   * Organization control-plane update for a shared workspace. This does not
-   * require or create operational workspace access for the organization admin.
-   */
-  async updateOrganizationWorkspace(
-    organizationId: string,
-    workspaceId: string,
-    request: UpdateWorkspaceRequest,
-  ): Promise<Workspace> {
-    return await this.requestJson<Workspace>(
-      "PATCH",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
-      request,
-    );
-  }
-
   /** Create a shared workspace without implicitly granting the actor access. */
   async createOrganizationWorkspace(
     organizationId: string,
     request: CreateOrganizationWorkspaceRequest,
-  ): Promise<Workspace> {
-    return await this.requestJson<Workspace>(
+  ): Promise<OrganizationWorkspaceAccess> {
+    return await this.requestJson<OrganizationWorkspaceAccess>(
       "POST",
       `/v1/organizations/${organizationId}/workspaces`,
+      request,
+    );
+  }
+
+  /** Rename one shared workspace under an exact optimistic-concurrency fence. */
+  async updateOrganizationWorkspace(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateOrganizationWorkspaceRequest,
+  ): Promise<OrganizationWorkspaceAccess> {
+    return await this.requestJson<OrganizationWorkspaceAccess>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
       request,
     );
   }
@@ -3899,43 +4106,41 @@ export class OpenGeniClient {
     );
   }
 
-  async addOrganizationWorkspaceMember(
+  async putOrganizationWorkspaceMember(
     organizationId: string,
     workspaceId: string,
-    request: AddOrganizationWorkspaceMemberRequest,
-  ): Promise<WorkspaceMember> {
-    return await this.requestJson<WorkspaceMember>(
+    membershipId: string,
+    request: PutOrganizationWorkspaceMemberRequest,
+  ): Promise<OrganizationWorkspaceAccessMember> {
+    return await this.requestJson<OrganizationWorkspaceAccessMember>(
+      "PUT",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${membershipId}`,
+      request,
+    );
+  }
+
+  async revokeOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    membershipId: string,
+    request: RevokeOrganizationWorkspaceMemberRequest,
+  ): Promise<RevokeOrganizationWorkspaceMemberResponse> {
+    return await this.requestJson<RevokeOrganizationWorkspaceMemberResponse>(
       "POST",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members`,
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${membershipId}/revoke`,
       request,
     );
   }
 
-  async updateOrganizationWorkspaceMember(
+  /** Rename the organization under an exact optimistic-concurrency fence. */
+  async updateOrganizationName(
     organizationId: string,
-    workspaceId: string,
-    subjectId: string,
-    request: UpdateWorkspaceMemberRequest,
-  ): Promise<WorkspaceMember> {
-    return await this.requestJson<WorkspaceMember>(
+    request: UpdateOrganizationNameRequest,
+  ): Promise<OrganizationSummary> {
+    return await this.requestJson<OrganizationSummary>(
       "PATCH",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
-        subjectId,
-      )}`,
+      `/v1/organizations/${organizationId}`,
       request,
-    );
-  }
-
-  async removeOrganizationWorkspaceMember(
-    organizationId: string,
-    workspaceId: string,
-    subjectId: string,
-  ): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
-        subjectId,
-      )}`,
     );
   }
 
@@ -3967,6 +4172,93 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationRetentionPolicy>(
       "PATCH",
       `/v1/organizations/${organizationId}/retention-policy`,
+      request,
+    );
+  }
+
+  async getOrganizationRecovery(organizationId: string): Promise<OrganizationRecoveryOverview> {
+    return await this.requestJson<OrganizationRecoveryOverview>(
+      "GET",
+      `/v1/organizations/${organizationId}/recovery`,
+    );
+  }
+
+  async configureOrganizationRecoveryPolicy(
+    organizationId: string,
+    request: ConfigureOrganizationRecoveryPolicyRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "PUT",
+      `/v1/organizations/${organizationId}/recovery/policy`,
+      request,
+    );
+  }
+
+  async acceptOrganizationRecoveryCustody(
+    organizationId: string,
+    request: AcceptOrganizationRecoveryCustodyRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/policy/accept`,
+      request,
+    );
+  }
+
+  async disableOrganizationRecoveryPolicy(
+    organizationId: string,
+    request: DisableOrganizationRecoveryPolicyRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/policy/disable`,
+      request,
+    );
+  }
+
+  async startOrganizationRecoveryOperation(
+    organizationId: string,
+    request: StartOrganizationRecoveryOperationRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations`,
+      request,
+    );
+  }
+
+  async approveOrganizationRecoveryOperation(
+    organizationId: string,
+    recoveryOperationId: string,
+    request: OrganizationRecoveryOperationCommandRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/approve`,
+      request,
+    );
+  }
+
+  async cancelOrganizationRecoveryOperation(
+    organizationId: string,
+    recoveryOperationId: string,
+    request: OrganizationRecoveryOperationCommandRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/cancel`,
+      request,
+    );
+  }
+
+  async executeOrganizationRecoveryOperation(
+    organizationId: string,
+    recoveryOperationId: string,
+    request: OrganizationRecoveryOperationCommandRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/execute`,
       request,
     );
   }
@@ -4636,6 +4928,18 @@ export class OpenGeniClient {
     );
   }
 
+  /** Resolve only caller-supplied attachment ids without enumerating the catalog. */
+  async resolveVariableSetAttachments(
+    workspaceId: string,
+    request: ResolveVariableSetAttachmentsRequest,
+  ): Promise<ResolveVariableSetAttachmentsResponse> {
+    return await this.requestJson<ResolveVariableSetAttachmentsResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/variable-sets/resolve-attachments`,
+      request,
+    );
+  }
+
   async createVariableSet(
     workspaceId: string,
     request: CreateVariableSetRequest,
@@ -5058,10 +5362,17 @@ export class OpenGeniClient {
     );
   }
 
-  async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {
+  async getFile(
+    workspaceId: string,
+    fileId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<FileAsset> {
     return await this.requestJson<FileAsset>(
       "GET",
       `/v1/workspaces/${workspaceId}/files/${fileId}`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -5453,100 +5764,6 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/documents/${documentId}/move`,
       request,
-    );
-  }
-
-  /**
-   * Atomically reclassify a Document's authority and every indexed chunk.
-   * The operation is replay-safe and rejects a stale expected authority tuple.
-   */
-  async reclassifyDocumentAuthority(
-    workspaceId: string,
-    documentId: string,
-    request: ReclassifyDocumentAuthorityRequest,
-  ): Promise<DocumentAuthorityReclassification> {
-    return await this.requestJson<DocumentAuthorityReclassification>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications`,
-      request,
-    );
-  }
-
-  /** List the current actor's durable authority-reclassification receipts. */
-  async listDocumentAuthorityReclassifications(
-    workspaceId: string,
-    documentId: string,
-    options: ListDocumentAuthorityReclassificationsOptions = {},
-  ): Promise<ListDocumentAuthorityReclassificationsResponse> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor) params.set("cursor", options.cursor);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.requestJson<ListDocumentAuthorityReclassificationsResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications${query}`,
-    );
-  }
-
-  /**
-   * Advance one resumable, organization-scoped Default collection backfill.
-   * Reusing an operation ID is idempotent; keep the run ID across batches.
-   */
-  async runDocumentDefaultCollectionBackfill(
-    workspaceId: string,
-    request: RunDocumentDefaultCollectionBackfillRequest,
-  ): Promise<DocumentDefaultCollectionBackfill> {
-    return await this.requestJson<DocumentDefaultCollectionBackfill>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/document-default-collection-backfills`,
-      request,
-    );
-  }
-
-  /** List organization-scoped Default collection backfill runs (organization admin only). */
-  async listDocumentDefaultCollectionBackfillRuns(
-    workspaceId: string,
-    options: ListDocumentAuthorityReclassificationsOptions = {},
-  ): Promise<ListDocumentDefaultCollectionBackfillRunsResponse> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor) params.set("cursor", options.cursor);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.requestJson<ListDocumentDefaultCollectionBackfillRunsResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-default-collection-backfills${query}`,
-    );
-  }
-
-  /** Read bounded operation and workspace receipts for one Default-collection backfill run. */
-  async getDocumentDefaultCollectionBackfillAudit(
-    workspaceId: string,
-    runId: string,
-    options: GetDocumentDefaultCollectionBackfillAuditOptions = {},
-  ): Promise<DocumentDefaultCollectionBackfillAudit> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.operationCursor) params.set("operationCursor", options.operationCursor);
-    if (options.receiptCursor) params.set("receiptCursor", options.receiptCursor);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.requestJson<DocumentDefaultCollectionBackfillAudit>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-default-collection-backfills/${runId}${query}`,
-    );
-  }
-
-  /** List organization-wide Document authority changes (organization admin only). */
-  async listOrganizationDocumentAuthorityReclassifications(
-    workspaceId: string,
-    options: ListDocumentAuthorityReclassificationsOptions = {},
-  ): Promise<ListOrganizationDocumentAuthorityReclassificationsResponse> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor) params.set("cursor", options.cursor);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.requestJson<ListOrganizationDocumentAuthorityReclassificationsResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-authority-reclassifications${query}`,
     );
   }
 

@@ -1,5 +1,43 @@
 # @opengeni/contracts
 
+## 2.7.0
+
+### Minor Changes
+
+- 7238fa4: Add permission-scoped advisory work discovery, durable non-exclusive typed work claims, bounded related-work projections, independent rollout controls, observability, and SDK topology filters.
+
+## 2.6.0
+
+### Minor Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+- 986f5fe: Add provider-neutral browser login session sets with bounded independently revocable slots, explicit actor switching, isolated add and re-authentication, scoped logout, non-enumerating cross-slot deep-link recovery, and rolling legacy/dual/broker compatibility.
+- 6e12f3a: Add canonical-human organization recovery custody with exactly three accepted custodians, two-person approval, a fixed seven-day cooldown, promotion-only co-owner execution, durable notification evidence, and immutable workspace organization ownership.
+
+### Patch Changes
+
+- 9ef491b: Add the Agent Knowledge product surface, Personal workspace knowledge views and defaults, workspace learning-autonomy administration, explicit routing guidance between Memory, Skills, and Workspace instructions, authority-first organization Document search, exact replay-safe confirmed Memory materialization, and the narrower organization identity/mission boundary with richer facts retrieved from organization knowledge.
+
+## 2.5.0
+
+### Minor Changes
+
+- 76d6396: Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, custom-role and old-image rolling-compatible least-privilege database posture, and UI projections that never use raw initial prompts as display names. Durable title fanout now requires a versioned subscriber-recovery capability: managed NATS and supported embedded brokers coalesce one Postgres catch-up after reconnect, while legacy buses without that contract fail readiness/worker startup before durable rows can be acknowledged.
+- b5071cf: Require every Rig to layer setup and checks on the deployment-managed platform sandbox, reject new explicit Rig image overrides, keep provider-native image ids out of durable lease identity, and verify Browser, Terminal, and Computer services before publishing a Rig provider image.
+
+## 2.4.0
+
+### Minor Changes
+
+- 47b88d3: Add explicit managed onboarding: ordinary verified signup completes an organization-name-only setup that creates only the owner membership and canonical Personal workspace, while unregistered invitees can use a digest-only one-time account setup link before signing in normally.
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+
+### Patch Changes
+
+- 977fa0f: Add durable provider-neutral invited-user email delivery with scope-bound retention fences, ambiguity-preserving retries, digest-only setup preview, and explicit delivery state across the API, SDK, and organization administration experience.
+- 9d251cb: Add server-owned viewer, member, and administrator roles for shared organization workspaces, an explicit Personal/shared workspace kind, a privacy-safe administration projection, and audited idempotent grant and revocation commands.
+
 ## 2.3.0
 
 ### Minor Changes

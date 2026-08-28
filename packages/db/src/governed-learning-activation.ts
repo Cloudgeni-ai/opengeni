@@ -174,8 +174,17 @@ function undoFromRow(row: UndoRow): UndoReceipt {
 /** Subject-filtered activation and compensation history for Workspace State. */
 export async function listGovernedLearningActivationHistory(
   db: Database,
-  input: { workspaceId: string; subjectId: string; principalKind: string; limit: number },
-): Promise<{ activations: ActivationReceipt[]; undos: UndoReceipt[]; truncated: boolean }> {
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    principalKind: string;
+    limit: number;
+  },
+): Promise<{
+  activations: ActivationReceipt[];
+  undos: UndoReceipt[];
+  truncated: boolean;
+}> {
   if (input.principalKind !== "human_session") {
     throw new GovernedLearningActivationAuthorityError(
       "Governed-learning history requires an exact authenticated human actor",
@@ -555,6 +564,69 @@ export async function confirmRememberKnowledgeClaim(
           approvalReviewRevision: Number(row.approval_review_revision),
           createdAt: iso(row.created_at),
         });
+      },
+    );
+  } catch (error) {
+    translate(error);
+  }
+}
+
+export type RememberKnowledgeMemoryMaterialization = {
+  confirmationReceiptId: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  memoryId: string;
+  taskNoteTextHash: string;
+  createdAt: string;
+};
+
+/**
+ * Materialize the exact approved Task-note text behind one completed remember
+ * confirmation. The database capability owns the insert and its immutable
+ * confirmation-to-Memory mapping, so generic deduplication cannot substitute a
+ * normalized lookalike and replay keeps the same Memory id after archival.
+ */
+export async function materializeConfirmedRememberKnowledgeMemory(
+  db: Database,
+  receipt: RememberKnowledgeConfirmationReceiptType,
+): Promise<RememberKnowledgeMemoryMaterialization> {
+  const confirmed = RememberKnowledgeConfirmationReceipt.parse(receipt);
+  try {
+    return await withWorkspaceSubjectRls(
+      db,
+      confirmed.workspaceId,
+      confirmed.initiatingHumanSubjectId,
+      async (scoped) => {
+        const rows = await rawRows<{
+          confirmation_receipt_id: string;
+          account_id: string;
+          workspace_id: string;
+          session_id: string;
+          memory_id: string;
+          task_note_text_hash: string;
+          created_at: Date | string;
+        }>(
+          scoped,
+          sql`SELECT * FROM materialize_remember_knowledge_memory(
+            ${confirmed.accountId}::uuid,
+            ${confirmed.workspaceId}::uuid,
+            ${confirmed.id}::uuid
+          )`,
+        );
+        const row = rows[0];
+        if (rows.length !== 1 || !row) {
+          throw new Error("remember Knowledge Memory materialization returned no unique receipt");
+        }
+        return {
+          confirmationReceiptId: row.confirmation_receipt_id,
+          accountId: row.account_id,
+          workspaceId: row.workspace_id,
+          sessionId: row.session_id,
+          memoryId: row.memory_id,
+          taskNoteTextHash: row.task_note_text_hash,
+          createdAt: iso(row.created_at),
+        };
       },
     );
   } catch (error) {

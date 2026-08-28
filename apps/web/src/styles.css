@@ -199,6 +199,14 @@ body {
   cursor: text;
 }
 
+/* Sonner keeps the toast container's slide/fade, but its default child-opacity
+   tween passes through low-contrast text while a notification joins or leaves
+   the collapsed stack. Switch the content atomically so every rendered frame
+   remains readable. */
+.toaster [data-sonner-toast] > * {
+  transition: none;
+}
+
 /* Respect reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *,

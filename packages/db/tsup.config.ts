@@ -27,6 +27,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: {
     index: "src/index.ts",
+    "managed-auth-session-sets": "src/managed-auth-session-sets.ts",
     schema: "src/schema.ts",
     migrate: "src/migrate.ts",
     "provision-roles": "src/provision-roles.ts",

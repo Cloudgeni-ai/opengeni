@@ -5,6 +5,7 @@ import {
   buildCreateSessionRequest,
   classifyCreateSessionFailure,
   emptySessionDraft,
+  newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
   prepareCreateSessionAttempt,
   rememberedMachineFolder,
@@ -418,6 +419,57 @@ describe("successful-create selection history", () => {
 });
 
 describe("new-session draft option mapping", () => {
+  test("creates Only-me Personal-workspace sessions with private tenancy", () => {
+    expect(newSessionCreateVisibility(true, "workspace")).toBe("private");
+    expect(newSessionCreateVisibility(true, "private")).toBe("private");
+    expect(newSessionCreateVisibility(false, "workspace")).toBe("workspace");
+  });
+
+  test("preserves ordered Variable Set precedence through create and draft persistence", () => {
+    const variableSetIds = [
+      "00000000-0000-4000-8000-000000000011",
+      "00000000-0000-4000-8000-000000000013",
+    ];
+    const draft = {
+      ...emptySessionDraft(),
+      variableSetIds,
+      variableSetId: variableSetIds.at(-1)!,
+    };
+    const personalResourceAttachment = {
+      mode: "session" as const,
+      workspaceSharedAcknowledged: false,
+      sharedOutputWarningVersion: 1 as const,
+    };
+    const submission = submissionFromSessionDraft(draft, undefined, personalResourceAttachment);
+    expect(submission.extras).toMatchObject({
+      variableSetIds,
+      variableSetId: variableSetIds.at(-1),
+      personalResourceAttachment,
+    });
+    const visibility = newSessionCreateVisibility(true, draft.visibility);
+    const request = build([], [], {
+      submission: { text: "start privately", ...submission.extras },
+      visibility,
+    });
+    expect(request).toMatchObject({
+      visibility: "private",
+      variableSetIds,
+      variableSetId: variableSetIds.at(-1),
+      personalResourceAttachment,
+    });
+    const options = newSessionDraftOptionsFromSessionDraft(draft, undefined, visibility);
+    expect(options).toMatchObject({
+      visibility: "private",
+      variableSetIds,
+      variableSetId: variableSetIds.at(-1),
+    });
+    expect(options.visibility).toBe(request.visibility);
+    expect(sessionDraftFromNewSessionDraftOptions(options)).toMatchObject({
+      variableSetIds,
+      variableSetId: variableSetIds.at(-1),
+    });
+  });
+
   test("round-trips managed compute, goal, and exact custom permissions", () => {
     const draft = {
       ...emptySessionDraft(),

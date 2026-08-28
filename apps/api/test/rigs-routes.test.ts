@@ -169,7 +169,6 @@ describe("rig route permission matrix", () => {
     // Create: rigs:manage only.
     const createBody = JSON.stringify({
       name: "gate",
-      image: "ubuntu:24.04",
       checks: [{ name: "ok", command: "true" }],
     });
     expect(
@@ -183,6 +182,20 @@ describe("rig route permission matrix", () => {
     expect(created.status).toBe(201);
     const rig = await created.json();
     expect(rig.activeVersion.version).toBe(1);
+    expect(rig.activeVersion.image).toBeNull();
+
+    const explicitImage = await app().request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "custom-base", image: "ubuntu:24.04" }),
+    });
+    expect(explicitImage.status).toBe(422);
+    expect(await explicitImage.json()).toMatchObject({
+      error: {
+        code: "validation_failed",
+        details: { code: "RIG_IMAGE_OVERRIDE_UNSUPPORTED" },
+      },
+    });
 
     // Get: rigs:use OK.
     expect((await app().request(`${base}/${rig.id}`, { headers: useOnly })).status).toBe(200);
@@ -197,6 +210,15 @@ describe("rig route permission matrix", () => {
       (await app().request(`${base}/${rig.id}`, { method: "PATCH", headers: manage, body: patch }))
         .status,
     ).toBe(200);
+    const explicitPatchImage = await app().request(`${base}/${rig.id}`, {
+      method: "PATCH",
+      headers: manage,
+      body: JSON.stringify({ image: null }),
+    });
+    expect(explicitPatchImage.status).toBe(422);
+    expect(await explicitPatchImage.json()).toMatchObject({
+      error: { details: { code: "RIG_IMAGE_OVERRIDE_UNSUPPORTED" } },
+    });
 
     // Activate: rigs:manage only.
     const versionId = rig.activeVersion.id;
@@ -214,6 +236,18 @@ describe("rig route permission matrix", () => {
       payload: { command: "apt-get install -y jq" },
     });
     const changesPath = `${base}/${rig.id}/changes`;
+    const explicitChangeImage = await app().request(changesPath, {
+      method: "POST",
+      headers: useOnly,
+      body: JSON.stringify({
+        kind: "definition_edit",
+        payload: { image: "ubuntu:24.04" },
+      }),
+    });
+    expect(explicitChangeImage.status).toBe(422);
+    expect(await explicitChangeImage.json()).toMatchObject({
+      error: { details: { code: "RIG_IMAGE_OVERRIDE_UNSUPPORTED" } },
+    });
     expect(
       (await app().request(changesPath, { method: "POST", headers: none, body: proposeBody }))
         .status,

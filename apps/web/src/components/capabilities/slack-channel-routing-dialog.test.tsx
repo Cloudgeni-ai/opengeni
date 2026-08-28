@@ -61,12 +61,13 @@ function contextValue(storedRouteTarget: string | null): Record<string, unknown>
   return {
     accessContext,
     workspaces: [
-      { id: WORKSPACE_ID, accountId: ACCOUNT_ID, name: "Home" },
-      { id: SHARED_ID, accountId: ACCOUNT_ID, name: "Platform" },
-      { id: PERSONAL_ID, accountId: ACCOUNT_ID, name: "Sam" },
+      { id: WORKSPACE_ID, accountId: ACCOUNT_ID, kind: "shared", name: "Home" },
+      { id: SHARED_ID, accountId: ACCOUNT_ID, kind: "shared", name: "Platform" },
+      { id: PERSONAL_ID, accountId: ACCOUNT_ID, kind: "personal", name: "Sam" },
     ],
-    // The pointer is what makes PERSONAL_ID this admin's own personal
-    // workspace. Without it nothing here is personal.
+    // Canonical Workspace.kind drives display and routing classification. The
+    // membership pointer separately proves that PERSONAL_ID belongs to this
+    // admin when an owner-specific lifecycle operation needs that identity.
     managedSelfContext: {
       identity: { credentialGeneration: 1, managedUserId: "user-a", subjectId: "subject-a" },
       memberships: [

@@ -1,5 +1,113 @@
 # @opengeni/db
 
+## 3.6.0
+
+### Minor Changes
+
+- 7238fa4: Add permission-scoped advisory work discovery, durable non-exclusive typed work claims, bounded related-work projections, independent rollout controls, observability, and SDK topology filters.
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/config@0.22.0
+  - @opengeni/contracts@2.7.0
+  - @opengeni/codemode@0.4.17
+
+## 3.5.2
+
+### Patch Changes
+
+- 18afc44: Accept native tool-search results whose correlation id is carried only in provider metadata.
+- bc88a28: Keep recoverable sessions durably wakeable until exact attempt quiescence, including when a retained process settles after the workflow's final reconciliation check.
+- 3a004ff: Preserve optional structured human-input answers, replay terminal settlements idempotently, and retain Slack replies when expiry or cancellation wins a response race.
+
+## 3.5.1
+
+### Patch Changes
+
+- da0c2d2: Prevent accepted-attempt workspace learning-policy snapshots from deadlocking with ordinary session lifecycle writers. The snapshot function now locks the workspace, session, turn, and attempt explicitly in the canonical order, then revalidates the complete live-attempt and interruption tuple in a fresh statement before deriving the immutable policy snapshot.
+- 92f227f: Make session and workspace Pause/Resume desired-state mutations report authoritative changed, unchanged, and replayed outcomes. Represented no-ops no longer allocate control revisions, events, interruptions, or wakes, while newer descendant overrides and missing lifecycle repairs still produce real mutations. First-party MCP session control now returns the same versioned mutation receipt for agent-bound and sessionless callers.
+
+## 3.5.0
+
+### Minor Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+- 986f5fe: Add provider-neutral browser login session sets with bounded independently revocable slots, explicit actor switching, isolated add and re-authentication, scoped logout, non-enumerating cross-slot deep-link recovery, and rolling legacy/dual/broker compatibility.
+- 6e12f3a: Add canonical-human organization recovery custody with exactly three accepted custodians, two-person approval, a fixed seven-day cooldown, promotion-only co-owner execution, durable notification evidence, and immutable workspace organization ownership.
+
+### Patch Changes
+
+- d7ab403: Bundle Workspace Insights usage and model projections into bounded analytical reads while preserving filter, visibility, and UTC boundary semantics.
+- 9ef491b: Add the Agent Knowledge product surface, Personal workspace knowledge views and defaults, workspace learning-autonomy administration, explicit routing guidance between Memory, Skills, and Workspace instructions, authority-first organization Document search, exact replay-safe confirmed Memory materialization, and the narrower organization identity/mission boundary with richer facts retrieved from organization knowledge.
+- 03d1c6e: Repair Workspace Insights analytical reads under production FORCE RLS while preserving ordinary fact visibility and write policies.
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+  - @opengeni/codemode@0.4.16
+
+## 3.4.0
+
+### Minor Changes
+
+- 76d6396: Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, custom-role and old-image rolling-compatible least-privilege database posture, and UI projections that never use raw initial prompts as display names. Durable title fanout now requires a versioned subscriber-recovery capability: managed NATS and supported embedded brokers coalesce one Postgres catch-up after reconnect, while legacy buses without that contract fail readiness/worker startup before durable rows can be acknowledged.
+- b5071cf: Require every Rig to layer setup and checks on the deployment-managed platform sandbox, reject new explicit Rig image overrides, keep provider-native image ids out of durable lease identity, and verify Browser, Terminal, and Computer services before publishing a Rig provider image.
+
+### Patch Changes
+
+- Updated dependencies [76d6396]
+- Updated dependencies [b5071cf]
+  - @opengeni/contracts@2.5.0
+  - @opengeni/codemode@0.4.15
+  - @opengeni/config@0.20.1
+
+## 3.3.1
+
+### Patch Changes
+
+- 8fabf12: Document the one-way deployment boundary for named signup and invited-user
+  setup. Migration 0348 requires every API, control worker, and turn worker to be
+  stopped and drained before it runs, with the exact old/new application database
+  roles supplied to the migration runner. Start only binaries built for schema
+  ordinal 0348 or newer after it commits; never restart a pre-0348 image, and
+  remain in maintenance to fix forward if the new runtime cannot start.
+- 8fabf12: Repair realtime human-authority routing and metrics, personal Document reads
+  under FORCE RLS, private-session visibility transition checks, and
+  tenant-scoped session-tenancy fencing through migrations 0343-0345.
+
+  Migration 0345 is a one-way maintenance cutover. Stop and drain every API,
+  control worker, and turn worker before applying it, then start only binaries
+  built for schema ordinal 0345 or newer. Never restart a pre-0345 image after
+  the migration commits: its session-tenancy writes do not enter the required
+  workspace fence and will fail closed.
+
+## 3.3.0
+
+### Minor Changes
+
+- 47b88d3: Add explicit managed onboarding: ordinary verified signup completes an organization-name-only setup that creates only the owner membership and canonical Personal workspace, while unregistered invitees can use a digest-only one-time account setup link before signing in normally.
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+
+### Patch Changes
+
+- d47da57: Add bounded connection-authority convergence evidence with global residual totals, fixed operator actions, deterministic membership remediation, and fail-closed command completion.
+- 977fa0f: Add durable provider-neutral invited-user email delivery with scope-bound retention fences, ambiguity-preserving retries, digest-only setup preview, and explicit delivery state across the API, SDK, and organization administration experience.
+- ba29352: Automatically activate session tenancy for an exact newly inserted Personal-only organization after the canonical deployment boundary, with atomic setup, private-setting, and greenfield evidence receipts.
+- 9d251cb: Add server-owned viewer, member, and administrator roles for shared organization workspaces, an explicit Personal/shared workspace kind, a privacy-safe administration projection, and audited idempotent grant and revocation commands.
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/config@0.20.0
+  - @opengeni/codemode@0.4.14
+
 ## 3.2.0
 
 ### Minor Changes
