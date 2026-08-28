@@ -1,5 +1,14 @@
 # @opengeni/github
 
+## 0.6.2
+
+### Patch Changes
+
+- Updated dependencies [17d253b]
+- Updated dependencies [c116379]
+  - @opengeni/config@0.22.1
+  - @opengeni/contracts@2.7.1
+
 ## 0.6.1
 
 ### Patch Changes

@@ -1,5 +1,18 @@
 # @opengeni/runtime
 
+## 1.4.3
+
+### Patch Changes
+
+- 17d253b: Complete personal GitHub identity support across managed, self-hosted, and local modes. Add a compact connect-and-repository UI, exact local-human authority persistence, Docker-safe credential brokering, durable child and goal propagation, and reviewed GitHub tools for pull-request reviews and merges without exposing provider tokens to agents.
+- c116379: Recover sessions containing legacy duplicate native tool-search pairs and prevent crash settlement from appending another pair when the provider correlation id is stored only in provider data.
+- Updated dependencies [17d253b]
+- Updated dependencies [c116379]
+  - @opengeni/config@0.22.1
+  - @opengeni/sdk@3.1.1
+  - @opengeni/contracts@2.7.1
+  - @opengeni/codemode@0.4.18
+
 ## 1.4.2
 
 ### Patch Changes

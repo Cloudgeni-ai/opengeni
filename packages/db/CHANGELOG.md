@@ -1,5 +1,19 @@
 # @opengeni/db
 
+## 3.6.1
+
+### Patch Changes
+
+- 17d253b: Complete personal GitHub identity support across managed, self-hosted, and local modes. Add a compact connect-and-repository UI, exact local-human authority persistence, Docker-safe credential brokering, durable child and goal propagation, and reviewed GitHub tools for pull-request reviews and merges without exposing provider tokens to agents.
+- ff4af61: Promote a normal human Send to Steer-equivalent replacement when an active session is waiting for human action, cancelling the stale decision surface and placing the conversational message directly in chat.
+- c116379: Improve organization and workspace administration with compact people management, workspace-admin member controls, personal integration and Codex subscription setup, clearer permission presets, consistent connector presentation, and organization-scoped resource navigation.
+- c116379: Recover sessions containing legacy duplicate native tool-search pairs and prevent crash settlement from appending another pair when the provider correlation id is stored only in provider data.
+- Updated dependencies [17d253b]
+- Updated dependencies [c116379]
+  - @opengeni/config@0.22.1
+  - @opengeni/contracts@2.7.1
+  - @opengeni/codemode@0.4.18
+
 ## 3.6.0
 
 ### Minor Changes
