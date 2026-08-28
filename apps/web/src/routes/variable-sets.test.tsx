@@ -176,9 +176,30 @@ describe("Variable Sets credential-autofill boundaries", () => {
         );
       });
 
+      const manageButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Manage variables for staging"]',
+      );
+      const editButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Edit details for staging"]',
+      );
+      expect(manageButton?.textContent?.trim()).toBe("Manage variables");
+      expect(editButton?.textContent?.trim()).toBe("Edit details");
+
+      await act(async () => {
+        editButton!.click();
+      });
+      expect(container.querySelector('[aria-label="Variable set name"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Variable set description"]')).not.toBeNull();
+      expect(container.querySelector('form[aria-label="Add variable to staging"]')).toBeNull();
+
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.trim() === "Cancel")!
+          .click();
+      });
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
           .click();
       });
 
@@ -271,7 +292,7 @@ describe("Variable Sets credential-autofill boundaries", () => {
       });
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
           .click();
       });
 
@@ -280,7 +301,7 @@ describe("Variable Sets credential-autofill boundaries", () => {
       await setInputValue(name, "1test-key");
       await setInputValue(value, "secret-value");
       const submit = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-        (button) => button.textContent?.trim() === "Set variable",
+        (button) => button.textContent?.trim() === "Add variable",
       )!;
       expect(name.value).toBe("1test-key");
       expect(container.textContent).toContain("Start the name with a letter");
@@ -353,7 +374,7 @@ describe("Variable Sets credential-autofill boundaries", () => {
       await renderCard(0);
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
           .click();
       });
       expect(container.textContent).not.toContain(exact);
@@ -382,7 +403,7 @@ describe("Variable Sets credential-autofill boundaries", () => {
       expect(container.textContent).not.toContain(exact);
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
           .click();
       });
       expect(container.textContent).not.toContain(exact);
@@ -430,13 +451,13 @@ describe("Variable Sets credential-autofill boundaries", () => {
       });
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
           .click();
       });
       expect(container.querySelector('[aria-label="Reveal variable API_TOKEN"]')).toBeNull();
       expect(container.querySelector('[aria-label="Rotate variable API_TOKEN"]')).toBeNull();
       expect(container.querySelector('[aria-label="Delete variable API_TOKEN"]')).toBeNull();
-      expect(container.querySelector('[aria-label="Edit variable set"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Edit details for staging"]')).toBeNull();
       expect(container.querySelector('form[aria-label="Add variable to staging"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
