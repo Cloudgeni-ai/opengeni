@@ -726,6 +726,9 @@ turn that attached them; historical attachment ids do not cause sandbox or
 object-storage work. This-turn generated-video files may still copy onto the
 box before dispatch; a copy miss is deferred like generated images (the
 durable File remains) and does not fail the turn.
+Source-bearing `generate_video` calls join that same single-flight provisioner
+immediately before inspecting their `/workspace` references and use the active
+routed session. Text-to-video requests do not acquire a sandbox.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
