@@ -148,6 +148,9 @@ describe("Slack integration authority", () => {
     expect(canManageApiIntegrations(accessContext(["connections:write"]), "workspace-a")).toBe(
       false,
     );
+    expect(canManageApiIntegrations(accessContext(["capabilities:manage"]), "workspace-a")).toBe(
+      true,
+    );
     expect(canManageApiIntegrations(accessContext(["workspace:admin"]), "workspace-a")).toBe(true);
   });
 });

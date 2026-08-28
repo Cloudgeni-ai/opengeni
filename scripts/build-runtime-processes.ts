@@ -63,10 +63,9 @@ const sharedBuild = {
   sourcemap: "none" as const,
 };
 
-// LiteParse and its native Sharp dependency must resolve from the workload
-// package's node_modules at runtime. Bundling either package detaches Sharp's
-// dynamic @img/* binding lookups and LiteParse's packaged PDF.js assets from
-// their installed dependency graph.
+// LiteParse and Sharp must resolve from the workload package's node_modules at
+// runtime. Both load platform-specific native packages dynamically, so bundling
+// either one detaches those bindings from their installed dependency graph.
 const nativeRuntimeExternals = ["@llamaindex/liteparse", "sharp"];
 
 async function buildApi(): Promise<void> {

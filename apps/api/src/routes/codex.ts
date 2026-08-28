@@ -258,7 +258,7 @@ async function requireRedemptionHuman(
       message: "managed browser session required",
     });
   }
-  const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+  const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
   if (grant.subjectId !== human.subjectId) {
     throw new HTTPException(403, {
       message: "managed browser identity mismatch",
@@ -601,7 +601,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // signed state that carries the device_auth_id back to `poll`.
   app.post("/v1/workspaces/:workspaceId/codex/connect/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    await requireAccessGrant(c, deps, workspaceId, "connections:write");
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
       start = await startDeviceCode();
@@ -627,7 +627,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Poll for authorization: pending | expired | connected (persists on success).
   app.post("/v1/workspaces/:workspaceId/codex/connect/poll", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const { state } = (await c.req.json()) as { state?: string };
     const payload = (state
       ? readSignedState(state, githubStateSecret)
@@ -918,7 +918,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Pure pointer flip; in-flight turns pick it up on their next token fetch.
   app.post("/v1/workspaces/:workspaceId/codex/accounts/:accountId/activate", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const accountId = c.req.param("accountId");
     const mutation = await withCodexCapacityMutation(
       db,
@@ -936,14 +936,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json({ activated: true, accountId });
   });
 
-  // Update rotation settings. admin access. sharded-rotation policy: the strategy picker is GONE —
+  // Update rotation settings. Connection-management access. Sharded-rotation policy: the strategy picker is GONE —
   // rotation-enabled always behaves as sticky-sharded (worker-side
   // effectiveRotationStrategy normalization). `rotationStrategy` in the body is
   // ACCEPTED-BUT-IGNORED so no existing SDK/UI caller breaks (deprecation), and
   // the stored column is only legacy residue kept for old-binary rollback.
   app.patch("/v1/workspaces/:workspaceId/codex/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const body = (await c.req.json().catch(() => ({}))) as {
       rotationEnabled?: unknown;
       rotationStrategy?: unknown;
@@ -987,7 +987,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Rename an account (label only in P1).
   app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const accountId = c.req.param("accountId");
     const body = (await c.req.json()) as { label?: string | null };
     const label = typeof body.label === "string" ? body.label : null;
@@ -1008,7 +1008,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // an explicit 409 carrying the current version.
   app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId/allocator", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const parsed = z
       .object({
         enabled: z.boolean(),
@@ -1046,7 +1046,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // row was active (FK ON DELETE SET NULL + re-pick in the same RLS txn).
   app.delete("/v1/workspaces/:workspaceId/codex/accounts/:accountId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const accountId = c.req.param("accountId");
     const mutation = await withCodexCapacityMutation(
       db,
@@ -1071,7 +1071,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   // the by-id route above.
   app.delete("/v1/workspaces/:workspaceId/codex", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const mutation = await withCodexCapacityMutation(
       db,
       { workspaceId, reason: "codex_credentials_disconnected" },
@@ -1181,7 +1181,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const ownerRecoveries =
       human &&
       human.subjectId === grant.subjectId &&
-      hasPermission(grant.permissions, "workspace:admin")
+      hasPermission(grant.permissions, "connections:write")
         ? await listCodexResetRedemptionRecoveries(db, {
             accountId: grant.accountId,
             workspaceId,
@@ -1204,14 +1204,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           human &&
           human.subjectId === grant.subjectId &&
           human.subjectId === account.connectedBySubjectId &&
-          hasPermission(grant.permissions, "workspace:admin"),
+          hasPermission(grant.permissions, "connections:write"),
         );
         const canRedeem = canResumeRedemption && account.status === "active";
         const redemptionAccess = codexRedemptionAccess({
           connectedBySubjectId: account.connectedBySubjectId,
           grantSubjectId: grant.subjectId,
           managedHumanSubjectId: human?.subjectId ?? null,
-          canManage: hasPermission(grant.permissions, "workspace:admin"),
+          canManage: hasPermission(grant.permissions, "connections:write"),
         });
         overview[account.id] = await fetchCodexAccountOverview(
           deps,
@@ -1258,7 +1258,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
               human &&
               human.subjectId === grant.subjectId &&
               human.subjectId === account.connectedBySubjectId &&
-              hasPermission(grant.permissions, "workspace:admin"),
+              hasPermission(grant.permissions, "connections:write"),
             );
             const fallback = await fetchCodexAccountOverview(
               deps,
@@ -1268,7 +1268,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
                 connectedBySubjectId: account.connectedBySubjectId,
                 grantSubjectId: grant.subjectId,
                 managedHumanSubjectId: human?.subjectId ?? null,
-                canManage: hasPermission(grant.permissions, "workspace:admin"),
+                canManage: hasPermission(grant.permissions, "connections:write"),
               }),
               false,
               canResumeRedemption,

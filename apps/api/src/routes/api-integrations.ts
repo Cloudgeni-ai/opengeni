@@ -148,7 +148,7 @@ export function registerApiIntegrationRoutes(
 
   app.post("/v1/workspaces/:workspaceId/integrations/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const payload = InstallApiIntegrationRequest.parse(await c.req.json());
     const resolved = await resolveForRoute({
       deps,
@@ -261,7 +261,7 @@ export function registerApiIntegrationRoutes(
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
       const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
       const instanceKey = decodeURIComponent(c.req.param("instanceKey"));
       const payload = UninstallApiIntegrationRequest.parse(await c.req.json());

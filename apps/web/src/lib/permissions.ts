@@ -45,6 +45,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "api_keys:manage": "Admin & account",
   "connections:read": "Connections",
   "connections:write": "Connections",
+  "capabilities:manage": "Connections",
   "members:manage": "Admin & account",
   "account:read": "Admin & account",
   "account:admin": "Admin & account",
@@ -174,10 +175,17 @@ export function buildWorkspaceMemberPermissionGroups(): PermissionGroup[] {
     "billing:manage",
     "workspace:create",
   ]);
+  // Membership itself is the workspace-access boundary. `workspace:read` is
+  // the baseline capability that lets an admitted human discover and open the
+  // workspace, so the organization editor includes it automatically instead
+  // of presenting it as an optional fine-grained choice.
+  const automaticBaseline = new Set<string>(["workspace:read"]);
   return buildApiKeyPermissionGroups()
     .map((group) => ({
       label: group.label,
-      permissions: group.permissions.filter((permission) => !accountOnly.has(permission)),
+      permissions: group.permissions.filter(
+        (permission) => !accountOnly.has(permission) && !automaticBaseline.has(permission),
+      ),
     }))
     .filter((group) => group.permissions.length > 0);
 }
@@ -215,6 +223,84 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "secrets:write",
   "goals:manage",
 ]);
+
+export type WorkspaceAccessLevel = "viewer" | "member" | "admin";
+
+export const workspaceAccessLevels: ReadonlyArray<{
+  role: WorkspaceAccessLevel;
+  label: string;
+  description: string;
+  permissions: readonly string[];
+}> = [
+  {
+    role: "viewer",
+    label: "Viewer",
+    description: "Can browse sessions and shared workspace content.",
+    permissions: [
+      "workspace:read",
+      "sessions:read",
+      "stream:view",
+      "files:read",
+      "documents:search",
+      "variable-sets:list",
+      "connections:read",
+      "rigs:use",
+      "artifacts:read",
+    ],
+  },
+  {
+    role: "member",
+    label: "Member",
+    description: "Can create sessions and work with the workspace's shared resources.",
+    permissions: [...defaultWorkspaceMemberPermissions],
+  },
+  {
+    role: "admin",
+    label: "Workspace admin",
+    description: "Can manage this workspace, including its members and integrations.",
+    permissions: [
+      "workspace:read",
+      "workspace:admin",
+      "members:manage",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+      "stream:view",
+      "stream:control",
+      "stream:acknowledge",
+      "terminal:attach",
+      "codemode:call",
+      "files:upload",
+      "files:read",
+      "files:write",
+      "documents:manage",
+      "documents:search",
+      "scheduled_tasks:manage",
+      "scheduled_tasks:run",
+      "github:manage",
+      "github:use",
+      "api_keys:manage",
+      "connections:read",
+      "connections:write",
+      "variable-sets:list",
+      "variable-sets:read",
+      "variable-sets:write",
+      "variable-sets:manage",
+      "variable-sets:attach",
+      "variable-sets:use",
+      "secrets:list",
+      "secrets:write",
+      "mcp_servers:attach",
+      "goals:manage",
+      "rigs:use",
+      "rigs:manage",
+      "enrollments:read",
+      "enrollments:manage",
+      "artifacts:read",
+      "artifacts:publish",
+    ],
+  },
+];
 
 export function hasWorkspacePermission(
   context: AccessContext | null,

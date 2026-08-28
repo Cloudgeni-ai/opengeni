@@ -44,10 +44,10 @@ worker resolves workspace ownership, range-reads bounded bytes, validates the
 actual image signature and durable hash, then sends those images in order.
 Arbitrary URLs are never accepted. The prompt states what each ordered image
 contributes. Masks and provider-specific edit controls are not emulated.
-Resolving a `/workspace` reference joins the turn's canonical lazy sandbox
-provisioner at the point of the file read. File and generated-image artifact
-references read permanent object-storage bytes and do not create or resume a
-sandbox.
+Resolving a `/workspace` reference joins the shared canonical turn-sandbox
+access boundary at the point of the file read. File and generated-image
+artifact references read permanent object-storage bytes and do not create or
+resume a sandbox.
 
 Codex subscriptions use `/images/generations` without references and the
 Codex-compatible `/images/edits` request when references are present. Gateway

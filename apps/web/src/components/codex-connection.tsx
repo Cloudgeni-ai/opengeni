@@ -1267,7 +1267,8 @@ export function CodexSubscriptionsCard({
       ) : accounts.length === 0 ? (
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs text-fg-subtle">
-            Not connected. Connecting needs admin access and a ChatGPT Plus/Pro/Team plan.
+            Not connected. Connecting requires connection-management access and a ChatGPT
+            Plus/Pro/Team plan.
           </p>
           {canManage ? (
             <Button type="button" size="sm" disabled={busy} onClick={() => void connect()}>

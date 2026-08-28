@@ -53,7 +53,7 @@ export default defineConfig({
               // falls into a circular workspace-management route chunk.
               name: "app-shell",
               test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/]routes\.ts|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
-              includeDependenciesRecursively: false,
+              includeDependenciesRecursively: true,
               priority: 4,
             },
             {
@@ -102,6 +102,18 @@ export default defineConfig({
               entriesAware: true,
               entriesAwareMergeThreshold: 192 * 1024,
               priority: 2,
+            },
+            {
+              // Workspace member administration is opened only from the lazy
+              // settings route. Keep its sizeable roster and permission editor
+              // graph behind that second boundary so it cannot be folded into
+              // startup or a direct session load through shared UI primitives.
+              name: "workspace-members",
+              test: /src[\\/]routes[\\/]workspace-members-section\.tsx$/,
+              includeDependenciesRecursively: true,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 28 * 1024,
+              priority: 4,
             },
             {
               // The settings hub owns several substantial management surfaces.

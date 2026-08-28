@@ -19,6 +19,8 @@ export function historyCallId(item: Record<string, unknown>): string | null {
     item.providerData && typeof item.providerData === "object" && !Array.isArray(item.providerData)
       ? (item.providerData as Record<string, unknown>)
       : null;
+  // Native tool-search `id` is the provider item id, not the call correlation
+  // id. Prefer its providerData identity before the generic item-id fallback.
   const value =
     item.callId ?? item.call_id ?? providerData?.callId ?? providerData?.call_id ?? item.id;
   return typeof value === "string" && value.length > 0 ? value : null;

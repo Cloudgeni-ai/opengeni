@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 2.7.1
+
+### Patch Changes
+
+- c116379: Improve organization and workspace administration with compact people management, workspace-admin member controls, personal integration and Codex subscription setup, clearer permission presets, consistent connector presentation, and organization-scoped resource navigation.
+
 ## 2.7.0
 
 ### Minor Changes

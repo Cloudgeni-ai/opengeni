@@ -253,6 +253,66 @@ export async function waitForTurnStreamCleanup(
   await waitForTurnFinalizerStep(providerCompleted, signal);
 }
 
+export class IncompleteAgentStreamError extends Error {
+  readonly name = "IncompleteAgentStreamError";
+
+  constructor(message = "Agent stream ended without a successful terminal output") {
+    super(message);
+  }
+}
+
+/**
+ * Prove that SDK completion authority did not report a failure or runtime
+ * cancellation. The Agents SDK closes its ReadableStream immediately when its
+ * run signal aborts, so iterator EOF is not completion authority: the separate
+ * `completed` promise carries the eventual run failure.
+ *
+ * Only Temporal cancellation detaches cleanup. Internal runtime cancellation
+ * such as a provider-deadline sandbox rotation must escape to the turn failure
+ * settlement path, which checkpoints and redispatches the same logical turn.
+ */
+export async function assertSuccessfulAgentStreamCompletion(input: {
+  batcherFlush: Promise<unknown>;
+  stream: {
+    completed: Promise<void>;
+    error: unknown;
+  };
+  temporalCancellationSignal: AbortSignal | undefined;
+  runtimeCancellationSignal: AbortSignal;
+}): Promise<void> {
+  await waitForTurnStreamCleanup(
+    input.batcherFlush,
+    input.stream.completed,
+    input.temporalCancellationSignal,
+  );
+
+  if (input.runtimeCancellationSignal.aborted) {
+    throw (
+      input.runtimeCancellationSignal.reason ??
+      new IncompleteAgentStreamError("Agent stream was cancelled without a terminal reason")
+    );
+  }
+  if (input.stream.error !== null && input.stream.error !== undefined) {
+    throw input.stream.error;
+  }
+}
+
+/** Call after any more-specific empty-stream recovery has had priority. */
+export function assertAgentStreamNotCancelled(cancelled: boolean): void {
+  if (cancelled) {
+    throw new IncompleteAgentStreamError("Agent stream was cancelled without a terminal result");
+  }
+}
+
+/** Interruption streams do not produce a normal final output. Call this only
+ * after the interruption branch has settled any required action. */
+export function requireAgentStreamFinalOutput(finalOutput: unknown | undefined): unknown {
+  if (finalOutput === undefined) {
+    throw new IncompleteAgentStreamError();
+  }
+  return finalOutput;
+}
+
 /**
  * Terminal settlement closes the active attempt before turn finalization. The
  * ordinary workspace admission therefore correctly returns `attempt_fenced`

@@ -41,6 +41,58 @@ import type {
 
 export const DEFAULT_DOCUMENT_AUTHORITY_KIND: DocumentAuthorityKind = "workspace";
 
+export const KNOWLEDGE_UPLOAD_ACCEPT = [
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".docm",
+  ".dot",
+  ".dotm",
+  ".dotx",
+  ".odt",
+  ".ott",
+  ".rtf",
+  ".pages",
+  ".ppt",
+  ".pptx",
+  ".pptm",
+  ".pot",
+  ".potm",
+  ".potx",
+  ".odp",
+  ".otp",
+  ".key",
+  ".xls",
+  ".xlsx",
+  ".xlsm",
+  ".xlsb",
+  ".ods",
+  ".ots",
+  ".numbers",
+  ".csv",
+  ".tsv",
+  ".txt",
+  ".log",
+  ".md",
+  ".markdown",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".xml",
+  ".html",
+  ".htm",
+  ".eml",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".bmp",
+  ".tif",
+  ".tiff",
+  ".webp",
+  ".svg",
+].join(",");
+
 export function defaultDocumentAuthorityKind(personalWorkspace: boolean): DocumentAuthorityKind {
   return personalWorkspace ? "personal" : DEFAULT_DOCUMENT_AUTHORITY_KIND;
 }
@@ -328,6 +380,7 @@ export function DocumentsRoute({
         authorityKind: selectedAuthorityKind,
         agentAccess: true,
       });
+      requireSuccessfulKnowledgeDrop(document);
       setDropText("");
       toast.success("Dropped into knowledge", {
         description: dropResultDescription(document),
@@ -360,6 +413,7 @@ export function DocumentsRoute({
           authorityKind: selectedAuthorityKind,
           agentAccess: true,
         });
+        requireSuccessfulKnowledgeDrop(last);
       }
       toast.success(
         files.length === 1 ? "Dropped into knowledge" : `${files.length} files dropped`,
@@ -530,7 +584,7 @@ export function DocumentsRoute({
                 aria-label="Knowledge drop text"
                 value={dropText}
                 onChange={(event) => setDropText(event.target.value)}
-                placeholder="Paste text here, drag in files, or choose files below."
+                placeholder="Paste text here, or add PDFs, Office files, text, and images."
                 rows={2}
                 disabled={!fileUploadsEnabled || dropping}
                 className="min-h-16 w-full resize-y rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 py-2 text-xs leading-5 text-[color:var(--color-fg)]"
@@ -559,6 +613,7 @@ export function DocumentsRoute({
                     ref={dropFileInputRef}
                     type="file"
                     multiple
+                    accept={KNOWLEDGE_UPLOAD_ACCEPT}
                     aria-label="Add files as a knowledge drop"
                     className="hidden"
                     onChange={(event) => void handleDropFiles(event.target.files)}
@@ -929,6 +984,13 @@ function dropResultDescription(document: Pick<IndexedDocument, "curationStatus">
     case "failed":
       return "Curation failed softly; the document remains searchable with safe fallback metadata.";
   }
+}
+
+export function requireSuccessfulKnowledgeDrop(
+  document: Pick<IndexedDocument, "status" | "error">,
+): void {
+  if (document.status !== "failed") return;
+  throw new Error(document.error?.trim() || "The document could not be processed.");
 }
 
 function documentStatusTone(status: IndexedDocument["status"]): StatusTone {

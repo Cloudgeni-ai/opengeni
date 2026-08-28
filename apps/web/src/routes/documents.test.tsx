@@ -109,11 +109,13 @@ mock.module("@/context", () => ({
 const {
   DEFAULT_DOCUMENT_AUTHORITY_KIND,
   DOCUMENT_AUTHORITY_OPTIONS,
+  KNOWLEDGE_UPLOAD_ACCEPT,
   DocumentsRoute,
   defaultDocumentAuthorityKind,
   documentAuthorityLabel,
   documentTypeLabel,
   localPopulatedDocumentsPreview,
+  requireSuccessfulKnowledgeDrop,
 } = await import("./documents");
 
 beforeAll(() => {
@@ -223,6 +225,26 @@ describe("Documents scope-first UX", () => {
     expect(documentAuthorityLabel("organization")).toBe("Company");
     expect(documentAuthorityLabel("workspace")).toBe("Current workspace");
     expect(documentAuthorityLabel("personal")).toBe("Only me");
+    expect(KNOWLEDGE_UPLOAD_ACCEPT).toContain(".pdf");
+    expect(KNOWLEDGE_UPLOAD_ACCEPT).toContain(".docx");
+    expect(KNOWLEDGE_UPLOAD_ACCEPT).toContain(".xlsx");
+    expect(KNOWLEDGE_UPLOAD_ACCEPT).toContain(".pptx");
+    expect(KNOWLEDGE_UPLOAD_ACCEPT).toContain(".png");
+    expect(KNOWLEDGE_UPLOAD_ACCEPT).toContain(".jpg");
+    expect(KNOWLEDGE_UPLOAD_ACCEPT).toContain(".svg");
+  });
+
+  test("turns failed indexing results into immediate upload errors", () => {
+    expect(() =>
+      requireSuccessfulKnowledgeDrop({
+        status: "failed",
+        error: "No readable text was found in diagram.png",
+      }),
+    ).toThrow("No readable text was found in diagram.png");
+    expect(() => requireSuccessfulKnowledgeDrop({ status: "failed", error: null })).toThrow(
+      "The document could not be processed.",
+    );
+    expect(() => requireSuccessfulKnowledgeDrop({ status: "ready", error: null })).not.toThrow();
   });
 
   test("defaults new knowledge to Only me in a personal workspace", async () => {
@@ -429,6 +451,10 @@ describe("Documents scope-first UX", () => {
       );
       expect(upload).not.toBeUndefined();
       expect(upload?.disabled).toBe(false);
+      expect(
+        container.querySelector<HTMLInputElement>('[aria-label="Add files as a knowledge drop"]')
+          ?.accept,
+      ).toBe(KNOWLEDGE_UPLOAD_ACCEPT);
       const authoritySelect = container.querySelector<HTMLSelectElement>(
         '[aria-label="Drop authority"]',
       );

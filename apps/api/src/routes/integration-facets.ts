@@ -66,7 +66,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
         c,
         deps,
         workspaceId,
-        "workspace:admin",
+        "capabilities:manage",
       );
       const { grant } = authorization;
       try {
@@ -82,7 +82,10 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
               payload: await c.req.json(),
               canManageOrganizationDestination:
                 authorization.accountGrant?.permissions.includes("account:admin") === true,
-              canManageWorkspaceDestination: hasPermission(grant.permissions, "workspace:admin"),
+              canManageWorkspaceDestination: hasPermission(
+                grant.permissions,
+                "capabilities:manage",
+              ),
               canManagePersonalDestination:
                 authorization.contextIntegrity &&
                 authorization.authenticatedSubjectId === grant.subjectId,
@@ -122,7 +125,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
       const payload = UpsertIntegrationFacetRequest.parse(await c.req.json());
       const capabilityId = decoded(c.req.param("capabilityId"));
       const instanceKey = decoded(c.req.param("instanceKey"));
@@ -204,7 +207,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
       `/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/${action}`,
       async (c) => {
         const workspaceId = c.req.param("workspaceId");
-        const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+        const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
         const payload = MutateIntegrationFacetRequest.parse(await c.req.json());
         try {
           return c.json(
@@ -233,7 +236,7 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
     "/v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey",
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
       const payload = MutateIntegrationFacetRequest.parse(await c.req.json());
       try {
         return c.json(

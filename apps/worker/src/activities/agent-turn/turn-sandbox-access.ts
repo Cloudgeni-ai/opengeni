@@ -1,21 +1,24 @@
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
+import type { ResumedTurnSandbox } from "../../sandbox-resume";
 import type { SandboxRuntimeState } from "./turn-context";
 
-type ImageReferenceSandboxState = Pick<
+type TurnSandboxAccessState = Pick<
   SandboxRuntimeState,
   "resolvedSandbox" | "lazyOwnedSandbox" | "turnSandboxProvisioner"
 >;
 
-/**
- * Join the turn's canonical lazy sandbox boundary before reading a
- * model-supplied /workspace image reference. Durable File and artifact
- * references never call this helper because their bytes come from object
- * storage instead.
- */
-export async function resolveImageReferenceSandboxSession(
-  sandboxState: ImageReferenceSandboxState,
+export type ResolvedTurnSandboxAccess = Readonly<{
+  sandbox: ResumedTurnSandbox | null;
+  session: ChannelASession;
+  leaseEpoch: number;
+}>;
+
+/** Join the turn's canonical sandbox boundary and return its active routed session. */
+export async function resolveTurnSandboxAccess(
+  sandboxState: TurnSandboxAccessState,
   sdkOwnedSandboxSession: unknown,
-): Promise<{ session: ChannelASession; leaseEpoch: number }> {
+  unavailableMessage: string,
+): Promise<ResolvedTurnSandboxAccess> {
   let sandbox = sandboxState.resolvedSandbox;
   if (!sandbox && sandboxState.turnSandboxProvisioner) {
     sandbox = await sandboxState.turnSandboxProvisioner.get();
@@ -24,11 +27,10 @@ export async function resolveImageReferenceSandboxSession(
   const session = (sandboxState.lazyOwnedSandbox?.session ??
     sandbox?.established.session ??
     sdkOwnedSandboxSession) as ChannelASession | null;
-  if (!session) {
-    throw new Error("Sandbox image reference is unavailable");
-  }
+  if (!session) throw new Error(unavailableMessage);
 
   return {
+    sandbox,
     session,
     leaseEpoch: sandbox?.leaseEpoch ?? 0,
   };

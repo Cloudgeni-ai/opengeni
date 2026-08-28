@@ -19,6 +19,7 @@ import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
 import { useAppContext, type AppContextValue } from "@/context";
 import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
 import { isAbortError } from "@/lib/session-tools";
+import { orgLabel } from "@/lib/org";
 import { authorizedWorkspaceFromList } from "@/lib/workspace-scope-context";
 import {
   updateWorkspaceOwnedState,
@@ -462,8 +463,12 @@ function AuthorizedWorkspaceShell({
     workspaceId,
     location.search.section,
   );
-  const workspaceName =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? "Workspace";
+  const activeWorkspace =
+    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const workspaceName = activeWorkspace?.name ?? "Workspace";
+  const organizationName = activeWorkspace
+    ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants)
+    : "Organization";
   useEffect(() => {
     onMount?.();
   }, [onMount]);
@@ -479,6 +484,7 @@ function AuthorizedWorkspaceShell({
         <WorkspaceManagementShell
           workspaceId={workspaceId}
           workspaceName={workspaceName}
+          organizationName={organizationName}
           location={managementLocation}
         >
           {children}

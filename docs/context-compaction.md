@@ -237,10 +237,15 @@ model call, owned by the current execution attempt. Codex subscription
 allowance headers use the same per-account request context and remain separate
 from OpenGeni token billing.
 
-Both paths compact and restart sampling inside the same activity, turn,
-attempt, and sandbox. Compaction never creates a prompt-queue row, a recovery
-message, a new logical turn, or another sandbox. The model then sees the durable
-replacement history and continues the work.
+Both paths compact inside the same activity, turn, attempt, and sandbox.
+Compaction never creates a prompt-queue row, a recovery message, a new logical
+turn, or another sandbox. Normally the model then sees the durable replacement
+history and continues the work. If human/API or Agent Steer arrives after
+`session.context.compaction.started`, admission is immediate but interruption
+is deferred so it cannot fence the checkpoint transaction. As soon as the
+terminal `session.context.compacted` or `session.context.compaction.skipped`
+landmark is durable, the ordinary turn settles `superseded` before another
+model request and the Steer runs next. Pause and Cancel are not deferred.
 
 If summarization produces an authoritative terminal failure, the turn ends
 with an honest `context_compaction_failed` result. OpenGeni does not continue
@@ -290,7 +295,9 @@ row; it exists to own model allocation, attempt fencing, recovery, and
 settlement. Portable `/compact` still skips prepareTools/sandbox. `remote_v2`
 `/compact` prepares tools and builds the agent first so the compact request
 reuses the ordinary tools→instructions cache prefix, then settles without
-inference.
+inference. A Steer accepted while that standalone maintenance attempt is live
+does not interrupt it; maintenance records its terminal compaction result and
+completes normally, then the already-admitted Steer is the next runnable work.
 
 The exact attempt that successfully installs the replacement clears the request
 in the same transaction. If there is no active history, the generated

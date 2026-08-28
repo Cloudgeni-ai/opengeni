@@ -1,5 +1,27 @@
 # @opengeni/api-router
 
+## 2.5.1
+
+### Patch Changes
+
+- c116379: Improve organization and workspace administration with compact people management, workspace-admin member controls, personal integration and Codex subscription setup, clearer permission presets, consistent connector presentation, and organization-scoped resource navigation.
+- Updated dependencies [17d253b]
+- Updated dependencies [ff4af61]
+- Updated dependencies [c116379]
+- Updated dependencies [c116379]
+  - @opengeni/config@0.22.1
+  - @opengeni/core@2.5.4
+  - @opengeni/db@3.6.1
+  - @opengeni/runtime@1.4.3
+  - @opengeni/contracts@2.7.1
+  - @opengeni/documents@0.8.7
+  - @opengeni/github@0.6.2
+  - @opengeni/storage@0.2.111
+  - @opengeni/events@0.4.5
+  - @opengeni/artifact-tool@0.3.10
+  - @opengeni/codemode@0.4.18
+  - @opengeni/observability@0.8.10
+
 ## 2.5.0
 
 ### Minor Changes

@@ -14,6 +14,7 @@ import {
   listWorkspacesForSubject,
   managedPersonalWorkspacePermissions,
   nestedPostgresSqlState,
+  resolveNamedManagedPersonalWorkspaceGrant,
   setRlsContext,
   type DbClient,
 } from "../src";
@@ -46,6 +47,7 @@ const expectedManagedPersonalWorkspacePermissions: Permission[] = [
   "github:use",
   "connections:read",
   "connections:write",
+  "capabilities:manage",
   "variable-sets:list",
   "variable-sets:read",
   "variable-sets:write",
@@ -303,6 +305,26 @@ describe("migration 0219 managed-human organization provisioning", () => {
     expect(first.workspaceGrants[1]?.permissions).not.toContain("workspace:admin");
     expect(first.workspaceGrants[1]?.permissions).not.toContain("members:manage");
     expect(first.workspaceGrants[1]?.permissions).not.toContain("api_keys:manage");
+    expect(
+      await resolveNamedManagedPersonalWorkspaceGrant(client.db, {
+        accountId: account!.id,
+        workspaceId: personalWorkspace!.id,
+        subjectId,
+      }),
+    ).toEqual({
+      workspaceId: personalWorkspace!.id,
+      accountId: account!.id,
+      subjectId,
+      permissions: expectedManagedPersonalWorkspacePermissions,
+      principalKind: "human_session",
+    });
+    expect(
+      await resolveNamedManagedPersonalWorkspaceGrant(client.db, {
+        accountId: account!.id,
+        workspaceId: defaultWorkspace!.id,
+        subjectId,
+      }),
+    ).toBeNull();
     expect(membership).toMatchObject({
       accountId: account!.id,
       subjectId,

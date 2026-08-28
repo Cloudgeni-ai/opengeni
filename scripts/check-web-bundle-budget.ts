@@ -255,6 +255,20 @@ const budgets = {
   // bytes of headroom); the existing 600-KiB gzip envelope retains 2,866 bytes
   // of headroom, above the 1.5-KiB platform-skew allowance. Every file-count,
   // initial, per-file, lazy-chunk, and CSS cap remains fixed.
+  // Timeline paging and settled-history hardening add compact cursor ownership,
+  // retained-group memoization, split entrance gates, and lazy tooltip token
+  // publication. After removing redundant wrapper/comparator bytes, the exact
+  // current-main Linux/x64 Bun 1.4 merge measures 2,201,665-2,201,700 raw /
+  // 617,112-617,126 gzip bytes across repeated builds and 31 files. Calibrate
+  // from the high raw observation to the policy-derived 2,152-KiB envelope
+  // (1,948 bytes of headroom) and gzip to 605 KiB (2,394 bytes above the high
+  // observation, preserving the established 1.5-KiB platform-skew allowance).
+  // Every initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
+  // On exact current main, the integrated timeline graph measures 2,222,765 raw
+  // / 622,330 gzip bytes across 29 files. Advance raw through the shared policy
+  // envelope to 2,172 KiB and gzip to 610 KiB, retaining 1,363 raw and 2,310
+  // gzip bytes of headroom. Initial, per-file, file-count, lazy, and CSS caps
+  // remain fixed.
   // Multi-account browser isolation adds actor-fenced transport state while
   // account controls and the credential popup remain lazy. On exact current
   // main, the Linux/x64 Bun 1.4 direct-session graph measures 2,197,257 raw /
@@ -310,11 +324,23 @@ const budgets = {
   // 2,156 KiB. Advance gzip to 605 KiB so the established 1.5-KiB platform-skew
   // allowance remains intact. Initial, file-count, lazy, CSS, and unrelated
   // per-file caps stay fixed.
+  // Workspace member administration keeps its UI behind a dedicated lazy
+  // boundary. The four browser-used SDK methods leave the exact Linux/x64 Bun
+  // 1.4 direct-session graph at 2,210,226 raw bytes. The policy-derived 2,160-KiB
+  // envelope retains 1,614 bytes of headroom; gzip and request count still fit.
+  // After merging onto protected main with timeline paging, human-wait, and
+  // stream-recovery changes, repeated local builds measure 2,224,684 raw bytes
+  // and protected-main CI measures at most 2,224,726 across the supported build
+  // paths. Advance only the shared raw envelope to 2,174 KiB, retaining 1,450
+  // bytes of headroom above the high observation; gzip, request count, initial,
+  // lazy, and CSS caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
-  directSessionGzip: 609 * kib,
+  directSessionGzip: 610 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
+  // Member roster and permission-editor selectors bring the single compiled
+  // stylesheet to 32,221 gzip bytes. Keep the next whole-KiB envelope.
   cssGzip: 32 * kib,
 } as const;
 

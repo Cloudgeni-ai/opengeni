@@ -9,7 +9,6 @@ const clientPath = path.join(repoRoot, "packages/sdk/src/client.ts");
 // method to the eager client fails review until it moves to a focused subpath.
 const legacyBrowserUnusedMethods = [
   "addDocument",
-  "addWorkspaceMember",
   "advanceExternalBrowserAuthRun",
   "applyGoalRevision",
   "cancelSession",
@@ -47,12 +46,10 @@ const legacyBrowserUnusedMethods = [
   "listPackInstallations",
   "listTranscriptionRecordings",
   "listWorkspaceInstructionPolicies",
-  "listWorkspaceMembers",
   "moveDocument",
   "openExternalBrowserAuthFlow",
   "pauseGoal",
   "rejectGoalRevision",
-  "removeWorkspaceMember",
   "resumeGoal",
   "revokeUserResourceGrant",
   "rollbackGoalRevision",
@@ -62,7 +59,6 @@ const legacyBrowserUnusedMethods = [
   "supergrokStatus",
   "undoGovernedLearningActivation",
   "updateOrganizationWorkspaceSettings",
-  "updateWorkspaceMember",
   "verifyPersonalGitHubRepositorySelections",
 ];
 

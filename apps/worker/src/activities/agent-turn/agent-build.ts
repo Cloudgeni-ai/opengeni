@@ -77,7 +77,8 @@ import type {
   SandboxRuntimeState,
 } from "./turn-context";
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
-import { resolveImageReferenceSandboxSession } from "./image-reference-sandbox";
+import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
+import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 
 export type BuildTurnAgentDeps = {
   input: RunAgentTurnInput;
@@ -254,9 +255,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       subjectId: fileAuthoritySubjectId,
       references,
       readSandboxFile: async (path, maxBytes) => {
-        const imageReferenceSandbox = await resolveImageReferenceSandboxSession(
+        const imageReferenceSandbox = await resolveTurnSandboxAccess(
           sandboxState,
           media.sdkOwnedSandboxSession,
+          "Sandbox image reference is unavailable",
         );
         const relativePath = path.slice("/workspace/".length);
         const referenceRunAs = sandboxRunAs(eventing.modelRunSettings);
@@ -508,9 +510,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       videoGeneration: {
         capabilities: async () => capabilities,
         execute: async (toolInput, { toolCallId }) => {
-          const sessionForReference =
-            sandboxState.resolvedSandbox?.established.session ?? media.sdkOwnedSandboxSession;
+          const referenceSandbox = await resolveVideoReferenceSandboxAccess(
+            toolInput,
+            sandboxState,
+            media.sdkOwnedSandboxSession,
+          );
           const fence = eventing.toolCancellationFenceRef.current;
+          if (referenceSandbox && !fence) {
+            throw new Error("Video reference command fence is unavailable");
+          }
           const runAs = sandboxRunAs(eventing.modelRunSettings);
           let accepted: Awaited<ReturnType<typeof admitVideoGenerationRequest>>;
           try {
@@ -527,11 +535,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               toolInput,
               policy: videoGenerationPolicy,
               credential: videoGenerationCredential,
-              ...(sessionForReference && fence
+              ...(referenceSandbox && fence
                 ? {
                     runCommand: async (command) =>
                       await fence.runSandboxCommandStructured(
-                        sessionForReference as TurnSandboxCommandSession,
+                        referenceSandbox.session as TurnSandboxCommandSession,
                         {
                           ...command,
                           ...(runAs ? { runAs } : {}),

@@ -894,6 +894,45 @@ describe("sanitizeHistoryItemsForModel: tool_search pairing (progressive connect
     expect(sanitizeHistoryItemsForModel(items)).toEqual(items);
   });
 
+  test("keeps the original native tool-search pair and drops a later recovery duplicate", () => {
+    const call = {
+      type: "tool_search_call",
+      id: "tsc-provider-item",
+      arguments: { query: "matching tools" },
+      providerData: { call_id: "ts-duplicate", execution: "client" },
+    };
+    const output = {
+      type: "tool_search_output",
+      tools: [{ name: "matching_tool" }],
+      providerData: { call_id: "ts-duplicate", execution: "client" },
+    };
+    const recoveryCall = { ...call };
+    const recoveryOutput = {
+      type: "tool_search_output",
+      callId: "ts-duplicate",
+      tools: [],
+      status: "incomplete",
+    };
+    const items = [userMessage("q"), call, output, recoveryCall, recoveryOutput];
+
+    const repaired = sanitizeHistoryItemsForModel(items);
+
+    expect(repaired).toEqual([items[0], call, output]);
+    expect(repaired[1]).toBe(call);
+    expect(repaired[2]).toBe(output);
+  });
+
+  test("does not expose a repeated call identity as an approval open suffix", () => {
+    const items = [
+      toolSearchCall("ts1"),
+      toolSearchOutput("ts1"),
+      toolSearchCall("ts1"),
+      toolSearchOutput("ts1"),
+    ];
+
+    expect(extractOpenSuffixMembers(items)).toEqual([]);
+  });
+
   test("tool_search pairing never disturbs function_call pairing in the same history", () => {
     const items = [
       userMessage("q"),

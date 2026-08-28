@@ -120,6 +120,13 @@ const callIdOf = toolCallIdFromSdkItem;
  *     without its required following item". Mirrors the SDK's
  *     `dropReasoningItemsPrecedingDroppedCalls`.
  *
+ *  4. Keep only the first call/result pair for one `(result type, call_id)`.
+ *     A legacy recovery path could append a second synthetic pair after the
+ *     original native tool-search pair because its id lived only in
+ *     `providerData`. Responses treats the repeated call identity as invalid
+ *     even when both copies have outputs, so the later call and result must be
+ *     omitted from the request-local replay view.
+ *
  * A `call_id` is paired only when BOTH a call and a result of the matching
  * types exist with that id, the call appearing before the result. Calls and
  * results that satisfy that survive untouched.
@@ -136,7 +143,12 @@ export type OpenSuffixMember<T extends HistoryItem = HistoryItem> = {
   reasoningItems: T[];
 };
 
-function unpairedHistoryItemIndices<T extends HistoryItem>(items: readonly T[]): Set<number> {
+function analyzeHistoryProtocolItems<T extends HistoryItem>(
+  items: readonly T[],
+): {
+  dropped: Set<number>;
+  danglingCallIndices: Set<number>;
+} {
   // Pre-scan: for every (call-type, call_id) record the index of a RESULT that
   // appears strictly after the call. A call is valid only when such a result
   // exists; a result is valid only when its call appears strictly before it.
@@ -144,10 +156,14 @@ function unpairedHistoryItemIndices<T extends HistoryItem>(items: readonly T[]):
   // precedes its call is an orphan, and a call whose only result precedes it is
   // dangling).
   const dropped = new Set<number>();
+  const danglingCallIndices = new Set<number>();
 
-  // For each result-type, the call_ids of CALLs we have seen so far that are
-  // still waiting to be settled by a following result.
-  const openCallIdsByResultType = new Map<string, Set<string>>();
+  // For each result type, retain the first call index for a call id. Provider
+  // call identities are single-use: a later call with the same identity is a
+  // legacy duplicate, not another independently pairable call.
+  const openCallIndicesByResultType = new Map<string, Map<string, number>>();
+  const seenCallIdsByResultType = new Map<string, Set<string>>();
+  const duplicateOpenCountsByResultType = new Map<string, Map<string, number>>();
 
   items.forEach((item, index) => {
     const type = itemType(item);
@@ -157,16 +173,40 @@ function unpairedHistoryItemIndices<T extends HistoryItem>(items: readonly T[]):
     }
     const callResultType = RESULT_TYPE_BY_CALL_TYPE[type];
     if (callResultType) {
-      const open = openCallIdsByResultType.get(callResultType) ?? new Set<string>();
-      open.add(callId);
-      openCallIdsByResultType.set(callResultType, open);
+      const seen = seenCallIdsByResultType.get(callResultType) ?? new Set<string>();
+      seenCallIdsByResultType.set(callResultType, seen);
+      if (seen.has(callId)) {
+        dropped.add(index);
+        const duplicateOpen =
+          duplicateOpenCountsByResultType.get(callResultType) ?? new Map<string, number>();
+        duplicateOpen.set(callId, (duplicateOpen.get(callId) ?? 0) + 1);
+        duplicateOpenCountsByResultType.set(callResultType, duplicateOpen);
+        return;
+      }
+      seen.add(callId);
+      const open = openCallIndicesByResultType.get(callResultType) ?? new Map<string, number>();
+      open.set(callId, index);
+      openCallIndicesByResultType.set(callResultType, open);
       return;
     }
     if (RESULT_TYPES.has(type)) {
-      const open = openCallIdsByResultType.get(type);
+      const open = openCallIndicesByResultType.get(type);
       if (open && open.has(callId)) {
         // Settles a call we have already seen — keep both, close the call.
         open.delete(callId);
+        return;
+      }
+      const duplicateOpen = duplicateOpenCountsByResultType.get(type);
+      const duplicateCount = duplicateOpen?.get(callId) ?? 0;
+      if (duplicateCount > 0) {
+        // This result belongs to a later call that reused an already-seen id.
+        // Drop both halves of that duplicate pair while preserving the first.
+        dropped.add(index);
+        if (duplicateCount === 1) {
+          duplicateOpen!.delete(callId);
+        } else {
+          duplicateOpen!.set(callId, duplicateCount - 1);
+        }
       } else {
         // Rule 1: result whose call is absent or appears later — the orphan.
         dropped.add(index);
@@ -174,32 +214,12 @@ function unpairedHistoryItemIndices<T extends HistoryItem>(items: readonly T[]):
     }
   });
 
-  // Rule 2: any call still open after the full scan has no result after it —
-  // a dangling call the API rejects. Drop those calls. We re-walk to find the
-  // indices of the still-open call_ids (the last unmatched call per id).
-  const stillOpen = new Map<string, Set<string>>();
-  for (const [resultType, open] of openCallIdsByResultType) {
-    if (open.size > 0) {
-      stillOpen.set(resultType, new Set(open));
-    }
-  }
-  if (stillOpen.size > 0) {
-    for (let index = items.length - 1; index >= 0; index -= 1) {
-      const item = items[index];
-      const type = itemType(item);
-      const callId = callIdOf(item);
-      if (!type || !callId) {
-        continue;
-      }
-      const resultType = RESULT_TYPE_BY_CALL_TYPE[type];
-      if (!resultType) {
-        continue;
-      }
-      const open = stillOpen.get(resultType);
-      if (open && open.has(callId)) {
-        dropped.add(index);
-        open.delete(callId);
-      }
+  // Rule 2: any first-seen call still open after the full scan has no result
+  // after it — a dangling call the API rejects.
+  for (const open of openCallIndicesByResultType.values()) {
+    for (const index of open.values()) {
+      dropped.add(index);
+      danglingCallIndices.add(index);
     }
   }
 
@@ -221,7 +241,11 @@ function unpairedHistoryItemIndices<T extends HistoryItem>(items: readonly T[]):
       }
     }
   }
-  return dropped;
+  return { dropped, danglingCallIndices };
+}
+
+function unpairedHistoryItemIndices<T extends HistoryItem>(items: readonly T[]): Set<number> {
+  return analyzeHistoryProtocolItems(items).dropped;
 }
 
 /**
@@ -234,13 +258,13 @@ export function extractOpenSuffixMembers<T extends HistoryItem>(
   if (items.length === 0) {
     return [];
   }
-  const dropped = unpairedHistoryItemIndices(items);
+  const { dropped, danglingCallIndices } = analyzeHistoryProtocolItems(items);
   if (dropped.size === 0) {
     return [];
   }
   const members: Array<OpenSuffixMember<T>> = [];
   for (let index = 0; index < items.length; index += 1) {
-    if (!dropped.has(index)) {
+    if (!danglingCallIndices.has(index)) {
       continue;
     }
     const item = items[index];

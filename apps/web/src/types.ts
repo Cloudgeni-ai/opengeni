@@ -149,6 +149,7 @@ export type {
   VariableSetVariableMetadata,
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
+  WorkspaceMemberCandidate,
   WorkspaceMemorySearchMode,
   WorkspaceMemorySearchResponse,
   WorkspaceMemorySearchResult,

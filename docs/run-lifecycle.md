@@ -77,6 +77,17 @@ NATS and workspace-control fanout plus the immediate Temporal wake attempt are
 scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
 
+One narrow Send exception prevents a conversational answer from getting stuck
+behind the question it is answering. When the active, unpaused branch is in
+`requires_action`, a normal human Send is promoted inside that same transaction
+to Steer-equivalent replacement: pending human-input or approval state is
+cancelled, the new prompt is inserted at the head, and its routing is
+`accepted_for_steering`. Running, recovering, and capacity-waiting turns retain
+ordinary Send queue semantics. An explicitly paused branch also remains inert;
+only Resume or an explicit Steer activates it. Resubmitting a checked-out queue
+Edit also keeps ordinary queue placement: it is a revision of already accepted
+work, not a new conversational answer to the active wait.
+
 An owner-authored `personalResourceAttachment` is part of that same accepted
 work transaction for create, Send, and Steer. The server derives the fixed
 personal Variable Set/Rig/selected Connected Machine closure from the locked session; callers never issue
@@ -570,7 +581,15 @@ and continue; compaction itself never creates queue or recovery work. If that
 fresh continuation ends without any terminal model response, it is not accepted
 as an empty completion: cancellation still wins, otherwise the compacted
 checkpoint enters the ordinary bounded same-turn recovery path while newer
-queued prompts remain behind it.
+queued prompts remain behind it. Steer admission is immediate but deliberately
+does not interrupt while the latest exact-attempt compaction landmark is
+`started`, because an interruption row would also fence the terminal checkpoint
+write. Once `session.context.compacted` or
+`session.context.compaction.skipped` is durable, a waiting human/API or Agent
+Steer cooperatively settles the ordinary turn as `superseded` before another
+model request. A claimed standalone compaction instead completes its maintenance
+turn, then the waiting Steer is first to claim. Pause and Cancel remain immediate
+interruption fences.
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
@@ -707,6 +726,9 @@ turn that attached them; historical attachment ids do not cause sandbox or
 object-storage work. This-turn generated-video files may still copy onto the
 box before dispatch; a copy miss is deferred like generated images (the
 durable File remains) and does not fail the turn.
+Source-bearing `generate_video` calls join that same single-flight provisioner
+immediately before inspecting their `/workspace` references and use the active
+routed session. Text-to-video requests do not acquire a sandbox.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
@@ -834,10 +856,17 @@ terminal event on a unique contiguous durable sequence. The operator output is
 limited to safe IDs, event counts, sequences, and model name; credentials and
 event payloads are never printed.
 Pause closes the exact live attempt as `interrupted_recoverable` and leaves its
-logical turn `recovering`; Steer closes it as `superseded`, makes the steered
-human prompt first, and does not revive the old turn. A missing or already
-closed owner is an event-free stale no-op. This prevents a superseded activity
-that keeps running from publishing contradictory history or terminal truth.
+logical turn `recovering`; Steer normally closes it as `superseded`, makes the
+steered human prompt first, and does not revive the old turn. The exact exception
+is active compaction: while the latest exact-attempt landmark is
+`session.context.compaction.started`, and for the whole lifetime of a claimed
+standalone compaction turn, Steer records durable waiting work but inserts no
+interruption. The terminal checkpoint write therefore remains authorized; its
+first safe boundary supersedes the ordinary turn before another model request,
+or completes standalone maintenance before the Steer claim. A missing or
+already closed owner is an event-free stale no-op. This prevents a superseded
+activity that keeps running from publishing contradictory history or terminal
+truth without creating a compaction/Steer retry loop.
 
 Pause/Resume command persistence distinguishes `changed`, `unchanged`, and
 `replayed` before allocating a control revision. A fresh Pause is unchanged

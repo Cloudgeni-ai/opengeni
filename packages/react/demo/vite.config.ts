@@ -4,6 +4,25 @@ import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 const demoApiTarget = process.env.OPENGENI_REACT_DEMO_API_TARGET ?? "http://127.0.0.1:8000";
+const timelineScrollTestBuild = process.env.OPENGENI_TIMELINE_SCROLL_TEST_BUILD === "1";
+const demoInputs = {
+  main: resolve(__dirname, "index.html"),
+  timeline: resolve(__dirname, "timeline.html"),
+  fleetPolicy: resolve(__dirname, "fleet-policy.html"),
+  queue: resolve(__dirname, "queue.html"),
+  machines: resolve(__dirname, "machines.html"),
+  workbench: resolve(__dirname, "workbench.html"),
+  workbenchDock: resolve(__dirname, "workbench-dock.html"),
+  workbenchEmbed: resolve(__dirname, "workbench-embed.html"),
+  terminal: resolve(__dirname, "terminal.html"),
+  transcription: resolve(__dirname, "transcription.html"),
+  realtime: resolve(__dirname, "realtime.html"),
+  editableArtifacts: resolve(__dirname, "editable-artifacts.html"),
+  browser: resolve(__dirname, "browser.html"),
+  computer: resolve(__dirname, "computer.html"),
+  composerResponsive: resolve(__dirname, "composer-responsive.html"),
+  commandUx: resolve(__dirname, "command-ux.html"),
+};
 
 export default defineConfig({
   base: process.env.OPENGENI_REACT_DEMO_BASE ?? "/",
@@ -35,24 +54,9 @@ export default defineConfig({
       // renderer harness (timeline.html), the queue presentation browser
       // regression (queue.html), and the Machines / enrollment UI screenshot
       // harness (machines.html — M9 / V12), all static.
-      input: {
-        main: resolve(__dirname, "index.html"),
-        timeline: resolve(__dirname, "timeline.html"),
-        fleetPolicy: resolve(__dirname, "fleet-policy.html"),
-        queue: resolve(__dirname, "queue.html"),
-        machines: resolve(__dirname, "machines.html"),
-        workbench: resolve(__dirname, "workbench.html"),
-        workbenchDock: resolve(__dirname, "workbench-dock.html"),
-        workbenchEmbed: resolve(__dirname, "workbench-embed.html"),
-        terminal: resolve(__dirname, "terminal.html"),
-        transcription: resolve(__dirname, "transcription.html"),
-        realtime: resolve(__dirname, "realtime.html"),
-        editableArtifacts: resolve(__dirname, "editable-artifacts.html"),
-        browser: resolve(__dirname, "browser.html"),
-        computer: resolve(__dirname, "computer.html"),
-        composerResponsive: resolve(__dirname, "composer-responsive.html"),
-        commandUx: resolve(__dirname, "command-ux.html"),
-      },
+      input: timelineScrollTestBuild
+        ? { timelineScrollTest: resolve(__dirname, "timeline-scroll-test.html") }
+        : demoInputs,
     },
   },
 });
