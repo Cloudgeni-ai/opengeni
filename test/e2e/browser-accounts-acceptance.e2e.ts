@@ -1854,6 +1854,7 @@ beforeAll(async () => {
             completionResponseLoss.dropped = true;
             await response.body?.cancel();
             const headers = new Headers(response.headers);
+            headers.delete("content-encoding");
             headers.delete("content-length");
             // Preserve an accepted response with an unreadable completion payload without
             // throwing from Bun's server-side stream controller after the test has settled.
