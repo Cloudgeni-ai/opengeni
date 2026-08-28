@@ -70,14 +70,27 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
-import { createManagedAuth } from "./auth/managed-auth";
 import {
+  createManagedAuth,
+  isolatedManagedAuthOAuthCallbackRequest,
+  resolveManagedAuthOAuthAttempt,
+} from "./auth/managed-auth";
+import {
+  adoptManagedAuthSession,
   MANAGED_AUTH_SESSION_SET_COOKIE,
   ManagedAuthActorChangeError,
+  managedAuthCsrfHash,
+  managedAuthDerivedUuid,
+  managedAuthSecretRequestDigest,
   managedAuthSha256,
 } from "@opengeni/core/managed-auth-session-sets";
 import { createBetterAuthSessionAdapter } from "./auth/managed-auth-session-adapter";
-import { runManagedAuthDiscardedProviderSession } from "./auth/managed-auth-attempt-context";
+import {
+  currentManagedAuthCreatedSessionId,
+  runManagedAuthAttempt,
+  runManagedAuthDiscardedProviderSession,
+  runManagedAuthProvider,
+} from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
 import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
@@ -579,26 +592,94 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedAuthSessionSetRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
+      const pathname = new URL(c.req.url).pathname;
+      const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
       if (deps.settings.managedAuthSessionSetMode === "legacy") {
-        return await managedAuth.handler(c.req.raw);
+        return oauthCallbackProvider
+          ? await runManagedAuthProvider(
+              oauthCallbackProvider,
+              async () => await managedAuth.handler(c.req.raw),
+            )
+          : await managedAuth.handler(c.req.raw);
       }
-      requireManagedAuthProviderRouteAllowed(c.req.method, new URL(c.req.url).pathname);
+      requireManagedAuthProviderRouteAllowed(c.req.method, pathname);
       // Provider authentication/recovery is isolated from whichever actor the
       // browser currently renders. Selected-session capabilities are all
       // product-owned above this wildcard and generation/epoch fenced.
-      const headers = new Headers(c.req.raw.headers);
-      headers.delete("cookie");
-      headers.delete("authorization");
-      headers.delete("x-forwarded-user");
-      const providerRequest = new Request(c.req.raw, { headers });
       const authority = getCookie(c, MANAGED_AUTH_SESSION_SET_COOKIE);
-      const discardProviderSession =
-        deps.settings.managedAuthSessionSetMode === "broker" || authority !== undefined;
-      const providerResponse = discardProviderSession
-        ? await runManagedAuthDiscardedProviderSession(
-            async () => await managedAuth.handler(providerRequest),
-          )
-        : await managedAuth.handler(providerRequest);
+      let providerResponse: Response;
+      let preserveCookieNames: readonly string[] | undefined;
+      if (oauthCallbackProvider) {
+        const attempt = await resolveManagedAuthOAuthAttempt(
+          managedAuth,
+          c.req.raw,
+          oauthCallbackProvider,
+        );
+        if (!attempt || !authority || attempt.authorityHash !== managedAuthSha256(authority)) {
+          throw new HTTPException(409, { message: "provider_route_blocked" });
+        }
+        const isolated = await isolatedManagedAuthOAuthCallbackRequest(managedAuth, c.req.raw);
+        preserveCookieNames = [isolated.stateCookieName];
+        const handled = await runManagedAuthAttempt(
+          attempt.transactionId,
+          oauthCallbackProvider,
+          async () => {
+            const response = await managedAuth.handler(isolated.request);
+            return { response, authSessionId: currentManagedAuthCreatedSessionId() };
+          },
+        );
+        providerResponse = handled.response;
+        if (handled.authSessionId) {
+          try {
+            await adoptManagedAuthSession({
+              db: deps.db,
+              adapter: managedAuthSessionAdapter!,
+              authority,
+              authorityHash: attempt.authorityHash,
+              csrfHash: managedAuthCsrfHash(authority),
+              operationId: managedAuthDerivedUuid(
+                "opengeni:managed-auth:social-completion",
+                `${attempt.transactionId}:${attempt.provider}`,
+              ),
+              requestDigest: managedAuthSecretRequestDigest(deps.settings.betterAuthSecret!, {
+                operation: "social_completion",
+                transactionId: attempt.transactionId,
+                provider: attempt.provider,
+                expectedGeneration: attempt.expectedGeneration,
+                expectedActorEpoch: attempt.expectedActorEpoch,
+              }),
+              expectedGeneration: attempt.expectedGeneration,
+              expectedActorEpoch: attempt.expectedActorEpoch,
+              transactionId: attempt.transactionId,
+              transactionSecretHash: attempt.transactionSecretHash,
+              authSessionId: handled.authSessionId,
+              mode: deps.settings.managedAuthSessionSetMode,
+            });
+          } catch {
+            // adoptManagedAuthSession revokes only when durable reconciliation
+            // proves that completion did not commit. An uncertain outcome may
+            // already point the selected slot at this session, so the callback
+            // must not independently revoke it.
+            const location = new URL("/account-auth", deps.settings.publicBaseUrl!);
+            location.searchParams.set("transaction", attempt.transactionId);
+            location.searchParams.set("social", "error");
+            providerResponse = Response.redirect(location, 302);
+          }
+        }
+      } else {
+        const headers = new Headers(c.req.raw.headers);
+        headers.delete("cookie");
+        headers.delete("authorization");
+        headers.delete("x-forwarded-user");
+        const providerRequest = new Request(c.req.raw, { headers });
+        const discardProviderSession =
+          deps.settings.managedAuthSessionSetMode === "broker" || authority !== undefined;
+        providerResponse = discardProviderSession
+          ? await runManagedAuthDiscardedProviderSession(
+              async () => await managedAuth.handler(providerRequest),
+            )
+          : await managedAuth.handler(providerRequest);
+      }
       let replacementCookies: readonly string[] | undefined;
       if (deps.settings.managedAuthSessionSetMode === "broker") {
         replacementCookies = await managedAuthSessionAdapter!.createLegacySelectedSessionCookies(
@@ -628,7 +709,10 @@ export function createAppComposition(deps: AppDependencies): {
           }
         }
       }
-      return await scrubManagedAuthProviderResponse(providerResponse, { replacementCookies });
+      return await scrubManagedAuthProviderResponse(providerResponse, {
+        replacementCookies,
+        preserveCookieNames,
+      });
     });
   }
 
@@ -956,6 +1040,11 @@ export function createAppComposition(deps: AppDependencies): {
   return { app, routeDeps };
 }
 
+function managedAuthOAuthCallbackProvider(pathname: string): "google" | "github" | null {
+  const match = pathname.match(/^\/v1\/auth\/callback\/(google|github)$/u);
+  return match?.[1] === "google" || match?.[1] === "github" ? match[1] : null;
+}
+
 function mutationOutcomeUnknown(error: unknown, method: string): boolean {
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
   const cause = error instanceof HTTPException ? error.cause : error;
@@ -1072,6 +1161,14 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
       mode: "managedSession" as const,
       session: "cookie" as const,
       emailVerificationRequired: settings.environment !== "local",
+      socialProviders: [
+        ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
+          ? (["google"] as const)
+          : []),
+        ...(settings.managedAuthGithubClientId && settings.managedAuthGithubClientSecret
+          ? (["github"] as const)
+          : []),
+      ],
     };
   }
   if (settings.productAccessMode === "configured") {

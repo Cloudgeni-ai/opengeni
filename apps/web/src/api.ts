@@ -529,6 +529,23 @@ export async function signInEmail(input: {
   });
 }
 
+export async function startManagedSocialSignIn(provider: "google" | "github"): Promise<void> {
+  const callbackURL = new URL("/", window.location.origin).toString();
+  const response = await authRequest<{ url?: unknown }>("/sign-in/social", {
+    method: "POST",
+    body: JSON.stringify({
+      provider,
+      callbackURL,
+      errorCallbackURL: callbackURL,
+      disableRedirect: true,
+    }),
+  });
+  if (typeof response.url !== "string") {
+    throw new Error("The sign-in provider did not return an authorization URL");
+  }
+  window.location.assign(response.url);
+}
+
 export async function signOutManaged(): Promise<unknown> {
   return await authRequest<unknown>("/sign-out", { method: "POST" });
 }

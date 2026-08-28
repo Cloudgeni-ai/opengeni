@@ -14514,6 +14514,10 @@ export const ClientAuthConfig = z.discriminatedUnion("mode", [
     mode: z.literal("managedSession"),
     session: z.literal("cookie"),
     emailVerificationRequired: z.boolean().default(true),
+    socialProviders: z
+      .array(z.enum(["google", "github"]))
+      .max(2)
+      .default([]),
   }),
 ]);
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;

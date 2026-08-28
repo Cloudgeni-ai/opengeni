@@ -1755,6 +1755,23 @@ describe("GET /v1/config/client", () => {
     ).toBe("broker");
   });
 
+  test("projects only configured managed social provider names", async () => {
+    const config = await fetchClientConfig(
+      testSettings({
+        productAccessMode: "managed",
+        managedAuthGoogleClientId: "google-login.apps.googleusercontent.com",
+        managedAuthGoogleClientSecret: "google-secret",
+        managedAuthGithubClientId: "github-login",
+        managedAuthGithubClientSecret: "github-secret",
+      }),
+    );
+    expect(config.auth).toMatchObject({
+      mode: "managedSession",
+      socialProviders: ["google", "github"],
+    });
+    expect(JSON.stringify(config.auth)).not.toContain("secret");
+  });
+
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {
     const disabled = await fetchClientConfig(testSettings());
     expect(disabled.analytics).toEqual({ consentRequired: true, providers: {} });

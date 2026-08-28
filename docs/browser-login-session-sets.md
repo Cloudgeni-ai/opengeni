@@ -69,7 +69,8 @@ wildcard handler:
   once during `dual` rollout; competing first-adoption attempts serialize, and a
   session already owned by any live slot cannot transfer or re-key set authority;
 - `POST /v1/auth/session-set/transactions`,
-  `POST /v1/auth/session-set/transactions/email-password`, and
+  `POST /v1/auth/session-set/transactions/email-password`,
+  `POST /v1/auth/session-set/transactions/social`, and
   `DELETE /v1/auth/session-set/transactions/:transactionId` own isolated add or
   exact-slot re-authentication;
 - `POST /v1/auth/session-set/select`, `logout-one`, and `logout-all` own explicit
@@ -103,6 +104,14 @@ attempt. The opener receives only the transaction UUID over an exact-origin,
 exact-window `postMessage`; it then rereads server authority. Add leaves the current
 slot selected. Re-auth proves the transaction's exact slot, human, login binding,
 and captured revisions before replacing that slot's provider session.
+
+Configured Google and GitHub sign-in starts through the same fenced transaction.
+The OAuth state retains only a server-side transaction digest and exact generation,
+actor epoch, authority hash, provider, and safe popup return. The callback preserves
+only Better Auth's state cookie, resolves the exact provider login binding, adopts
+the newly created session before redirecting to `/account-auth`, and then removes
+the ambient provider session cookie. A callback cannot select another browser slot,
+and automatic email-match account linking remains disabled.
 
 The session-set-capable signed-out surface uses that isolated Add path for sign-in
 in both `dual` and `broker`. Account creation and verification resend remain

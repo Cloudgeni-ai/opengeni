@@ -46,6 +46,7 @@ import {
   signInEmail,
   signOutManaged,
   signUpEmail,
+  startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
@@ -644,6 +645,8 @@ export function RootRouteComponent() {
     clientConfig?.auth.mode === "managedSession"
       ? (clientConfig.auth.emailVerificationRequired ?? true)
       : true;
+  const managedSocialProviders =
+    clientConfig?.auth.mode === "managedSession" ? (clientConfig.auth.socialProviders ?? []) : [];
   const keyAuthReady = !keyAuthRequired || hasAccessKey;
   const managedAuthReady = !managedAuthRequired || Boolean(authSession);
   const authReady = keyAuthReady && managedAuthReady;
@@ -2185,6 +2188,16 @@ export function RootRouteComponent() {
     });
   }
 
+  async function handleManagedSocialAuth(provider: "google" | "github") {
+    invalidatePrincipalWorkspaceState({
+      preservePendingSlackLink: preserveSlackLinkForManagedAuth(
+        "signin",
+        slackLinkPrepareController.phase(),
+      ),
+    });
+    await startManagedSocialSignIn(provider);
+  }
+
   async function handleManagedSignOut() {
     invalidatePrincipalWorkspaceState();
     const acceptedPrincipal = principalTransitionIdentity.current;
@@ -2549,6 +2562,8 @@ export function RootRouteComponent() {
         <ManagedAuthPanel
           onSubmit={handleManagedAuth}
           emailVerificationRequired={managedEmailVerificationRequired}
+          socialProviders={managedSocialProviders}
+          onSocialSubmit={handleManagedSocialAuth}
         />
       )}
     </Suspense>

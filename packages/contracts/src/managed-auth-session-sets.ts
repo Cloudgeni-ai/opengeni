@@ -127,6 +127,24 @@ export const ManagedAuthLoginTransaction = z.object({
 });
 export type ManagedAuthLoginTransaction = z.infer<typeof ManagedAuthLoginTransaction>;
 
+export const ManagedAuthSocialProvider = z.enum(["google", "github"]);
+export type ManagedAuthSocialProvider = z.infer<typeof ManagedAuthSocialProvider>;
+
+export const StartManagedAuthSocialTransactionRequest = ManagedAuthOperationIdentity.extend({
+  transactionId: z.string().uuid(),
+  provider: ManagedAuthSocialProvider,
+});
+export type StartManagedAuthSocialTransactionRequest = z.infer<
+  typeof StartManagedAuthSocialTransactionRequest
+>;
+
+export const StartManagedAuthSocialTransactionResponse = z.object({
+  url: z.string().url().max(4_096),
+});
+export type StartManagedAuthSocialTransactionResponse = z.infer<
+  typeof StartManagedAuthSocialTransactionResponse
+>;
+
 export const CompleteManagedAuthEmailPasswordTransactionRequest =
   ManagedAuthOperationIdentity.extend({
     transactionId: z.string().uuid(),

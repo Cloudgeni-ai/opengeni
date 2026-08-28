@@ -3469,6 +3469,8 @@ export type ClientAuthConfig =
       session: "cookie";
       /** Defaults to true when omitted by an older deployment. */
       emailVerificationRequired?: boolean;
+      /** Configured managed sign-in providers; omitted by older deployments. */
+      socialProviders?: ("google" | "github")[];
     };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract

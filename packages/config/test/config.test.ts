@@ -460,6 +460,36 @@ describe("managed auth browser session-set rollout", () => {
   });
 });
 
+describe("managed auth social providers", () => {
+  test("loads independently configured Google and GitHub login clients", () => {
+    expect(
+      withEnv(
+        {
+          OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID: "google-login.apps.googleusercontent.com",
+          OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET: "google-login-secret",
+          OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID: "github-login-client",
+          OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET: "github-login-secret",
+        },
+        () => getSettings(),
+      ),
+    ).toMatchObject({
+      managedAuthGoogleClientId: "google-login.apps.googleusercontent.com",
+      managedAuthGoogleClientSecret: "google-login-secret",
+      managedAuthGithubClientId: "github-login-client",
+      managedAuthGithubClientSecret: "github-login-secret",
+    });
+  });
+
+  test("rejects either provider when only one credential half is configured", () => {
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID: "google-login" }, () => getSettings()),
+    ).toThrow(/MANAGED_AUTH_GOOGLE_CLIENT_ID.*MANAGED_AUTH_GOOGLE_CLIENT_SECRET/);
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET: "github-secret" }, () => getSettings()),
+    ).toThrow(/MANAGED_AUTH_GITHUB_CLIENT_ID.*MANAGED_AUTH_GITHUB_CLIENT_SECRET/);
+  });
+});
+
 describe("personal GitHub OAuth settings", () => {
   const enabled = {
     OPENGENI_ENVIRONMENT: "test",

@@ -1,7 +1,13 @@
 import { BrowserAccountsApiError, createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import { Loader2Icon } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { fetchClientConfig } from "@/api";
+import {
+  ManagedAuthDivider,
+  ManagedSocialAuthButtons,
+  type ManagedSocialProvider,
+} from "@/components/managed-social-auth-buttons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,7 +19,13 @@ import {
 
 const browserAccountsApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
-export function AccountAuthRoute({ transactionId }: { transactionId: string | undefined }) {
+export function AccountAuthRoute({
+  transactionId,
+  socialOutcome,
+}: {
+  transactionId: string | undefined;
+  socialOutcome?: "complete" | "error";
+}) {
   const client = useMemo(
     () => createBrowserAccountsClient({ baseUrl: browserAccountsApiBaseUrl }),
     [],
@@ -22,62 +34,91 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
     operationId: string;
     expectedGeneration: string;
   } | null>(null);
+  const socialStartAttempt = useRef<{
+    provider: ManagedSocialProvider;
+    operationId: string;
+    expectedGeneration: string;
+  } | null>(null);
   const finishInFlight = useRef(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
+  const [socialProviders, setSocialProviders] = useState<ManagedSocialProvider[]>([]);
+  const [error, setError] = useState<string | null>(
+    socialOutcome === "error" ? "Social authentication did not complete" : null,
+  );
   const validTransactionId = isAccountAuthTransactionId(transactionId) ? transactionId : null;
 
-  function finish(type: "opengeni-account-auth-complete" | "opengeni-account-auth-cancel") {
-    if (!validTransactionId || finishInFlight.current) return;
-    const opener = window.opener;
-    if (!opener) {
-      window.location.replace("/");
-      return;
-    }
-    finishInFlight.current = true;
-    const message = {
-      type,
-      transactionId: validTransactionId,
-    } as const;
-    let resendTimer: number | null = null;
-    let timeoutTimer: number | null = null;
-    const cleanup = () => {
-      window.removeEventListener("message", onAcknowledgement);
-      if (resendTimer !== null) window.clearInterval(resendTimer);
-      if (timeoutTimer !== null) window.clearTimeout(timeoutTimer);
-    };
-    const onAcknowledgement = (event: MessageEvent<unknown>) => {
-      if (
-        !accountAuthPopupAcknowledgement(event, {
-          origin: window.location.origin,
-          opener,
-          transactionId: validTransactionId,
-        })
-      ) {
+  const finish = useCallback(
+    (type: "opengeni-account-auth-complete" | "opengeni-account-auth-cancel") => {
+      if (!validTransactionId || finishInFlight.current) return;
+      const opener = window.opener;
+      if (!opener) {
+        window.location.replace("/");
         return;
       }
-      cleanup();
-      window.close();
+      finishInFlight.current = true;
+      const message = {
+        type,
+        transactionId: validTransactionId,
+      } as const;
+      let resendTimer: number | null = null;
+      let timeoutTimer: number | null = null;
+      const cleanup = () => {
+        window.removeEventListener("message", onAcknowledgement);
+        if (resendTimer !== null) window.clearInterval(resendTimer);
+        if (timeoutTimer !== null) window.clearTimeout(timeoutTimer);
+      };
+      const onAcknowledgement = (event: MessageEvent<unknown>) => {
+        if (
+          !accountAuthPopupAcknowledgement(event, {
+            origin: window.location.origin,
+            opener,
+            transactionId: validTransactionId,
+          })
+        ) {
+          return;
+        }
+        cleanup();
+        window.close();
+      };
+      const post = () => postAccountAuthPopupMessage(opener, window.location.origin, message);
+      window.addEventListener("message", onAcknowledgement);
+      if (!post()) {
+        cleanup();
+        window.location.replace("/");
+        return;
+      }
+      // Keep the isolated popup alive until the exact opener acknowledges the
+      // non-secret receipt. WebKit can discard a queued postMessage when its
+      // sender closes immediately; bounded replay is safe because settlement is
+      // authority-reread and transaction-idempotent.
+      resendTimer = window.setInterval(post, 100);
+      timeoutTimer = window.setTimeout(() => {
+        cleanup();
+        window.location.replace("/");
+      }, 3_000);
+    },
+    [validTransactionId],
+  );
+
+  useEffect(() => {
+    let active = true;
+    void fetchClientConfig()
+      .then((config) => {
+        if (!active || config.auth.mode !== "managedSession") return;
+        setSocialProviders(config.auth.socialProviders ?? []);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
     };
-    const post = () => postAccountAuthPopupMessage(opener, window.location.origin, message);
-    window.addEventListener("message", onAcknowledgement);
-    if (!post()) {
-      cleanup();
-      window.location.replace("/");
-      return;
-    }
-    // Keep the isolated popup alive until the exact opener acknowledges the
-    // non-secret receipt. WebKit can discard a queued postMessage when its
-    // sender closes immediately; bounded replay is safe because settlement is
-    // authority-reread and transaction-idempotent.
-    resendTimer = window.setInterval(post, 100);
-    timeoutTimer = window.setTimeout(() => {
-      cleanup();
-      window.location.replace("/");
-    }, 3_000);
-  }
+  }, []);
+
+  useEffect(() => {
+    if (socialOutcome === "complete") finish("opengeni-account-auth-complete");
+  }, [finish, socialOutcome]);
 
   async function submit() {
     if (!validTransactionId || !email.trim() || !password) return;
@@ -117,6 +158,41 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
     }
   }
 
+  async function submitSocial(provider: ManagedSocialProvider) {
+    if (!validTransactionId) return;
+    setSocialBusy(provider);
+    setError(null);
+    try {
+      const projection = await client.getSessionSet();
+      const existing = socialStartAttempt.current;
+      const attempt =
+        existing?.provider === provider
+          ? existing
+          : {
+              provider,
+              operationId: crypto.randomUUID(),
+              expectedGeneration: projection.generation,
+            };
+      socialStartAttempt.current = attempt;
+      const result = await client.startSocialTransaction({
+        operationId: attempt.operationId,
+        expectedGeneration: attempt.expectedGeneration,
+        transactionId: validTransactionId,
+        provider,
+      });
+      socialStartAttempt.current = null;
+      window.location.assign(result.url);
+    } catch (caught) {
+      if (
+        !(caught instanceof BrowserAccountsApiError && caught.code === "operation_outcome_unknown")
+      ) {
+        socialStartAttempt.current = null;
+      }
+      setError(caught instanceof Error ? caught.message : "Authentication failed");
+      setSocialBusy(null);
+    }
+  }
+
   if (!validTransactionId) {
     return (
       <section className="flex flex-1 items-center justify-center px-4">
@@ -128,6 +204,17 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
           <p className="mt-2 text-sm text-fg-subtle">
             Close this window and start the account action again from OpenGeni.
           </p>
+        </div>
+      </section>
+    );
+  }
+
+  if (socialOutcome === "complete") {
+    return (
+      <section className="flex flex-1 items-center justify-center px-4">
+        <div role="status" className="flex items-center gap-2 text-sm text-fg-subtle">
+          <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+          Finishing sign in…
         </div>
       </section>
     );
@@ -146,10 +233,16 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
         <div className="mb-5">
           <h1 className="text-base font-semibold">Authenticate this account</h1>
           <p className="mt-1 text-sm text-fg-subtle">
-            Credentials stay in this isolated window. Your active account changes only after
-            OpenGeni verifies the transaction.
+            This window keeps the account you choose separate until OpenGeni verifies the sign-in.
           </p>
         </div>
+        <ManagedSocialAuthButtons
+          providers={socialProviders}
+          busyProvider={socialBusy}
+          disabled={busy}
+          onSelect={(provider) => void submitSocial(provider)}
+        />
+        {socialProviders.length > 0 ? <ManagedAuthDivider /> : null}
         <div className="mb-3">
           <Label htmlFor="account-auth-email">Email</Label>
           <Input
@@ -160,7 +253,7 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
             onChange={(event) => setEmail(event.target.value)}
             className="mt-2 min-h-11"
             autoFocus
-            disabled={busy}
+            disabled={busy || socialBusy !== null}
           />
         </div>
         <div>
@@ -172,7 +265,7 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             className="mt-2 min-h-11"
-            disabled={busy}
+            disabled={busy || socialBusy !== null}
           />
         </div>
         {error ? (
@@ -185,12 +278,16 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
             type="button"
             variant="outline"
             className="min-h-11"
-            disabled={busy}
+            disabled={busy || socialBusy !== null}
             onClick={() => finish("opengeni-account-auth-cancel")}
           >
             Cancel
           </Button>
-          <Button type="submit" className="min-h-11" disabled={busy || !email.trim() || !password}>
+          <Button
+            type="submit"
+            className="min-h-11"
+            disabled={busy || socialBusy !== null || !email.trim() || !password}
+          >
             {busy ? (
               <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
             ) : null}

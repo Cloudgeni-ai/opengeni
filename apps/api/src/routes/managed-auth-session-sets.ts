@@ -7,6 +7,7 @@ import {
   CompleteManagedAuthLoginTransactionResponse,
   LogoutManagedAuthLoginSlotRequest,
   LogoutManagedAuthSessionSetRequest,
+  MANAGED_AUTH_TRANSACTION_TTL_SECONDS,
   MANAGED_AUTH_SESSION_SET_API_CONTRACT_HEADER,
   MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
   ManagedAuthDeepLinkResolution,
@@ -15,6 +16,8 @@ import {
   ManagedAuthSessionSetErrorCode,
   ResolveManagedAuthDeepLinkRequest,
   SelectManagedAuthLoginSlotRequest,
+  StartManagedAuthSocialTransactionRequest,
+  StartManagedAuthSocialTransactionResponse,
   type ManagedAuthSessionSetProjection as ManagedAuthSessionSetProjectionType,
   type ManagedAuthSessionSetErrorCode as ManagedAuthSessionSetErrorCodeType,
 } from "@opengeni/contracts/managed-auth-session-sets";
@@ -57,11 +60,21 @@ import {
   mutateManagedAuthSessionSet,
 } from "@opengeni/db/managed-auth-session-sets";
 import { ensureManagedAccessForUser, getSession } from "@opengeni/db";
+import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
-import type { z } from "zod";
+import { z } from "zod";
+
+const ManagedAuthSocialStartReceipt = z
+  .object({
+    version: z.literal(1),
+    requestDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    url: z.string().url().max(4_096),
+    stateCookie: z.string().min(1).max(4_096),
+  })
+  .strict();
 
 export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDeps): void {
   const noStore = async (context: Context, next: () => Promise<void>) => {
@@ -304,6 +317,104 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
     }
   });
 
+  app.post("/v1/auth/session-set/transactions/social", async (context) => {
+    const body = await bodyAs(context, StartManagedAuthSocialTransactionRequest);
+    const { authority, actorEpoch } = await requireMutation(context, deps, body.expectedGeneration);
+    const available = requireAvailable(deps);
+    if (!managedAuthSocialProviderConfigured(deps, body.provider)) {
+      throw managedAuthApiError(404, "managed_authentication_unavailable");
+    }
+    const transactionSecret = requireTransactionSecret(context, body.transactionId);
+    const publicBaseUrl = deps.settings.publicBaseUrl;
+    if (!publicBaseUrl) {
+      throw managedAuthApiError(503, "managed_authentication_unavailable", { retryable: true });
+    }
+    const callbackURL = new URL("/account-auth", publicBaseUrl);
+    callbackURL.searchParams.set("transaction", body.transactionId);
+    callbackURL.searchParams.set("social", "complete");
+    const errorCallbackURL = new URL(callbackURL);
+    errorCallbackURL.searchParams.set("social", "error");
+    try {
+      const requestDigest = digest(deps, body);
+      const receiptIdentifier = `opengeni-managed-social-start:${body.operationId}`;
+      const receipt = await deps.db.transaction(async (transaction) => {
+        await transaction.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${receiptIdentifier}, 0))`,
+        );
+        const authContext = await available.managedAuth.$context;
+        const stored = await authContext.internalAdapter.findVerificationValue(receiptIdentifier);
+        if (stored && new Date(stored.expiresAt).getTime() > Date.now()) {
+          let parsed: ReturnType<typeof ManagedAuthSocialStartReceipt.safeParse>;
+          try {
+            parsed = ManagedAuthSocialStartReceipt.safeParse(JSON.parse(stored.value));
+          } catch (error) {
+            throw new ManagedAuthCompletionOutcomeUnknownError({ cause: error });
+          }
+          if (!parsed.success) {
+            throw new ManagedAuthCompletionOutcomeUnknownError({ cause: parsed.error });
+          }
+          if (parsed.data.requestDigest !== requestDigest) {
+            throw new ManagedAuthSessionSetOperationReuseError();
+          }
+          return parsed.data;
+        }
+        if (stored) {
+          await authContext.internalAdapter.deleteVerificationByIdentifier(receiptIdentifier);
+        }
+        const result = await available.managedAuth.api.signInSocial({
+          body: {
+            provider: body.provider,
+            disableRedirect: true,
+            callbackURL: callbackURL.toString(),
+            errorCallbackURL: errorCallbackURL.toString(),
+            additionalData: {
+              opengeniManagedAuth: {
+                version: 1,
+                operationId: body.operationId,
+                provider: body.provider,
+                transactionId: body.transactionId,
+                authorityHash: managedAuthSha256(authority),
+                transactionSecretHash: managedAuthSha256(transactionSecret),
+                expectedGeneration: body.expectedGeneration,
+                expectedActorEpoch: actorEpoch,
+              },
+            },
+          },
+          headers: isolatedManagedAuthHeaders(context.req.raw),
+          returnHeaders: true,
+        });
+        const url = result.response?.url;
+        const stateCookieName = authContext.createAuthCookie("state").name;
+        const stateCookie = setCookieHeaders(result.headers).find((cookie) =>
+          cookie.startsWith(`${stateCookieName}=`),
+        );
+        const parsed = ManagedAuthSocialStartReceipt.parse({
+          version: 1,
+          requestDigest,
+          url,
+          stateCookie,
+        });
+        const created = await authContext.internalAdapter.createVerificationValue({
+          identifier: receiptIdentifier,
+          value: JSON.stringify(parsed),
+          expiresAt: new Date(Date.now() + MANAGED_AUTH_TRANSACTION_TTL_SECONDS * 1_000),
+        });
+        if (!created) {
+          throw new ManagedAuthCompletionOutcomeUnknownError();
+        }
+        return parsed;
+      });
+      context.header("set-cookie", receipt.stateCookie, { append: true });
+      return jsonWithActorEpoch(
+        context,
+        actorEpoch,
+        StartManagedAuthSocialTransactionResponse.parse({ url: receipt.url }),
+      );
+    } catch (error) {
+      throwHttp(error);
+    }
+  });
+
   app.delete("/v1/auth/session-set/transactions/:transactionId", async (context) => {
     const body = await bodyAs(context, CancelManagedAuthLoginTransactionRequest);
     if (body.transactionId !== context.req.param("transactionId")) invalid();
@@ -470,21 +581,42 @@ export function requireManagedAuthProviderRouteAllowed(method: string, pathname:
       (pathname === "/v1/auth/verify-email" ||
         pathname === "/v1/auth/error" ||
         pathname === "/v1/auth/ok" ||
+        /^\/v1\/auth\/callback\/(?:google|github)$/.test(pathname) ||
         /^\/v1\/auth\/reset-password\/[^/]+$/.test(pathname)));
   if (!allowed) throw managedAuthApiError(409, "provider_route_blocked");
+}
+
+function managedAuthSocialProviderConfigured(
+  deps: ApiRouteDeps,
+  provider: "google" | "github",
+): boolean {
+  return provider === "google"
+    ? Boolean(
+        deps.settings.managedAuthGoogleClientId && deps.settings.managedAuthGoogleClientSecret,
+      )
+    : Boolean(
+        deps.settings.managedAuthGithubClientId && deps.settings.managedAuthGithubClientSecret,
+      );
 }
 
 /** Remove provider bearer/session material and enforce browser-auth cache/cookie policy. */
 export async function scrubManagedAuthProviderResponse(
   response: Response,
-  options: { replacementCookies?: readonly string[] | undefined } = {},
+  options: {
+    replacementCookies?: readonly string[] | undefined;
+    preserveCookieNames?: readonly string[] | undefined;
+  } = {},
 ): Promise<Response> {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   const headers = new Headers(response.headers);
   headers.set("cache-control", "no-store");
   headers.set("pragma", "no-cache");
   if (options.replacementCookies !== undefined) {
+    const preserved = setCookieHeaders(response.headers).filter((cookie) =>
+      options.preserveCookieNames?.some((name) => cookie.startsWith(`${name}=`)),
+    );
     headers.delete("set-cookie");
+    for (const cookie of preserved) headers.append("set-cookie", cookie);
     for (const cookie of options.replacementCookies) headers.append("set-cookie", cookie);
   }
   let body: BodyInit | null = response.body;
