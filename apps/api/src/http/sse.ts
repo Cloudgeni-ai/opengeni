@@ -309,14 +309,14 @@ export async function sseSessionStream(
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("session event stream delivery failed", error));
   };
-  stopReauthorization = startSseReauthorization(options, channel.stopped, fail);
+  stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
   let writeTail = Promise.resolve();
   const writeFrame = (frame: string): Promise<void> => {
     const write = writeTail.then(async () => {
       // A periodic check closes an idle stream, while this exact pre-delivery
       // check prevents a buffered/replayed event from crossing a revocation
       // boundary merely because its timer has not fired yet.
-      await options.reauthorize?.();
+      await reauthorizeSseOrClose(options, channel);
       if (!(await channel.write(frame))) throw new SseStreamStoppedError();
     });
     writeTail = write.catch(() => {});
@@ -540,11 +540,11 @@ export async function sseWorkspaceControlStream(
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("workspace control stream delivery failed", error));
   };
-  stopReauthorization = startSseReauthorization(options, channel.stopped, fail);
+  stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
   let writeTail = Promise.resolve();
   const writeFrame = (frame: string): Promise<void> => {
     const write = writeTail.then(async () => {
-      await options.reauthorize?.();
+      await reauthorizeSseOrClose(options, channel);
       if (!(await channel.write(frame))) throw new SseStreamStoppedError();
     });
     writeTail = write.catch(() => {});
@@ -682,9 +682,7 @@ export async function sseWorkspaceLiveStream(
   };
   if (signal.aborted) abort();
   else signal.addEventListener("abort", abort, { once: true });
-  stopReauthorization = startSseReauthorization(options, channel.stopped, (error) => {
-    channel.fail(retryableSseFailure("workspace live stream authorization failed", error));
-  });
+  stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
 
   const upstreamOptions: WorkspaceInteractionSseOptions = {
     ...options,
@@ -695,7 +693,7 @@ export async function sseWorkspaceLiveStream(
   let writeTail = Promise.resolve(true);
   const write = (frame: string): Promise<boolean> => {
     const pending = writeTail.then(async () => {
-      await options.reauthorize?.();
+      await reauthorizeSseOrClose(options, channel);
       return await channel.write(frame);
     });
     writeTail = pending.catch(() => false);
@@ -804,12 +802,10 @@ export async function sseWorkspaceInteractionRevisionStream(
     },
   });
   closeMetrics = observeSseConnection("workspace_interaction", after, options.observability);
-  stopReauthorization = startSseReauthorization(options, channel.stopped, (error) => {
-    channel.fail(retryableSseFailure("workspace interaction stream authorization failed", error));
-  });
+  stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
 
   const write = async (frame: string): Promise<boolean> => {
-    await options.reauthorize?.();
+    await reauthorizeSseOrClose(options, channel);
     const accepted = await channel.write(frame);
     if (accepted) lastWriteAt = Date.now();
     return accepted;
@@ -917,6 +913,24 @@ async function replayWorkspaceControlEvents(
 }
 
 class SseStreamStoppedError extends Error {}
+
+async function reauthorizeSseOrClose(
+  options: SseDeliveryOptions,
+  channel: ByteBoundedSseStream,
+): Promise<void> {
+  try {
+    await options.reauthorize?.();
+  } catch {
+    // Authorization loss is an expected fail-closed terminal condition, not a
+    // delivery fault. End the HTTP response cleanly so Bun and Chromium retire
+    // the HTTP/1 socket even if the initiating document is being replaced.
+    // No frame crosses the failed check; a still-live SDK may reconnect and is
+    // fenced again at request admission, while a destroyed realm cannot leave
+    // an errored response occupying the per-origin connection pool.
+    channel.close();
+    throw new SseStreamStoppedError();
+  }
+}
 
 export type SseDeliveryOptions = {
   maxQueuedBytes?: number;

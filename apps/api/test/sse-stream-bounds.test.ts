@@ -475,7 +475,7 @@ test("idle session stream count does not multiply durable reads on heartbeat", a
   await Promise.all(readers.map(async (reader) => await reader.cancel()));
 });
 
-test("a session stream fails closed before its first frame when host authorization is revoked", async () => {
+test("a session stream closes cleanly before its first frame when host authorization is revoked", async () => {
   durableEvents = [];
   durableReads.length = 0;
   let released = 0;
@@ -501,12 +501,12 @@ test("a session stream fails closed before its first frame when host authorizati
     },
   );
   const reader = response.body!.getReader();
-  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+  await expect(reader.read()).resolves.toEqual({ done: true, value: undefined });
   expect(reauthorizations).toBe(1);
   expect(released).toBe(1);
 });
 
-test("rechecks current authority and suppresses a live event after revocation", async () => {
+test("rechecks current authority and closes before a live event after revocation", async () => {
   durableEvents = [];
   durableReads.length = 0;
   let allowed = true;
@@ -537,8 +537,9 @@ test("rechecks current authority and suppresses a live event after revocation", 
   const reader = response.body!.getReader();
   expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
   allowed = false;
+  durableEvents = [event(1)];
   publish?.([event(1)]);
-  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+  await expect(reader.read()).resolves.toEqual({ done: true, value: undefined });
 });
 
 test("emits the selected actor epoch and closes before a cross-tab actor event", async () => {
@@ -574,8 +575,9 @@ test("emits the selected actor epoch and closes before a cross-tab actor event",
   const reader = response.body!.getReader();
   expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
   currentEpoch = "8";
+  durableEvents = [event(1)];
   publish?.([event(1)]);
-  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+  await expect(reader.read()).resolves.toEqual({ done: true, value: undefined });
 });
 
 test("every long-lived SSE surface closes when its current workspace authority is revoked", async () => {
@@ -618,7 +620,7 @@ test("every long-lived SSE surface closes when its current workspace authority i
   const readers = responses.map((response) => response.body!.getReader());
   await Promise.all(
     readers.map(async (reader) => {
-      await expect(reader.read()).rejects.toBeInstanceOf(Error);
+      await expect(reader.read()).resolves.toEqual({ done: true, value: undefined });
     }),
   );
 });
