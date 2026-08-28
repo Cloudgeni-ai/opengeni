@@ -273,11 +273,21 @@ export async function managedActorFetch(
       }, nativeLifetimeMs);
       await waitForManagedActorForegroundIdle(controller.signal);
     }
-    const response = await fetch(transportInput, {
-      ...init,
-      headers,
-      signal: controller.signal,
-    });
+    // A finite HTTP/1 batch needs a browser-owned terminal before its bytes
+    // cross the actor boundary. Chromium can keep a completed fetch body in
+    // its shared connection accounting after the initiating document is
+    // replaced; XHR's load terminal is completion-owned and cannot outlive
+    // the fully buffered response. Keep fetch as the non-browser/test fallback
+    // and for credential-omitting requests, whose cookie semantics XHR cannot
+    // reproduce on the same origin.
+    const response =
+      boundedHttp1Sse && typeof XMLHttpRequest !== "undefined" && init.credentials !== "omit"
+        ? await finiteHttp1BrowserBatchRequest(transportInput, headers, init, controller.signal)
+        : await fetch(transportInput, {
+            ...init,
+            headers,
+            signal: controller.signal,
+          });
     if (
       acceptedEpoch !== null &&
       response.headers.get(MANAGED_ACTOR_STATE_HEADER)?.toLowerCase() === "changed"
@@ -461,6 +471,88 @@ function isFiniteSseBatchResponse(response: Response, boundedHttp1Sse: boolean):
     Number.isSafeInteger(parsedContentLength) &&
     parsedContentLength <= HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
   );
+}
+
+function finiteHttp1BrowserBatchRequest(
+  input: string | URL | Request,
+  headers: Headers,
+  init: RequestInit,
+  signal: AbortSignal,
+): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    const cleanup = () => {
+      signal.removeEventListener("abort", abort);
+      xhr.onload = null;
+      xhr.onerror = null;
+      xhr.onabort = null;
+      xhr.ontimeout = null;
+    };
+    const fail = (reason: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(reason);
+    };
+    const abort = () => {
+      const reason =
+        signal.reason ?? new DOMException("The bounded HTTP/1 request was aborted", "AbortError");
+      xhr.abort();
+      fail(reason);
+    };
+    const networkFailure = () => fail(new TypeError("The bounded HTTP/1 request failed"));
+
+    try {
+      xhr.open(requestMethod(input, init), String(input), true);
+      xhr.responseType = "arraybuffer";
+      xhr.withCredentials = init.credentials === "include";
+      headers.forEach((value, name) => xhr.setRequestHeader(name, value));
+      xhr.onload = () => {
+        if (xhr.status === 0) {
+          networkFailure();
+          return;
+        }
+        const responseHeaders = new Headers();
+        for (const line of xhr
+          .getAllResponseHeaders()
+          .trim()
+          .split(/[\r\n]+/u)) {
+          if (!line) continue;
+          const separator = line.indexOf(":");
+          if (separator <= 0) continue;
+          responseHeaders.append(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
+        }
+        const hasNullBody = new Set([204, 205, 304]).has(xhr.status);
+        const body =
+          hasNullBody || !(xhr.response instanceof ArrayBuffer) ? null : xhr.response.slice(0);
+        const response = new Response(body, {
+          status: xhr.status,
+          statusText: xhr.statusText,
+          headers: responseHeaders,
+        });
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(response);
+      };
+      xhr.onerror = networkFailure;
+      xhr.onabort = () =>
+        fail(
+          signal.reason ?? new DOMException("The bounded HTTP/1 request was aborted", "AbortError"),
+        );
+      xhr.ontimeout = () =>
+        fail(new DOMException("The bounded HTTP/1 request timed out", "TimeoutError"));
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      xhr.send();
+    } catch (error) {
+      fail(error);
+    }
+  });
 }
 
 async function readFiniteResponseBytes(response: Response): Promise<ArrayBuffer> {
