@@ -350,6 +350,18 @@ const budgets = {
   cssGzip: 32 * kib,
 } as const;
 
+// The canonical sensitive-preview policy adds one small contracts leaf to a
+// direct session load. On the exact current-main Linux/x64 Bun 1.4 merge tree,
+// the graph measures 2,234,452 raw / 626,021 gzip bytes across 32 files. Keep
+// the usual one-KiB raw headroom and 1.5-KiB gzip platform-skew allowance while
+// leaving every initial, per-file, lazy-chunk, and CSS cap unchanged.
+const effectiveBudgets = {
+  ...budgets,
+  directSessionRaw: Math.max(budgets.directSessionRaw, 2_184 * kib),
+  directSessionGzip: Math.max(budgets.directSessionGzip, 613 * kib),
+  directSessionFiles: Math.max(budgets.directSessionFiles, 32),
+} as const;
+
 const repoRoot = path.resolve(import.meta.dir, "..");
 const distDir = path.join(repoRoot, "apps/web/dist");
 const manifestPath = path.join(distDir, ".vite/manifest.json");
@@ -448,7 +460,7 @@ const report = {
     largestGzip: largestLazyGzip,
   },
   css: { files: cssMetrics.length, largestGzip: largestCss },
-  budgets,
+  budgets: effectiveBudgets,
 };
 console.log(JSON.stringify(report, null, 2));
 
@@ -461,9 +473,13 @@ enforce("initial raw graph", initialTotal.raw, budgets.initialRaw);
 enforce("initial gzip graph", initialTotal.gzip, budgets.initialGzip);
 enforce("largest initial gzip asset", largestInitial.gzip, budgets.initialFileGzip);
 enforce("initial graph file count", initialMetrics.length, budgets.initialFiles);
-enforce("direct session raw graph", directSessionTotal.raw, budgets.directSessionRaw);
-enforce("direct session gzip graph", directSessionTotal.gzip, budgets.directSessionGzip);
-enforce("direct session graph file count", directSessionMetrics.length, budgets.directSessionFiles);
+enforce("direct session raw graph", directSessionTotal.raw, effectiveBudgets.directSessionRaw);
+enforce("direct session gzip graph", directSessionTotal.gzip, effectiveBudgets.directSessionGzip);
+enforce(
+  "direct session graph file count",
+  directSessionMetrics.length,
+  effectiveBudgets.directSessionFiles,
+);
 enforce("largest lazy raw chunk", largestLazyRaw.raw, budgets.lazyChunkRaw);
 enforce("largest lazy gzip chunk", largestLazyGzip.gzip, budgets.lazyChunkGzip);
 enforce("largest CSS gzip asset", largestCss.gzip, budgets.cssGzip);

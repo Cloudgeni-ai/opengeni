@@ -37,6 +37,11 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+For session lists, `deriveSessionDisplayTitle(session)` returns the durable
+agent/user title when available. While the automatic title is still pending, it
+shows a short, sensitive-safe preview of the opening prompt and automatically
+yields to the later `session.title_set` value.
+
 Browser consoles that do not need operator-only surfaces can import
 `OpenGeniBrowserClient` from `@opengeni/sdk/browser`. Document authority migration
 and Default-collection backfill methods stay available on the backward-compatible
