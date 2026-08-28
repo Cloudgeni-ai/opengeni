@@ -9,7 +9,9 @@ import postgres from "postgres";
 import {
   createDb,
   createSession,
+  getVariableSetValuesForRun,
   initializeSessionStartAtomically,
+  readVariableSetSecretAtomically,
   SessionCreateIdempotencyConflictError,
 } from "../src";
 import { migrate } from "../src/migrate";
@@ -163,7 +165,7 @@ describe("migration 0306 atomic personal-resource attachments", () => {
         origin_workspace_id, generation, status
       ) values (
         ${accountId}, ${membership!.id}, 'variable_set', ${variableSet!.id},
-        ${personalWorkspaceId}, 11, 'active'
+        ${personalWorkspaceId}, 1, 'active'
       ) returning id`;
     await admin`
       update workspace_variable_sets set authority_scope = 'user',
@@ -171,6 +173,19 @@ describe("migration 0306 atomic personal-resource attachments", () => {
         owner_organization_membership_id = ${membership!.id},
         origin_workspace_id = ${personalWorkspaceId}
       where id = ${variableSet!.id}`;
+    await admin`
+      insert into workspace_variable_set_variables (
+        account_id, workspace_id, variable_set_id, name, value_encrypted
+      ) values (
+        ${accountId}, ${personalWorkspaceId}, ${variableSet!.id},
+        'PERSONAL_TOKEN', 'ciphertext:personal-token'
+      )`;
+    const [workspaceVariableSet] = await admin<Array<{ id: string }>>`
+      insert into workspace_variable_sets (
+        account_id, workspace_id, name, origin_workspace_id
+      ) values (
+        ${accountId}, ${workspaceId}, 'shared variables', ${workspaceId}
+      ) returning id`;
 
     const client = createDb(blank.databaseUrl, { max: 1 });
     try {
@@ -187,7 +202,8 @@ describe("migration 0306 atomic personal-resource attachments", () => {
         reasoningEffort: "medium",
         latencyMode: "standard",
         sandboxBackend: "modal",
-        variableSetId: variableSet!.id,
+        variableSetIds: [variableSet!.id, workspaceVariableSet!.id],
+        variableSetId: workspaceVariableSet!.id,
         firstPartyMcpTools: [],
         createIdempotencyKey: `atomic-attachment-${sessionId}`,
         initialPersonalResourceAttachmentIntent: {
@@ -294,6 +310,41 @@ describe("migration 0306 atomic personal-resource attachments", () => {
         select resource_count::int as count from session_attempt_personal_resource_admissions
         where attempt_id = ${firstAttemptId}`;
       expect(firstAdmission).toEqual({ count: 1 });
+
+      const materialized = await getVariableSetValuesForRun(client.db, {
+        accountId,
+        workspaceId,
+        variableSetId: variableSet!.id,
+        authority: {
+          kind: "agent_attempt",
+          subjectId,
+          sessionId,
+          turnId,
+          attemptId: firstAttemptId,
+          executionGeneration: 1,
+          initiatingHumanSubjectId: subjectId,
+        },
+      });
+      expect(materialized).toMatchObject({
+        variableSet: { id: variableSet!.id, scope: "user", generation: 1 },
+        values: { PERSONAL_TOKEN: "ciphertext:personal-token" },
+      });
+      const secret = await readVariableSetSecretAtomically(client.db, {
+        accountId,
+        workspaceId,
+        subjectId,
+        variableSetId: variableSet!.id,
+        name: "PERSONAL_TOKEN",
+        actor: {
+          kind: "agent_attempt",
+          sessionId,
+          turnId,
+          attemptId: firstAttemptId,
+          executionGeneration: 1,
+        },
+        decrypt: (valueEncrypted) => valueEncrypted,
+      });
+      expect(secret?.value).toBe("ciphertext:personal-token");
 
       await admin.begin(async (sql) => {
         await sql.unsafe("set local opengeni.session_inference_claim = '1'");
