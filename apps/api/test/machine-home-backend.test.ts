@@ -16,6 +16,8 @@
 //   - a child of backend:'none' or a boxed (modal) parent, with only
 //     targetSandboxId (sandbox + sandboxBackend omitted) ⇒ own selfhosted home,
 //     own group, pointer seeded — honest-label, not caller sandboxBackend.
+//   - a child with no sandbox choice inherits its selfhosted parent's exact
+//     machine route + working directory before the child's first turn.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
@@ -431,6 +433,77 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     const [turnRow] = await admin<{ sandbox_backend: string }[]>`
       select sandbox_backend from session_turns where session_id = ${child.id} limit 1`;
     expect(turnRow?.sandbox_backend).toBe("selfhosted");
+  }, 60_000);
+
+  test("an omitted child sandbox inherits its selfhosted parent's machine route", async () => {
+    if (!available) return;
+    const selfhostedOnly = testSettings({
+      ...settings,
+      sandboxBackend: "selfhosted",
+    });
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine("macos");
+    const parent = await createSessionForRequest(
+      deps(bus, selfhostedOnly),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the connected machine",
+        targetSandboxId: sandboxId,
+        workingDir: "workers/parent",
+      },
+    );
+    expect(parent).toMatchObject({
+      sandboxBackend: "selfhosted",
+      sandboxOs: "macos",
+      activeSandboxId: sandboxId,
+      workingDir: "/srv/project/workers/parent",
+    });
+
+    const child = await createSessionForRequest(
+      deps(bus, selfhostedOnly),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      {
+        initialMessage: "inspect the repository without choosing compute again",
+      },
+    );
+
+    expect(child).toMatchObject({
+      parentSessionId: parent.id,
+      sandboxBackend: "selfhosted",
+      sandboxOs: "macos",
+      sandboxGroupId: parent.sandboxGroupId,
+      activeSandboxId: sandboxId,
+      workingDir: "/srv/project/workers/parent",
+    });
+    const [turnRow] = await admin<
+      { sandbox_backend: string; sandbox_os: string }[]
+    >`select sandbox_backend, sandbox_os from session_turns where session_id = ${child.id} limit 1`;
+    expect(turnRow).toEqual({ sandbox_backend: "selfhosted", sandbox_os: "macos" });
+  }, 60_000);
+
+  test("a targetless top-level selfhosted session is rejected before its first turn", async () => {
+    if (!available) return;
+    const selfhostedOnly = testSettings({
+      ...settings,
+      sandboxBackend: "selfhosted",
+    });
+    const { accountId, workspaceId, bus } = await seedMachine();
+
+    await expect(
+      createSessionForRequest(
+        deps(bus, selfhostedOnly),
+        grant(accountId, workspaceId),
+        workspaceId,
+        {
+          initialMessage: "this must not become an unusable session",
+        },
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      message:
+        "self-hosted execution runs on a Connected Machine, but no machine was selected or inherited; connect the parent session to a machine or provide machineTarget",
+    });
   }, 60_000);
 
   test("explicit sandbox:'shared' plus a machine target ⇒ 422", async () => {

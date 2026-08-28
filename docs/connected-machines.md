@@ -166,6 +166,11 @@ Rules to keep in mind:
   `sandbox` still shares the creator's box only when no machine is named.
   Explicit `sandbox: "shared"` or `{ groupId }` plus a machine target is a
   **422**.
+- When a child omits both `sandbox` and `machineTarget`, sharing a parent that is
+  currently routed to a Connected Machine automatically copies that exact
+  machine and working directory to the child before its first turn. The model
+  does not choose the machine again. A selfhosted-only create with neither an
+  inherited nor explicit machine is rejected before an unusable session starts.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required

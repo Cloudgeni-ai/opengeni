@@ -298,6 +298,12 @@ active pointer before its first turn. A targetless generated schedule cannot
 resolve to `selfhosted`; ingress rejects that configuration, and dispatch
 revalidates the frozen target rather than falling back to managed compute.
 
+Child workers keep the ordinary low-friction rule: omitting placement shares
+the creator's box. Because a Connected Machine pointer is session-local, that
+default copies the trusted parent's exact active machine and working directory
+before the child's first turn. A selfhosted-only child with no inherited or
+explicit machine fails at create rather than reaching an unbound runtime.
+
 A machine-home session does not pre-provision a hidden managed box. When the
 deployment has a managed sandbox backend, its fleet nevertheless exposes the
 session's synthetic managed group as a separate explicit target. Selecting
