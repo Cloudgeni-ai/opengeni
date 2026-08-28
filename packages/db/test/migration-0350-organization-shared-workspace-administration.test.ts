@@ -8,10 +8,12 @@ import postgres from "postgres";
 import { sql } from "drizzle-orm";
 
 import {
+  assertWorkspaceMemberManagementCandidate,
   createDb,
   createOrganizationWorkspace,
   ensureManagedAccessForUser,
   getOrganizationAdministrationOverview,
+  listWorkspaceMemberManagementCandidates,
   listOrganizationAdministrationMembers,
   listOrganizationMembers,
   listSelfOrganizationMemberships,
@@ -19,6 +21,7 @@ import {
   putOrganizationWorkspaceMember,
   requireWorkspace,
   revokeOrganizationWorkspaceMember,
+  upsertWorkspaceMemberAsWorkspaceManager,
   updateOrganizationMember,
   updateOrganizationWorkspace,
   type DbClient,
@@ -114,6 +117,7 @@ describe("migration 0350 organization shared-workspace administration", () => {
         eventsDml: boolean;
         receiptsDml: boolean;
         command: boolean;
+        workspaceCandidate: boolean;
         safeList: boolean;
       }>
     >`
@@ -130,12 +134,17 @@ describe("migration 0350 organization shared-workspace administration", () => {
           'opengeni_app', 'organization_workspace_command(jsonb)', 'EXECUTE'
         ) as command,
         has_function_privilege(
+          'opengeni_app',
+          'assert_workspace_member_management_candidate(uuid,uuid,text,text)', 'EXECUTE'
+        ) as "workspaceCandidate",
+        has_function_privilege(
           'opengeni_app', 'list_organization_administration_members(uuid,text)', 'EXECUTE'
         ) as "safeList"`;
     expect(acl).toEqual({
       eventsDml: false,
       receiptsDml: false,
       command: true,
+      workspaceCandidate: true,
       safeList: true,
     });
 
@@ -234,6 +243,70 @@ describe("migration 0350 organization shared-workspace administration", () => {
       expect(definition.permissions).not.toContain("account:admin");
     }
 
+    await putOrganizationWorkspaceMember(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      workspaceId: workspace.id,
+      targetOrganizationMembershipId: ownerMembership!.id,
+      access: {
+        role: "admin",
+        expectedUpdatedAt: null,
+        operationId: crypto.randomUUID(),
+      },
+    });
+    expect(
+      await listWorkspaceMemberManagementCandidates(client.db, {
+        accountId: organizationId,
+        workspaceId: workspace.id,
+        actorSubjectId: ownerSubject,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        organizationMembershipId: targetMembershipId,
+        subjectId: targetSubject,
+        name: "Ada Member",
+        email: targetEmail,
+        organizationRole: "member",
+      }),
+    ]);
+    await assertWorkspaceMemberManagementCandidate(client.db, {
+      accountId: organizationId,
+      workspaceId: workspace.id,
+      actorSubjectId: ownerSubject,
+      targetSubjectId: targetSubject,
+    });
+    await expectSqlState(
+      () =>
+        assertWorkspaceMemberManagementCandidate(client!.db, {
+          accountId: organizationId,
+          workspaceId: workspace.id,
+          actorSubjectId: ownerSubject,
+          targetSubjectId: `user:${crypto.randomUUID()}`,
+        }),
+      "P0002",
+    );
+    await expectSqlState(
+      () =>
+        assertWorkspaceMemberManagementCandidate(client!.db, {
+          accountId: organizationId,
+          workspaceId: ownerMembership!.personalWorkspaceId!,
+          actorSubjectId: ownerSubject,
+          targetSubjectId: targetSubject,
+        }),
+      "42501",
+    );
+    await expect(
+      upsertWorkspaceMemberAsWorkspaceManager(client.db, {
+        accountId: organizationId,
+        workspaceId: workspace.id,
+        actorSubjectId: ownerSubject,
+        targetSubjectId: ownerSubject,
+        mode: "update",
+        role: "viewer",
+        permissions: ["workspace:read"],
+      }),
+    ).rejects.toMatchObject({ code: "WORKSPACE_MEMBER_SELF_UPDATE" });
+
     const grantOperationId = crypto.randomUUID();
     const viewer = await putOrganizationWorkspaceMember(client.db, {
       organizationId,
@@ -256,6 +329,13 @@ describe("migration 0350 organization shared-workspace administration", () => {
     expect(viewer.permissions).toEqual(
       overview.roles.find(({ role }) => role === "viewer")!.permissions,
     );
+    expect(
+      await listWorkspaceMemberManagementCandidates(client.db, {
+        accountId: organizationId,
+        workspaceId: workspace.id,
+        actorSubjectId: ownerSubject,
+      }),
+    ).toEqual([]);
     expect(
       (
         await putOrganizationWorkspaceMember(client.db, {
@@ -551,7 +631,7 @@ describe("migration 0350 organization shared-workspace administration", () => {
          where account_id = ${organizationId}) as events,
         (select count(*)::int from organization_workspace_operation_receipts
          where account_id = ${organizationId}) as receipts`;
-    expect(audit).toEqual({ events: 7, receipts: 7 });
+    expect(audit).toEqual({ events: 8, receipts: 8 });
     await expectSqlState(
       () => client!.db.execute(sql`delete from organization_workspace_lifecycle_events`),
       "42501",

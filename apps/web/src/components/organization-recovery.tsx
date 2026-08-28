@@ -269,7 +269,7 @@ export function OrganizationRecoverySection(props: {
 
   if (visible.loading && !overview) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-surface p-4 text-sm text-fg-muted">
+      <div className="flex items-center gap-2 border-b border-border py-5 text-sm text-fg-muted">
         <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
         Loading organization recovery
       </div>
@@ -283,7 +283,7 @@ export function OrganizationRecoverySection(props: {
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </span>
-      <section className="grid min-w-0 gap-3 rounded-lg border border-border bg-surface p-4">
+      <section className="grid min-w-0 gap-4 border-b border-border pb-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <h2
@@ -347,7 +347,7 @@ export function OrganizationRecoverySection(props: {
       </section>
 
       {overview.capabilities.configure ? (
-        <section className="grid min-w-0 gap-3 rounded-lg border border-border bg-surface p-4">
+        <section className="grid min-w-0 gap-4 border-b border-border pb-6">
           <div className="min-w-0">
             <h3 className="flex items-center gap-1.5 text-sm font-medium">
               <UserRoundCogIcon className="size-4 text-brand" />
@@ -368,9 +368,10 @@ export function OrganizationRecoverySection(props: {
                 return (
                   <label
                     key={member.membershipId}
-                    className="flex min-h-11 min-w-0 cursor-pointer items-center gap-3 rounded-md border border-border px-3 py-2 text-sm"
+                    className="flex min-h-11 min-w-0 cursor-pointer items-center gap-3 rounded-md border border-border bg-bg/25 px-3 py-2 text-sm transition-colors has-[:checked]:border-brand/50 has-[:checked]:bg-brand/5"
                   >
                     <input
+                      name="recovery-custodian"
                       type="checkbox"
                       checked={selected}
                       disabled={!selected && custodianIds.length >= 3}
@@ -422,7 +423,7 @@ export function OrganizationRecoverySection(props: {
       ) : null}
 
       {policy ? (
-        <section className="grid min-w-0 gap-3 rounded-lg border border-border bg-surface p-4">
+        <section className="grid min-w-0 gap-4 border-b border-border pb-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <h3 className="text-sm font-medium">Custodian acceptance</h3>
@@ -490,7 +491,7 @@ export function OrganizationRecoverySection(props: {
       ) : null}
 
       {overview.capabilities.start && policy ? (
-        <section className="grid min-w-0 gap-3 rounded-lg border border-border bg-surface p-4">
+        <section className="grid min-w-0 gap-4 border-b border-border pb-6">
           <div className="min-w-0">
             <h3 className="flex items-center gap-1.5 text-sm font-medium">
               <KeyRoundIcon className="size-4 text-brand" />
@@ -504,6 +505,7 @@ export function OrganizationRecoverySection(props: {
           <label className="grid min-w-0 gap-1 text-xs font-medium">
             Target member
             <select
+              name="recovery-target-member"
               value={targetMembershipId}
               disabled={Boolean(visibleBusy)}
               onChange={(event) => setTargetMembershipId(event.target.value)}
@@ -539,7 +541,7 @@ export function OrganizationRecoverySection(props: {
       ) : null}
 
       {recoveryOperation ? (
-        <section className="grid min-w-0 gap-3 rounded-lg border border-border bg-surface p-4">
+        <section className="grid min-w-0 gap-4 border-b border-border pb-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <h3 className="flex items-center gap-1.5 text-sm font-medium">

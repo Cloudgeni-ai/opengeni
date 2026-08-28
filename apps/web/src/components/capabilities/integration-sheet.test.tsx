@@ -67,6 +67,40 @@ async function render(node: React.ReactNode) {
 }
 
 describe("IntegrationRow", () => {
+  test("uses provider logos when available and the shared monogram fallback otherwise", async () => {
+    const rendered = await render(
+      <>
+        <IntegrationRow
+          model={model({
+            id: "github",
+            name: "GitHub",
+            mark: { logoSrc: "https://example.test/github.svg", monogram: "G" },
+          })}
+          onOpen={() => {}}
+        />
+        <IntegrationRow
+          model={model({ id: "outlook-mail", name: "Outlook Mail", mark: { monogram: "OM" } })}
+          onOpen={() => {}}
+        />
+      </>,
+    );
+    try {
+      const rows = [...rendered.container.querySelectorAll("[data-integration-row]")];
+      expect(rows[0]!.className).toContain("hover:bg-accent");
+      expect(rows[0]!.querySelector("button")!.className).not.toContain("hover:bg-");
+      const logo = rows[0]!.querySelector("img");
+      expect(logo?.getAttribute("src")).toBe("https://example.test/github.svg");
+      expect(rows[1]!.querySelector("img")).toBeNull();
+      expect(rows[1]!.textContent).toContain("OM");
+
+      await act(async () => logo!.dispatchEvent(new Event("error")));
+      expect(rows[0]!.querySelector("img")).toBeNull();
+      expect(rows[0]!.textContent).toContain("G");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("renders every integration through the same two-button row shape", async () => {
     const onOpen = mock(() => {});
     const rendered = await render(

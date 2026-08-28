@@ -36,18 +36,7 @@ export type IntegrationChip = {
   tone: IntegrationChipTone;
 };
 
-/**
- * The closed icon vocabulary for a provider with no hosted logo asset, mirroring
- * `IntegrationPresentationIcon` in `@opengeni/capabilities`. A named product
- * glyph reads far better than an ambiguous two-letter monogram (Outlook
- * Calendar and Outlook Contacts cannot both be "OC").
- */
-export type IntegrationMarkIcon = "mail" | "calendar" | "contacts" | "files" | "cloud";
-
-export type IntegrationMark =
-  | { logoSrc: string; monogram: string }
-  | { icon: IntegrationMarkIcon }
-  | { monogram: string };
+export type IntegrationMark = { logoSrc: string; monogram: string } | { monogram: string };
 
 export type IntegrationFact = {
   label: string;

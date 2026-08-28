@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { historyCallId } from "../src/session-tool-call-settlement";
 import { orphanedResultRowIndicesForRepair } from "../src/index";
 
 // Pure spec for migration 0014 (repair of legacy orphaned tool-call results).
@@ -21,6 +22,16 @@ function functionResult(callId: string) {
 }
 
 describe("orphanedResultRowIndicesForRepair (migration 0014 spec)", () => {
+  test("resolves native tool-search identity from provider data before provider item id", () => {
+    expect(
+      historyCallId({
+        type: "tool_search_call",
+        id: "tsc-provider-item-id",
+        providerData: { call_id: "call-provider-correlation-id" },
+      }),
+    ).toBe("call-provider-correlation-id");
+  });
+
   test("flags a function_call_result with no preceding function_call (the brick)", () => {
     const rows = [
       row(userMessage("hi")),

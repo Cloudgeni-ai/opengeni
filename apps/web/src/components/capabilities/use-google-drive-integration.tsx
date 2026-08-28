@@ -101,7 +101,7 @@ export function useGoogleDriveIntegration({
   const canManageWorkspaceDestination = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
-    "workspace:admin",
+    "capabilities:manage",
   );
   const canManageOrganizationDestination = Boolean(
     workspaceGrant &&

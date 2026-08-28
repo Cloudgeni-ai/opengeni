@@ -77,11 +77,11 @@ describe("Agent Knowledge surface", () => {
       source("components/knowledge/memory-pane.tsx"),
     ]);
     expect(shell).toContain('id: "knowledge"');
-    expect(shell).toContain('title: "Organization knowledge"');
+    expect(shell).toContain('title: "Knowledge"');
     expect(organization).toContain('section === "knowledge"');
     expect(organization).toContain("OrganizationKnowledgePrompt");
     expect(organization).toContain("Organization identity");
-    expect(organization).toContain("Explore organization knowledge");
+    expect(organization).toContain("Open documents");
     expect(workspaceSettings).toContain("WorkspaceLearningAdministration");
     expect(workspaceSettings).toContain("manage them in Memory");
     expect(workspaceSettings).not.toContain("editable on Documents");

@@ -495,6 +495,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       { waitUntil: "domcontentloaded" },
     );
     await page.getByRole("heading", { name: "Workspaces & access" }).waitFor();
+    await page.getByRole("button", { name: "Create new workspace" }).click();
     await page.getByLabel("New workspace name").fill("Launch Room");
     await page.getByRole("button", { name: "Create workspace" }).click();
     await page.getByText("Launch Room created").waitFor();
@@ -559,10 +560,12 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       { waitUntil: "domcontentloaded" },
     );
     await ownerPage.getByRole("heading", { name: "People & invitations", level: 2 }).waitFor();
+    await ownerPage.getByRole("button", { name: "Invite person", exact: true }).click();
     await ownerPage.getByLabel("Email address").fill(invitedEmail);
     await ownerPage.getByLabel("Name", { exact: true }).fill("Onboarding Invited");
-    await ownerPage.getByText("Launch Operations", { exact: true }).last().click();
-    await ownerPage.getByRole("button", { name: "Invite", exact: true }).click();
+    await ownerPage.getByText("Workspace access", { exact: true }).click();
+    await ownerPage.getByLabel("Launch Operations", { exact: true }).check();
+    await ownerPage.getByRole("button", { name: "Send invitation", exact: true }).click();
     await ownerPage.getByText("Invitation sent", { exact: true }).waitFor();
 
     const setupEmail = await takeEmail("organization_user_setup", invitedEmail);

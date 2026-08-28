@@ -324,11 +324,21 @@ const budgets = {
   // 2,156 KiB. Advance gzip to 605 KiB so the established 1.5-KiB platform-skew
   // allowance remains intact. Initial, file-count, lazy, CSS, and unrelated
   // per-file caps stay fixed.
+  // Workspace member administration keeps its UI behind a dedicated lazy
+  // boundary. The four browser-used SDK methods leave the exact Linux/x64 Bun
+  // 1.4 direct-session graph at 2,210,226 raw bytes. The policy-derived 2,160-KiB
+  // envelope retains 1,614 bytes of headroom; gzip and request count still fit.
+  // After integrating current main's Personal GitHub authority, the exact graph
+  // measures 2,220,970 raw / 620,262 gzip bytes across 30 files. Advance only
+  // the shared raw envelope to 2,170 KiB, retaining 1,110 bytes of headroom;
+  // gzip, request count, initial, lazy, and CSS caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
+  // Member roster and permission-editor selectors bring the single compiled
+  // stylesheet to 32,221 gzip bytes. Keep the next whole-KiB envelope.
   cssGzip: 32 * kib,
 } as const;
 

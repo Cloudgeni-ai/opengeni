@@ -5,6 +5,8 @@ import {
   BotIcon,
   BoxIcon,
   BoxesIcon,
+  Building2Icon,
+  ChevronRightIcon,
   DatabaseIcon,
   KeyRoundIcon,
   LaptopIcon,
@@ -179,11 +181,13 @@ export function workspaceManagementLocation(
 export function WorkspaceManagementShell({
   workspaceId,
   workspaceName,
+  organizationName,
   location,
   children,
 }: {
   workspaceId: string;
   workspaceName: string;
+  organizationName: string;
   location: WorkspaceManagementLocation;
   children: ReactNode;
 }) {
@@ -212,8 +216,20 @@ export function WorkspaceManagementShell({
           </Link>
 
           <div className="mt-4 min-w-0 px-2 lg:mt-6">
-            <p className="text-base font-semibold">Workspace</p>
-            <p className="mt-1 truncate text-xs text-fg-muted">{workspaceName}</p>
+            <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+              Workspace settings
+            </p>
+            <div className="mt-2 flex min-w-0 items-center gap-2.5">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/25 bg-brand-strong/15 text-sm font-semibold text-brand">
+                {workspaceName.trim().charAt(0).toUpperCase() || "W"}
+              </span>
+              <div className="min-w-0">
+                <p className="truncate text-lg font-semibold leading-tight tracking-tight text-fg">
+                  {workspaceName}
+                </p>
+                <p className="mt-0.5 text-2xs text-fg-subtle">Settings and controls</p>
+              </div>
+            </div>
           </div>
 
           <p className="mt-3 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
@@ -281,6 +297,22 @@ export function WorkspaceManagementShell({
               </nav>
             </div>
           ))}
+
+          <div className="mt-4 border-t border-border pt-3">
+            <p className="px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+              Organization
+            </p>
+            <Link
+              to="/workspaces/$workspaceId/organization"
+              params={{ workspaceId }}
+              aria-label={`Organization settings for ${organizationName}`}
+              className="mt-1 flex min-h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+            >
+              <Building2Icon className="size-4 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{organizationName}</span>
+              <ChevronRightIcon className="size-3.5 shrink-0 text-fg-subtle" />
+            </Link>
+          </div>
         </div>
       </aside>
 

@@ -168,18 +168,20 @@ export function OrganizationKnowledgePrompt({ workspaceId }: { workspaceId: stri
 
   return (
     <form
-      className="grid gap-3 rounded-lg border border-border bg-surface p-4"
+      className="grid gap-3 border-b border-border pb-6"
       onSubmit={(event) => void start(event)}
     >
       <label className="grid gap-2 text-sm font-medium text-fg">
         <span className="flex items-center gap-2">
-          <SparklesIcon className="size-4 text-brand" />
+          <SparklesIcon aria-hidden="true" className="size-4 text-brand" />
           Describe your organization
         </span>
         <textarea
-          className="min-h-28 rounded-md border border-border bg-surface px-3 py-2 text-sm leading-6 text-fg outline-none focus:border-brand"
+          name="organization-description"
+          autoComplete="off"
+          className="min-h-28 rounded-lg border border-border bg-surface/45 px-3 py-2 text-sm leading-6 text-fg outline-none transition-colors focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/15"
           value={request}
-          placeholder="For example: OpenGeni builds infrastructure for teams running dependable autonomous agents. We exist to make capable agents safe and practical to operate."
+          placeholder="For example: OpenGeni builds infrastructure for teams running dependable autonomous agents. We exist to make capable agents safe and practical to operate…"
           onChange={(event) => setRequest(event.target.value)}
         />
       </label>

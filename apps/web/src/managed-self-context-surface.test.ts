@@ -50,14 +50,15 @@ describe("managed self-context surfaces", () => {
     );
     expect(settingsSource).toContain("personal ? (");
     expect(settingsSource).toContain("administrators and other members do not gain access");
-    expect(settingsSource).toContain("<MembersSection workspaceId={workspaceId}");
+    expect(settingsSource).toContain('import("./workspace-members-section")');
+    expect(settingsSource).toContain("<LazyMembersSection workspaceId={workspaceId}");
   });
 
   test("separates organization administration from Personal content", () => {
-    expect(organizationAdminSource).toContain("Personal content stays personal");
     expect(organizationAdminSource).toContain(
-      "Organization administration never grants access to another member&apos;s Personal",
+      "Manage organization roles and shared workspace access. Personal workspaces and private",
     );
+    expect(organizationAdminSource).toContain("resources are never shared here.");
     expect(organizationAdminSource).toContain(
       "Create shared workspaces, then choose which organization members can use each one.",
     );

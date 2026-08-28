@@ -228,6 +228,15 @@ worker process, a connection row, or provenance metadata. A turn freezes its
 initiating principal and the authority snapshots needed by later execution and
 recovery.
 
+Organization settings owns the cross-workspace roster and organization roles.
+A shared workspace's Members page is deliberately narrower: a caller with
+`members:manage` may add an already-active human from the same organization and
+change or revoke access only in that workspace. Personal workspaces,
+cross-organization targets, self-demotion, and removal of the final workspace
+administrator fail closed. The candidate inventory discloses only active
+same-organization humans who do not already have access, without exposing their
+other workspace grants.
+
 Managed browser login slots are explicit session-set actors, not tenant hints.
 Organization recovery custody is a separate quorum and actor-fenced authority;
 ordinary organization administration cannot transfer immutable workspace
@@ -237,6 +246,11 @@ Personal connections and resources require the exact human authority that made
 them executable. Workspace-owned credentials remain workspace-scoped and are
 revalidated at use. An embedding host may narrow access through an explicit
 port; it cannot grant access that OpenGeni denied.
+
+The managed personal-workspace owner receives a closed permission projection
+that includes `capabilities:manage`, so they can configure their own Plugins,
+Integrations, and Codex subscription without receiving the `workspace:admin`
+wildcard, member management, or API-key delegation.
 
 Canonical: `packages/core/src/access/index.ts`,
 `packages/core/src/session-authorization.ts`, `packages/db/src/runtime-posture.ts`,

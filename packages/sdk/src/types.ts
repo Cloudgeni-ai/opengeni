@@ -2796,6 +2796,7 @@ export const KNOWN_PERMISSIONS = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
+  "capabilities:manage",
   "environments:manage",
   "environments:use",
   "variable-sets:list",
@@ -4271,8 +4272,20 @@ export type ListWorkspaceMembersResponse = {
   members: WorkspaceMember[];
 };
 
+export type WorkspaceMemberCandidate = {
+  organizationMembershipId: string;
+  subjectId: string;
+  name: string | null;
+  email: string | null;
+  organizationRole: "owner" | "admin" | "member";
+};
+
+export type ListWorkspaceMemberCandidatesResponse = {
+  members: WorkspaceMemberCandidate[];
+};
+
 export type AddWorkspaceMemberRequest = {
-  email: string;
+  organizationMembershipId: string;
   role?: string | undefined;
   permissions: Permission[];
 };

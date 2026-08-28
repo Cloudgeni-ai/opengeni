@@ -149,7 +149,7 @@ export function canManageApiIntegrations(
   accessContext: AccessContext | null,
   workspaceId: string,
 ): boolean {
-  return hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
+  return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
 
 /**
@@ -336,7 +336,7 @@ export function CapabilitiesRoute({
   const canManageSkills = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
-    "workspace:admin",
+    "capabilities:manage",
   );
 
   // One adapter per integration maps its own data onto the shared view-model.
@@ -1703,14 +1703,14 @@ export function CapabilitiesRoute({
         <section className="mt-8 space-y-3" aria-labelledby="integrations-heading">
           <div>
             <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-              Built by OpenGeni
+              First-party integrations
             </p>
             <h2 id="integrations-heading" className="mt-1 text-base font-semibold text-fg">
               Apps
             </h2>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
-              These do more than call tools. They receive events, post as OpenGeni, and hold their
-              own identity in the other product.
+              Purpose-built connections with OpenGeni-managed accounts, sync, events, or provider
+              actions - not generic catalog connectors.
             </p>
           </div>
           <div className="grid gap-2" data-integration-list>

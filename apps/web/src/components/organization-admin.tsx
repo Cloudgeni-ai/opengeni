@@ -5,13 +5,20 @@ import {
 } from "@opengeni/sdk/organization-private-session-settings";
 import { retryOrganizationUserSetupDelivery } from "@opengeni/sdk/organization-user-setup";
 import {
+  ArrowUpRightIcon,
   Building2Icon,
   CheckIcon,
   ClockIcon,
   Loader2Icon,
+  MoreHorizontalIcon,
+  PauseIcon,
   PencilIcon,
+  PlayIcon,
+  PlusIcon,
   RefreshCwIcon,
+  SearchIcon,
   ShieldCheckIcon,
+  SlidersHorizontalIcon,
   UserMinusIcon,
   UserPlusIcon,
   UsersIcon,
@@ -23,6 +30,21 @@ import { LoadErrorState } from "@/components/common";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
@@ -76,6 +98,26 @@ const ORGANIZATION_ROLE_LABELS: Record<OrganizationMembershipRole, string> = {
 };
 
 type WorkspaceMemberRole = OrganizationWorkspaceAccessMember["role"];
+type WorkspaceNamedRole = Exclude<WorkspaceMemberRole, "custom">;
+const WORKSPACE_MEMBER_BASELINE_PERMISSION = "workspace:read" as const satisfies SdkPermission;
+
+type CustomPermissionEditor = {
+  workspace: OrganizationWorkspaceAccess;
+  member: OrganizationWorkspaceAccessMember;
+  permissions: SdkPermission[];
+};
+
+function editableWorkspaceMemberPermissions(permissions: readonly string[]): SdkPermission[] {
+  const editable = workspaceMemberPermissionGroups().flatMap((group) => group.permissions);
+  const editableSet = new Set<string>(editable);
+  return [
+    WORKSPACE_MEMBER_BASELINE_PERMISSION,
+    ...permissions.filter(
+      (permission): permission is SdkPermission =>
+        permission !== WORKSPACE_MEMBER_BASELINE_PERMISSION && editableSet.has(permission),
+    ),
+  ];
+}
 
 function organizationMemberStatusLabel(status: OrganizationMember["status"]): string {
   if (status === "suspended") return "Access paused";
@@ -293,7 +335,7 @@ export function OrganizationPrivateSessionsSection(props: {
 
   if (!props.managedSession || !canAdminister) return null;
   return (
-    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+    <section className="grid gap-3 border-b border-border pb-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-1.5 text-sm font-medium">
@@ -329,9 +371,9 @@ export function OrganizationPrivateSessionsSection(props: {
           <Loader2Icon className="size-3.5 animate-spin" /> Loading Only me chat settings…
         </p>
       ) : !settings.available ? (
-        <Notice tone="muted" title="Not available yet">
-          This deployment has not completed the private-session readiness activation for this
-          organization.
+        <Notice tone="muted" title="Private sessions are not enabled on this installation">
+          Ask the deployment operator to enable private-session support. When it is ready, this
+          control becomes available automatically.
         </Notice>
       ) : (
         <p className="text-xs text-fg-subtle">
@@ -353,6 +395,15 @@ function organizationMemberLabel(member: OrganizationMember, currentSubjectId?: 
   if (member.email) return member.email;
   if (member.subjectId === currentSubjectId) return "You";
   return maskedOrganizationSubject(member.subjectId);
+}
+
+function workspaceMemberLabel(member: OrganizationWorkspaceAccessMember): string {
+  return (
+    member.name ??
+    member.email ??
+    member.subjectLabel ??
+    maskedOrganizationSubject(member.subjectId)
+  );
 }
 
 export function OrganizationOverviewSection(props: {
@@ -389,20 +440,17 @@ export function OrganizationOverviewSection(props: {
   const [organizationMembers, setOrganizationMembers] = useState<OrganizationMember[]>([]);
   const [workspaceAssignments, setWorkspaceAssignments] = useState<Record<string, string>>({});
   const [workspaceAssignmentAccess, setWorkspaceAssignmentAccess] = useState<
-    Record<string, WorkspaceMemberRole>
-  >({});
-  const [workspaceAssignmentCustomPermissions, setWorkspaceAssignmentCustomPermissions] = useState<
-    Record<string, SdkPermission[]>
+    Record<string, WorkspaceNamedRole>
   >({});
   const [workspaceMemberRoleDrafts, setWorkspaceMemberRoleDrafts] = useState<
     Record<string, WorkspaceMemberRole>
   >({});
-  const [workspaceMemberCustomPermissions, setWorkspaceMemberCustomPermissions] = useState<
-    Record<string, SdkPermission[]>
-  >({});
+  const [customPermissionEditor, setCustomPermissionEditor] =
+    useState<CustomPermissionEditor | null>(null);
   const [workspaceNameDrafts, setWorkspaceNameDrafts] = useState<Record<string, string>>({});
   const [accessBusyWorkspaceId, setAccessBusyWorkspaceId] = useState<string | null>(null);
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
+  const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [revokeWorkspaceAccess, setRevokeWorkspaceAccess] = useState<{
     workspace: OrganizationWorkspaceAccess;
@@ -448,6 +496,8 @@ export function OrganizationOverviewSection(props: {
     pendingWorkspaceAccessRef.current.clear();
     pendingWorkspaceRevokeRef.current.clear();
     setRevokeWorkspaceAccess(null);
+    setCustomPermissionEditor(null);
+    setCreateWorkspaceOpen(false);
     return () => {
       identityRef.current = null;
       active.clear();
@@ -499,20 +549,6 @@ export function OrganizationOverviewSection(props: {
           ),
         ),
       );
-      setWorkspaceMemberCustomPermissions(
-        Object.fromEntries(
-          overview.workspaces.flatMap((workspace) =>
-            workspace.members.map((member) => [
-              `${workspace.id}:${member.membershipId}`,
-              member.permissions.filter((permission): permission is SdkPermission =>
-                workspaceMemberPermissionGroups().some((group) =>
-                  group.permissions.some((candidate) => candidate === permission),
-                ),
-              ),
-            ]),
-          ),
-        ),
-      );
       setOrganizationMembers(memberPage.members.filter((member) => member.status === "active"));
       setState({
         ownerKey: identityKey,
@@ -551,20 +587,16 @@ export function OrganizationOverviewSection(props: {
     const member = organizationMembers.find((candidate) => candidate.id === membershipId);
     if (!member) return;
     const role = workspaceAssignmentAccess[workspaceId] ?? "member";
-    const permissions =
-      role === "custom" ? (workspaceAssignmentCustomPermissions[workspaceId] ?? []) : undefined;
-    if (role === "custom" && (!permissions || permissions.length === 0)) return;
     const pending = pendingWorkspaceAccessRef.current.get(workspaceId);
     const attempt =
       pending?.membershipId === member.id &&
       pending.role === role &&
       pending.expectedUpdatedAt === null &&
-      JSON.stringify(pending.permissions ?? []) === JSON.stringify(permissions ?? [])
+      pending.permissions === undefined
         ? pending
         : {
             membershipId: member.id,
             role,
-            ...(permissions ? { permissions } : {}),
             expectedUpdatedAt: null,
             operationId: crypto.randomUUID(),
           };
@@ -575,28 +607,17 @@ export function OrganizationOverviewSection(props: {
         props.identity.organizationId,
         workspaceId,
         member.id,
-        attempt.role === "custom"
-          ? {
-              role: "custom",
-              permissions: attempt.permissions ?? [],
-              expectedUpdatedAt: attempt.expectedUpdatedAt,
-              operationId: attempt.operationId,
-            }
-          : {
-              role: attempt.role,
-              expectedUpdatedAt: attempt.expectedUpdatedAt,
-              operationId: attempt.operationId,
-            },
+        {
+          role: attempt.role as WorkspaceNamedRole,
+          expectedUpdatedAt: attempt.expectedUpdatedAt,
+          operationId: attempt.operationId,
+        },
       );
       pendingWorkspaceAccessRef.current.delete(workspaceId);
       setWorkspaceAssignments((current) => ({ ...current, [workspaceId]: "" }));
       setWorkspaceAssignmentAccess((current) => ({
         ...current,
         [workspaceId]: "member",
-      }));
-      setWorkspaceAssignmentCustomPermissions((current) => ({
-        ...current,
-        [workspaceId]: [],
       }));
       toast.success(`${organizationMemberLabel(member)} can now access this workspace`);
       await load();
@@ -624,20 +645,24 @@ export function OrganizationOverviewSection(props: {
     member: OrganizationWorkspaceAccessMember,
     role: WorkspaceMemberRole,
     permissions?: SdkPermission[],
-  ) {
-    if (!member.organizationMembershipId || (role === "custom" && !permissions?.length)) return;
+  ): Promise<boolean> {
+    const resolvedPermissions =
+      role === "custom" ? editableWorkspaceMemberPermissions(permissions ?? []) : permissions;
+    if (!member.organizationMembershipId || (role === "custom" && !resolvedPermissions?.length)) {
+      return false;
+    }
     const key = `${workspace.id}:${member.organizationMembershipId}`;
     const pending = pendingWorkspaceAccessRef.current.get(key);
     const attempt =
       pending?.membershipId === member.organizationMembershipId &&
       pending.role === role &&
       pending.expectedUpdatedAt === member.updatedAt &&
-      JSON.stringify(pending.permissions ?? []) === JSON.stringify(permissions ?? [])
+      JSON.stringify(pending.permissions ?? []) === JSON.stringify(resolvedPermissions ?? [])
         ? pending
         : {
             membershipId: member.organizationMembershipId,
             role,
-            ...(permissions ? { permissions } : {}),
+            ...(resolvedPermissions ? { permissions: resolvedPermissions } : {}),
             expectedUpdatedAt: member.updatedAt,
             operationId: crypto.randomUUID(),
           };
@@ -664,6 +689,7 @@ export function OrganizationOverviewSection(props: {
       pendingWorkspaceAccessRef.current.delete(key);
       toast.success(role === "custom" ? "Custom workspace access saved" : "Workspace role saved");
       await load();
+      return true;
     } catch (error) {
       const outcomeUnknown =
         typeof error === "object" &&
@@ -678,6 +704,7 @@ export function OrganizationOverviewSection(props: {
             ? error.message
             : String(error),
       });
+      return false;
     } finally {
       setAccessBusyWorkspaceId(null);
     }
@@ -789,6 +816,7 @@ export function OrganizationOverviewSection(props: {
       await props.onCreateWorkspace(attempt.name, attempt.operationId);
       pendingCreateWorkspaceRef.current = null;
       setNewWorkspaceName("");
+      setCreateWorkspaceOpen(false);
       toast.success(`${requestedName} created`);
       await load();
     } catch (error) {
@@ -904,7 +932,7 @@ export function OrganizationOverviewSection(props: {
   }
   if (!overview) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-surface p-4 text-sm text-fg-muted">
+      <div className="flex items-center gap-2 border-b border-border py-5 text-sm text-fg-muted">
         <Loader2Icon className="size-4 animate-spin" /> Loading organization…
       </div>
     );
@@ -912,7 +940,7 @@ export function OrganizationOverviewSection(props: {
 
   return (
     <div className="grid min-w-0 gap-4">
-      <section className="grid gap-4 rounded-lg border border-border bg-surface p-4">
+      <section className="grid gap-4 border-b border-border pb-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
@@ -922,6 +950,8 @@ export function OrganizationOverviewSection(props: {
               <div className="mt-1 flex max-w-lg gap-2">
                 <Input
                   aria-label="Organization name"
+                  name="organization-name"
+                  autoComplete="off"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   maxLength={120}
@@ -963,12 +993,12 @@ export function OrganizationOverviewSection(props: {
             </p>
           </div>
           {!editing ? (
-            <Button type="button" variant="secondary" size="sm" onClick={() => setEditing(true)}>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setEditing(true)}>
               <PencilIcon className="size-3.5" /> Rename
             </Button>
           ) : null}
         </div>
-        <div className="grid gap-2 sm:grid-cols-3">
+        <div className="grid grid-cols-1 divide-y divide-border border-y border-border sm:grid-cols-3 sm:divide-x sm:divide-y-0">
           <Metric label="Shared workspaces" value={overview.workspaces.length} />
           <Metric label="People with access" value={peopleWithAccess} />
           <Metric
@@ -978,8 +1008,8 @@ export function OrganizationOverviewSection(props: {
         </div>
       </section>
 
-      <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-        <div className="flex flex-wrap items-end justify-between gap-3">
+      <section className="grid gap-3 border-b border-border pb-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-sm font-medium">Workspaces &amp; access</h2>
             <p className="mt-1 text-xs text-fg-muted">
@@ -987,28 +1017,10 @@ export function OrganizationOverviewSection(props: {
               Personal workspaces stay private.
             </p>
           </div>
-          <form
-            className="flex w-full min-w-0 gap-2 sm:w-auto"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void createWorkspace();
-            }}
-          >
-            <Input
-              aria-label="New workspace name"
-              placeholder="New workspace name"
-              value={newWorkspaceName}
-              onChange={(event) => setNewWorkspaceName(event.target.value)}
-            />
-            <Button
-              type="submit"
-              size="sm"
-              disabled={!newWorkspaceName.trim() || creatingWorkspace}
-            >
-              {creatingWorkspace ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-              Create workspace
-            </Button>
-          </form>
+          <Button type="button" size="sm" onClick={() => setCreateWorkspaceOpen(true)}>
+            <PlusIcon className="size-3.5" />
+            Create new workspace
+          </Button>
         </div>
         {overview.workspaces.length === 0 ? (
           <p className="rounded-md border border-dashed border-border p-4 text-sm text-fg-muted">
@@ -1044,6 +1056,18 @@ export function OrganizationOverviewSection(props: {
                     </span>
                   </summary>
                   <div className="grid gap-3 border-t border-border/70 px-3 py-3">
+                    {props.accessibleWorkspaceIds.has(workspace.id) ? (
+                      <div className="flex justify-end">
+                        <a
+                          href={`/workspaces/${encodeURIComponent(workspace.id)}/settings?section=general`}
+                          aria-label={`Open ${workspace.name} workspace settings`}
+                          className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+                        >
+                          Open settings
+                          <ArrowUpRightIcon className="size-3.5" />
+                        </a>
+                      </div>
+                    ) : null}
                     <form
                       className="flex flex-wrap items-end gap-2"
                       onSubmit={(event) => {
@@ -1055,6 +1079,8 @@ export function OrganizationOverviewSection(props: {
                         Workspace name
                         <Input
                           aria-label={`Workspace name for ${workspace.name}`}
+                          name={`workspace-name-${workspace.id}`}
+                          autoComplete="off"
                           value={workspaceNameDrafts[workspace.id] ?? workspace.name}
                           disabled={accessBusyWorkspaceId === workspace.id}
                           onChange={(event) =>
@@ -1110,7 +1136,7 @@ export function OrganizationOverviewSection(props: {
                             onChange={(event) =>
                               setWorkspaceAssignmentAccess((current) => ({
                                 ...current,
-                                [workspace.id]: event.target.value as WorkspaceMemberRole,
+                                [workspace.id]: event.target.value as WorkspaceNamedRole,
                               }))
                             }
                           >
@@ -1119,7 +1145,6 @@ export function OrganizationOverviewSection(props: {
                                 {role.label}
                               </option>
                             ))}
-                            <option value="custom">Custom permissions…</option>
                           </Select>
                         </label>
                         <Button
@@ -1127,10 +1152,7 @@ export function OrganizationOverviewSection(props: {
                           size="sm"
                           disabled={
                             accessBusyWorkspaceId === workspace.id ||
-                            !(workspaceAssignments[workspace.id] ?? "") ||
-                            (workspaceAssignmentAccess[workspace.id] === "custom" &&
-                              (workspaceAssignmentCustomPermissions[workspace.id]?.length ?? 0) ===
-                                0)
+                            !(workspaceAssignments[workspace.id] ?? "")
                           }
                           onClick={() => void addWorkspaceAccess(workspace.id)}
                         >
@@ -1139,180 +1161,115 @@ export function OrganizationOverviewSection(props: {
                           ) : null}
                           Add access
                         </Button>
-                        {workspaceAssignmentAccess[workspace.id] === "custom" ? (
-                          <details open className="w-full rounded-md border border-border/70 p-3">
-                            <summary className="cursor-pointer text-xs font-medium">
-                              Advanced custom permissions
-                            </summary>
-                            <p className="my-2 text-xs text-fg-muted">
-                              Use named roles for normal access. This advanced path preserves exact
-                              raw permissions for integrations and legacy grants.
-                            </p>
-                            <PermissionGroupPicker
-                              groups={workspaceMemberPermissionGroups()}
-                              selected={
-                                new Set(workspaceAssignmentCustomPermissions[workspace.id] ?? [])
-                              }
-                              disabled={accessBusyWorkspaceId === workspace.id}
-                              onToggle={(permission) =>
-                                setWorkspaceAssignmentCustomPermissions((current) => {
-                                  const selected = new Set(current[workspace.id] ?? []);
-                                  if (selected.has(permission as SdkPermission)) {
-                                    selected.delete(permission as SdkPermission);
-                                  } else {
-                                    selected.add(permission as SdkPermission);
-                                  }
-                                  return {
-                                    ...current,
-                                    [workspace.id]: [...selected],
-                                  };
-                                })
-                              }
-                            />
-                          </details>
-                        ) : null}
                       </div>
                     ) : null}
                     {workspace.members.length === 0 ? (
                       <p className="py-2 text-xs text-fg-subtle">No direct workspace access.</p>
                     ) : (
-                      <div className="overflow-x-auto">
-                        <table className="min-w-full text-left text-xs">
-                          <thead className="text-fg-subtle">
-                            <tr>
-                              <th className="py-1 pr-4 font-medium">Person or service</th>
-                              <th className="py-1 pr-4 font-medium">Workspace access</th>
-                              <th className="py-1 font-medium">Details</th>
-                              <th className="py-1 text-right font-medium">Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {workspace.members.map((member) => {
-                              const memberKey = `${workspace.id}:${member.membershipId}`;
-                              const roleDraft = workspaceMemberRoleDrafts[memberKey] ?? member.role;
-                              const customPermissions =
-                                workspaceMemberCustomPermissions[memberKey] ?? [];
-                              return (
-                                <tr key={member.membershipId} className="border-t border-border/50">
-                                  <td className="py-2 pr-4">
-                                    <span className="font-medium">
-                                      {member.name ??
-                                        member.email ??
-                                        member.subjectLabel ??
-                                        maskedOrganizationSubject(member.subjectId)}
-                                    </span>
-                                    <span className="ml-2 text-2xs capitalize text-fg-subtle">
-                                      {member.principalKind}
-                                    </span>
-                                  </td>
-                                  <td className="py-2 pr-4">
-                                    {member.principalKind === "human" ? (
-                                      <Select
-                                        aria-label={`Workspace access for ${
-                                          member.subjectLabel ??
-                                          maskedOrganizationSubject(member.subjectId)
-                                        }`}
-                                        className="min-w-48"
-                                        value={roleDraft}
-                                        disabled={
-                                          accessBusyWorkspaceId === workspace.id ||
-                                          !member.organizationMembershipId
-                                        }
-                                        onChange={(event) => {
-                                          const role = event.target.value as WorkspaceMemberRole;
-                                          setWorkspaceMemberRoleDrafts((current) => ({
-                                            ...current,
-                                            [memberKey]: role,
-                                          }));
-                                          if (role !== "custom") {
-                                            void updateWorkspaceAccess(workspace, member, role);
-                                          }
-                                        }}
-                                      >
-                                        {overview.roles.map((role) => (
-                                          <option key={role.role} value={role.role}>
-                                            {role.label}
-                                          </option>
-                                        ))}
-                                        <option value="custom">Custom permissions…</option>
-                                      </Select>
-                                    ) : (
-                                      <span className="capitalize text-fg-muted">
-                                        {member.role}
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td className="py-2 text-fg-muted">
-                                    {roleDraft === "custom" ? (
-                                      <details open={member.role === "custom"} className="min-w-64">
-                                        <summary className="cursor-pointer">
-                                          {customPermissions.length} custom permissions
-                                        </summary>
-                                        <div className="mt-2 grid gap-2 rounded-md border border-border/70 p-2">
-                                          <PermissionGroupPicker
-                                            groups={workspaceMemberPermissionGroups()}
-                                            selected={new Set(customPermissions)}
-                                            disabled={accessBusyWorkspaceId === workspace.id}
-                                            onToggle={(permission) =>
-                                              setWorkspaceMemberCustomPermissions((current) => {
-                                                const selected = new Set(current[memberKey] ?? []);
-                                                if (selected.has(permission as SdkPermission)) {
-                                                  selected.delete(permission as SdkPermission);
-                                                } else {
-                                                  selected.add(permission as SdkPermission);
-                                                }
-                                                return { ...current, [memberKey]: [...selected] };
-                                              })
-                                            }
-                                          />
-                                          <Button
-                                            type="button"
-                                            size="sm"
-                                            disabled={
-                                              accessBusyWorkspaceId === workspace.id ||
-                                              customPermissions.length === 0 ||
-                                              !member.organizationMembershipId
-                                            }
-                                            onClick={() =>
-                                              void updateWorkspaceAccess(
-                                                workspace,
-                                                member,
-                                                "custom",
-                                                customPermissions,
-                                              )
-                                            }
-                                          >
-                                            Save custom permissions
-                                          </Button>
-                                        </div>
-                                      </details>
-                                    ) : (
-                                      (overview.roles.find((role) => role.role === roleDraft)
-                                        ?.description ?? "Named workspace role")
-                                    )}
-                                  </td>
-                                  <td className="py-2 text-right">
-                                    {member.subjectId !== props.identity.subjectId &&
-                                    member.principalKind === "human" &&
-                                    member.organizationMembershipId ? (
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="sm"
-                                        disabled={accessBusyWorkspaceId === workspace.id}
-                                        onClick={() =>
-                                          setRevokeWorkspaceAccess({ workspace, member })
-                                        }
-                                      >
-                                        Remove access
-                                      </Button>
-                                    ) : null}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
+                      <div className="grid gap-2">
+                        {workspace.members.map((member) => {
+                          const memberKey = `${workspace.id}:${member.membershipId}`;
+                          const roleDraft = workspaceMemberRoleDrafts[memberKey] ?? member.role;
+                          const roleDescription =
+                            roleDraft === "custom"
+                              ? `${member.permissions.length} individually selected permissions`
+                              : (overview.roles.find((role) => role.role === roleDraft)
+                                  ?.description ?? "Named workspace role");
+                          return (
+                            <div
+                              key={member.membershipId}
+                              className="grid min-w-0 gap-3 rounded-md border border-border/70 bg-bg/25 p-3 md:grid-cols-[minmax(11rem,1fr)_minmax(15rem,1.35fr)_auto] md:items-center"
+                            >
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-medium">
+                                  {workspaceMemberLabel(member)}
+                                </div>
+                                <div className="mt-0.5 text-2xs capitalize text-fg-subtle">
+                                  {member.principalKind}
+                                </div>
+                              </div>
+                              <div className="grid min-w-0 gap-1.5">
+                                {member.principalKind === "human" ? (
+                                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                    <Select
+                                      aria-label={`Workspace access for ${workspaceMemberLabel(member)}`}
+                                      className="min-w-0 flex-1 sm:min-w-48"
+                                      value={roleDraft}
+                                      disabled={
+                                        accessBusyWorkspaceId === workspace.id ||
+                                        !member.organizationMembershipId
+                                      }
+                                      onChange={(event) => {
+                                        const role = event.target.value as WorkspaceNamedRole;
+                                        setWorkspaceMemberRoleDrafts((current) => ({
+                                          ...current,
+                                          [memberKey]: role,
+                                        }));
+                                        void updateWorkspaceAccess(workspace, member, role);
+                                      }}
+                                    >
+                                      {roleDraft === "custom" ? (
+                                        <option value="custom" disabled>
+                                          Custom access
+                                        </option>
+                                      ) : null}
+                                      {overview.roles.map((role) => (
+                                        <option key={role.role} value={role.role}>
+                                          {role.label}
+                                        </option>
+                                      ))}
+                                    </Select>
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      className="shrink-0"
+                                      disabled={
+                                        accessBusyWorkspaceId === workspace.id ||
+                                        !member.organizationMembershipId
+                                      }
+                                      aria-label={`Fine-tune permissions for ${workspaceMemberLabel(member)}`}
+                                      onClick={() =>
+                                        setCustomPermissionEditor({
+                                          workspace,
+                                          member,
+                                          permissions: editableWorkspaceMemberPermissions(
+                                            member.permissions,
+                                          ),
+                                        })
+                                      }
+                                    >
+                                      <SlidersHorizontalIcon className="size-3.5" />
+                                      Fine-tune
+                                    </Button>
+                                  </div>
+                                ) : (
+                                  <span className="text-sm capitalize text-fg-muted">
+                                    {member.role}
+                                  </span>
+                                )}
+                                <p className="min-w-0 text-xs leading-4 text-fg-muted">
+                                  {roleDescription}
+                                </p>
+                              </div>
+                              <div className="flex justify-end">
+                                {member.subjectId !== props.identity.subjectId &&
+                                member.principalKind === "human" &&
+                                member.organizationMembershipId ? (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={accessBusyWorkspaceId === workspace.id}
+                                    onClick={() => setRevokeWorkspaceAccess({ workspace, member })}
+                                  >
+                                    Remove access
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -1322,6 +1279,193 @@ export function OrganizationOverviewSection(props: {
           </div>
         )}
       </section>
+      <Dialog
+        open={createWorkspaceOpen}
+        onOpenChange={(open) => {
+          if (creatingWorkspace) return;
+          setCreateWorkspaceOpen(open);
+          if (!open) setNewWorkspaceName("");
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create a new workspace</DialogTitle>
+            <DialogDescription>
+              Workspaces keep sessions, tools, integrations, and access separate within your
+              organization.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            className="grid gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createWorkspace();
+            }}
+          >
+            <div className="grid gap-2">
+              <Label htmlFor="new-workspace-name">Workspace name</Label>
+              <Input
+                id="new-workspace-name"
+                aria-label="New workspace name"
+                name="workspace-name"
+                autoComplete="off"
+                placeholder="For example, Product team…"
+                value={newWorkspaceName}
+                onChange={(event) => setNewWorkspaceName(event.target.value)}
+                disabled={creatingWorkspace}
+                autoFocus
+              />
+              <p className="text-xs text-fg-muted">
+                You can invite organization members after it is created.
+              </p>
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={creatingWorkspace}
+                onClick={() => {
+                  setCreateWorkspaceOpen(false);
+                  setNewWorkspaceName("");
+                }}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={!newWorkspaceName.trim() || creatingWorkspace}>
+                {creatingWorkspace ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                Create workspace
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={customPermissionEditor !== null}
+        onOpenChange={(open) => {
+          if (!open && accessBusyWorkspaceId === null) setCustomPermissionEditor(null);
+        }}
+      >
+        <DialogContent className="max-h-[92dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-h-[88vh] sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Fine-tune workspace access</DialogTitle>
+            <DialogDescription>
+              {customPermissionEditor
+                ? `Choose exactly what ${workspaceMemberLabel(customPermissionEditor.member)} can do in ${customPermissionEditor.workspace.name}.`
+                : "Choose exactly what this person can do."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid min-h-0 gap-5 overflow-y-auto px-1 pb-1">
+            <section className="grid gap-2" aria-labelledby="access-starting-point-heading">
+              <div>
+                <h3 id="access-starting-point-heading" className="text-sm font-medium">
+                  Start with a simple access level
+                </h3>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Pick the closest level, then adjust individual permissions below.
+                </p>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {overview.roles.map((role) => (
+                  <button
+                    key={role.role}
+                    type="button"
+                    className="grid min-w-0 gap-1 rounded-md border border-border bg-bg/35 p-3 text-left transition-colors hover:border-border-strong hover:bg-surface-2 disabled:opacity-50"
+                    disabled={accessBusyWorkspaceId !== null}
+                    aria-label={`Use ${role.label} permissions`}
+                    onClick={() =>
+                      setCustomPermissionEditor((current) =>
+                        current
+                          ? {
+                              ...current,
+                              permissions: editableWorkspaceMemberPermissions(role.permissions),
+                            }
+                          : null,
+                      )
+                    }
+                  >
+                    <span className="text-sm font-medium">{role.label}</span>
+                    <span className="text-xs leading-4 text-fg-muted">{role.description}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+            <section className="grid gap-3 border-t border-border pt-4">
+              <div className="flex flex-wrap items-end justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-medium">Individual permissions</h3>
+                  <p className="mt-1 text-xs text-fg-muted">
+                    Workspace membership and basic visibility are included automatically. Choose the
+                    additional actions this person may perform.
+                  </p>
+                </div>
+              </div>
+              <PermissionGroupPicker
+                groups={workspaceMemberPermissionGroups()}
+                selected={new Set(customPermissionEditor?.permissions ?? [])}
+                disabled={accessBusyWorkspaceId !== null}
+                onToggle={(permission) =>
+                  setCustomPermissionEditor((current) => {
+                    if (!current) return null;
+                    const selected = new Set(current.permissions);
+                    if (selected.has(permission as SdkPermission)) {
+                      selected.delete(permission as SdkPermission);
+                    } else {
+                      selected.add(permission as SdkPermission);
+                    }
+                    return { ...current, permissions: [...selected] };
+                  })
+                }
+                onSetGroup={(permissions, shouldSelect) =>
+                  setCustomPermissionEditor((current) => {
+                    if (!current) return null;
+                    const selected = new Set(current.permissions);
+                    for (const permission of permissions) {
+                      if (shouldSelect) selected.add(permission as SdkPermission);
+                      else selected.delete(permission as SdkPermission);
+                    }
+                    return { ...current, permissions: [...selected] };
+                  })
+                }
+              />
+            </section>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={accessBusyWorkspaceId !== null}
+              onClick={() => setCustomPermissionEditor(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={
+                !customPermissionEditor ||
+                customPermissionEditor.permissions.length === 0 ||
+                accessBusyWorkspaceId !== null
+              }
+              onClick={() => {
+                if (!customPermissionEditor) return;
+                const editor = customPermissionEditor;
+                void updateWorkspaceAccess(
+                  editor.workspace,
+                  editor.member,
+                  "custom",
+                  editor.permissions,
+                ).then((saved) => {
+                  if (saved) setCustomPermissionEditor(null);
+                });
+              }}
+            >
+              {accessBusyWorkspaceId !== null ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : null}
+              Save custom access
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <ConfirmDialog
         open={revokeWorkspaceAccess !== null}
         onOpenChange={(open) => {
@@ -1343,9 +1487,9 @@ export function OrganizationOverviewSection(props: {
 
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="rounded-md border border-border/70 bg-bg/35 px-3 py-2">
-      <p className="text-lg font-semibold capitalize">{value}</p>
-      <p className="text-2xs text-fg-subtle">{label}</p>
+    <div className="px-3 py-3 first:pl-0 last:pr-0 sm:px-5">
+      <p className="text-base font-semibold capitalize">{value}</p>
+      <p className="mt-0.5 text-2xs uppercase tracking-wide text-fg-subtle">{label}</p>
     </div>
   );
 }
@@ -1395,6 +1539,8 @@ export function OrganizationPeopleSection(props: {
   const [inviteRole, setInviteRole] = useState<OrganizationMembershipRole>("member");
   const [inviteWorkspaces, setInviteWorkspaces] = useState<OrganizationWorkspaceAccess[]>([]);
   const [inviteWorkspaceIds, setInviteWorkspaceIds] = useState<string[]>([]);
+  const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+  const [memberSearch, setMemberSearch] = useState("");
   const [roleDrafts, setRoleDrafts] = useState<Record<string, OrganizationMembershipRole>>({});
   const [busyResource, setBusyResource] = useState<OrganizationAdminResource | null>(null);
   const [busyOwnerKey, setBusyOwnerKey] = useState("");
@@ -1637,6 +1783,7 @@ export function OrganizationPeopleSection(props: {
     setBusyResource(null);
     setMemberConfirmation(null);
     setRevokeConfirmation(null);
+    setInviteDialogOpen(false);
     setLiveOutcome("");
     void loadMembers();
     void loadAdminInvitations();
@@ -1711,6 +1858,7 @@ export function OrganizationPeopleSection(props: {
       setInviteEmail("");
       setInviteName("");
       setInviteWorkspaceIds([]);
+      setInviteDialogOpen(false);
       setLiveOutcome(invitationDeliveryOutcome(invitation));
       toast.success(
         invitation.delivery?.state === "sent"
@@ -1996,14 +2144,30 @@ export function OrganizationPeopleSection(props: {
   const pendingIncoming = incoming.value.invitations.filter(
     (invite) => invite.status === "pending",
   );
+  const pendingAdminInvites = adminInvites.value.invitations.filter(
+    (invite) => invite.status === "pending",
+  );
   const activeOwnerCount = members.value.filter(
     (member) => member.role === "owner" && member.status === "active",
   ).length;
+  const normalizedMemberSearch = memberSearch.trim().toLowerCase();
+  const visibleMembers = members.value.filter((member) => {
+    if (!normalizedMemberSearch) return true;
+    return [
+      organizationMemberLabel(member, props.identity.subjectId),
+      member.email,
+      ORGANIZATION_ROLE_LABELS[member.role],
+      organizationMemberStatusLabel(member.status),
+      ...member.sharedWorkspaceAccess.map((access) => access.workspaceName),
+    ]
+      .filter((value): value is string => Boolean(value))
+      .some((value) => value.toLowerCase().includes(normalizedMemberSearch));
+  });
   return (
     <div className="grid min-w-0 gap-5 [&>section>*]:min-w-0 [&>section]:min-w-0">
       <section
         aria-labelledby="organization-people-heading"
-        className="grid gap-3 rounded-lg border border-border bg-surface p-4"
+        className="grid gap-4 border-b border-border pb-6"
       >
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -2017,8 +2181,8 @@ export function OrganizationPeopleSection(props: {
               People
             </h2>
             <p className="mt-1 text-xs text-fg-muted">
-              Invite your team, choose their organization role, and manage who can access each
-              shared workspace.
+              Manage organization roles and shared workspace access. Personal workspaces and private
+              resources are never shared here.
             </p>
           </div>
           {canAdminister ? (
@@ -2054,184 +2218,259 @@ export function OrganizationPeopleSection(props: {
             Loading organization people…
           </p>
         ) : (
-          <div className="grid gap-2">
-            {members.value.map((member) => {
-              const capability = organizationMemberCapabilities(
-                props.actorRole,
-                member,
-                activeOwnerCount,
-              );
-              const label = organizationMemberLabel(member, props.identity.subjectId);
-              const roleDraft = roleDrafts[member.id] ?? member.role;
-              const soleActiveOwner =
-                member.role === "owner" && member.status === "active" && activeOwnerCount <= 1;
-              const soleOwnerReasonId = `sole-owner-reason-${member.id}`;
-              return (
-                <article
-                  key={member.id}
-                  className="grid gap-3 rounded-lg border border-border bg-bg/35 p-3 sm:grid-cols-[minmax(0,1fr)_auto]"
-                >
-                  <div className="min-w-0">
-                    <h3 className="truncate text-sm font-medium">{label}</h3>
-                    {member.email && member.email !== label ? (
-                      <p className="mt-0.5 truncate text-xs text-fg-subtle">{member.email}</p>
-                    ) : null}
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      <span className="rounded-full border border-border px-2 py-0.5 text-xs">
-                        {ORGANIZATION_ROLE_LABELS[member.role]}
-                      </span>
-                      <span className="rounded-full border border-border px-2 py-0.5 text-xs text-fg-muted">
-                        {organizationMemberStatusLabel(member.status)}
-                      </span>
-                    </div>
-                    {member.sharedWorkspaceAccess.length > 0 ? (
-                      <p className="mt-2 text-xs text-fg-subtle">
-                        Shared access:{" "}
-                        {member.sharedWorkspaceAccess
-                          .map((access) => `${access.workspaceName} (${access.role})`)
-                          .join(", ")}
-                      </p>
-                    ) : (
-                      <p className="mt-2 text-xs text-fg-subtle">No shared workspace access</p>
-                    )}
-                  </div>
-                  <div className="grid min-w-48 content-start gap-2 sm:justify-items-end">
-                    {soleActiveOwner ? (
-                      <label className="grid w-full gap-1 text-xs text-fg-muted sm:w-48">
-                        Organization role
-                        <Select
-                          aria-label={`Organization role for ${label}`}
-                          aria-describedby={soleOwnerReasonId}
-                          value={member.role}
-                          disabled
-                        >
-                          <option value={member.role}>
+          <div className="overflow-hidden rounded-xl border border-border bg-surface/30">
+            <div className="flex flex-col gap-3 border-b border-border bg-surface-raised/35 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="relative w-full sm:max-w-xs">
+                <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-fg-subtle" />
+                <Input
+                  type="search"
+                  aria-label="Search organization people"
+                  placeholder="Search people or workspaces"
+                  value={memberSearch}
+                  onChange={(event) => setMemberSearch(event.target.value)}
+                  className="h-8 pl-9"
+                />
+              </div>
+              <p className="shrink-0 text-xs tabular-nums text-fg-subtle">
+                {normalizedMemberSearch
+                  ? `${visibleMembers.length} of ${members.value.length}`
+                  : `${members.value.length} ${members.value.length === 1 ? "person" : "people"}`}
+              </p>
+            </div>
+
+            <div
+              aria-hidden="true"
+              className="hidden grid-cols-[minmax(13rem,1.5fr)_minmax(11rem,1.15fr)_10.5rem_7rem_2.5rem] gap-3 border-b border-border px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-fg-subtle md:grid"
+            >
+              <span>Person</span>
+              <span>Shared workspaces</span>
+              <span>Organization role</span>
+              <span>Status</span>
+              <span />
+            </div>
+
+            {visibleMembers.length === 0 ? (
+              <div className="px-4 py-10 text-center">
+                <p className="text-sm font-medium text-fg">No matching people</p>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Try a name, email, role, status, or workspace.
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-border/70">
+                {visibleMembers.map((member) => {
+                  const capability = organizationMemberCapabilities(
+                    props.actorRole,
+                    member,
+                    activeOwnerCount,
+                  );
+                  const label = organizationMemberLabel(member, props.identity.subjectId);
+                  const roleDraft = roleDrafts[member.id] ?? member.role;
+                  const soleActiveOwner =
+                    member.role === "owner" && member.status === "active" && activeOwnerCount <= 1;
+                  const soleOwnerReasonId = `sole-owner-reason-${member.id}`;
+                  const memberName = member.name?.trim() || member.email || label;
+                  const avatarLetter = memberName.slice(0, 1).toUpperCase();
+                  const workspaceAccessTitle = member.sharedWorkspaceAccess
+                    .map((access) => `${access.workspaceName} (${access.role})`)
+                    .join(", ");
+                  const firstWorkspace = member.sharedWorkspaceAccess[0];
+                  const additionalWorkspaceCount = Math.max(
+                    0,
+                    member.sharedWorkspaceAccess.length - 1,
+                  );
+                  const hasMemberActions =
+                    capability.canSuspend || capability.canReactivate || capability.canOffboard;
+                  return (
+                    <article
+                      key={member.id}
+                      className="grid min-w-0 gap-3 px-3 py-3 transition-colors hover:bg-surface-raised/35 md:grid-cols-[minmax(13rem,1.5fr)_minmax(11rem,1.15fr)_10.5rem_7rem_2.5rem] md:items-center"
+                    >
+                      <div className="flex min-w-0 items-center gap-3">
+                        <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-brand/20 bg-brand/10 text-xs font-semibold text-brand">
+                          {avatarLetter}
+                        </span>
+                        <div className="min-w-0">
+                          <h3 className="truncate text-sm font-medium">{label}</h3>
+                          {member.email && member.email !== label ? (
+                            <p className="truncate text-xs text-fg-subtle">{member.email}</p>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="min-w-0 text-xs text-fg-muted" title={workspaceAccessTitle}>
+                        {firstWorkspace ? (
+                          <p className="truncate">
+                            <span className="text-fg">{firstWorkspace.workspaceName}</span>
+                            <span className="ml-1 text-fg-subtle">{firstWorkspace.role}</span>
+                            {additionalWorkspaceCount > 0 ? (
+                              <span className="ml-1.5 rounded-full bg-surface-raised px-1.5 py-0.5 text-[11px] text-fg-muted">
+                                +{additionalWorkspaceCount}
+                              </span>
+                            ) : null}
+                          </p>
+                        ) : (
+                          <span className="text-fg-subtle">No shared workspaces</span>
+                        )}
+                      </div>
+
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        {soleActiveOwner ? (
+                          <div
+                            className="min-w-0 flex-1"
+                            title="Add another owner before changing this role."
+                          >
+                            <Select
+                              aria-label={`Organization role for ${label}`}
+                              aria-describedby={soleOwnerReasonId}
+                              value={member.role}
+                              disabled
+                              className="h-8"
+                            >
+                              <option value={member.role}>
+                                {ORGANIZATION_ROLE_LABELS[member.role]}
+                              </option>
+                            </Select>
+                            <p id={soleOwnerReasonId} className="mt-1 text-xs text-fg-subtle">
+                              Assign another active owner before changing, pausing, or removing the
+                              sole owner.
+                            </p>
+                          </div>
+                        ) : capability.canChangeRole ? (
+                          <div className="min-w-0 flex-1">
+                            <Select
+                              aria-label={`Organization role for ${label}`}
+                              value={roleDraft}
+                              disabled={visibleBusyResource === "members"}
+                              className="h-8"
+                              onChange={(event) =>
+                                setRoleDrafts((current) => ({
+                                  ...current,
+                                  [member.id]: event.target.value as OrganizationMembershipRole,
+                                }))
+                              }
+                            >
+                              {capability.allowedRoles.map((role) => (
+                                <option key={role} value={role}>
+                                  {ORGANIZATION_ROLE_LABELS[role]}
+                                </option>
+                              ))}
+                            </Select>
+                          </div>
+                        ) : (
+                          <span className="truncate text-sm text-fg-muted">
                             {ORGANIZATION_ROLE_LABELS[member.role]}
-                          </option>
-                        </Select>
-                      </label>
-                    ) : capability.canChangeRole ? (
-                      <label className="grid w-full gap-1 text-xs text-fg-muted sm:w-48">
-                        Organization role
-                        <Select
-                          aria-label={`Organization role for ${label}`}
-                          value={roleDraft}
-                          disabled={visibleBusyResource === "members"}
-                          onChange={(event) =>
-                            setRoleDrafts((current) => ({
-                              ...current,
-                              [member.id]: event.target.value as OrganizationMembershipRole,
-                            }))
-                          }
-                        >
-                          {capability.allowedRoles.map((role) => (
-                            <option key={role} value={role}>
-                              {ORGANIZATION_ROLE_LABELS[role]}
-                            </option>
-                          ))}
-                        </Select>
-                      </label>
-                    ) : null}
-                    <div className="flex w-full flex-wrap justify-end gap-2">
-                      {capability.canChangeRole && roleDraft !== member.role ? (
-                        <Button
-                          type="button"
-                          size="sm"
-                          disabled={visibleBusyResource === "members"}
-                          onClick={() => void changeRole(member)}
-                        >
-                          Save role
-                        </Button>
-                      ) : null}
-                      {capability.canSuspend ? (
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          aria-label={`Pause access for ${label}`}
-                          disabled={visibleBusyResource === "members"}
-                          onClick={(event) => {
-                            actionTriggerRef.current = event.currentTarget;
-                            setMemberConfirmation({
-                              member,
-                              action: "suspend",
-                            });
-                          }}
-                        >
-                          Pause access
-                        </Button>
-                      ) : null}
-                      {capability.canReactivate ? (
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          aria-label={`Restore access for ${label}`}
-                          disabled={visibleBusyResource === "members"}
-                          onClick={(event) => {
-                            actionTriggerRef.current = event.currentTarget;
-                            setMemberConfirmation({
-                              member,
-                              action: "reactivate",
-                            });
-                          }}
-                        >
-                          Restore access
-                        </Button>
-                      ) : null}
-                      {capability.canOffboard ? (
-                        <Button
-                          type="button"
-                          variant="destructive"
-                          size="sm"
-                          aria-label={`Remove ${label} from the organization`}
-                          disabled={visibleBusyResource === "members"}
-                          onClick={(event) => {
-                            actionTriggerRef.current = event.currentTarget;
-                            setMemberConfirmation({
-                              member,
-                              action: "offboard",
-                            });
-                          }}
-                        >
-                          <UserMinusIcon className="size-3.5" />
-                          Remove
-                        </Button>
-                      ) : null}
-                      {soleActiveOwner ? (
-                        <>
+                          </span>
+                        )}
+                        {capability.canChangeRole && roleDraft !== member.role ? (
                           <Button
                             type="button"
-                            variant="secondary"
-                            size="sm"
-                            disabled
-                            aria-describedby={soleOwnerReasonId}
+                            size="icon-sm"
+                            aria-label={`Save role for ${label}`}
+                            title="Save role"
+                            disabled={visibleBusyResource === "members"}
+                            onClick={() => void changeRole(member)}
                           >
-                            Pause access
+                            <CheckIcon className="size-3.5" />
                           </Button>
+                        ) : null}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 text-xs text-fg-muted">
+                        <span
+                          aria-hidden="true"
+                          className={`size-1.5 rounded-full ${
+                            member.status === "active"
+                              ? "bg-success"
+                              : member.status === "provisioning"
+                                ? "bg-warning"
+                                : "bg-fg-subtle"
+                          }`}
+                        />
+                        <span>{organizationMemberStatusLabel(member.status)}</span>
+                        {soleActiveOwner ? (
+                          <span className="hidden text-fg-subtle xl:inline">· sole owner</span>
+                        ) : null}
+                      </div>
+
+                      <div className="flex justify-end">
+                        {hasMemberActions ? (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label={`More actions for ${label}`}
+                                title="More actions"
+                                disabled={visibleBusyResource === "members"}
+                                onClick={(event) => {
+                                  actionTriggerRef.current = event.currentTarget;
+                                }}
+                              >
+                                <MoreHorizontalIcon className="size-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-48">
+                              {capability.canSuspend ? (
+                                <DropdownMenuItem
+                                  onSelect={() =>
+                                    setMemberConfirmation({ member, action: "suspend" })
+                                  }
+                                >
+                                  <PauseIcon />
+                                  Pause access
+                                </DropdownMenuItem>
+                              ) : null}
+                              {capability.canReactivate ? (
+                                <DropdownMenuItem
+                                  onSelect={() =>
+                                    setMemberConfirmation({ member, action: "reactivate" })
+                                  }
+                                >
+                                  <PlayIcon />
+                                  Restore access
+                                </DropdownMenuItem>
+                              ) : null}
+                              {capability.canOffboard &&
+                              (capability.canSuspend || capability.canReactivate) ? (
+                                <DropdownMenuSeparator />
+                              ) : null}
+                              {capability.canOffboard ? (
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onSelect={() =>
+                                    setMemberConfirmation({ member, action: "offboard" })
+                                  }
+                                >
+                                  <UserMinusIcon />
+                                  Remove from organization
+                                </DropdownMenuItem>
+                              ) : null}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        ) : (
                           <Button
                             type="button"
-                            variant="destructive"
-                            size="sm"
+                            variant="ghost"
+                            size="icon-sm"
                             disabled
-                            aria-describedby={soleOwnerReasonId}
+                            aria-label={`No actions available for ${label}`}
+                            title={
+                              soleActiveOwner
+                                ? "Add another owner before changing, pausing, or removing this member."
+                                : "No actions available"
+                            }
                           >
-                            <UserMinusIcon className="size-3.5" />
-                            Remove
+                            <MoreHorizontalIcon className="size-4" />
                           </Button>
-                        </>
-                      ) : null}
-                    </div>
-                    {soleActiveOwner ? (
-                      <p id={soleOwnerReasonId} className="max-w-60 text-xs text-fg-subtle">
-                        Assign another active owner before changing, pausing, or removing the sole
-                        owner.
-                      </p>
-                    ) : null}
-                  </div>
-                </article>
-              );
-            })}
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -2239,190 +2478,158 @@ export function OrganizationPeopleSection(props: {
       {canAdminister ? (
         <section
           aria-labelledby="organization-invitations-heading"
-          className="grid gap-3 rounded-lg border border-border bg-surface p-4"
+          className="grid gap-4 border-b border-border pb-6"
         >
-          <div>
-            <h2
-              id="organization-invitations-heading"
-              className="flex items-center gap-1.5 text-sm font-medium"
-            >
-              <UserPlusIcon className="size-3.5 text-brand" />
-              People &amp; invitations
-            </h2>
-            <p className="mt-1 text-xs text-fg-muted">
-              Invite someone by email with an organization role and explicit shared workspace
-              access. OpenGeni records every delivery attempt and invitations expire after seven
-              days.
-            </p>
-          </div>
-          <fieldset
-            disabled={visibleBusyResource === "admin-invitations" || adminInvites.loading}
-            className="grid gap-2 sm:grid-cols-2"
-          >
-            <legend className="sr-only">Invite someone to the organization</legend>
-            <div className="grid gap-1">
-              <Label htmlFor="organization-invite-email">Email address</Label>
-              <Input
-                id="organization-invite-email"
-                type="email"
-                autoComplete="email"
-                value={inviteEmail}
-                onChange={(event) => setInviteEmail(event.target.value)}
-              />
-            </div>
-            <div className="grid gap-1">
-              <Label htmlFor="organization-invite-name">Name</Label>
-              <Input
-                id="organization-invite-name"
-                autoComplete="name"
-                value={inviteName}
-                onChange={(event) => setInviteName(event.target.value)}
-                placeholder="Optional"
-              />
-            </div>
-            <label className="grid min-w-44 gap-1 text-sm">
-              Organization role
-              <Select
-                value={inviteRole}
-                onChange={(event) =>
-                  setInviteRole(event.target.value as OrganizationMembershipRole)
-                }
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2
+                id="organization-invitations-heading"
+                className="flex items-center gap-1.5 text-sm font-medium"
               >
-                {(["owner", "admin", "member"] as const)
-                  .filter((role) => canInviteOrganizationRole(props.actorRole, role))
-                  .map((role) => (
-                    <option key={role} value={role}>
-                      {ORGANIZATION_ROLE_LABELS[role]}
-                    </option>
-                  ))}
-              </Select>
-            </label>
-            <Button
-              className="self-end"
-              type="button"
-              disabled={
-                !inviteEmail.trim() ||
-                visibleBusyResource !== null ||
-                adminInvites.loading ||
-                !canInviteOrganizationRole(props.actorRole, inviteRole)
-              }
-              onClick={() => void createInvitation()}
-            >
-              Invite
-            </Button>
-            <div className="grid gap-2 sm:col-span-2">
-              <span className="text-sm">Initial shared workspace access</span>
-              {inviteWorkspaces.length === 0 ? (
-                <p className="text-xs text-fg-muted">
-                  No shared workspaces are available. The invite creates organization membership
-                  only.
-                </p>
-              ) : (
-                <div className="grid gap-2 rounded-md border border-border/70 p-3 sm:grid-cols-2">
-                  {inviteWorkspaces.map((workspace) => (
-                    <label key={workspace.id} className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={inviteWorkspaceIds.includes(workspace.id)}
-                        onChange={(event) =>
-                          setInviteWorkspaceIds((current) =>
-                            event.target.checked
-                              ? [...new Set([...current, workspace.id])]
-                              : current.filter((workspaceId) => workspaceId !== workspace.id),
-                          )
-                        }
-                      />
-                      <span>{workspace.name}</span>
-                    </label>
-                  ))}
-                </div>
-              )}
-              <p className="text-xs text-fg-subtle">
-                Selected access is granted when the invitation is accepted. Personal workspaces are
-                never listed here.
+                <UserPlusIcon className="size-3.5 text-brand" />
+                People &amp; invitations
+              </h2>
+              <p className="mt-1 text-xs text-fg-muted">
+                Invite people who are not in this organization yet.
               </p>
             </div>
-          </fieldset>
+            <Button
+              type="button"
+              size="sm"
+              disabled={adminInvites.loading || visibleBusyResource !== null}
+              onClick={() => setInviteDialogOpen(true)}
+            >
+              <PlusIcon className="size-3.5" />
+              Invite person
+            </Button>
+          </div>
           {adminInvites.error ? (
             <LoadErrorState
               title="Could not load organization invitations"
               error={adminInvites.error}
               onRetry={() => void loadAdminInvitations()}
             />
-          ) : adminInvites.loading && adminInvites.value.invitations.length === 0 ? (
+          ) : adminInvites.loading && pendingAdminInvites.length === 0 ? (
             <p role="status" className="text-xs text-fg-muted">
               Loading invitations…
             </p>
-          ) : adminInvites.value.invitations.length === 0 ? (
-            <p className="text-xs text-fg-muted">
-              No organization invitations yet. Invite someone above when you are ready.
-            </p>
+          ) : pendingAdminInvites.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-border px-4 py-6 text-center">
+              <p className="text-sm font-medium text-fg">No pending invitations</p>
+              <p className="mt-1 text-xs text-fg-muted">
+                Invite someone when you&apos;re ready to grow the organization.
+              </p>
+            </div>
           ) : (
-            <div className="grid gap-2">
-              {adminInvites.value.invitations.map((invite) => (
-                <div
-                  key={invite.id}
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-xs"
-                >
-                  <div>
-                    <span className="font-medium">
-                      {invite.targetName ? `${invite.targetName} · ` : ""}
-                      {invite.targetEmail}
-                    </span>
-                    <span className="ml-2 text-fg-muted">
-                      {ORGANIZATION_ROLE_LABELS[invite.role]} · {invite.status}
-                    </span>
-                    <div className="mt-0.5 text-fg-subtle">
-                      Expires {formatTimestamp(invite.expiresAt)}
+            <div className="overflow-hidden rounded-xl border border-border bg-surface/30">
+              <div className="flex items-center justify-between border-b border-border bg-surface-raised/35 px-3 py-2">
+                <span className="text-xs font-medium text-fg-muted">Pending</span>
+                <span className="text-xs tabular-nums text-fg-subtle">
+                  {pendingAdminInvites.length}
+                </span>
+              </div>
+              <div className="divide-y divide-border/70">
+                {pendingAdminInvites.map((invite) => {
+                  const canRetry = !invite.delivery || invite.delivery.retryState === "available";
+                  const canRevoke = canRevokeOrganizationInvitation(props.actorRole, invite.role);
+                  const deliveryLabel =
+                    invite.delivery?.state === "sent"
+                      ? "Sent"
+                      : invite.delivery?.state === "pending"
+                        ? "Sending"
+                        : invite.delivery?.state === "failed"
+                          ? "Delivery failed"
+                          : invite.delivery?.state === "outcome_unknown"
+                            ? "Delivery needs review"
+                            : "Not sent";
+                  const workspaceNames = invite.initialWorkspaceIds.map(
+                    (workspaceId) =>
+                      inviteWorkspaces.find((workspace) => workspace.id === workspaceId)?.name ??
+                      "Unavailable workspace",
+                  );
+                  return (
+                    <div
+                      key={invite.id}
+                      className="flex min-w-0 items-center gap-3 px-3 py-3 transition-colors hover:bg-surface-raised/35"
+                    >
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-surface-raised text-xs font-semibold text-fg-muted">
+                        {(invite.targetName || invite.targetEmail).slice(0, 1).toUpperCase()}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-fg">
+                          {invite.targetName || invite.targetEmail}
+                        </p>
+                        {invite.targetName ? (
+                          <p className="truncate text-xs text-fg-subtle">{invite.targetEmail}</p>
+                        ) : null}
+                        <p className="mt-1 truncate text-xs text-fg-muted">
+                          {ORGANIZATION_ROLE_LABELS[invite.role]} · {deliveryLabel} · Expires{" "}
+                          {formatTimestamp(invite.expiresAt)}
+                          {workspaceNames.length > 0
+                            ? ` · ${workspaceNames.length} ${workspaceNames.length === 1 ? "workspace" : "workspaces"}`
+                            : ""}
+                        </p>
+                        {(!invite.delivery ||
+                          invite.delivery.state === "failed" ||
+                          invite.delivery.state === "outcome_unknown") && (
+                          <InvitationDeliveryStatus invitation={invite} />
+                        )}
+                      </div>
+                      {canRetry || canRevoke ? (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label={`More actions for invitation to ${invite.targetEmail}`}
+                              title="More actions"
+                              disabled={visibleBusyResource !== null || adminInvites.loading}
+                              onClick={(event) => {
+                                actionTriggerRef.current = event.currentTarget;
+                              }}
+                            >
+                              <MoreHorizontalIcon className="size-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-48">
+                            {canRetry ? (
+                              <DropdownMenuItem
+                                aria-label={`${invite.delivery ? "Retry delivery" : "Send invitation"} to ${invite.targetEmail}`}
+                                onSelect={() => void retryInvitationDelivery(invite)}
+                              >
+                                <RefreshCwIcon />
+                                {invite.delivery ? "Retry delivery" : "Send invitation"}
+                              </DropdownMenuItem>
+                            ) : null}
+                            {canRetry && canRevoke ? <DropdownMenuSeparator /> : null}
+                            {canRevoke ? (
+                              <DropdownMenuItem
+                                variant="destructive"
+                                aria-label={`Revoke invitation for ${invite.targetEmail}`}
+                                onSelect={() => setRevokeConfirmation(invite)}
+                              >
+                                <UserMinusIcon />
+                                Revoke invitation
+                              </DropdownMenuItem>
+                            ) : null}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          disabled
+                          aria-label={`No actions available for invitation to ${invite.targetEmail}`}
+                        >
+                          <MoreHorizontalIcon className="size-4" />
+                        </Button>
+                      )}
                     </div>
-                    <div className="mt-0.5 text-fg-subtle">
-                      Shared access:{" "}
-                      {invite.initialWorkspaceIds.length === 0
-                        ? "none"
-                        : invite.initialWorkspaceIds
-                            .map(
-                              (workspaceId) =>
-                                inviteWorkspaces.find((workspace) => workspace.id === workspaceId)
-                                  ?.name ?? "Unavailable workspace",
-                            )
-                            .join(", ")}
-                    </div>
-                    <InvitationDeliveryStatus invitation={invite} />
-                  </div>
-                  <div className="flex flex-wrap justify-end gap-2">
-                    {invite.status === "pending" &&
-                    (!invite.delivery || invite.delivery.retryState === "available") ? (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        aria-label={`${invite.delivery ? "Retry delivery" : "Send invitation"} to ${invite.targetEmail}`}
-                        disabled={visibleBusyResource !== null || adminInvites.loading}
-                        onClick={() => void retryInvitationDelivery(invite)}
-                      >
-                        <RefreshCwIcon className="size-3.5" />
-                        {invite.delivery ? "Retry delivery" : "Send invitation"}
-                      </Button>
-                    ) : null}
-                    {invite.status === "pending" &&
-                    canRevokeOrganizationInvitation(props.actorRole, invite.role) ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="max-w-full whitespace-normal text-right"
-                        disabled={visibleBusyResource !== null || adminInvites.loading}
-                        onClick={(event) => {
-                          actionTriggerRef.current = event.currentTarget;
-                          setRevokeConfirmation(invite);
-                        }}
-                      >
-                        Revoke invitation for {invite.targetEmail}
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
-              ))}
+                  );
+                })}
+              </div>
             </div>
           )}
           {adminInvites.value.nextCursor ? (
@@ -2438,84 +2645,212 @@ export function OrganizationPeopleSection(props: {
               Load more invitations
             </Button>
           ) : null}
+
+          <Dialog
+            open={inviteDialogOpen}
+            onOpenChange={(open) => {
+              if (visibleBusyResource === "admin-invitations") return;
+              setInviteDialogOpen(open);
+              if (!open) {
+                setInviteEmail("");
+                setInviteName("");
+                setInviteRole("member");
+                setInviteWorkspaceIds([]);
+              }
+            }}
+          >
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Invite person</DialogTitle>
+                <DialogDescription>
+                  They&apos;ll receive an email invitation to join this organization.
+                </DialogDescription>
+              </DialogHeader>
+              <form
+                className="grid gap-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void createInvitation();
+                }}
+              >
+                <div className="grid gap-1.5">
+                  <Label htmlFor="organization-invite-email">Email address</Label>
+                  <Input
+                    id="organization-invite-email"
+                    type="email"
+                    name="email"
+                    autoComplete="email"
+                    spellCheck={false}
+                    value={inviteEmail}
+                    onChange={(event) => setInviteEmail(event.target.value)}
+                    placeholder="name@company.com"
+                    autoFocus
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="organization-invite-name">Name</Label>
+                  <Input
+                    id="organization-invite-name"
+                    name="name"
+                    autoComplete="name"
+                    value={inviteName}
+                    onChange={(event) => setInviteName(event.target.value)}
+                    placeholder="Optional"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="organization-invite-role">Organization role</Label>
+                  <Select
+                    id="organization-invite-role"
+                    value={inviteRole}
+                    onChange={(event) =>
+                      setInviteRole(event.target.value as OrganizationMembershipRole)
+                    }
+                  >
+                    {(["owner", "admin", "member"] as const)
+                      .filter((role) => canInviteOrganizationRole(props.actorRole, role))
+                      .map((role) => (
+                        <option key={role} value={role}>
+                          {ORGANIZATION_ROLE_LABELS[role]}
+                        </option>
+                      ))}
+                  </Select>
+                </div>
+                {inviteWorkspaces.length > 0 ? (
+                  <details className="group rounded-lg border border-border bg-surface/30">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-sm font-medium text-fg marker:hidden">
+                      <span>Workspace access</span>
+                      <span className="text-xs font-normal text-fg-subtle">
+                        {inviteWorkspaceIds.length === 0
+                          ? "Optional"
+                          : `${inviteWorkspaceIds.length} selected`}
+                      </span>
+                    </summary>
+                    <div className="grid gap-2 border-t border-border px-3 py-3 sm:grid-cols-2">
+                      {inviteWorkspaces.map((workspace) => (
+                        <label key={workspace.id} className="flex items-center gap-2 text-sm">
+                          <input
+                            name="initial-workspace-access"
+                            type="checkbox"
+                            checked={inviteWorkspaceIds.includes(workspace.id)}
+                            onChange={(event) =>
+                              setInviteWorkspaceIds((current) =>
+                                event.target.checked
+                                  ? [...new Set([...current, workspace.id])]
+                                  : current.filter((workspaceId) => workspaceId !== workspace.id),
+                              )
+                            }
+                          />
+                          <span className="truncate">{workspace.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
+                ) : null}
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={visibleBusyResource === "admin-invitations"}
+                    onClick={() => {
+                      setInviteDialogOpen(false);
+                      setInviteEmail("");
+                      setInviteName("");
+                      setInviteRole("member");
+                      setInviteWorkspaceIds([]);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="submit"
+                    disabled={
+                      !inviteEmail.trim() ||
+                      visibleBusyResource !== null ||
+                      adminInvites.loading ||
+                      !canInviteOrganizationRole(props.actorRole, inviteRole)
+                    }
+                  >
+                    {visibleBusyResource === "admin-invitations" ? (
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                    ) : null}
+                    Send invitation
+                  </Button>
+                </DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
         </section>
       ) : null}
 
-      <section
-        aria-labelledby="incoming-invitations-heading"
-        className="grid gap-3 rounded-lg border border-border bg-surface p-4"
-      >
-        <div>
-          <h2
-            id="incoming-invitations-heading"
-            className="flex items-center gap-1.5 text-sm font-medium"
-          >
-            <ClockIcon className="size-3.5 text-brand" />
-            Your incoming invitations
-          </h2>
-          <p className="mt-1 text-xs text-fg-muted">
-            Accepting creates your own membership and Personal workspace in that organization. It
-            grants no access to another member&apos;s personal content.
-          </p>
-        </div>
-        {incoming.error ? (
-          <LoadErrorState
-            title="Could not load your invitations"
-            error={incoming.error}
-            onRetry={() => void loadIncomingInvitations()}
-          />
-        ) : incoming.loading && incoming.value.invitations.length === 0 ? (
-          <p role="status" className="text-xs text-fg-muted">
-            Loading your invitations…
-          </p>
-        ) : pendingIncoming.length === 0 ? (
-          <p className="text-xs text-fg-subtle">No pending invitations.</p>
-        ) : (
-          <div className="grid gap-2">
-            {pendingIncoming.map((invite) => (
-              <div
-                key={invite.id}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-xs"
-              >
-                <div>
-                  <span className="font-medium">
-                    Organization {invite.organizationId.slice(0, 8)}
-                  </span>
-                  <span className="ml-2 text-fg-muted">
-                    {ORGANIZATION_ROLE_LABELS[invite.role]}
-                  </span>
-                  <div className="mt-0.5 text-fg-subtle">
-                    Created for {invite.targetEmail} · expires {formatTimestamp(invite.expiresAt)}
-                  </div>
-                </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="max-w-full whitespace-normal text-right"
-                  disabled={visibleBusyResource !== null || incoming.loading}
-                  onClick={() => void acceptInvitation(invite)}
-                >
-                  <CheckIcon className="size-3.5" />
-                  Accept invitation to organization {invite.organizationId.slice(0, 8)}
-                </Button>
-              </div>
-            ))}
+      {incoming.error || pendingIncoming.length > 0 ? (
+        <section
+          aria-labelledby="incoming-invitations-heading"
+          className="grid gap-3 border-b border-border pb-6"
+        >
+          <div>
+            <h2
+              id="incoming-invitations-heading"
+              className="flex items-center gap-1.5 text-sm font-medium"
+            >
+              <ClockIcon className="size-3.5 text-brand" />
+              Invitations for you
+            </h2>
+            <p className="mt-1 text-xs text-fg-muted">
+              Join another organization that invited you.
+            </p>
           </div>
-        )}
-        {incoming.value.nextCursor ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={incoming.loading || visibleBusyResource === "incoming-invitations"}
-            onClick={() =>
-              void loadIncomingInvitations(incoming.value.nextCursor ?? undefined, true)
-            }
-          >
-            Load more incoming invitations
-          </Button>
-        ) : null}
-      </section>
+          {incoming.error ? (
+            <LoadErrorState
+              title="Could not load your invitations"
+              error={incoming.error}
+              onRetry={() => void loadIncomingInvitations()}
+            />
+          ) : (
+            <div className="divide-y divide-border/70 overflow-hidden rounded-xl border border-border bg-surface/30">
+              {pendingIncoming.map((invite) => (
+                <div
+                  key={invite.id}
+                  className="flex flex-wrap items-center justify-between gap-3 px-3 py-3"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-fg">
+                      {invite.organizationName ||
+                        `Organization ${invite.organizationId.slice(0, 8)}`}
+                    </p>
+                    <p className="mt-0.5 text-xs text-fg-subtle">
+                      {ORGANIZATION_ROLE_LABELS[invite.role]} · Expires{" "}
+                      {formatTimestamp(invite.expiresAt)}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={visibleBusyResource !== null || incoming.loading}
+                    onClick={() => void acceptInvitation(invite)}
+                  >
+                    <CheckIcon className="size-3.5" />
+                    Accept
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+          {incoming.value.nextCursor ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={incoming.loading || visibleBusyResource === "incoming-invitations"}
+              onClick={() =>
+                void loadIncomingInvitations(incoming.value.nextCursor ?? undefined, true)
+              }
+            >
+              Load more invitations
+            </Button>
+          ) : null}
+        </section>
+      ) : null}
 
       <p role="status" aria-live="polite" className="min-h-5 text-xs text-fg-muted">
         {liveOutcome}
@@ -2754,7 +3089,7 @@ export function OrganizationRetentionSection(props: {
   return (
     <section
       aria-labelledby="organization-retention-heading"
-      className="grid gap-3 rounded-lg border border-border bg-surface p-4"
+      className="grid gap-4 border-b border-border pb-6"
     >
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -2813,34 +3148,45 @@ export function OrganizationRetentionSection(props: {
             {formatTimestamp(visible.value.updatedAt)}
           </p>
           {canEdit ? (
-            <fieldset
-              disabled={visibleBusy}
-              className="grid gap-3 rounded-md border border-border p-3"
-            >
-              <legend className="px-1 text-sm font-medium">Owner-only retention policy</legend>
-              <label className="flex gap-2 text-sm">
+            <fieldset disabled={visibleBusy} className="grid gap-2">
+              <legend className="mb-1 text-sm font-medium">Owner-only retention policy</legend>
+              <label className="flex cursor-pointer gap-3 rounded-lg border border-border bg-bg/25 p-3 text-sm transition-colors has-[:checked]:border-brand/50 has-[:checked]:bg-brand/5">
                 <input
+                  className="mt-0.5 shrink-0 accent-brand"
                   type="radio"
                   name="retention-mode"
                   checked={mode === "retain"}
                   onChange={() => setMode("retain")}
                 />
-                Retain personal data indefinitely after removal
+                <span>
+                  <span className="block font-medium">Retain indefinitely</span>
+                  <span className="mt-0.5 block text-xs text-fg-muted">
+                    Keep removed members&apos; retained personal data until an operator acts.
+                  </span>
+                </span>
               </label>
-              <label className="flex gap-2 text-sm">
+              <label className="flex cursor-pointer gap-3 rounded-lg border border-border bg-bg/25 p-3 text-sm transition-colors has-[:checked]:border-brand/50 has-[:checked]:bg-brand/5">
                 <input
+                  className="mt-0.5 shrink-0 accent-brand"
                   type="radio"
                   name="retention-mode"
                   checked={mode === "delete_after"}
                   onChange={() => setMode("delete_after")}
                 />
-                Make personal data eligible for operator cleanup after a bounded delay
+                <span>
+                  <span className="block font-medium">Set a cleanup window</span>
+                  <span className="mt-0.5 block text-xs text-fg-muted">
+                    Make retained personal data eligible for operator cleanup after a delay.
+                  </span>
+                </span>
               </label>
               {mode === "delete_after" ? (
                 <div className="grid max-w-52 gap-1">
                   <Label htmlFor="retention-days">Retention days (30–90)</Label>
                   <Input
                     id="retention-days"
+                    name="retention-days"
+                    autoComplete="off"
                     type="number"
                     min={30}
                     max={90}

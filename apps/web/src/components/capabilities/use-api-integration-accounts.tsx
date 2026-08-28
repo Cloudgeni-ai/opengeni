@@ -466,7 +466,11 @@ export function useIntegrationDefinitionRow({
   refreshRevision?: number;
 }): IntegrationAdapter {
   const context = useAppContext();
-  const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  const canManage = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "capabilities:manage",
+  );
   const controller = useApiIntegrationAccounts({
     workspaceId,
     definitionId,

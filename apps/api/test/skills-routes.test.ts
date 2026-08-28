@@ -110,7 +110,7 @@ async function auth(): Promise<string> {
     accountId,
     workspaceId,
     subjectId,
-    permissions: ["workspace:read", "workspace:admin"],
+    permissions: ["workspace:read", "capabilities:manage"],
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   })}`;
