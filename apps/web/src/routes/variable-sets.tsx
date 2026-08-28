@@ -166,7 +166,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<BoxIcon className="size-4" />}
         title="Variable sets"
-        description="Named secrets injected into sandboxes at session start. Values stay encrypted at rest; explicitly permissioned reads reveal one value on demand and are audited."
+        description="Named secrets injected into managed sandboxes at session start. Values stay encrypted at rest; explicitly permissioned reads reveal one value on demand and are audited."
         actions={
           <>
             <Button
@@ -574,13 +574,27 @@ export function VariableSetCard(props: {
               </>
             ) : (
               <>
+                <CollapsibleTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    className="h-8 pointer-coarse:min-h-10"
+                    aria-label={`${expanded ? "Hide" : "Manage"} variables for ${variableSet.name}`}
+                  >
+                    {expanded ? "Hide variables" : "Manage variables"}
+                    <ChevronDownIcon
+                      className={`size-3.5 transition-transform ${expanded ? "rotate-180" : ""}`}
+                    />
+                  </Button>
+                </CollapsibleTrigger>
                 {canManageSet ? (
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon-sm"
-                    className="pointer-coarse:size-10"
-                    aria-label="Edit variable set"
+                    size="sm"
+                    className="h-8 pointer-coarse:min-h-10"
+                    aria-label={`Edit details for ${variableSet.name}`}
                     onClick={() => {
                       setNameDraft(variableSet.name);
                       setDescriptionDraft(variableSet.description ?? "");
@@ -588,6 +602,7 @@ export function VariableSetCard(props: {
                     }}
                   >
                     <PencilIcon className="size-3.5" />
+                    Edit details
                   </Button>
                 ) : null}
                 {canManageSecrets ? (
@@ -604,187 +619,181 @@ export function VariableSetCard(props: {
                     <Trash2Icon className="size-3.5" />
                   </Button>
                 ) : null}
-                <CollapsibleTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 pointer-coarse:min-h-10"
-                    aria-label={`${expanded ? "Hide" : "Show"} variables for ${variableSet.name}`}
-                  >
-                    {expanded ? "Hide" : "Show"}
-                    <ChevronDownIcon
-                      className={`size-3.5 transition-transform ${expanded ? "rotate-180" : ""}`}
-                    />
-                  </Button>
-                </CollapsibleTrigger>
               </>
             )}
           </div>
         </div>
 
         <CollapsibleContent>
-          <div className="mt-3 space-y-1.5">
-            {variableSet.variables.length === 0 ? (
-              <p className="text-xs text-fg-subtle">
-                No variables yet — add one below to inject it into the sandbox.
+          <div className="mt-3 border-t border-border/70 pt-3">
+            <div className="mb-2">
+              <p className="text-xs font-medium text-fg">Variables</p>
+              <p className="text-2xs text-fg-muted">
+                Add environment names, rotate secret values, or remove variables from this set.
               </p>
-            ) : (
-              variableSet.variables.map((variable) => (
-                <div
-                  key={variable.name}
-                  className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
-                >
-                  <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                    <div className="flex min-w-0 items-start gap-2">
-                      <KeyRoundIcon className="mt-0.5 size-3 shrink-0 text-fg-subtle" />
-                      <span
-                        className="min-w-0 break-words font-mono text-xs [overflow-wrap:anywhere]"
-                        title={variable.name}
-                      >
-                        {variable.name}
-                      </span>
-                    </div>
-                    <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:justify-end">
-                      <span className="text-2xs text-fg-subtle">
-                        v{variable.version} · {formatTimestamp(variable.updatedAt)}
-                      </span>
-                      {revealedValues[variable.name] === undefined ? (
+            </div>
+            <div className="space-y-1.5">
+              {variableSet.variables.length === 0 ? (
+                <p className="text-xs text-fg-subtle">
+                  No variables yet. Add one below to inject it into a managed sandbox.
+                </p>
+              ) : (
+                variableSet.variables.map((variable) => (
+                  <div
+                    key={variable.name}
+                    className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
+                  >
+                    <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                      <div className="flex min-w-0 items-start gap-2">
+                        <KeyRoundIcon className="mt-0.5 size-3 shrink-0 text-fg-subtle" />
                         <span
-                          className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle"
-                          title={
-                            props.canReadSecrets
-                              ? "Value is hidden until explicitly revealed"
-                              : "Requires variable-sets:read and secrets:read"
-                          }
-                          aria-label="Value hidden"
+                          className="min-w-0 break-words font-mono text-xs [overflow-wrap:anywhere]"
+                          title={variable.name}
                         >
-                          ••••••
+                          {variable.name}
                         </span>
-                      ) : null}
-                      {props.canReadSecrets ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="xs"
-                          className="h-7 text-2xs pointer-coarse:min-h-10"
-                          disabled={readingName === variable.name}
-                          aria-label={`${
-                            revealedValues[variable.name] === undefined ? "Reveal" : "Hide"
-                          } variable ${variable.name}`}
-                          onClick={() => {
-                            if (revealedValues[variable.name] === undefined) {
-                              void revealVariable(variable.name);
-                            } else {
-                              clearRevealedValue(variable.name);
+                      </div>
+                      <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:justify-end">
+                        <span className="text-2xs text-fg-subtle">
+                          v{variable.version} · {formatTimestamp(variable.updatedAt)}
+                        </span>
+                        {revealedValues[variable.name] === undefined ? (
+                          <span
+                            className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle"
+                            title={
+                              props.canReadSecrets
+                                ? "Value is hidden until explicitly revealed"
+                                : "Requires variable-sets:read and secrets:read"
                             }
-                          }}
-                        >
-                          {readingName === variable.name ? (
-                            <Loader2Icon className="size-3 animate-spin" />
-                          ) : revealedValues[variable.name] === undefined ? (
-                            <EyeIcon className="size-3" />
-                          ) : (
-                            <EyeOffIcon className="size-3" />
-                          )}
-                          {revealedValues[variable.name] === undefined ? "Reveal" : "Hide"}
-                        </Button>
-                      ) : null}
-                      {props.canWriteSecrets ? (
-                        <>
+                            aria-label="Value hidden"
+                          >
+                            ••••••
+                          </span>
+                        ) : null}
+                        {props.canReadSecrets ? (
                           <Button
                             type="button"
                             variant="ghost"
                             size="xs"
                             className="h-7 text-2xs pointer-coarse:min-h-10"
-                            disabled={props.mutating}
-                            aria-label={`Rotate variable ${variable.name}`}
-                            aria-expanded={rotatingName === variable.name}
+                            disabled={readingName === variable.name}
+                            aria-label={`${
+                              revealedValues[variable.name] === undefined ? "Reveal" : "Hide"
+                            } variable ${variable.name}`}
                             onClick={() => {
-                              setRotatingName((current) =>
-                                current === variable.name ? null : variable.name,
-                              );
-                              setRotateValue("");
+                              if (revealedValues[variable.name] === undefined) {
+                                void revealVariable(variable.name);
+                              } else {
+                                clearRevealedValue(variable.name);
+                              }
                             }}
                           >
-                            Rotate
+                            {readingName === variable.name ? (
+                              <Loader2Icon className="size-3 animate-spin" />
+                            ) : revealedValues[variable.name] === undefined ? (
+                              <EyeIcon className="size-3" />
+                            ) : (
+                              <EyeOffIcon className="size-3" />
+                            )}
+                            {revealedValues[variable.name] === undefined ? "Reveal" : "Hide"}
                           </Button>
+                        ) : null}
+                        {props.canWriteSecrets ? (
+                          <>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="xs"
+                              className="h-7 text-2xs pointer-coarse:min-h-10"
+                              disabled={props.mutating}
+                              aria-label={`Rotate variable ${variable.name}`}
+                              aria-expanded={rotatingName === variable.name}
+                              onClick={() => {
+                                setRotatingName((current) =>
+                                  current === variable.name ? null : variable.name,
+                                );
+                                setRotateValue("");
+                              }}
+                            >
+                              Rotate
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-xs"
+                              aria-label={`Delete variable ${variable.name}`}
+                              className="hover:text-status-failed pointer-coarse:size-10"
+                              disabled={props.mutating}
+                              onClick={() => setConfirmDeleteVariable(variable.name)}
+                            >
+                              <Trash2Icon className="size-3" />
+                            </Button>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                    {revealedValues[variable.name] !== undefined ? (
+                      <div
+                        className="mt-2 rounded-md border border-border bg-surface px-2.5 py-2"
+                        aria-label={`Revealed value for ${variable.name}`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <pre className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-xs text-fg">
+                            {revealedValues[variable.name]}
+                          </pre>
                           <Button
                             type="button"
                             variant="ghost"
-                            size="icon-xs"
-                            aria-label={`Delete variable ${variable.name}`}
-                            className="hover:text-status-failed pointer-coarse:size-10"
-                            disabled={props.mutating}
-                            onClick={() => setConfirmDeleteVariable(variable.name)}
+                            size="xs"
+                            className="h-7 shrink-0 text-2xs pointer-coarse:min-h-10"
+                            aria-label={`Copy variable ${variable.name}`}
+                            onClick={() => void copyRevealedValue(variable.name)}
                           >
-                            <Trash2Icon className="size-3" />
+                            <CopyIcon className="size-3" />
+                            Copy
                           </Button>
-                        </>
-                      ) : null}
-                    </div>
-                  </div>
-                  {revealedValues[variable.name] !== undefined ? (
-                    <div
-                      className="mt-2 rounded-md border border-border bg-surface px-2.5 py-2"
-                      aria-label={`Revealed value for ${variable.name}`}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <pre className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-xs text-fg">
-                          {revealedValues[variable.name]}
-                        </pre>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="xs"
-                          className="h-7 shrink-0 text-2xs pointer-coarse:min-h-10"
-                          aria-label={`Copy variable ${variable.name}`}
-                          onClick={() => void copyRevealedValue(variable.name)}
-                        >
-                          <CopyIcon className="size-3" />
-                          Copy
-                        </Button>
+                        </div>
+                        <p className="mt-1.5 text-2xs text-fg-subtle">
+                          Audited plaintext read. Hide it when you&apos;re done.
+                        </p>
                       </div>
-                      <p className="mt-1.5 text-2xs text-fg-subtle">
-                        Audited plaintext read. Hide it when you&apos;re done.
-                      </p>
-                    </div>
-                  ) : null}
-                  {props.canWriteSecrets && rotatingName === variable.name ? (
-                    <form
-                      aria-label={`Rotate variable ${variable.name}`}
-                      autoComplete="off"
-                      className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        void rotateVariable(variable.name);
-                      }}
-                    >
-                      <Input
-                        name="variable-value"
-                        type="password"
-                        value={rotateValue}
-                        onChange={(event) => setRotateValue(event.target.value)}
-                        placeholder="New value"
-                        aria-label={`New value for ${variable.name}`}
-                        autoComplete="new-password"
-                        className="h-8 flex-1 text-xs pointer-coarse:min-h-10"
-                        autoFocus
-                      />
-                      <Button
-                        type="submit"
-                        size="sm"
-                        className="h-8 pointer-coarse:min-h-10"
-                        disabled={props.mutating || !rotateValue}
+                    ) : null}
+                    {props.canWriteSecrets && rotatingName === variable.name ? (
+                      <form
+                        aria-label={`Rotate variable ${variable.name}`}
+                        autoComplete="off"
+                        className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          void rotateVariable(variable.name);
+                        }}
                       >
-                        <CheckIcon className="size-3.5" />
-                        Set
-                      </Button>
-                    </form>
-                  ) : null}
-                </div>
-              ))
-            )}
+                        <Input
+                          name="variable-value"
+                          type="password"
+                          value={rotateValue}
+                          onChange={(event) => setRotateValue(event.target.value)}
+                          placeholder="New value"
+                          aria-label={`New value for ${variable.name}`}
+                          autoComplete="new-password"
+                          className="h-8 flex-1 text-xs pointer-coarse:min-h-10"
+                          autoFocus
+                        />
+                        <Button
+                          type="submit"
+                          size="sm"
+                          className="h-8 pointer-coarse:min-h-10"
+                          disabled={props.mutating || !rotateValue}
+                        >
+                          <CheckIcon className="size-3.5" />
+                          Set
+                        </Button>
+                      </form>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
 
           {props.canWriteSecrets ? (
@@ -836,7 +845,7 @@ export function VariableSetCard(props: {
                 disabled={props.mutating || !newVariableNameValid || !variableValue}
               >
                 <PlusIcon className="size-3.5" />
-                Set variable
+                Add variable
               </Button>
             </form>
           ) : null}

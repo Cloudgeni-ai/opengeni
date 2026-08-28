@@ -493,9 +493,9 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.goto(surfaceUrl(webBaseUrl, workspaceId, "variable-sets", fixtures));
     await page.getByText(longVariableSetName, { exact: true }).waitFor();
     const manage = page.getByRole("button", {
-      name: `Show variables for ${longVariableSetName}`,
+      name: `Manage variables for ${longVariableSetName}`,
     });
-    expect((await manage.textContent())?.trim()).toBe("Show");
+    expect((await manage.textContent())?.trim()).toBe("Manage variables");
     await manage.focus();
     await page.keyboard.press("Enter");
     const expandedManage = page.getByRole("button", {
@@ -883,7 +883,7 @@ async function ensureVariableSetExpanded(page: Page): Promise<void> {
     name: `Hide variables for ${longVariableSetName}`,
   });
   if ((await expanded.count()) === 0) {
-    await page.getByRole("button", { name: `Show variables for ${longVariableSetName}` }).click();
+    await page.getByRole("button", { name: `Manage variables for ${longVariableSetName}` }).click();
   }
   await expanded.waitFor();
   expect(await expanded.getAttribute("aria-expanded")).toBe("true");
