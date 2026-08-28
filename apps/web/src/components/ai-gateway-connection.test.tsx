@@ -173,7 +173,7 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
-  test("blocks duplicate or whitespace-bearing slugs before the API call", async () => {
+  test("blocks duplicate, whitespace-bearing, or field-separator slugs before the API call", async () => {
     listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
       models: [customModel("anthropic/claude-sonnet-4.6")],
     }));
@@ -191,10 +191,50 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(add.disabled).toBe(true);
       expect(container.textContent).toContain("exact printable slug with no spaces");
 
+      await setInputValue(input, "anthropic|claude");
+      expect(add.disabled).toBe(true);
+      expect(container.textContent).toContain("no spaces or |");
+
       await setInputValue(input, "anthropic/claude-sonnet-4.6");
       expect(add.disabled).toBe(true);
       expect(container.textContent).toContain("already configured for this workspace");
       expect(createWorkspaceGatewayCustomModel).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("ignores a slower response from the previous workspace", async () => {
+    let resolveWorkspaceA: ((value: { models: WorkspaceGatewayCustomModel[] }) => void) | undefined;
+    listWorkspaceGatewayCustomModels.mockImplementation(async (workspaceId) => {
+      if (workspaceId === "workspace-a") {
+        return await new Promise<{ models: WorkspaceGatewayCustomModel[] }>((resolve) => {
+          resolveWorkspaceA = resolve;
+        });
+      }
+      return { models: [customModel("workspace-b/model")] };
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<AiGatewayConnectionCard workspaceId="workspace-a" canManage />);
+        await flush();
+      });
+      await act(async () => {
+        root.render(<AiGatewayConnectionCard workspaceId="workspace-b" canManage />);
+        await flush();
+      });
+      expect(container.textContent).toContain("workspace-b/model");
+
+      await act(async () => {
+        resolveWorkspaceA?.({ models: [customModel("workspace-a/model")] });
+        await flush();
+      });
+      expect(container.textContent).toContain("workspace-b/model");
+      expect(container.textContent).not.toContain("workspace-a/model");
     } finally {
       await act(async () => root.unmount());
       container.remove();

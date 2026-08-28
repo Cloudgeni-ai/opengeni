@@ -106,11 +106,25 @@ the source flag. Do not flip the flag before the row exists:
 
 ```bash
 OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
-  bun run model-catalog:upsert -- --file ./model-catalog.json
+  OPENGENI_DB_SCHEMA='opengeni' \
+  bun run model-catalog:upsert -- --file ./model-catalog.json --expected-version 0
 ```
 
+Omit `OPENGENI_DB_SCHEMA` for `public`; embedded deployments must set the same
+dedicated schema used by migrations and runtime connections.
+
 The upsert increments `version` only when the normalized document changes. It
-never writes provider credentials or the separate cost policy.
+never writes provider credentials or the separate cost policy. The mandatory
+`--expected-version` is a compare-and-swap fence: use `0` only for an absent
+singleton, then pass the exact reported version for every later update. A
+stale version is rejected without changing the document or version.
+
+For an authenticated `registryProviders` entry in database mode, predeclare the
+same provider ID in `OPENGENI_MODEL_PROVIDERS_JSON` with its deployment-owned
+`apiKey` or `apiKeyEnv`. Database resolution takes only those credential fields
+from the host declaration; the database document remains authoritative for the
+provider URL, wire contract, and model membership and cannot name an arbitrary
+environment secret.
 
 ## Registry configuration
 

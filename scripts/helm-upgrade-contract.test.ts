@@ -87,6 +87,15 @@ describe("Helm database upgrade contract", () => {
     expect(configMap).not.toContain('hasKey .Values.config "OPENGENI_MCP_URL"');
   });
 
+  test("keeps the API unready until runtime dependencies and the database catalog converge", async () => {
+    const values = Bun.YAML.parse(await source("deploy/helm/opengeni/values.yaml")) as {
+      api: { probes: { readiness: { path: string }; liveness: { path: string } } };
+    };
+
+    expect(values.api.probes.readiness.path).toBe("/traffic-readyz");
+    expect(values.api.probes.liveness.path).toBe("/healthz");
+  });
+
   test("projects only dedicated credentials into the artifact materializer", async () => {
     const values = await source("deploy/helm/opengeni/values.yaml");
     const materializer = await source(

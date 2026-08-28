@@ -225,7 +225,7 @@ api:
   probes:
     readiness:
       enabled: true
-      path: /healthz
+      path: /traffic-readyz
       initialDelaySeconds: 5
       periodSeconds: 10
       timeoutSeconds: 2

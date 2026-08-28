@@ -2302,7 +2302,7 @@ export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceMo
 
 export const CreateWorkspaceGatewayCustomModelRequest = z
   .object({
-    upstreamModelId: z.string().regex(/^[!-~]{1,256}$/u),
+    upstreamModelId: z.string().regex(/^[!-{}-~]{1,256}$/),
     label: z
       .string()
       .min(1)

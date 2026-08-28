@@ -1,11 +1,11 @@
+import {
+  compareModelPickerOrder,
+  modelPickerBillingClassFor,
+  type ModelPickerBillingClass,
+} from "@opengeni/contracts/model-picker-order";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
-export type PickerBillingClass =
-  | "opengeni_credits"
-  | "external"
-  | "codex_subscription"
-  | "supergrok_subscription"
-  | "byok";
+export type PickerBillingClass = ModelPickerBillingClass;
 
 export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogModel> = {
   id: string;
@@ -22,14 +22,6 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
 };
 
 export type LatencyModeId = "standard" | "priority" | "fast";
-
-const BILLING_CLASS_ORDER: PickerBillingClass[] = [
-  "opengeni_credits",
-  "external",
-  "codex_subscription",
-  "supergrok_subscription",
-  "byok",
-];
 
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   opengeni_credits: "OpenGeni",
@@ -50,33 +42,7 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
-  if (model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment") {
-    return "external";
-  }
-  if (model.source === "supergrok") {
-    return "supergrok_subscription";
-  }
-  if (model.source === "codex") {
-    return "codex_subscription";
-  }
-  if (model.source === "workspace_gateway") {
-    return "byok";
-  }
-  if (model.credentialSource?.kind === "connected_subscription") {
-    return model.credentialSource.provider === "xai"
-      ? "supergrok_subscription"
-      : "codex_subscription";
-  }
-  if (model.credentialSource?.kind === "workspace_connection") {
-    return "byok";
-  }
-  if (model.billing?.upstreamPayer === "connected_subscription") {
-    return "codex_subscription";
-  }
-  if (model.billing?.upstreamPayer === "workspace") {
-    return "byok";
-  }
-  return "opengeni_credits";
+  return modelPickerBillingClassFor(model);
 }
 
 export function billingClassLabel(billingClass: PickerBillingClass): string {
@@ -249,18 +215,7 @@ export function projectClientModelRows(models: ClientModel[]): PickerModelRow<Cl
 export function sortPickerRows<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
 ): PickerModelRow<TCatalog>[] {
-  return [...rows].sort((left, right) => {
-    const classDelta =
-      BILLING_CLASS_ORDER.indexOf(left.billingClass) -
-      BILLING_CLASS_ORDER.indexOf(right.billingClass);
-    if (classDelta !== 0) {
-      return classDelta;
-    }
-    if (left.selectable !== right.selectable) {
-      return left.selectable ? -1 : 1;
-    }
-    return left.label.localeCompare(right.label);
-  });
+  return [...rows].sort(compareModelPickerOrder);
 }
 
 export function findPickerRow<TCatalog extends ClientModel>(

@@ -1775,7 +1775,7 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
 });
 
 describe("buildProviderClient", () => {
-  test("a registry provider gets a client pointed at its base URL with its key/headers, cached by id", () => {
+  test("a registry provider is cached only while its resolved configuration is unchanged", () => {
     const settings = multiProviderSettings();
     const provider = configuredProviders(settings).find(
       (candidate) => candidate.id === "fireworks",
@@ -1785,8 +1785,49 @@ describe("buildProviderClient", () => {
     expect(client.baseURL).toBe("https://api.fireworks.ai/inference/v1");
     expect(client.apiKey).toBe("fw-test-key");
     expect(client.maxRetries).toBe(settings.openaiMaxRetries);
-    // One client per provider id (module-level cache).
     expect(buildProviderClient(provider, settings)).toBe(client);
+
+    const changed = multiProviderSettings({
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "fireworks",
+          baseUrl: "https://changed.fireworks.example/v1",
+          apiKey: "changed-key",
+          models: [{ id: "fireworks/model" }],
+        },
+      ]),
+    });
+    const changedProvider = configuredProviders(changed).find(
+      (candidate) => candidate.id === "fireworks",
+    )!;
+    expect(buildProviderClient(changedProvider, changed)).not.toBe(client);
+  });
+
+  test("managed Gateway cache keys include the live catalog request policy", () => {
+    const gatewayModel = (providers: string[]) => ({
+      productId: "gateway/database-model",
+      workspaceProductId: "workspace-gateway/database-model",
+      upstreamModelId: "database/model",
+      label: "Database model",
+      providers,
+    });
+    const firstSettings = testSettings({
+      vercelAiGatewayApiKey: "gateway-key",
+      resolvedGatewayModelsJson: JSON.stringify([gatewayModel(["provider-a"])]),
+    });
+    const firstProvider = configuredProviders(firstSettings).find(
+      (candidate) => candidate.id === "opengeni-gateway",
+    )!;
+    const firstClient = buildProviderClient(firstProvider, firstSettings);
+
+    const secondSettings = testSettings({
+      vercelAiGatewayApiKey: "gateway-key",
+      resolvedGatewayModelsJson: JSON.stringify([gatewayModel(["provider-b"])]),
+    });
+    const secondProvider = configuredProviders(secondSettings).find(
+      (candidate) => candidate.id === "opengeni-gateway",
+    )!;
+    expect(buildProviderClient(secondProvider, secondSettings)).not.toBe(firstClient);
   });
 
   test("an anonymous provider sends no authentication or ambient OpenAI identity headers", async () => {

@@ -43,7 +43,7 @@ type AiGatewayConnectionCardProps = {
 
 export function AiGatewayConnectionCard(props: AiGatewayConnectionCardProps) {
   const client = useAppContext().client;
-  return <AiGatewayConnectionCardWithClient {...props} client={client} />;
+  return <AiGatewayConnectionCardWithClient key={props.workspaceId} {...props} client={client} />;
 }
 
 /** Isolated product fixture seam; production callers use AiGatewayConnectionCard. */
@@ -74,7 +74,7 @@ export function AiGatewayConnectionCardWithClient(
   }, [connections]);
   const connected = connection?.status === "active";
   const normalizedModelSlug = modelSlug.trim();
-  const modelSlugValid = /^[!-~]{1,256}$/u.test(normalizedModelSlug);
+  const modelSlugValid = /^[!-{}-~]{1,256}$/.test(normalizedModelSlug);
   const modelSlugExists = customModels.some(
     (model) => model.upstreamModelId === normalizedModelSlug,
   );
@@ -340,7 +340,7 @@ export function AiGatewayConnectionCardWithClient(
                 {modelSlugExists
                   ? "That slug is already configured for this workspace."
                   : normalizedModelSlug && !modelSlugValid
-                    ? "Use the exact printable slug with no spaces."
+                    ? "Use the exact printable slug with no spaces or |."
                     : connected
                       ? "The model becomes selectable when workspace policy allows it."
                       : "You can configure models now; they become selectable after you connect the Gateway."}

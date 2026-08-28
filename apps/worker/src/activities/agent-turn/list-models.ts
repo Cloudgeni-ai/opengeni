@@ -1,4 +1,8 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
+import {
+  compareModelPickerOrder,
+  modelPickerBillingClassFor,
+} from "@opengeni/contracts/model-picker-order";
 import type { WorkspaceModelSelection } from "@opengeni/core";
 
 export const LIST_MODELS_TOOL_NAME = "list_models";
@@ -23,13 +27,22 @@ export function renderListModels(input: {
     lines.push(`Current: ${safeLineField(input.currentModelId)}`);
   }
 
-  const selectable = input.selections.filter((entry) => entry.availability.selectable);
+  const selectable = input.selections
+    .filter((entry) => entry.availability.selectable)
+    .map((selection) => ({
+      selection,
+      billingClass: modelPickerBillingClassFor(selection.model),
+      selectable: selection.availability.selectable,
+      label: selection.model.label,
+    }))
+    .sort(compareModelPickerOrder);
   if (selectable.length === 0) {
     lines.push("No models are available in this workspace.");
     return lines.join("\n");
   }
 
-  for (const { model } of selectable) {
+  for (const { selection } of selectable) {
+    const { model } = selection;
     const fields = [safeLineField(model.id), safeLineField(model.label), model.cost];
     const note = input.modelNotes[model.id];
     if (note) fields.push(safeLineField(note));
@@ -56,7 +69,6 @@ export function createListModelsAttemptToolDefinition(input: {
       properties: {},
       additionalProperties: false,
     },
-    outputSchema: { type: "string" },
     annotations: {
       title: "List selectable models",
       readOnlyHint: true,

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_MODEL_COST_POLICY_JSON,
   DEFAULT_OPENROUTER_MODEL_ID,
   OPENROUTER_BASE_URL,
   applyModelCatalogDocument,
@@ -7,6 +8,7 @@ import {
   configuredProviders,
   getSettings,
   parseModelCatalogDocument,
+  validateModelCatalogSettings,
 } from "../src";
 
 function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
@@ -54,6 +56,23 @@ describe("deployment model catalog source", () => {
         structuredOutput: { upstream: "supported", runnable: true },
       },
     });
+  });
+
+  test("defaults cost policy by catalog source without weakening explicit policy validation", () => {
+    const code = withEnv({}, () => getSettings());
+    expect(code.modelCostPolicyJson).toBe(DEFAULT_MODEL_COST_POLICY_JSON);
+
+    const database = withEnv({ OPENGENI_MODEL_CATALOG_SOURCE: "database" }, () => getSettings());
+    expect(database.modelCostPolicyJson).toBe("{}");
+
+    const explicit = withEnv(
+      {
+        OPENGENI_MODEL_CATALOG_SOURCE: "database",
+        OPENGENI_MODEL_COST_POLICY_JSON: JSON.stringify({ "database/model": "free" }),
+      },
+      () => getSettings(),
+    );
+    expect(explicit.modelCostPolicyJson).toBe(JSON.stringify({ "database/model": "free" }));
   });
 
   test("keeps workspace-facing free or credits independent from provider settlement", () => {
@@ -196,5 +215,87 @@ describe("deployment model catalog source", () => {
         modelNotes: { "unknown/model": "Unknown models are rejected." },
       }),
     ).toThrow("model note references a product id outside the deployment catalog");
+
+    for (const providerId of ["openrouter", "openai"]) {
+      expect(() =>
+        parseModelCatalogDocument({
+          schemaVersion: 1,
+          builtInModels: ["gpt-5.6-luna"],
+          registryProviders: [
+            {
+              kind: "anonymous",
+              id: providerId,
+              baseUrl: "https://provider.example.test/v1",
+              models: [{ id: `database/${providerId}` }],
+            },
+          ],
+        }),
+      ).toThrow("reserved for a reviewed OpenGeni provider");
+    }
+    expect(() =>
+      parseModelCatalogDocument({
+        schemaVersion: 1,
+        builtInModels: ["gpt-5.6-luna"],
+        registryProviders: [
+          {
+            kind: "anonymous",
+            id: "database-provider",
+            baseUrl: "https://one.example.test/v1",
+            models: [{ id: "database/one" }],
+          },
+          {
+            kind: "anonymous",
+            id: "database-provider",
+            baseUrl: "https://two.example.test/v1",
+            models: [{ id: "database/two" }],
+          },
+        ],
+      }),
+    ).toThrow("duplicate provider id database-provider");
+  });
+
+  test("binds database-owned provider membership only to host-authorized credentials", () => {
+    const { settings, models } = withEnv(
+      {
+        FIREWORKS_DATABASE_KEY: "fireworks-secret",
+        OPENGENI_MODEL_CATALOG_SOURCE: "database",
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          {
+            id: "fireworks",
+            baseUrl: "https://host-placeholder.example.test/v1",
+            apiKeyEnv: "FIREWORKS_DATABASE_KEY",
+            models: [{ id: "host/placeholder" }],
+          },
+        ]),
+      },
+      () => {
+        const resolved = applyModelCatalogDocument(
+          getSettings(),
+          parseModelCatalogDocument({
+            schemaVersion: 1,
+            builtInModels: ["gpt-5.6-luna"],
+            registryProviders: [
+              {
+                id: "fireworks",
+                baseUrl: "https://api.fireworks.ai/inference/v1",
+                models: [{ id: "fireworks/database-model" }],
+              },
+            ],
+          }),
+        );
+        return { settings: resolved, models: validateModelCatalogSettings(resolved) };
+      },
+    );
+    const [provider] = JSON.parse(settings.modelProvidersJson) as Array<{
+      baseUrl: string;
+      apiKeyEnv?: string;
+      models: Array<{ id: string }>;
+    }>;
+    expect(provider).toMatchObject({
+      baseUrl: "https://api.fireworks.ai/inference/v1",
+      apiKeyEnv: "FIREWORKS_DATABASE_KEY",
+      models: [{ id: "fireworks/database-model" }],
+    });
+    expect(models).toBeArray();
   });
 });

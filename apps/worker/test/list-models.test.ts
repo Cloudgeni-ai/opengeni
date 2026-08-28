@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { DEFAULT_OPENROUTER_MODEL_ID } from "@opengeni/config";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing";
 import {
+  LIST_MODELS_TOOL_NAME,
   createListModelsAttemptToolDefinition,
   renderListModels,
 } from "../src/activities/agent-turn/list-models";
@@ -31,7 +33,7 @@ describe("list_models", () => {
     expect(
       renderListModels({
         currentModelId: "gpt-5.6-sol",
-        selections,
+        selections: [...selections].reverse(),
         modelNotes: JSON.parse(settings.modelNotesJson),
       }),
     ).toBe(
@@ -91,10 +93,27 @@ describe("list_models", () => {
       properties: {},
       additionalProperties: false,
     });
+    expect(definition.outputSchema).toBeUndefined();
     await expect((definition.execute as any)({ extra: true }, {})).rejects.toThrow(
       "list_models accepts no arguments",
     );
-    const output = await (definition.execute as any)({}, {});
+    const environment = createAttemptToolEnvironment({
+      scope: {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+      },
+      generation: 1,
+      definitions: [definition],
+    });
+    const output = await environment.callModel({
+      modelName: LIST_MODELS_TOOL_NAME,
+      arguments: {},
+      subjectId: "agent:test",
+    });
     expect(output).toEqual({
       isError: false,
       content: [{ type: "text", text: "No models are available in this workspace." }],

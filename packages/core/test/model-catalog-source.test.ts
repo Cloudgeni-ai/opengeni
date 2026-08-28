@@ -77,6 +77,31 @@ describe("model catalog source resolution", () => {
     }
   });
 
+  test("accepts a database catalog that omits the code-mode OpenRouter starter", async () => {
+    const getCatalog = spyOn(opengeniDb, "getDeploymentModelCatalog").mockResolvedValue({
+      document: {
+        schemaVersion: 1,
+        builtInModels: ["gpt-5.6-luna"],
+        registryProviders: [],
+        gatewayModels: [],
+        openrouterModels: [],
+        modelNotes: {},
+      },
+      version: 8,
+      updatedAt: new Date("2026-08-27T12:00:00.000Z"),
+    });
+    try {
+      const resolved = await resolveCatalogSettings(
+        {} as opengeniDb.Database,
+        testSettings({ modelCatalogSource: "database" }),
+      );
+      expect(resolved.settings.modelCostPolicyJson).toBe("{}");
+      expect(resolved.settings.openaiModel).toBe("gpt-5.6-luna");
+    } finally {
+      getCatalog.mockRestore();
+    }
+  });
+
   test("adds only the workspace's durable custom Gateway rows to executable settings", async () => {
     const listCustom = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([
       {

@@ -53,6 +53,7 @@ describe("migration 0365 model catalog and Gateway custom models", () => {
     );
     expect(migration).toContain("octet_length(upstream_model_id) BETWEEN 1 AND 256");
     expect(migration).toContain("upstream_model_id ~ '^[!-~]+$'");
+    expect(migration).toContain("upstream_model_id !~ '[|]'");
     expect(migration).not.toContain("{1,256}");
 
     const catalogTable = migration.slice(
@@ -101,6 +102,14 @@ describe("migration 0365 model catalog and Gateway custom models", () => {
       values (${account!.id}, 'migration 0365 first'), (${account!.id}, 'migration 0365 second')
       returning id
     `;
+    await expect(
+      createWorkspaceGatewayCustomModel(client.db, {
+        accountId: account!.id,
+        workspaceId: firstWorkspace!.id,
+        upstreamModelId: "anthropic|claude",
+        createdBySubjectId: "user:migration-0365",
+      }),
+    ).rejects.toThrow();
     const created = await createWorkspaceGatewayCustomModel(client.db, {
       accountId: account!.id,
       workspaceId: firstWorkspace!.id,

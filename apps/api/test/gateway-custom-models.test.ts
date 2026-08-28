@@ -124,6 +124,7 @@ describe("workspace Gateway custom model API", () => {
     for (const body of [
       { upstreamModelId: "" },
       { upstreamModelId: "a".repeat(257) },
+      { upstreamModelId: "anthropic|claude" },
       { upstreamModelId: "anthropic/claude-sonnet-4.6", label: "é".repeat(65) },
       { upstreamModelId: "anthropic/claude-sonnet-4.6", capabilities: {} },
       { upstreamModelId: "anthropic/claude-sonnet-4.6", billing: "credits" },
@@ -222,6 +223,37 @@ describe("workspace Gateway custom model API", () => {
     );
     expect(blockedSend.status).toBe(422);
     expect(await blockedSend.text()).toContain("not allowed by this workspace's model policy");
+
+    const inheritedSession = await createSession(client!.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Inherited policy-check fixture",
+      resources: [],
+      metadata: {},
+      model: productModelId,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const blockedInheritedSend = await publicApp.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${inheritedSession.id}/events`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(["sessions:control"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: crypto.randomUUID(),
+          payload: { text: "blocked inherited custom model", resources: [] },
+        }),
+      },
+    );
+    expect(blockedInheritedSend.status).toBe(422);
+    expect(await blockedInheritedSend.text()).toContain(
+      "not allowed by this workspace's model policy",
+    );
 
     const publicConfig = await publicApp.request("/v1/config/client");
     expect(publicConfig.status).toBe(200);

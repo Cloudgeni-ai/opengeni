@@ -695,7 +695,7 @@ const SettingsSchema = z.object({
   // Deployment-owned workspace-facing price policy. This is deliberately
   // separate from catalog membership and upstream credential ownership.
   // Shape: { "product/model-id": "free" | "credits" }.
-  modelCostPolicyJson: z.string().default(DEFAULT_MODEL_COST_POLICY_JSON),
+  modelCostPolicyJson: z.string().default("{}"),
   // Optional per-product agent guidance. Database mode replaces this with the
   // singleton document's validated modelNotes map.
   modelNotesJson: z.string().default("{}"),
@@ -1962,6 +1962,16 @@ export const OPENROUTER_PROVIDER_ID = "openrouter" as const;
 export const OPENROUTER_MODEL_ID_PREFIX = "openrouter/" as const;
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1" as const;
 
+const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
+  "openai",
+  "azure",
+  CODEX_PROVIDER_ID,
+  XAI_SUBSCRIPTION_PROVIDER_ID,
+  OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  OPENROUTER_PROVIDER_ID,
+]);
+
 export const ModelCostClass = z.enum(["free", "credits"]);
 export type ModelCostClass = z.infer<typeof ModelCostClass>;
 
@@ -2069,6 +2079,7 @@ export const ModelCatalogDocument = z
   .strict()
   .superRefine((document, context) => {
     const productIds = new Set<string>();
+    const providerIds = new Set<string>();
     const add = (id: string, path: Array<string | number>): void => {
       if (/[\u000A\u000D|]/u.test(id)) {
         context.addIssue({
@@ -2083,11 +2094,26 @@ export const ModelCatalogDocument = z
       productIds.add(id);
     };
     document.builtInModels.forEach((id, index) => add(id, ["builtInModels", index]));
-    document.registryProviders.forEach((provider, providerIndex) =>
+    document.registryProviders.forEach((provider, providerIndex) => {
+      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["registryProviders", providerIndex, "id"],
+          message: `provider id ${provider.id} is reserved for a reviewed OpenGeni provider`,
+        });
+      }
+      if (providerIds.has(provider.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["registryProviders", providerIndex, "id"],
+          message: `duplicate provider id ${provider.id}`,
+        });
+      }
+      providerIds.add(provider.id);
       provider.models.forEach((model, modelIndex) =>
         add(model.id, ["registryProviders", providerIndex, "models", modelIndex, "id"]),
-      ),
-    );
+      );
+    });
     document.gatewayModels.forEach((model, index) => {
       add(model.productId, ["gatewayModels", index, "productId"]);
       add(model.workspaceProductId, ["gatewayModels", index, "workspaceProductId"]);
@@ -2115,6 +2141,25 @@ export function parseModelCatalogDocument(value: unknown): ModelCatalogDocument 
   return ModelCatalogDocument.parse(value);
 }
 
+function deploymentRegistryProvidersWithHostCredentials(
+  settings: Settings,
+  providers: readonly z.infer<typeof DeploymentRegistryProviderSchema>[],
+): RegistryProvider[] {
+  const hostProviders = new Map(
+    parseModelProvidersJson(settings.modelProvidersJson).map((provider) => [provider.id, provider]),
+  );
+  return providers.map((provider) => {
+    if (provider.kind !== "api-key") return provider;
+    const host = hostProviders.get(provider.id);
+    if (!host || host.kind !== "api-key") return provider;
+    return {
+      ...provider,
+      ...(host.apiKey === undefined ? {} : { apiKey: host.apiKey }),
+      ...(host.apiKeyEnv === undefined ? {} : { apiKeyEnv: host.apiKeyEnv }),
+    };
+  });
+}
+
 /** Pure secret-free database catalog overlay. getSettings remains env-only. */
 export function applyModelCatalogDocument(settings: Settings, rawDocument: unknown): Settings {
   const document = parseModelCatalogDocument(rawDocument);
@@ -2122,7 +2167,9 @@ export function applyModelCatalogDocument(settings: Settings, rawDocument: unkno
     ...settings,
     openaiModel: document.builtInModels[0]!,
     openaiAllowedModels: document.builtInModels.slice(1).join(","),
-    modelProvidersJson: JSON.stringify(document.registryProviders),
+    modelProvidersJson: JSON.stringify(
+      deploymentRegistryProvidersWithHostCredentials(settings, document.registryProviders),
+    ),
     resolvedGatewayModelsJson: JSON.stringify(document.gatewayModels),
     resolvedOpenRouterModelsJson: JSON.stringify(document.openrouterModels),
     modelNotesJson: JSON.stringify(document.modelNotes),
@@ -2555,6 +2602,10 @@ function optional(name: string): string | undefined {
 }
 
 export function getSettings(): Settings {
+  const modelCatalogSource = optional("OPENGENI_MODEL_CATALOG_SOURCE");
+  const modelCostPolicyJson =
+    optional("OPENGENI_MODEL_COST_POLICY_JSON") ??
+    (modelCatalogSource === "database" ? "{}" : DEFAULT_MODEL_COST_POLICY_JSON);
   const raw = {
     serviceName: optional("OPENGENI_SERVICE_NAME"),
     environment: optional("OPENGENI_ENVIRONMENT"),
@@ -2744,8 +2795,8 @@ export function getSettings(): Settings {
     voiceInputAzureAdToken: optional("OPENGENI_VOICE_INPUT_AZURE_AD_TOKEN"),
     voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
-    modelCatalogSource: optional("OPENGENI_MODEL_CATALOG_SOURCE"),
-    modelCostPolicyJson: optional("OPENGENI_MODEL_COST_POLICY_JSON"),
+    modelCatalogSource,
+    modelCostPolicyJson,
     modelNotesJson: optional("OPENGENI_MODEL_NOTES_JSON"),
     openrouterApiKey: optional("OPENGENI_OPENROUTER_API_KEY"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
@@ -6318,14 +6369,6 @@ function validateSettings(settings: Settings): void {
     parseModelCostPolicyJson(settings.modelCostPolicyJson);
   }
 }
-
-const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
-  CODEX_PROVIDER_ID,
-  XAI_SUBSCRIPTION_PROVIDER_ID,
-  OPENGENI_GATEWAY_PROVIDER_ID,
-  WORKSPACE_GATEWAY_PROVIDER_ID,
-  OPENROUTER_PROVIDER_ID,
-]);
 
 /** Validate one fully resolved, secret-bearing executable catalog. */
 export function validateModelCatalogSettings(settings: Settings): ConfiguredModel[] {

@@ -1288,9 +1288,9 @@ export async function postUserMessageTurn(input: {
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
-  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
   const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
   const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
+  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, effectiveModelForGate);
   try {
     assertSessionAllowsProductModel(sessionForModelGate, effectiveModelForGate);
   } catch (error) {

@@ -36,6 +36,7 @@ CREATE TABLE workspace_gateway_custom_models (
   CONSTRAINT workspace_gateway_custom_models_upstream_chk CHECK (
     octet_length(upstream_model_id) BETWEEN 1 AND 256
     AND upstream_model_id ~ '^[!-~]+$'
+    AND upstream_model_id !~ '[|]'
   ),
   CONSTRAINT workspace_gateway_custom_models_label_chk CHECK (
     label IS NULL OR (

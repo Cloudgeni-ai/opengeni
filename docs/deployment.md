@@ -1815,8 +1815,19 @@ operator-owned singleton, not a boot-time reconciliation loop:
 
    ```bash
    OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
-     bun run model-catalog:upsert -- --file ./model-catalog.json
+     OPENGENI_DB_SCHEMA='opengeni' \
+     bun run model-catalog:upsert -- --file ./model-catalog.json --expected-version 0
    ```
+
+   Omit `OPENGENI_DB_SCHEMA` for the default `public` schema. Set it to the
+   same dedicated schema used by migration and runtime connections for embedded
+   deployments; the command validates it and uses the canonical
+   `<schema>,opengeni_private,public` search path.
+
+   `--expected-version` is mandatory compare-and-swap protection. Use `0` only
+   when the singleton must not exist yet; for later changes, pass the exact
+   version reported by the previous successful command. A mismatch makes no
+   database change.
 
 4. Confirm the command reports the expected version, then roll every API and
    worker with `OPENGENI_MODEL_CATALOG_SOURCE=database`.

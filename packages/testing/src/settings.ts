@@ -172,7 +172,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
       },
     }),
     modelCatalogSource: "code",
-    modelCostPolicyJson: DEFAULT_MODEL_COST_POLICY_JSON,
+    modelCostPolicyJson:
+      overrides.modelCostPolicyJson ??
+      (overrides.modelCatalogSource === "database" ? "{}" : DEFAULT_MODEL_COST_POLICY_JSON),
     modelNotesJson: "{}",
     openrouterApiKey: undefined,
     resolvedGatewayModelsJson: undefined,
