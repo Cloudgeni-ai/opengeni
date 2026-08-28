@@ -2110,6 +2110,25 @@ described in [Rig operational rollout](rigs.md#operational-rollout). Enable lazy
 provisioning only after the credential/resource eager-path canaries for the
 target release are green.
 
+## Advisory work-discovery rollout
+
+Related-work discovery and durable typed work claims use additive rolling
+migrations and four independent runtime settings. For a conservative rollout,
+deploy the schema/application with all four settings explicitly false, enable
+claim mutations first to collect evidence, enable discovery for selected
+API/MCP consumers after observing its bounded metrics, and enable human
+advisories last. The automatic-nudge setting remains false: no automatic nudge
+producer is shipped.
+
+Rollback is forward-only and flag-based. Disable human advisories, then
+discovery, then claim mutations as needed. Ordinary session browsing remains
+available when discovery is off, existing evidence remains durable, and
+lifecycle settlement continues when mutation tools are off. Do not delete claim
+rows, reverse the migration ledger, or drop the search indexes as a feature
+rollback. The exact flags, benchmark commands, metrics, alert guidance, and
+authority boundaries are in
+[`work-discovery.md`](work-discovery.md).
+
 ## Observability
 
 OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
@@ -2187,6 +2206,7 @@ helm upgrade --install opengeni deploy/helm/opengeni \
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
+- Advisory work discovery: request/outcome rate, p50/p95/p99 duration, result count, response bytes, overlap count, stable match-class distribution, and observer errors from the `opengeni_work_discovery_*` family. Keep only its fixed surface/mode/outcome/scope/match labels; never add workspace, session, query, subject, title, goal, claim, version, or provenance labels. See [`work-discovery.md`](work-discovery.md).
 - Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Google Drive sync: run outcome and failure ratio, reconnect-required events, p95 terminal activity-batch duration, logical provider requests, physical provider attempts/retries, explicit limit hits, and bounded terminal failure reasons, scoped by namespace, environment, release, and provider where applicable.

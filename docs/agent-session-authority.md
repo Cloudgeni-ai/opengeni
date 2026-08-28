@@ -33,6 +33,15 @@ widen a cross-session projection from exact-target to whole-root.
 Goal tools remain self-only. Compact `sessions_list` discovery still requires a
 live attempt.
 
+Related-work matching does not widen this table. OpenGeni resolves the exact
+caller and optional host list scope before applying lifecycle/root/parent/
+recency filters, matching titles, active goals, or typed work claims, counting
+results, or expanding authorized ancestors. A claim is non-exclusive advisory
+evidence and grants no read, message, or control authority. The projection's
+literal `advisoryOnly` and `noAdditionalAccess` fields are part of the wire
+contract; no match automatically Steers, pauses, cancels, reassigns, or messages
+a session. See [`work-discovery.md`](work-discovery.md).
+
 Structured human input versus tool approvals: a live attempt holding
 `sessions:control` may answer (or skip, when allowed) another session's
 pending structured human-input request through `session_human_input_respond`

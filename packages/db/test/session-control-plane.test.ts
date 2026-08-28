@@ -839,11 +839,21 @@ describe("clean session control plane", () => {
 
     const search = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
       limit: 10,
-      search: "third",
+      query: "goal",
       subjectId: grant.subjectId,
     });
     expect(search.total).toBe(1);
     expect(search.sessions[0]?.id).toBe(third.id);
+    expect(search.sessions[0]?.workDiscovery.match).toMatchObject({
+      class: "goal",
+      field: "goal",
+    });
+    const promptOnlySearch = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      query: "third",
+      subjectId: grant.subjectId,
+    });
+    expect(promptOnlySearch).toMatchObject({ total: 0, sessions: [] });
     const paths = await listSessionDiscoveryAncestorPaths(client.db, grant.workspaceId!, [
       third.id,
     ]);
