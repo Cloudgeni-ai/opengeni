@@ -18,11 +18,20 @@ import {
   completeSelfServiceOrganizationSetup,
   shouldReloadForDeploymentRevision,
   shouldReloadForApiContractRevision,
+  shouldBoundBrowserSseForProtocol,
   subscribeManagedActorInvalidation,
   subscribeManagedActorMutationBusy,
 } from "./api";
 
 describe("web API auth helpers", () => {
+  test("bounds browser event streams only on HTTP/1", () => {
+    expect(shouldBoundBrowserSseForProtocol("http/1.0")).toBe(true);
+    expect(shouldBoundBrowserSseForProtocol("http/1.1")).toBe(true);
+    expect(shouldBoundBrowserSseForProtocol("h2")).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol("h3")).toBe(false);
+    expect(shouldBoundBrowserSseForProtocol(null)).toBe(false);
+  });
+
   test("attaches the accepted actor epoch and rejects a late prior-actor response", async () => {
     const originalFetch = globalThis.fetch;
     let release!: (response: Response) => void;

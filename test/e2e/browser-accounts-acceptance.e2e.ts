@@ -81,6 +81,7 @@ type BrowserProblems = {
     responsePhase: string;
   }>;
   activeStreams: Map<object, string>;
+  boundedHttp1StreamDispatches: number;
   actorDispatches: Array<{ actorEpoch: string; startedAt: number }>;
   actorFenceResponses: string[];
   actorTransitionResponses: Array<{
@@ -541,6 +542,7 @@ function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
     acceptedRequestFailures: [],
     activeStreams: new Map(),
+    boundedHttp1StreamDispatches: 0,
     actorDispatches: [],
     actorFenceResponses: [],
     actorTransitionResponses: [],
@@ -566,7 +568,8 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   >();
   page.on("request", (request) => {
-    const pathname = new URL(request.url()).pathname;
+    const requestUrl = new URL(request.url());
+    const pathname = requestUrl.pathname;
     const actorEpoch = request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null;
     const startedAt = performance.now();
     const requestSessionSetAuthorityHash = request
@@ -574,6 +577,9 @@ function observeBrowser(page: Page): BrowserProblems {
       .then(sessionSetAuthorityHash, () => null);
     if (actorEpoch !== null) problems.actorDispatches.push({ actorEpoch, startedAt });
     if (pathname.endsWith("/stream") || pathname.includes("/live-events/stream")) {
+      if (requestUrl.searchParams.get("transport") === "http1-bounded") {
+        problems.boundedHttp1StreamDispatches += 1;
+      }
       problems.activeStreams.set(
         request,
         `[dispatch=${problems.phase}; actor=${actorEpoch ?? "missing"}] ${request.method()} ${request.url()}`,
@@ -3185,6 +3191,9 @@ describe("provider-neutral browser account acceptance", () => {
       });
 
       await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems, otherProblems]);
+      for (const problems of [pageProblems, secondTabProblems, otherProblems]) {
+        expect(problems.boundedHttp1StreamDispatches).toBeGreaterThan(0);
+      }
       await expectNoBrowserProblems(pageProblems);
       await expectNoBrowserProblems(secondTabProblems);
       await expectNoBrowserProblems(otherProblems);
@@ -3204,6 +3213,11 @@ describe("provider-neutral browser account acceptance", () => {
               primary: pageProblems.retiredFiniteReads.length,
               secondTab: secondTabProblems.retiredFiniteReads.length,
               independentSet: otherProblems.retiredFiniteReads.length,
+            },
+            boundedHttp1StreamDispatches: {
+              primary: pageProblems.boundedHttp1StreamDispatches,
+              secondTab: secondTabProblems.boundedHttp1StreamDispatches,
+              independentSet: otherProblems.boundedHttp1StreamDispatches,
             },
             sameSetSecondTabNeutralizedAfterLogoutAll: true,
             anotherBrowserSetSurvivedLogoutAll: true,

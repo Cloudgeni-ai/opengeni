@@ -22,6 +22,7 @@ export const bundleDeploymentRevision = String(
 const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
+const boundedHttp1SseTransport = "http1-bounded";
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 let managedActorEpoch: string | null = null;
 let managedActorRevision = 0;
@@ -199,11 +200,12 @@ export async function managedActorFetch(
     typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined,
   );
   new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+  const transportInput = browserSseTransportInput(input, init, headers);
   if (acceptedEpoch && init.credentials !== "omit" && !headers.has(MANAGED_ACTOR_EPOCH_HEADER)) {
     headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
   }
   try {
-    const response = await fetch(input, {
+    const response = await fetch(transportInput, {
       ...init,
       headers,
       signal: controller.signal,
@@ -278,6 +280,50 @@ export async function managedActorFetch(
   } finally {
     if (!responseOwnsCleanup) cleanup();
   }
+}
+
+/** HTTP/1 browsers cap all same-origin SSE connections across every tab at six. */
+export function shouldBoundBrowserSseForProtocol(protocol: string | null | undefined): boolean {
+  const normalized = protocol?.trim().toLowerCase();
+  return normalized === "http/1.0" || normalized === "http/1.1";
+}
+
+function browserSseTransportInput(
+  input: string | URL | Request,
+  init: RequestInit,
+  headers: Headers,
+): string | URL | Request {
+  if (
+    requestMethod(input, init) !== "GET" ||
+    !headers.get("accept")?.toLowerCase().includes("text/event-stream") ||
+    (typeof Request !== "undefined" && input instanceof Request) ||
+    !shouldBoundBrowserSseForProtocol(observedApiProtocol())
+  ) {
+    return input;
+  }
+  const url = new URL(String(input), window.location.href);
+  url.searchParams.set("transport", boundedHttp1SseTransport);
+  return typeof input === "string" ? url.toString() : url;
+}
+
+function observedApiProtocol(): string | null {
+  if (typeof window === "undefined" || typeof performance === "undefined") return null;
+  const apiOrigin = new URL(apiBaseUrl || window.location.origin, window.location.href).origin;
+  const resources = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
+  for (let index = resources.length - 1; index >= 0; index -= 1) {
+    const entry = resources[index];
+    if (!entry?.nextHopProtocol) continue;
+    try {
+      if (new URL(entry.name).origin === apiOrigin) return entry.nextHopProtocol;
+    } catch {
+      // Ignore browser-extension and other non-URL performance entries.
+    }
+  }
+  if (apiOrigin !== window.location.origin) return null;
+  const navigation = performance.getEntriesByType("navigation")[0] as
+    | PerformanceNavigationTiming
+    | undefined;
+  return navigation?.nextHopProtocol || null;
 }
 
 function isFiniteJsonResponse(response: Response): boolean {

@@ -26,6 +26,7 @@ const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
 export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+export const HTTP1_BROWSER_SSE_LIFETIME_MS = 5_000;
 type SseStreamKind = "session" | "workspace_control" | "workspace_interaction";
 const activeSseStreams: Record<SseStreamKind, number> = {
   session: 0,
@@ -41,6 +42,7 @@ export type SseDeliveryBoundObservation = {
 };
 
 export type ByteBoundedSseStreamOptions = {
+  connectionLifetimeMs?: number | undefined;
   maxQueuedBytes?: number;
   stallTimeoutMs?: number;
   onStop?: () => void;
@@ -72,16 +74,24 @@ export function createByteBoundedSseStream(
 ): ByteBoundedSseStream {
   const maxQueuedBytes = options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES;
   const stallTimeoutMs = options.stallTimeoutMs ?? SSE_WRITE_STALL_TIMEOUT_MS;
+  const connectionLifetimeMs = options.connectionLifetimeMs;
   if (!Number.isSafeInteger(maxQueuedBytes) || maxQueuedBytes <= 0) {
     throw new RangeError("SSE byte high-water mark must be a positive safe integer");
   }
   if (!Number.isSafeInteger(stallTimeoutMs) || stallTimeoutMs <= 0) {
     throw new RangeError("SSE write stall timeout must be a positive safe integer");
   }
+  if (
+    connectionLifetimeMs !== undefined &&
+    (!Number.isSafeInteger(connectionLifetimeMs) || connectionLifetimeMs <= 0)
+  ) {
+    throw new RangeError("SSE connection lifetime must be a positive safe integer");
+  }
   const encoder = new TextEncoder();
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let stopped = false;
   let capacityWake: (() => void) | null = null;
+  let lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
   let queuedFrames = 0;
   let queuedBytes = 0;
 
@@ -93,6 +103,10 @@ export function createByteBoundedSseStream(
   const stop = (settle: () => void) => {
     if (stopped) return;
     stopped = true;
+    if (lifetimeTimer !== null) {
+      clearTimeout(lifetimeTimer);
+      lifetimeTimer = null;
+    }
     wakeWriter();
     options.onStop?.();
     try {
@@ -127,6 +141,9 @@ export function createByteBoundedSseStream(
       size: () => 1,
     },
   );
+  if (connectionLifetimeMs !== undefined) {
+    lifetimeTimer = setTimeout(() => stop(() => controller.close()), connectionLifetimeMs);
+  }
 
   return {
     stream,
@@ -299,6 +316,7 @@ export async function sseSessionStream(
     release?.();
   };
   const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
     onObservation: sseObservationReporter("session", options),
@@ -536,6 +554,7 @@ export async function sseWorkspaceControlStream(
     release?.();
   };
   const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
     onObservation: sseObservationReporter("workspace_control", options),
@@ -673,6 +692,7 @@ export async function sseWorkspaceLiveStream(
   const upstream = new AbortController();
   let stopReauthorization = () => {};
   const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
     onObservation: sseObservationReporter("workspace_interaction", options),
@@ -692,6 +712,7 @@ export async function sseWorkspaceLiveStream(
 
   const upstreamOptions: WorkspaceInteractionSseOptions = {
     ...options,
+    connectionLifetimeMs: undefined,
     reauthorize: undefined,
     reauthorizeAfterMs: undefined,
   };
@@ -797,6 +818,7 @@ export async function sseWorkspaceInteractionRevisionStream(
   let detachAbortListener = () => {};
   let closeMetrics = () => {};
   const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
     onObservation: sseObservationReporter("workspace_interaction", options),
@@ -939,6 +961,7 @@ async function reauthorizeSseOrClose(
 }
 
 export type SseDeliveryOptions = {
+  connectionLifetimeMs?: number | undefined;
   maxQueuedBytes?: number;
   stallTimeoutMs?: number;
   heartbeatIntervalMs?: number;
@@ -950,6 +973,14 @@ export type SseDeliveryOptions = {
   /** Exact selected actor emitted on the stream response for cross-tab fencing. */
   actorEpoch?: string | undefined;
 };
+
+export function browserSseDeliveryOptions(
+  transport: string | undefined,
+): Pick<SseDeliveryOptions, "connectionLifetimeMs"> {
+  return transport === "http1-bounded"
+    ? { connectionLifetimeMs: HTTP1_BROWSER_SSE_LIFETIME_MS }
+    : {};
+}
 
 export type SessionSseDeliveryOptions = SseDeliveryOptions;
 
