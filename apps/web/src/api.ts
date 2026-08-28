@@ -25,10 +25,11 @@ const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 const boundedHttp1SseTransport = "http1-bounded";
 const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 2_000;
 const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
-// The API normally closes bounded HTTP/1 streams after five seconds. Keep a
+// New APIs close bounded HTTP/1 streams after one second. Keep a longer
 // browser-owned backstop as well: a server/runtime adapter can acknowledge a
 // Web Stream close without retiring Chromium's native request, and one such
 // orphan per tab is enough to exhaust the shared per-origin connection pool.
+// Nine seconds also preserves rolling compatibility with older five-second APIs.
 const HTTP1_BROWSER_SSE_NATIVE_LIFETIME_MS = 9_000;
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 let managedActorEpoch: string | null = null;

@@ -120,7 +120,7 @@ afterAll(() => {
 
 test("HTTP/1 browser streams cycle cleanly while HTTP/2 streams remain long-lived", async () => {
   expect(browserSseDeliveryOptions("http1-bounded")).toEqual({
-    connectionLifetimeMs: 5_000,
+    connectionLifetimeMs: 1_000,
     finiteResponseMaxBytes: 512 * 1024,
   });
   expect(browserSseDeliveryOptions(undefined)).toEqual({});
@@ -160,6 +160,7 @@ test("HTTP/1 browser fallback returns a fully framed finite SSE batch", async ()
   );
   const bytes = await response.arrayBuffer();
   expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
+  expect(response.headers.get("connection")).toBeNull();
   expect(new TextDecoder().decode(bytes)).toContain('"sequence":3');
 });
 
@@ -178,6 +179,7 @@ test("workspace interaction SSE projects only the newest durable revision", asyn
     controller.signal,
     { pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
   );
+  expect(response.headers.get("connection")).toBe("close");
   const reader = response.body!.getReader();
   expect(await readSequences(reader, 1)).toEqual([3]);
 

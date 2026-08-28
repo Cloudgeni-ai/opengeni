@@ -26,7 +26,7 @@ const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
 export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
-export const HTTP1_BROWSER_SSE_LIFETIME_MS = 5_000;
+export const HTTP1_BROWSER_SSE_LIFETIME_MS = 1_000;
 export const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
 type SseStreamKind = "session" | "workspace_control" | "workspace_interaction";
 const activeSseStreams: Record<SseStreamKind, number> = {
@@ -982,14 +982,14 @@ async function sseHttpResponse(
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      // A clean authorization close must also retire the HTTP/1 transport.
-      // Reusing that socket can leave Chromium accounting the ended SSE as an
-      // active per-origin connection while a replacement document is already
-      // dispatching finite reads. HTTP/2 front doors strip this hop-by-hop
-      // header; direct Bun/self-hosted HTTP/1 clients receive an unambiguous
-      // connection end after the stream's terminal chunk.
-      Connection: "close",
-      ...(contentLength === null ? {} : { "Content-Length": String(contentLength) }),
+      // Unbounded direct HTTP/1 streams still need an unambiguous transport
+      // close when authorization ends. A finite batch is already delimited by
+      // Content-Length and must leave its socket reusable: forcing a TCP close
+      // on every bounded batch lets rapid reconnects race ordinary reads
+      // while Chromium is still retiring the previous connection.
+      ...(contentLength === null
+        ? { Connection: "close" }
+        : { "Content-Length": String(contentLength) }),
       ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
