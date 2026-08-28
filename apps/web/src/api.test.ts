@@ -141,9 +141,9 @@ describe("web API auth helpers", () => {
       const lateRead = reader.read();
       configureManagedActorEpoch("13");
       expect(observed.signal?.aborted).toBe(true);
-      await Promise.resolve();
       expect(observed.cancelledWith).toMatchObject({ name: "AbortError" });
       expect(transportCloseOrder).toEqual(["native-abort", "source-cancel"]);
+      await Promise.resolve();
       await expect(lateRead).rejects.toMatchObject({ name: "AbortError" });
       await Promise.resolve();
       expect(source.locked).toBe(false);
@@ -192,13 +192,16 @@ describe("web API auth helpers", () => {
 
   test("aborts live native transports before a document is replaced", async () => {
     const originalFetch = globalThis.fetch;
-    const observed: { signal?: AbortSignal | null } = {};
+    const observed: { cancelledWith?: unknown; signal?: AbortSignal | null } = {};
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
     globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       observed.signal = init?.signal ?? null;
       const source = new ReadableStream<Uint8Array>({
         start(controller) {
           bodyController = controller;
+        },
+        cancel(reason) {
+          observed.cancelledWith = reason;
         },
       });
       return new Response(source, {
@@ -212,7 +215,7 @@ describe("web API auth helpers", () => {
       const read = response.body!.getReader().read();
       handleManagedActorPageHide(false);
       expect(observed.signal?.aborted).toBe(true);
-      await Promise.resolve();
+      expect(observed.cancelledWith).toMatchObject({ name: "AbortError" });
       await expect(read).rejects.toMatchObject({ name: "AbortError" });
       // The old response must not retain a native body controller that can
       // continue publishing after document teardown.
