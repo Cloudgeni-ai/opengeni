@@ -379,6 +379,10 @@ const SettingsSchema = z.object({
     .regex(/^@opengeni\/ogtool@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   environmentsEncryptionKey: z.string().optional(),
+  // Native static Sites and arbitrary Advanced Deployments are independent,
+  // disabled-by-default product surfaces with different trust boundaries.
+  sitesEnabled: EnvBoolean.default(false),
+  advancedDeploymentsEnabled: EnvBoolean.default(false),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
@@ -2105,6 +2109,8 @@ export function getSettings(): Settings {
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
+    sitesEnabled: optional("OPENGENI_SITES_ENABLED"),
+    advancedDeploymentsEnabled: optional("OPENGENI_ADVANCED_DEPLOYMENTS_ENABLED"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(

@@ -1,0 +1,6 @@
+config:
+  OPENGENI_ADVANCED_DEPLOYMENTS_ENABLED: "true"
+
+# Keep the normal production storage backends and configure the model catalog
+# so `local-research-model` resolves to a local inference endpoint. Secrets stay
+# in the release's existing Secret, never in this values file.

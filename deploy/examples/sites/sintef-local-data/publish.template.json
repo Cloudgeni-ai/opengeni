@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "apiUrl": "http://127.0.0.1:8000",
+  "workspaceId": "00000000-0000-4000-8000-000000000000",
+  "operationId": "00000000-0000-4000-8000-000000000001",
+  "sourceHtml": "deploy/examples/sites/sintef-local-data/index.html",
+  "slug": "sintef-materials-explorer",
+  "title": "SINTEF Materials Explorer",
+  "description": "Explore approved local materials evidence through durable OpenGeni AI.",
+  "manifest": {
+    "schemaVersion": 1,
+    "ai": {
+      "enabled": true,
+      "defaultModel": "replace-with-approved-local-model",
+      "allowedModels": ["replace-with-approved-local-model"],
+      "reasoningEffort": "medium",
+      "instructions": "You are the governed research assistant for the SINTEF Materials Explorer Site. Search only the approved local workspace knowledge exposed by this immutable release. Distinguish observations from inference, cite available provenance, state uncertainty, and never invent missing measurements.",
+      "monthlyBudgetMicros": 10000000
+    },
+    "integrations": {
+      "firstPartyPermissions": ["workspace:read", "documents:search"],
+      "firstPartyTools": ["memory_search"],
+      "mcpServers": [],
+      "allowedPersonalConnectionServerIds": []
+    },
+    "approvals": { "writeActions": "deny" },
+    "access": { "audience": "workspace" }
+  },
+  "apiKeyEnvironment": "OPENGENI_SITES_PUBLISH_API_KEY"
+}

@@ -58,6 +58,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     streamTokenSecret: undefined,
     streamControlEnabled: false,
     environmentsEncryptionKey: undefined,
+    sitesEnabled: false,
+    advancedDeploymentsEnabled: false,
     integrationsEnabled: false,
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,

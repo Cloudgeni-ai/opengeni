@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SINTEF Materials Explorer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        background: #07100f;
+        color: #ecf7f2;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: radial-gradient(circle at 75% 0%, #164c3d 0, transparent 35rem), #07100f;
+      }
+      main {
+        width: min(1100px, calc(100% - 32px));
+        margin: auto;
+        padding: 44px 0 64px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-start;
+      }
+      .eyebrow,
+      .pill {
+        color: #7ce4ba;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      h1 {
+        max-width: 760px;
+        margin: 12px 0;
+        font-size: clamp(38px, 7vw, 72px);
+        line-height: 0.98;
+        letter-spacing: -0.055em;
+      }
+      .lede {
+        max-width: 680px;
+        color: #a9c3b9;
+        font-size: 18px;
+        line-height: 1.55;
+      }
+      .pill {
+        border: 1px solid #2d6957;
+        border-radius: 999px;
+        padding: 9px 12px;
+        white-space: nowrap;
+        background: #0d241e;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: 16px;
+        margin-top: 36px;
+      }
+      .card {
+        border: 1px solid #23463b;
+        border-radius: 20px;
+        padding: 22px;
+        background: rgba(10, 28, 23, 0.88);
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.26);
+      }
+      label {
+        display: block;
+        margin-bottom: 9px;
+        font-size: 13px;
+        font-weight: 700;
+        color: #c7ded5;
+      }
+      textarea {
+        width: 100%;
+        min-height: 132px;
+        resize: vertical;
+        border: 1px solid #315e50;
+        border-radius: 13px;
+        padding: 14px;
+        background: #071612;
+        color: #f5fffb;
+        font: inherit;
+        line-height: 1.5;
+      }
+      textarea:focus {
+        outline: 2px solid #56d6a4;
+        outline-offset: 2px;
+      }
+      button {
+        margin-top: 12px;
+        border: 0;
+        border-radius: 11px;
+        padding: 11px 16px;
+        background: #69e0b1;
+        color: #062017;
+        font: inherit;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: wait;
+      }
+      .suggestions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .suggestions button {
+        margin: 0;
+        padding: 7px 10px;
+        background: #15352c;
+        color: #bfe4d5;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .answer {
+        min-height: 290px;
+        white-space: pre-wrap;
+        color: #dcebe5;
+        line-height: 1.62;
+      }
+      .answer.empty {
+        color: #78978b;
+      }
+      .facts {
+        display: grid;
+        gap: 10px;
+        margin-top: 16px;
+      }
+      .fact {
+        display: flex;
+        justify-content: space-between;
+        gap: 18px;
+        padding: 12px 0;
+        border-top: 1px solid #1f4035;
+        font-size: 13px;
+      }
+      .fact span:first-child {
+        color: #86a89b;
+      }
+      .fact span:last-child {
+        text-align: right;
+        color: #d7e9e2;
+        font-weight: 650;
+      }
+      .status {
+        min-height: 20px;
+        margin-top: 10px;
+        color: #86a89b;
+        font-size: 12px;
+      }
+      @media (max-width: 760px) {
+        header {
+          display: block;
+        }
+        .pill {
+          display: inline-block;
+          margin-top: 10px;
+        }
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <div class="eyebrow">SINTEF / OpenGeni Sites</div>
+          <h1>Ask the lab data without moving the lab data.</h1>
+          <p class="lede">
+            A static internal Site with native, durable AI. It can search only the local workspace
+            knowledge approved for this release; credentials and model keys never enter this page.
+          </p>
+        </div>
+        <div class="pill" id="connection-state">Connecting locally</div>
+      </header>
+      <section class="grid">
+        <div class="card">
+          <label for="question">Research question</label>
+          <textarea id="question">
+Compare the approved tensile-strength observations for the latest aluminium alloy experiments. Explain uncertainty and cite the available local evidence.</textarea>
+          <button id="ask" type="button" disabled>Ask approved data</button>
+          <div class="suggestions" aria-label="Suggested questions">
+            <button
+              type="button"
+              data-question="Which experiments have missing provenance or quality notes?"
+            >
+              Find evidence gaps
+            </button>
+            <button
+              type="button"
+              data-question="Summarize the most recent approved materials observations for a project review."
+            >
+              Create review summary
+            </button>
+          </div>
+          <div class="status" id="status" role="status" aria-live="polite"></div>
+          <div class="facts">
+            <div class="fact"><span>Site code</span><span>Immutable static HTML</span></div>
+            <div class="fact">
+              <span>Data path</span><span>Local OpenGeni knowledge / approved MCP</span>
+            </div>
+            <div class="fact"><span>AI identity</span><span>Signed-in workspace user</span></div>
+            <div class="fact"><span>Credentials in browser</span><span>None</span></div>
+          </div>
+        </div>
+        <article class="card">
+          <div class="eyebrow">Durable answer</div>
+          <div id="answer" class="answer empty">
+            The streamed response will appear here. Close and reopen the Site without creating
+            per-Site compute; the underlying OpenGeni session remains durable and auditable.
+          </div>
+        </article>
+      </section>
+    </main>
+    <script>
+      (async function () {
+        const ask = document.getElementById("ask");
+        const question = document.getElementById("question");
+        const answer = document.getElementById("answer");
+        const status = document.getElementById("status");
+        const connection = document.getElementById("connection-state");
+        let runtime;
+        let receipt;
+        let rendered = "";
+
+        function eventText(value) {
+          const event = value && value.event;
+          const payload = event && event.payload;
+          if (!payload || typeof payload !== "object") return "";
+          if (typeof payload.text === "string") return payload.text;
+          if (typeof payload.delta === "string") return payload.delta;
+          return "";
+        }
+
+        try {
+          runtime = await window.OpenGeniSite.connect();
+          connection.textContent = "Local gateway ready";
+          ask.disabled = false;
+          runtime.onEvent(function (value) {
+            if (receipt && value.sessionId !== receipt.sessionId) return;
+            const text = eventText(value);
+            if (text) {
+              rendered += text;
+              answer.textContent = rendered;
+              answer.classList.remove("empty");
+            }
+            const type = value.event && value.event.type;
+            if (type === "turn.completed") {
+              status.textContent = "Answer complete and retained in OpenGeni.";
+              ask.disabled = false;
+            }
+            if (type === "turn.failed" || type === "turn.cancelled") {
+              status.textContent = "The durable turn stopped. You can retry safely.";
+              ask.disabled = false;
+            }
+          });
+        } catch (error) {
+          connection.textContent = "Open in Site shell";
+          status.textContent = error instanceof Error ? error.message : String(error);
+        }
+
+        ask.addEventListener("click", async function () {
+          const message = question.value.trim();
+          if (!message || !runtime) return;
+          ask.disabled = true;
+          rendered = "";
+          answer.textContent = "Searching approved local evidence...";
+          answer.classList.add("empty");
+          status.textContent = "OpenGeni is running a durable Site turn.";
+          try {
+            if (!receipt) receipt = await runtime.ai.start({ message: message });
+            else
+              await runtime.ai.send({ runtimeSessionId: receipt.runtimeSession.id, text: message });
+          } catch (error) {
+            status.textContent = error instanceof Error ? error.message : String(error);
+            ask.disabled = false;
+          }
+        });
+
+        document.querySelectorAll("[data-question]").forEach(function (button) {
+          button.addEventListener("click", function () {
+            question.value = button.dataset.question || "";
+            question.focus();
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

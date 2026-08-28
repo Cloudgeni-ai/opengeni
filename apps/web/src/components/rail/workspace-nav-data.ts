@@ -7,6 +7,8 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/variable-sets"
   | "/workspaces/$workspaceId/rigs"
   | "/workspaces/$workspaceId/machines"
+  | "/workspaces/$workspaceId/sites"
+  | "/workspaces/$workspaceId/applications"
   | "/workspaces/$workspaceId/capabilities"
   | "/workspaces/$workspaceId/schedules"
   | "/workspaces/$workspaceId/documents"
@@ -35,6 +37,8 @@ export type WorkspaceConfigItem = {
   description: string;
   /** When true, only include for subjects with workspace:admin. */
   requiresAdmin?: boolean;
+  /** Deployment capability gate projected by /v1/config/client. */
+  feature?: "sites" | "advancedDeployments";
 };
 
 export type WorkspaceConfigGroup = {
@@ -85,12 +89,26 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
         label: "Machines",
         description: "Your own connected computers",
       },
+      {
+        to: "/workspaces/$workspaceId/applications",
+        icon: "panels-top-left",
+        label: "Advanced deployments",
+        description: "Deploy arbitrary full-stack apps to connected infrastructure",
+        feature: "advancedDeployments",
+      },
     ],
   },
   {
     id: "knowledge",
     label: "Knowledge",
     items: [
+      {
+        to: "/workspaces/$workspaceId/sites",
+        icon: "panels-top-left",
+        label: "Sites",
+        description: "Authenticated static apps with native AI and integrations",
+        feature: "sites",
+      },
       {
         to: "/workspaces/$workspaceId/documents",
         icon: "file-search",
@@ -157,11 +175,18 @@ export const WORKSPACE_BROWSE_ITEMS: WorkspaceConfigItem[] = WORKSPACE_CONFIG_GR
 export function filterWorkspaceConfigGroups(
   groups: WorkspaceConfigGroup[],
   canReadInsights: boolean,
+  sitesEnabled = false,
+  advancedDeploymentsEnabled = false,
 ): WorkspaceConfigGroup[] {
   return groups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => !item.requiresAdmin || canReadInsights),
+      items: group.items.filter(
+        (item) =>
+          (!item.requiresAdmin || canReadInsights) &&
+          (item.feature !== "sites" || sitesEnabled) &&
+          (item.feature !== "advancedDeployments" || advancedDeploymentsEnabled),
+      ),
     }))
     .filter((group) => group.items.length > 0);
 }

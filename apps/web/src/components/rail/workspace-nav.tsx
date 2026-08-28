@@ -38,13 +38,20 @@ export {
 export function WorkspaceNav() {
   const rail = useRail();
   const context = useAppContext();
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const canReadInsights = hasWorkspacePermission(
     context.accessContext,
     rail.workspaceId,
     "workspace:admin",
   );
-  const groups = filterWorkspaceConfigGroups(WORKSPACE_CONFIG_GROUPS, canReadInsights);
+  const groups = filterWorkspaceConfigGroups(
+    WORKSPACE_CONFIG_GROUPS,
+    canReadInsights,
+    context.clientConfig.sites?.enabled === true,
+    context.clientConfig.advancedDeployments?.enabled === true,
+  );
   const settingsActive = isWorkspaceConfigPath(pathname, rail.workspaceId);
 
   if (rail.isMobile) {

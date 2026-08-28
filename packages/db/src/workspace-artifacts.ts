@@ -259,6 +259,28 @@ export async function getWorkspaceArtifactContentRef(
   });
 }
 
+/** Resolve one immutable version to its owning artifact without exposing content. */
+export async function getWorkspaceArtifactVersionIdentity(
+  db: Database,
+  workspaceId: string,
+  versionId: string,
+): Promise<string> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [version] = await scopedDb
+      .select({ artifactId: schema.workspaceArtifactVersions.artifactId })
+      .from(schema.workspaceArtifactVersions)
+      .where(
+        and(
+          eq(schema.workspaceArtifactVersions.workspaceId, workspaceId),
+          eq(schema.workspaceArtifactVersions.id, versionId),
+        ),
+      )
+      .limit(1);
+    if (!version) throw new WorkspaceArtifactNotFoundError("Artifact version not found");
+    return version.artifactId;
+  });
+}
+
 type PublishMetadata = {
   accountId: string;
   workspaceId: string;

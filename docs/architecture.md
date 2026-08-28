@@ -882,11 +882,12 @@ The monorepo is a **Bun workspace** (`workspaces: [apps/*, examples/*, packages/
 | `deployment`    | `@opengeni/deployment`    | Deployment contract source of truth: 12 profiles, overlays, required-env/preflight/stack-plan/runtime-artifact logic.                                                                                                                                                                                                                                                                               | `contractForProfile`, `preflightChecksFor`, `stackPlanFor`, `generateRuntimeArtifacts`, `SANDBOX_REQUIRED_ENV` (parity-pinned to config).                                  | `packages/deployment/src/index.ts`                                                                        |
 | `agent-proto`   | `@opengeni/agent-proto`   | Generated TS wire types for the selfhosted control protocol, codegen'd from `agent/proto/opengeni_agent.proto`. Control-plane side of the BYO-compute seam.                                                                                                                                                                                                                                         | Re-exports the generated `opengeni.agent.v1` types.                                                                                                                        | `packages/agent-proto/src/index.ts`                                                                       |
 | `sdk`           | `@opengeni/sdk`          | **Published.** Zero-runtime-dep TS client: typed API methods + exactly-once SSE streaming + proxy helpers + desktop/terminal transport contracts plus native `transcribeAudio` (legacy adapter types deprecated). | `OpenGeniClient`, `streamSessionEvents`, `transcribeAudio`, proxy/desktop/terminal helpers. | `packages/sdk/src/client.ts`, `packages/sdk/src/stream.ts`, `packages/sdk/src/transcription.ts`            |
+| `site-runtime`  | `@opengeni/site-runtime` | **Published.** Zero-network, credential-free browser facade over the authenticated Site shell's page-lifetime MessageChannel. It is bundled into generated static SPAs and owns no API transport or authority. | `connect`, `SiteRuntime`, `SiteRuntimeEvent`. | `packages/site-runtime/src/index.ts`, [`sites.md`](sites.md) |
 | `react`         | `@opengeni/react`        | **Published.** React hooks + styled components over the SDK: live streaming, chat, timeline, sandbox surfaces, and native MediaRecorder composer voice input. Product hosts can use the session-only **`@opengeni/react/session`** subpath for session hooks and pure projection without the styled workbench graph; its structural client type excludes workspace administration and workbench APIs. Advanced composer composition lives under **`@opengeni/react/composer`**; Connected-machine UI lives under **`@opengeni/react/machines`**. Built-in compact session chrome is **`SessionChrome`** (token-themed `--og-session-chrome-*`; merges incoming/queue/goal/agents above the composer). `QueueSurface` remains available for embeds that want the standalone queue only. | `OpenGeniProvider`, the `use*` hooks, `ChatComposer`/`SessionChrome`/`MessageTimeline`/`WorkspaceDock`/etc.; `./session` for host-rendered session embedding; `./session-ui` for styled session surfaces; `./composer` for composable composer UI; `./machines` for machine UI. | `packages/react/src/index.ts`, `packages/react/src/session.ts`, `packages/react/src/session-ui.ts`, `packages/react/src/composer.ts`, `packages/react/src/components/session-chrome.tsx`, `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/machines.ts`, `packages/react/src/client.ts` |
 | `ogtool`        | `@opengeni/ogtool`        | **Published.** Small Codemode CLI for managed stock sandboxes and custom rigs. Its package bin is the canonical source installed into OpenGeni images and may be bootstrapped only from an exact deployment-pinned stable package spec. Connected Machines instead use the no-runtime client built into their installed Rust agent. | `ogtool list`, `ogtool call`, `ogtool doctor`; package constants for the CLI environment contract. | `packages/ogtool/src/cli.ts`, `packages/ogtool/src/index.ts`                                              |
 | `testing`       | `@opengeni/testing`       | Shared test harness/fixtures (`startTestServices`, `buildSandboxImage`, `ScriptedModel`, e2e worker).                                                                                                                                                                                                                                                                                               | Consumed only by tests.                                                                                                                                                    | `packages/testing`                                                                                        |
 
-**Dependency direction (high level):** `contracts`, `config`, and the workspace-independent `network` transport are foundations. `db`/`runtime`/`events`/`storage`/`documents`/`github` build on them. `core` depends on those foundations/leaves for domain/access/billing logic; `apps/api` and `apps/worker` compose core with HTTP and Temporal process wiring. The **client closure** (`contracts → sdk → react`) is kept strictly server-free; `apps/web` consumes `sdk` + `react`. The Rust `agent/` and TS `agent-proto` are bound by one shared `.proto`.
+**Dependency direction (high level):** `contracts`, `config`, and the workspace-independent `network` transport are foundations. `db`/`runtime`/`events`/`storage`/`documents`/`github` build on them. `core` depends on those foundations/leaves for domain/access/billing logic; `apps/api` and `apps/worker` compose core with HTTP and Temporal process wiring. The **client closure** (`contracts → sdk → react`) is kept strictly server-free; `site-runtime` is a standalone zero-dependency browser leaf, and `apps/web` consumes `sdk` + `react`. The Rust `agent/` and TS `agent-proto` are bound by one shared `.proto`.
 
 ### 6.3 The self-hosted agent (`agent/`) — Rust
 
@@ -1165,7 +1166,7 @@ Migration 0149 adds workspace artifacts as one mutable artifact row plus append-
 
 Migration 0172 is a maintenance-only credential-boundary cutover. It strips the retired model-visible `github_token` name from every durable session selection, updates the column default, and installs a database check that rejects stale writers attempting to restore it. Stop every old API/worker before applying it and never restart an older image afterward. GitHub App token mint/renew remains exclusively in the host-owned worker/runtime credential path. Canonical: `packages/db/drizzle/0172_retire_model_visible_github_token.sql`, `apps/worker/src/activities/environment.ts`, `apps/api/src/mcp/server.ts`.
 
-Published HTML artifacts run as exact source in an opaque-origin sandboxed iframe. Scripts, external resources, forms, popups, and downloads are enabled; `allow-same-origin` and top-level navigation are not, so artifact code receives no OpenGeni origin authority, cookies, storage, or parent DOM access. Canonical: `packages/react/src/components/artifacts/published-html-artifact-frame.tsx`, `apps/web/src/components/artifacts/artifact-sandbox.tsx`, and `test/e2e/artifact-static-renderer.browser.e2e.ts`.
+Published HTML artifacts run as exact source in an opaque-origin sandboxed iframe. Scripts, external resources, forms, popups, and downloads are enabled; `allow-same-origin` and top-level navigation are not, so artifact code receives no OpenGeni origin authority, cookies, storage, or parent DOM access. A Site release deliberately narrows this generic preview further to `allow-scripts` plus a network-disabled CSP and typed parent MessageChannel (§7.13). Canonical: `packages/react/src/components/artifacts/published-html-artifact-frame.tsx`, `apps/web/src/components/artifacts/artifact-sandbox.tsx`, and `test/e2e/artifact-static-renderer.browser.e2e.ts`.
 
 ### 7.7 `runtime` — the agent loop + sandbox abstraction
 
@@ -1213,6 +1214,101 @@ The current map:
 - **Worker.** `runOpenGeniWorker({ role, settings, activityDependencies, databasePosture })` runs a durable role-specific Temporal worker as a separate process next to the host app; it is never optional for real agent turns. The npm package ships the exact pre-bundled workflow artifact, and `createOpenGeniWorkerService` exposes lifecycle state, bounded dependency readiness, metrics, role-correct internal schedules, and idempotent graceful drain without taking ownership of injected host DB/EventBus handles. Resource-based turn services also own a continuous whole-host/effective-cgroup memory guard; closing the service closes the guard first, while a sustained breach calls the same idempotent graceful drain. Standalone entrypoints supply the exact catalog posture; an embedded host may omit it only when it owns an equivalent isolation contract, retaining the legacy connectivity probe.
 - **EventBus binding.** API and worker must share a real broker-backed `EventBus` (`createNatsEventBus`) for cross-process live fanout and SSE. An in-memory bus only fans out inside one process and would silently break worker -> API SSE.
 - **Host event/usage projection.** `HostEventSink` / `HostUsageSink` consume a source-transactional Postgres outbox through `createHostExportPump`. Standalone capture defaults off; first-consumer registration linearizes with deferred source capture on the configuration row. Embedded capture uses a separate no-table-access exporter role, named at-least-once checkpoints, bounded batches, exact decimal-string cursors, explicit blocking/resume/dead-letter/rewind/prune operations, and immutable turn/attempt plus same-transaction session-root attribution. Session-bound rows must have a root. Published maintenance migration `0104` remains immutable; forward-only `0107` validates the invariant without rewriting data and rejects rows whose historical provenance cannot be proved from the durable `0103` ledger boundary. Immediate child identity remains in every exported fact; root lineage is attribution context and never changes child lifecycle semantics. NATS is not part of this durability path.
+
+### 7.13 OpenGeni Sites
+
+Sites are the default generated-application lane and have explicit runtime kind
+`static_spa`. They extend workspace HTML artifacts; they do not reuse the
+infrastructure-deployment workflow. Migration 0374 adds one workspace/account
+Site head plus immutable release, lifecycle-event, and runtime-session ledgers.
+All four tables are FORCE RLS. A release binds an exact artifact version to a
+canonical capability-manifest digest covering model allowlist, instructions,
+first-party permissions/tools, MCP servers, personal Connection server
+allowlist, write-approval mode, workspace audience, and monthly budget. Publish,
+rollback, and archive are CAS/idempotency fenced and never call a compute
+provider. Rollback creates a new immutable release; historical rows are never
+edited.
+
+The stable authenticated web route loads the exact current artifact into an
+opaque-origin iframe. The Site runtime has only `allow-scripts`, a
+network-disabled CSP, and a page-lifetime MessageChannel. The injected bridge
+accepts bounded `ai.start`, `ai.send`, and `ai.cancel` verbs; it carries no
+cookie, API/provider key, Connection credential, Variable Set value, object
+key, or generic fetch authority. `@opengeni/site-runtime` is the zero-network
+generated-SPA SDK. The parent web shell is the only authenticated browser
+principal and owns SSE forwarding plus approval UI.
+
+Runtime admission rechecks the current human workspace grant, active Site and
+exact release, model allowlist, personal Connection server allowlist, and
+budget. It creates an empty durable session shell, freezes MCP approval policy,
+records the Site/release/session link, and only then admits the first user
+message. This order prevents a first-turn approval race. Follow-ups require the
+same release to remain current. Ordinary sessions, history, SSE/replay,
+Connections/MCP authority, platform approvals, usage facts, cancellation, and
+audit remain canonical; Sites create no parallel agent runtime.
+
+Sites and Advanced Deployments have independent false-by-default flags.
+`OPENGENI_SITES_ENABLED` exposes only Sites;
+`OPENGENI_ADVANCED_DEPLOYMENTS_ENABLED` exposes only runtime kind
+`external_deployment` and its infrastructure authority.
+
+> Canonical: `packages/contracts/src/sites.ts`,
+> `packages/db/drizzle/0374_workspace_sites.sql`,
+> `packages/db/src/sites-schema.ts`, `packages/db/src/sites.ts`,
+> `apps/api/src/routes/sites.ts`, `packages/site-runtime`,
+> `packages/sdk/src/site-runtime-browser.ts`,
+> `apps/web/src/components/sites/site-runtime-frame.tsx`,
+> `apps/web/src/routes/sites.tsx`, `scripts/sites-publish.ts`, and
+> [`sites.md`](sites.md).
+
+### 7.14 Advanced Deployments
+
+The disabled-by-default internal-application preview is a separate serving
+control plane over the existing session runtime. A generated application is not
+an OpenGeni sandbox: the preview persists an application and immutable
+revisions, credential-free data and target catalogs, immutable image bundles,
+deployments, idempotent operations, and append-only events. All eight tables are
+workspace/account fenced with FORCE RLS. Planning freezes exact application,
+bundle, source, and target revisions before any provider call. Apply persists a
+`provider_started` fence; ambiguous Kubernetes results settle
+`outcome_unknown` and are never blindly replayed.
+
+Generation reuses the ordinary durable session runtime: a build-session route
+freezes the application revision, credential-free data schemas/governance, and
+selected target capabilities into agent instructions, then records an
+idempotent application event linking the session. The session owns files,
+tests, preview processes, tools, approvals, and recovery; trusted OCI
+publication separately supplies the image, SBOM, and provenance digests before
+bundle registration. The reference publisher is
+`scripts/internal-applications-publish.ts`: it runs Buildx/Syft outside the API
+process, keeps API credentials out of build subprocesses, pushes by declared
+architecture, and registers only canonical digest evidence.
+
+The first provider server-side applies a digest-pinned Kubernetes Deployment,
+Service, optional Ingress, and NetworkPolicy. Plans and manifests contain Secret
+references, never values. The Kubernetes control credential is loaded just in
+time from a workspace Connection, the app runtime API key comes from a target
+Secret, and credential-bearing data attachments use target-derived Secret
+references. The app starts policy-bound durable OpenGeni sessions through the
+native-AI route; application web serving remains in Kubernetes. Observation
+records rollout identity, generations, conditions, replica health, and bundle
+drift. A CAS-fenced retire operation removes only the exact managed objects in
+reverse order, clears the URL, and preserves bundle and operation evidence.
+
+The deployment flag is projected through `/v1/config/client`; API authorization
+runs before the flag check, and the flag check precedes request parsing. When
+off, both navigation and authenticated routes are invisible without deleting
+durable state or running workloads.
+
+> Canonical: `packages/contracts/src/internal-applications.ts`,
+> `packages/db/src/internal-applications-schema.ts`,
+> `packages/db/src/internal-applications.ts`, migration
+> `0373_internal_applications.sql`,
+> `packages/core/src/domain/internal-applications.ts`,
+> `apps/api/src/routes/internal-applications.ts`,
+> `apps/web/src/routes/internal-applications.tsx`, and
+> `scripts/internal-applications-publish.ts`, and
+> [`internal-applications.md`](internal-applications.md).
 
 ---
 
@@ -1385,6 +1481,8 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | A migration                                                                 | `packages/db/src/migrate.ts` (ordering is filename, not `_journal.json`)                                                                                                                                                                                    | —                                                                                  |
 | Auth / authz / access modes                                                 | `packages/core/src/access/index.ts`, `apps/api/src/http/auth.ts`                                                                                                                                                                                            | `SECURITY.md`                                                                      |
 | HTTP routes / middleware                                                    | `apps/api/src/app.ts`, `apps/api/src/routes/sessions.ts`                                                                                                                                                                                                    | —                                                                                  |
+| OpenGeni Sites / static SPA release and runtime gateway                      | `packages/contracts/src/sites.ts`, `packages/db/src/sites*.ts`, `apps/api/src/routes/sites.ts`, `packages/site-runtime`, `packages/sdk/src/site-runtime-browser.ts`, `apps/web/src/routes/sites.tsx`, migration `0374_workspace_sites.sql` | [`sites.md`](sites.md) |
+| Advanced Deployments / Kubernetes serving control plane                      | `packages/contracts/src/internal-applications.ts`, `packages/db/src/internal-applications*.ts`, `packages/core/src/domain/internal-applications.ts`, `apps/api/src/routes/internal-applications.ts`, `apps/web/src/routes/internal-applications.tsx`, migration `0373_internal_applications.sql` | [`internal-applications.md`](internal-applications.md) |
 | SSE / streaming semantics                                                   | `apps/api/src/http/sse.ts`, `packages/sdk/src/stream.ts`                                                                                                                                                                                                    | —                                                                                  |
 | Sandbox backends / the registry                                             | `packages/runtime/src/sandbox/providers/index.ts`, `packages/contracts` (the enum)                                                                                                                                                                          | [`../AGENTS.md`](../AGENTS.md) Sandbox Notes                                       |
 | Selfhosted / BYO-compute control plane                                      | `packages/runtime/src/sandbox/selfhosted/`, `agent/proto/opengeni_agent.proto`                                                                                                                                                                              | [`connected-machines.md`](connected-machines.md)                                  |
@@ -1443,6 +1541,8 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`architecture.md`](architecture.md) (this file)                 | The whole-system map, invariants, repo layout, and the change-decision table.                                                                                                                         |
 | [`run-lifecycle.md`](run-lifecycle.md)                           | Turns, the no-length-limit doctrine, model-memory truth, fenced attempts, and graceful/ungraceful same-turn recovery.                                                                                 |
 | [`human-input.md`](human-input.md)                               | Durable structured agent questions: contracts, exact-turn ownership, answer/skip/expiry semantics, API/SDK/React embedding, and restart behavior.                                                    |
+| [`internal-applications.md`](internal-applications.md)           | Feature-gated internal application catalogs, data residence, deterministic deployment operations, native AI sessions, Kubernetes provider, UX, and SINTEF reference enablement.                      |
+| [`sites.md`](sites.md)                                           | Static SPA Site releases, immutable capability manifests, browser bridge/gateway security, data residence, usage, rollback/archive, feature flags, and the SINTEF local-data reference.                |
 | [`goals.md`](goals.md)                                           | Goal-driven long runs: lifecycle, the replay-safe continuation loop, budget/admission guards, goal MCP tools, settings.                                                                               |
 | [`context-compaction.md`](context-compaction.md)                 | Session-frozen compaction modes: portable plaintext (non-Codex + portable-locked Codex) and Codex remote compaction v2 (default for new Codex sessions); token policy, replacement history, provider lock, fail-closed semantics. |
 | [`model-providers.md`](model-providers.md)                       | Multi-provider model support; per-model routing via `MultiProviderModelProvider`; responses vs chat wire APIs.                                                                                        |

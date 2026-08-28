@@ -82,6 +82,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
+      "test/e2e/sites.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
     ]);
@@ -229,6 +230,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       "test/e2e/react-compiled-css.browser.e2e.ts",
+      "test/e2e/sites.browser.e2e.ts",
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
     ]);

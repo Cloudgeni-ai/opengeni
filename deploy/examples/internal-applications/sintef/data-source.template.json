@@ -1,0 +1,30 @@
+{
+  "expectedRevision": 0,
+  "name": "Approved measurements",
+  "description": "Read-only measurements used by the local materials demonstration",
+  "kind": "postgres",
+  "allowedAccessModes": ["attach"],
+  "locator": {
+    "kind": "postgres",
+    "host": "measurements.sintef.internal",
+    "port": 5432,
+    "database": "materials",
+    "schemas": ["approved"],
+    "sslMode": "verify-full",
+    "credentialConnectionId": "00000000-0000-4000-8000-000000000000"
+  },
+  "governance": {
+    "classification": "restricted",
+    "residencySite": "SINTEF Oslo",
+    "residencyRegion": "NO",
+    "externalEgressAllowed": false,
+    "retentionDays": null,
+    "owner": "SINTEF research IT",
+    "purpose": "Local internal application demonstration"
+  },
+  "schemaDefinition": {},
+  "metadata": {
+    "accessReview": "required"
+  },
+  "status": "active"
+}

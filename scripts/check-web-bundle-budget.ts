@@ -39,8 +39,11 @@ const budgets = {
   // copy, the shared large-history disclosure scheduler, and durable sandbox-file
   // receipt/download controls bring the configured graph to 2,052,836 raw bytes
   // and 571,587 gzip bytes on both macOS/arm64 and Linux/x64. The 2,006/559 KiB
-  // envelopes retain 1,308/829 bytes of headroom.
-  initialRaw: 1448 * kib,
+  // envelopes retain 1,308/829 bytes of headroom. Sites and Advanced
+  // Deployments add feature-gated route registrations and two rail descriptors
+  // to the always-loaded shell while both route implementations remain lazy;
+  // reserve three additional raw KiB for that explicit navigation contract.
+  initialRaw: 1451 * kib,
   initialGzip: 400 * kib,
   // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
   // bun chunking with the channels/For-you rail code; the graph totals above

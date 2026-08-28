@@ -1,0 +1,7 @@
+config:
+  OPENGENI_SITES_ENABLED: "true"
+  OPENGENI_ADVANCED_DEPLOYMENTS_ENABLED: "false"
+
+# Configure the ordinary OpenGeni model catalog so the model named in the Site
+# manifest resolves to the approved local inference endpoint. Put credentials
+# in the existing deployment Secret, never in this file or generated Site code.

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "apiUrl": "https://opengeni.sintef.internal",
+  "workspaceId": "00000000-0000-4000-8000-000000000000",
+  "applicationId": "00000000-0000-4000-8000-000000000000",
+  "applicationRevisionId": "00000000-0000-4000-8000-000000000000",
+  "sourceDirectory": "/path/to/reviewed/opengeni-build-workspace",
+  "dockerfile": "Dockerfile",
+  "imageReference": "registry.sintef.internal/opengeni/materials-demo:reviewed",
+  "architecture": "amd64",
+  "runtime": {
+    "command": ["bun", "run", "start"],
+    "workingDirectory": "/app"
+  },
+  "health": {
+    "path": "/healthz",
+    "port": 3000
+  },
+  "configurationKeys": [
+    "OPENGENI_RUNTIME_URL",
+    "OPENGENI_WORKSPACE_ID",
+    "OPENGENI_INTERNAL_APPLICATION_ID",
+    "OPENGENI_API_KEY",
+    "OPENGENI_DATA_BINDINGS_JSON"
+  ],
+  "staticAssetsDigest": null,
+  "migrationsDigest": null,
+  "apiKeyEnvironment": "OPENGENI_API_KEY"
+}

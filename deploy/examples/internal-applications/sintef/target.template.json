@@ -1,0 +1,39 @@
+{
+  "expectedRevision": 0,
+  "name": "SINTEF local Kubernetes",
+  "description": "Local target for governed internal application demonstrations",
+  "kind": "kubernetes",
+  "environment": "development",
+  "site": "SINTEF Oslo",
+  "config": {
+    "kind": "kubernetes",
+    "apiServer": "https://kubernetes.sintef.internal",
+    "namespace": "opengeni-internal-apps",
+    "serviceAccount": "opengeni-internal-apps",
+    "ingressClass": "nginx-internal",
+    "ingressNamespace": "ingress-nginx",
+    "internalDomain": "apps.sintef.internal",
+    "registry": "registry.sintef.internal",
+    "storageClasses": ["local-path"],
+    "runtimeApiUrl": "http://opengeni-api.opengeni.svc:8000",
+    "runtimeCredentialSecretPrefix": "sintef-app-opengeni-runtime",
+    "dataCredentialSecretPrefix": "sintef-app-data",
+    "allowedEgressCidrs": ["10.20.0.0/16", "10.30.0.0/16"],
+    "credentialConnectionId": "00000000-0000-4000-8000-000000000000"
+  },
+  "capabilities": {
+    "architectures": ["amd64"],
+    "cpuMillicoresMax": 8000,
+    "memoryMiBMax": 32768,
+    "storageMiBMax": 1048576,
+    "gpuTypes": [],
+    "supportsNetworkPolicy": true,
+    "supportsPersistentVolumes": true,
+    "supportsInternalIngress": true,
+    "supportsLocalModelRoute": true
+  },
+  "metadata": {
+    "ownerTeam": "SINTEF research IT"
+  },
+  "status": "active"
+}
