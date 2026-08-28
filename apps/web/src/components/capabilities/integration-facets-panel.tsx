@@ -11,7 +11,7 @@ import {
   SlidersHorizontalIcon,
   Trash2Icon,
 } from "lucide-react";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent } from "react";
 import { toast } from "sonner";
 
@@ -91,7 +91,7 @@ export function IntegrationFacetsPanel({
   refreshRevision,
   GoogleDriveDialog,
 }: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   facetCount: number;

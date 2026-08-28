@@ -1,5 +1,28 @@
 # @opengeni/observability
 
+## 0.8.9
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/contracts@2.7.0
+
+## 0.8.8
+
+### Patch Changes
+
+- 09beefa: Attribute fatal API startup and runtime failures with secret-safe structural diagnostics, drain pending OTLP exports for a bounded interval, and preserve the required nonzero process exit.
+
+## 0.8.7
+
+### Patch Changes
+
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+  - @opengeni/contracts@2.6.0
+
 ## 0.8.6
 
 ### Patch Changes

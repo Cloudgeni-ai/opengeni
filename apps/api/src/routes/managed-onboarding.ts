@@ -309,6 +309,8 @@ async function requireManagedHuman(context: Context, deps: ApiRouteDeps) {
   }
   const session = await getManagedSession(context, deps.managedAuth, {
     db: deps.db,
+    sessionAdapter: deps.managedAuthSessionAdapter,
+    sessionSetMode: deps.settings.managedAuthSessionSetMode,
   });
   if (!session?.user) {
     throw new HTTPException(401, { message: "managed human session required" });

@@ -13,6 +13,7 @@ import {
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
 import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
+import { toolCallIdFromSdkItem } from "./tool-call-identity";
 
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
@@ -313,7 +314,7 @@ export function normalizeSdkEvent(
     pushProtocolEvent({
       type: "agent.toolCall.created",
       payload: {
-        id: raw.callId ?? raw.id ?? item.id ?? null,
+        id: toolCallIdFromSdkItem(raw) ?? raw.id ?? item.id ?? null,
         name: raw.name ?? raw.type ?? "tool",
         arguments: raw.arguments ?? raw.input ?? null,
         raw,
@@ -324,7 +325,7 @@ export function normalizeSdkEvent(
     pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
-        id: item.rawItem?.callId ?? item.id ?? null,
+        id: toolCallIdFromSdkItem(item.rawItem) ?? item.id ?? null,
         // Inline media becomes a content-free audit fact. Model history keeps
         // the provider's real structured image output on its separate path.
         output:
@@ -345,7 +346,9 @@ export function normalizeSdkEvent(
     pushProtocolEvent({
       type: "agent.toolCall.created",
       payload: {
-        id: raw.call_id ?? raw.callId ?? raw.id ?? item.id ?? null,
+        // Preserve the native tool-search wire identity when both SDK aliases
+        // are present; provider metadata remains the additive fallback.
+        id: raw.call_id ?? toolCallIdFromSdkItem(raw) ?? raw.id ?? item.id ?? null,
         name: "tool_search",
         arguments: raw.arguments ?? null,
         raw,
@@ -361,7 +364,7 @@ export function normalizeSdkEvent(
     pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
-        id: raw.call_id ?? raw.callId ?? item.id ?? null,
+        id: raw.call_id ?? toolCallIdFromSdkItem(raw) ?? item.id ?? null,
         output: {
           type: "text",
           text:

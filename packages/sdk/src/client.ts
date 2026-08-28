@@ -163,17 +163,7 @@ import type {
   UninstallPluginResult,
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
-  DocumentAuthorityReclassification,
-  DocumentDefaultCollectionBackfill,
-  DocumentDefaultCollectionBackfillAudit,
-  GetDocumentDefaultCollectionBackfillAuditOptions,
-  ListDocumentDefaultCollectionBackfillRunsResponse,
-  ListOrganizationDocumentAuthorityReclassificationsResponse,
-  ListDocumentAuthorityReclassificationsOptions,
-  ListDocumentAuthorityReclassificationsResponse,
   MoveDocumentRequest,
-  ReclassifyDocumentAuthorityRequest,
-  RunDocumentDefaultCollectionBackfillRequest,
   ClientConfig,
   WorkspaceModelAccessPolicy,
   WorkspaceModelCatalogResponse,
@@ -222,6 +212,8 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   CreateVariableSetRequest,
+  ResolveVariableSetAttachmentsRequest,
+  ResolveVariableSetAttachmentsResponse,
   CreateRigRequest,
   CreateWorkspaceRequest,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
@@ -261,6 +253,8 @@ import type {
   ListOrganizationAdministrationMembersResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
+  AcceptOrganizationRecoveryCustodyRequest,
+  ConfigureOrganizationRecoveryPolicyRequest,
   CreateOrganizationInvitationRequest,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
@@ -268,6 +262,9 @@ import type {
   OrganizationInvitation,
   OrganizationAdministrationOverview,
   OrganizationMember,
+  OrganizationRecoveryMutationResponse,
+  OrganizationRecoveryOperationCommandRequest,
+  OrganizationRecoveryOverview,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
   OrganizationRetentionPolicy,
@@ -278,6 +275,8 @@ import type {
   PutOrganizationWorkspaceMemberRequest,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
+  DisableOrganizationRecoveryPolicyRequest,
+  StartOrganizationRecoveryOperationRequest,
   UpdateOrganizationWorkspaceRequest,
   UpdateOrganizationRetentionPolicyRequest,
   ListPacksResponse,
@@ -324,6 +323,8 @@ import type {
   ForkSessionRequest,
   ForkSessionResponse,
   Session,
+  SessionStatus,
+  WorkClaimSubjectType,
   SessionBackgroundCommandListResponse,
   CancelSessionBackgroundCommandResult,
   SessionListResponse,
@@ -950,10 +951,16 @@ export class OpenGeniClient {
     );
   }
 
-  async getNewSessionDraft(workspaceId: string): Promise<NewSessionDraft> {
+  async getNewSessionDraft(
+    workspaceId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<NewSessionDraft> {
     return await this.requestJson<NewSessionDraft>(
       "GET",
       `/v1/workspaces/${workspaceId}/new-session-draft`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -1189,11 +1196,26 @@ export class OpenGeniClient {
     options: {
       limit?: number;
       parentSessionId?: string | null;
+      rootSessionId?: string;
       cursor?: string;
+      query?: string;
+      /** @deprecated use query. */
       search?: string;
+      statuses?: SessionStatus[];
+      activeOnly?: boolean;
+      recentHours?: number;
+      subject?: {
+        namespace: string;
+        type: WorkClaimSubjectType;
+        canonicalKey: string;
+      };
+      claimLimit?: number;
     } = {},
   ): Promise<AgentTopologyPageResponse> {
-    const search = options.search?.trim();
+    const query = options.query?.trim() || options.search?.trim();
+    if (query && options.subject) {
+      throw new TypeError("listAgentTopology query cannot be combined with an exact subject");
+    }
     return await this.requestJson<AgentTopologyPageResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/agent-topology`,
@@ -1203,8 +1225,22 @@ export class OpenGeniClient {
         ...(options.parentSessionId === undefined
           ? {}
           : { parentSessionId: options.parentSessionId ?? "null" }),
+        ...(options.rootSessionId ? { rootSessionId: options.rootSessionId } : {}),
         ...(options.cursor ? { cursor: options.cursor } : {}),
-        ...(search ? { search } : {}),
+        ...(query ? { query } : {}),
+        ...(options.statuses?.length ? { statuses: options.statuses.join(",") } : {}),
+        ...(options.activeOnly !== undefined
+          ? { activeOnly: options.activeOnly ? "true" : "false" }
+          : {}),
+        ...(options.recentHours !== undefined ? { recentHours: String(options.recentHours) } : {}),
+        ...(options.subject
+          ? {
+              subjectNamespace: options.subject.namespace,
+              subjectType: options.subject.type,
+              subjectKey: options.subject.canonicalKey,
+            }
+          : {}),
+        ...(options.claimLimit !== undefined ? { claimLimit: String(options.claimLimit) } : {}),
       },
     );
   }
@@ -4140,6 +4176,93 @@ export class OpenGeniClient {
     );
   }
 
+  async getOrganizationRecovery(organizationId: string): Promise<OrganizationRecoveryOverview> {
+    return await this.requestJson<OrganizationRecoveryOverview>(
+      "GET",
+      `/v1/organizations/${organizationId}/recovery`,
+    );
+  }
+
+  async configureOrganizationRecoveryPolicy(
+    organizationId: string,
+    request: ConfigureOrganizationRecoveryPolicyRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "PUT",
+      `/v1/organizations/${organizationId}/recovery/policy`,
+      request,
+    );
+  }
+
+  async acceptOrganizationRecoveryCustody(
+    organizationId: string,
+    request: AcceptOrganizationRecoveryCustodyRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/policy/accept`,
+      request,
+    );
+  }
+
+  async disableOrganizationRecoveryPolicy(
+    organizationId: string,
+    request: DisableOrganizationRecoveryPolicyRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/policy/disable`,
+      request,
+    );
+  }
+
+  async startOrganizationRecoveryOperation(
+    organizationId: string,
+    request: StartOrganizationRecoveryOperationRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations`,
+      request,
+    );
+  }
+
+  async approveOrganizationRecoveryOperation(
+    organizationId: string,
+    recoveryOperationId: string,
+    request: OrganizationRecoveryOperationCommandRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/approve`,
+      request,
+    );
+  }
+
+  async cancelOrganizationRecoveryOperation(
+    organizationId: string,
+    recoveryOperationId: string,
+    request: OrganizationRecoveryOperationCommandRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/cancel`,
+      request,
+    );
+  }
+
+  async executeOrganizationRecoveryOperation(
+    organizationId: string,
+    recoveryOperationId: string,
+    request: OrganizationRecoveryOperationCommandRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/execute`,
+      request,
+    );
+  }
+
   async listWorkspaces(): Promise<Workspace[]> {
     return await this.requestJson<Workspace[]>("GET", "/v1/workspaces");
   }
@@ -4805,6 +4928,18 @@ export class OpenGeniClient {
     );
   }
 
+  /** Resolve only caller-supplied attachment ids without enumerating the catalog. */
+  async resolveVariableSetAttachments(
+    workspaceId: string,
+    request: ResolveVariableSetAttachmentsRequest,
+  ): Promise<ResolveVariableSetAttachmentsResponse> {
+    return await this.requestJson<ResolveVariableSetAttachmentsResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/variable-sets/resolve-attachments`,
+      request,
+    );
+  }
+
   async createVariableSet(
     workspaceId: string,
     request: CreateVariableSetRequest,
@@ -5227,10 +5362,17 @@ export class OpenGeniClient {
     );
   }
 
-  async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {
+  async getFile(
+    workspaceId: string,
+    fileId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<FileAsset> {
     return await this.requestJson<FileAsset>(
       "GET",
       `/v1/workspaces/${workspaceId}/files/${fileId}`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -5622,100 +5764,6 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/documents/${documentId}/move`,
       request,
-    );
-  }
-
-  /**
-   * Atomically reclassify a Document's authority and every indexed chunk.
-   * The operation is replay-safe and rejects a stale expected authority tuple.
-   */
-  async reclassifyDocumentAuthority(
-    workspaceId: string,
-    documentId: string,
-    request: ReclassifyDocumentAuthorityRequest,
-  ): Promise<DocumentAuthorityReclassification> {
-    return await this.requestJson<DocumentAuthorityReclassification>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications`,
-      request,
-    );
-  }
-
-  /** List the current actor's durable authority-reclassification receipts. */
-  async listDocumentAuthorityReclassifications(
-    workspaceId: string,
-    documentId: string,
-    options: ListDocumentAuthorityReclassificationsOptions = {},
-  ): Promise<ListDocumentAuthorityReclassificationsResponse> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor) params.set("cursor", options.cursor);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.requestJson<ListDocumentAuthorityReclassificationsResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications${query}`,
-    );
-  }
-
-  /**
-   * Advance one resumable, organization-scoped Default collection backfill.
-   * Reusing an operation ID is idempotent; keep the run ID across batches.
-   */
-  async runDocumentDefaultCollectionBackfill(
-    workspaceId: string,
-    request: RunDocumentDefaultCollectionBackfillRequest,
-  ): Promise<DocumentDefaultCollectionBackfill> {
-    return await this.requestJson<DocumentDefaultCollectionBackfill>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/document-default-collection-backfills`,
-      request,
-    );
-  }
-
-  /** List organization-scoped Default collection backfill runs (organization admin only). */
-  async listDocumentDefaultCollectionBackfillRuns(
-    workspaceId: string,
-    options: ListDocumentAuthorityReclassificationsOptions = {},
-  ): Promise<ListDocumentDefaultCollectionBackfillRunsResponse> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor) params.set("cursor", options.cursor);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.requestJson<ListDocumentDefaultCollectionBackfillRunsResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-default-collection-backfills${query}`,
-    );
-  }
-
-  /** Read bounded operation and workspace receipts for one Default-collection backfill run. */
-  async getDocumentDefaultCollectionBackfillAudit(
-    workspaceId: string,
-    runId: string,
-    options: GetDocumentDefaultCollectionBackfillAuditOptions = {},
-  ): Promise<DocumentDefaultCollectionBackfillAudit> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.operationCursor) params.set("operationCursor", options.operationCursor);
-    if (options.receiptCursor) params.set("receiptCursor", options.receiptCursor);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.requestJson<DocumentDefaultCollectionBackfillAudit>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-default-collection-backfills/${runId}${query}`,
-    );
-  }
-
-  /** List organization-wide Document authority changes (organization admin only). */
-  async listOrganizationDocumentAuthorityReclassifications(
-    workspaceId: string,
-    options: ListDocumentAuthorityReclassificationsOptions = {},
-  ): Promise<ListOrganizationDocumentAuthorityReclassificationsResponse> {
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set("limit", String(options.limit));
-    if (options.cursor) params.set("cursor", options.cursor);
-    const query = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.requestJson<ListOrganizationDocumentAuthorityReclassificationsResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-authority-reclassifications${query}`,
     );
   }
 

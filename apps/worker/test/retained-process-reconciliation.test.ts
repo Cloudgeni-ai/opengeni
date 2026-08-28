@@ -20,6 +20,7 @@ import {
   readLease,
   recordRetainedProcessReconciliationProof,
   releaseLeaseHolder,
+  requestSessionTurnRecovery,
   retainedProcessSettlementIdentity,
   retainWorkspaceMutationProcess,
   SandboxRetainedProcessPromotionFencedError,
@@ -41,6 +42,8 @@ import {
   classifyRetainedProcessPollResult,
   createSandboxLeaseActivities,
   probeRetainedProcessAtProvider,
+  RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
+  RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
   type HistoricalModalSandboxLifecycleProbeFn,
   type RetainedProcessProbeFn,
 } from "../src/activities/sandbox-lease";
@@ -87,6 +90,7 @@ type WorkspaceIds = {
 type TurnFixture = {
   sessionId: string;
   turnId: string;
+  triggerEventId: string;
   attemptId: string;
   executionGeneration: number;
   holderId: `turn-attempt:${string}`;
@@ -153,6 +157,7 @@ async function freshTurn(ids: WorkspaceIds): Promise<TurnFixture> {
   return {
     sessionId: session.id,
     turnId: claim.turn.id,
+    triggerEventId: claim.turn.triggerEventId,
     attemptId,
     executionGeneration: claim.turn.executionGeneration,
     holderId: sandboxLeaseHolderIdForAttempt(attemptId),
@@ -849,6 +854,54 @@ describe("retained-process terminal-owner reconciliation", () => {
     });
   }, 60_000);
 
+  test("repeated missing Modal binding is quarantined without releasing its blocker", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    await admin`
+      update sandbox_leases set
+        lease_epoch = lease_epoch + 1,
+        instance_id = 'successor-modal-sandbox'
+      where id = ${fixture.leaseId}`;
+    await admin`
+      update sandbox_retained_processes set
+        provider_binding_key = null,
+        provider_binding = null,
+        reconcile_attempts = ${RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS - 1},
+        reconcile_after = now()
+      where id = ${fixture.process.id}`;
+    const before = await settlementProjection(fixture);
+    const startedAt = Date.now();
+
+    const observability = await runReaper(
+      async () => {
+        throw new Error("successor lease must not probe the historical process");
+      },
+      async () => ({
+        status: "not_found",
+        providerBindingKey: MODAL_PROVIDER_BINDING.key,
+        providerBinding: MODAL_PROVIDER_BINDING.binding,
+      }),
+    );
+
+    const process = await durableProcess(fixture);
+    expect(process).toMatchObject({
+      state: "active",
+      providerBindingKey: null,
+      providerBinding: null,
+      reconcileClaimId: null,
+      reconcileAttempts: RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
+      lastReconcileOutcome: "quarantined_provider_binding_missing",
+      reconcileProofOutcome: null,
+    });
+    expect(new Date(process.reconcileAfter).getTime()).toBeGreaterThanOrEqual(
+      startedAt + RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS - 5_000,
+    );
+    expect(await settlementProjection(fixture)).toEqual(before);
+    expect(await observability.prometheusMetrics()).toMatch(
+      /opengeni_retained_process_reconciliation_total\{[^}]*outcome="quarantined_binding_missing"[^}]*\} 1/,
+    );
+  }, 60_000);
+
   test("claims every closed terminal/recovery attempt and direct owner, but not a live attempt", async () => {
     if (!available) return;
     const expected = new Map<string, string>();
@@ -1262,6 +1315,73 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(metrics).toMatch(
       /opengeni_retained_process_reconciliation_total\{[^}]*outcome="settled_exited"[^}]*\} 1/,
     );
+  }, 60_000);
+
+  test("retained-process settlement atomically advances a recoverable attempt wake", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess();
+    expect(fixture.attempt).toBeDefined();
+    const attempt = fixture.attempt!;
+    expect(
+      await requestSessionTurnRecovery(db, fixture.workspaceId, {
+        sessionId: fixture.sessionId,
+        turnId: attempt.turnId,
+        triggerEventId: attempt.triggerEventId,
+        attemptId: attempt.attemptId,
+        reason: "worker_shutdown",
+      }),
+    ).toMatchObject({ action: "recovering" });
+    const [before] = await admin<
+      { wakeRevision: number; deliveredRevision: number; reason: string }[]
+    >`
+      select wake_revision::int as "wakeRevision",
+        delivered_revision::int as "deliveredRevision", reason
+      from session_workflow_wake_outbox
+      where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.sessionId}`;
+    expect(before?.reason).toBe("turn_recovery_requested");
+
+    const settled = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(fixture.process),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider_exit_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    expect(settled.settled).toBe(true);
+    const [after] = await admin<
+      { wakeRevision: number; deliveredRevision: number; reason: string }[]
+    >`
+      select wake_revision::int as "wakeRevision",
+        delivered_revision::int as "deliveredRevision", reason
+      from session_workflow_wake_outbox
+      where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.sessionId}`;
+    expect(after).toEqual({
+      wakeRevision: before!.wakeRevision + 1,
+      deliveredRevision: before!.deliveredRevision,
+      reason: "retained_process_settled_quiescence",
+    });
+
+    const replay = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(settled.process),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider_exit_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    expect(replay.settled).toBe(false);
+    const [afterReplay] = await admin<{ wakeRevision: number }[]>`
+      select wake_revision::int as "wakeRevision"
+      from session_workflow_wake_outbox
+      where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.sessionId}`;
+    expect(afterReplay?.wakeRevision).toBe(after!.wakeRevision);
   }, 60_000);
 
   test("copied identity, claim, and admission fences reject; durable proof safely removes a superseded holder", async () => {

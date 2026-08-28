@@ -6,6 +6,7 @@ import {
   RUNTIME_READ_INSERT_UPDATE_TABLES,
   RUNTIME_READ_ONLY_TABLES,
   RUNTIME_READ_UPDATE_TABLES,
+  WORK_CLAIM_CAPABILITY_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -482,6 +483,7 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadUpdateTables = `ARRAY[${RUNTIME_READ_UPDATE_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertTables = `ARRAY[${RUNTIME_READ_INSERT_TABLES.map(literal).join(", ")}]`;
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
+  const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
     "list_self_organization_memberships(text)",
     "list_self_organization_invitations(text)",
@@ -530,6 +532,31 @@ async function grantAppRoleIfSchemaExists(
     "fail_organization_retention_deletion(uuid,uuid,uuid,text)",
     "finalize_organization_retention_deletion(uuid,uuid,uuid,text)",
     "complete_organization_retention_deletion(uuid,uuid,uuid,text)",
+  ]
+    .map(literal)
+    .join(", ")}]`;
+  const managedAuthSessionSetRoutines = `ARRAY[${[
+    "get_canonical_human_exact_login_binding(text,text)",
+    "managed_auth_session_set_authority_state(text)",
+    "managed_auth_session_set_snapshot(text,text,boolean,boolean,boolean)",
+    "managed_auth_session_set_bootstrap(text,text,text,text,uuid,text,bigint,bigint)",
+    "managed_auth_session_set_begin_transaction(text,text,text,uuid,text,bigint,uuid,bigint,text,text,uuid,uuid,text,timestamp with time zone)",
+    "managed_auth_session_set_complete_transaction(text,text,uuid,text,bigint,bigint,uuid,text,text,text)",
+    "managed_auth_session_set_mutate(text,text,uuid,text,bigint,bigint,text,uuid,uuid,uuid,text,text)",
+    "managed_auth_actor_mutation_fence(text,bigint,uuid)",
+    "managed_auth_actor_mutation_lease_acquire(text,bigint,uuid,integer)",
+    "managed_auth_actor_mutation_lease_release(text,uuid)",
+    "managed_auth_actor_mutation_lease_validate(text,bigint,uuid)",
+    "managed_auth_adopted_session_snapshot(text)",
+    "managed_auth_isolated_session_reap(integer)",
+    "managed_auth_expired_session_set_reap(integer)",
+    "managed_auth_session_set_operation_receipt(text,uuid,text,text)",
+  ]
+    .map(literal)
+    .join(", ")}]`;
+  const organizationRecoveryRoutines = `ARRAY[${[
+    "get_organization_recovery_overview(uuid,text,jsonb,text,text)",
+    "organization_recovery_command(jsonb)",
   ]
     .map(literal)
     .join(", ")}]`;
@@ -972,6 +999,22 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Migration 0365 creates the advisory work-claim mutation capabilities
+    -- before a custom runtime role may exist. Re-converge their exact grants
+    -- for migrate-then-provision installs without exposing claim history or
+    -- the write-capability ledger to direct runtime DML.
+    FOREACH routine_signature IN ARRAY ${workClaimCapabilityRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     IF to_regprocedure(
       format(
         '%I.workspace_instruction_policy_get_or_create_snapshot(uuid,uuid,uuid,uuid,uuid,integer)',
@@ -1226,6 +1269,30 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    FOREACH routine_signature IN ARRAY ${managedAuthSessionSetRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    FOREACH routine_signature IN ARRAY ${organizationRecoveryRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- Migration 0225 creates these target-schema-local session visibility
     -- capabilities before opengeni_app may exist. Re-converge their exact
     -- EXECUTE grants for migrate-then-provision installs without granting
@@ -1593,6 +1660,11 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(format('%I.issue_self_local_connection_use_grant(uuid,uuid,uuid,text,boolean)', ${literal(schema)}))
+      IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(format('%I.resolve_connection_use_authority(uuid,uuid,uuid,jsonb)', ${literal(schema)}))
       IS NOT NULL THEN

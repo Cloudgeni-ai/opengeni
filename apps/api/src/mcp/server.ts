@@ -45,6 +45,16 @@ import {
   TASK_NOTE_MAX_LIFETIME_DAYS,
   TASK_NOTE_REASON_MAX_BYTES,
   TASK_NOTE_TEXT_MAX_BYTES,
+  WORK_CLAIM_CANONICAL_KEY_MAX_BYTES,
+  WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES,
+  WORK_CLAIM_DISCOVERY_LIMIT,
+  WORK_CLAIM_NAMESPACE_MAX_BYTES,
+  WORK_CLAIM_VERSION_VALUE_MAX_BYTES,
+  WORK_DISCOVERY_QUERY_MAX_CHARS,
+  WORK_DISCOVERY_RECENT_HOURS_MAX,
+  WorkClaimSubjectType,
+  type WorkClaimSubjectFilter,
+  type SessionStatus,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/contracts";
 import {
@@ -104,6 +114,8 @@ import {
   createTaskNote,
   listTaskNotes,
   replaceTaskNote,
+  releaseWorkClaim,
+  upsertWorkClaim,
   acceptSessionHumanInputResponse,
   HumanInputResponseValidationError,
 } from "@opengeni/db";
@@ -186,7 +198,7 @@ import {
 import {
   acceptSessionUserMessageWithOutcome,
   controlAgentSessionWorkstream,
-  controlHumanSessionWorkstream,
+  controlHumanSessionWorkstreamWithOutcome,
   createSessionForRequestWithOutcome,
   SessionSpawnDeniedError,
   sessionSpawnDenialEnvelope,
@@ -223,7 +235,11 @@ import {
   SESSION_WAIT_MAX_TARGETS,
   waitForSessionChanges,
 } from "./session-wait";
-import { mcpMutationReceipt, sessionCreateMutationReceipt } from "./receipts";
+import {
+  mcpMutationReceipt,
+  sessionControlMutationReceipt,
+  sessionCreateMutationReceipt,
+} from "./receipts";
 import {
   boundScheduledTaskDetailMcp,
   boundScheduledTaskMcpPage,
@@ -247,6 +263,7 @@ import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-a
 import { registerRememberTools } from "./remember";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
+import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -406,6 +423,8 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   task_note_save: { sessionRequired: true, allOf: ["sessions:control"] },
   task_note_archive: { sessionRequired: true, allOf: ["sessions:control"] },
   task_note_replace: { sessionRequired: true, allOf: ["sessions:control"] },
+  work_claim_upsert: { sessionRequired: true, allOf: ["sessions:control"] },
+  work_claim_release: { sessionRequired: true, allOf: ["sessions:control"] },
   knowledge_propose: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_correct: { sessionRequired: true, allOf: ["documents:search"] },
   task_note_promote_knowledge: {
@@ -787,6 +806,9 @@ export function buildOpenGeniMcpServer(
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
     registerTaskNoteTools(server, deps, grant, sessionId, json);
+    if (deps.settings.workClaimMutationsEnabled) {
+      registerWorkClaimTools(server, deps, grant, sessionId, json);
+    }
     const attempt = exactAgentAttemptClaims(grant)!;
     registerCompanyBrainGovernedWriteTools({
       server,
@@ -3237,6 +3259,133 @@ function registerTaskNoteTools(
   );
 }
 
+function registerWorkClaimTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  const attemptClaims = () => {
+    const resolved = exactAgentAttemptClaims(grant);
+    if (!resolved || resolved.sessionId !== sessionId) {
+      throw new Error("Exact signed work-claim attempt authority is required.");
+    }
+    return {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      ...resolved,
+    };
+  };
+  const authorize = async () => {
+    await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+  };
+
+  server.registerTool(
+    "work_claim_upsert",
+    {
+      description:
+        "Create or refresh one typed, non-exclusive claim describing this session's current external work. Claims are advisory evidence, never locks or authority. Use stable public identifiers only; never put credentials, tokens, or other secrets in claim fields. expectedRevision=0 creates a new active claim; refreshing an existing active claim requires its exact revision. Use a fresh operationId; an exact retry from a replacement attempt on the same logical turn replays safely.",
+      inputSchema: {
+        operationId: z4.string().uuid(),
+        expectedRevision: z4.number().int().min(0),
+        subjectNamespace: z4.string().min(1).max(WORK_CLAIM_NAMESPACE_MAX_BYTES),
+        subjectType: z4.enum([
+          "repository",
+          "branch",
+          "pull_request",
+          "issue",
+          "artifact",
+          "release",
+          "ci_run",
+          "other",
+        ]),
+        canonicalKey: z4.string().min(1).max(WORK_CLAIM_CANONICAL_KEY_MAX_BYTES),
+        displayLabel: z4.string().min(1).max(WORK_CLAIM_DISPLAY_LABEL_MAX_BYTES).optional(),
+        role: z4.enum(["working", "reviewing", "monitoring", "delivering"]),
+        versionKind: z4
+          .enum([
+            "git_commit",
+            "branch_head",
+            "pull_request_head",
+            "artifact_version",
+            "release_version",
+            "ci_run",
+            "other",
+          ])
+          .optional(),
+        versionValue: z4.string().min(1).max(WORK_CLAIM_VERSION_VALUE_MAX_BYTES).optional(),
+      },
+    },
+    async ({
+      operationId,
+      expectedRevision,
+      subjectNamespace,
+      subjectType,
+      canonicalKey,
+      displayLabel,
+      role,
+      versionKind,
+      versionValue,
+    }) => {
+      await authorize();
+      if ((versionKind === undefined) !== (versionValue === undefined)) {
+        throw new Error("work_claim_upsert versionKind and versionValue must be supplied together");
+      }
+      return json(
+        await upsertWorkClaim(deps.db, {
+          ...attemptClaims(),
+          operationId,
+          expectedRevision,
+          subjectNamespace,
+          subjectType,
+          canonicalKey,
+          ...(displayLabel === undefined ? {} : { displayLabel }),
+          role,
+          ...(versionKind && versionValue
+            ? { version: { kind: versionKind, value: versionValue } }
+            : {}),
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "work_claim_release",
+    {
+      description:
+        "Release one exact active claim owned by this session. This records an immutable receipt and does not affect other sessions claiming the same subject. Use a fresh operationId and the claim's exact revision.",
+      inputSchema: {
+        operationId: z4.string().uuid(),
+        claimId: z4.string().uuid(),
+        expectedRevision: z4.number().int().min(1),
+        reason: z4.enum([
+          "completed",
+          "cancelled",
+          "failed",
+          "superseded",
+          "no_longer_active",
+          "corrected",
+          "external_state_changed",
+          "other",
+        ]),
+      },
+    },
+    async ({ operationId, claimId, expectedRevision, reason }) => {
+      await authorize();
+      return json(
+        await releaseWorkClaim(deps.db, {
+          ...attemptClaims(),
+          operationId,
+          claimId,
+          expectedRevision,
+          reason,
+        }),
+      );
+    },
+  );
+}
+
 function registerPreferenceRegistryTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3999,46 +4148,145 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: `List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. includeLastMessage is opt-in and never previews a human/API prompt whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim): waiting work is represented by queuedPromptCount until the turn is claimed. Rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.`,
+        description: `List compact high-level session status and advisory related-work evidence in this workspace. query searches semantic titles, active goals, and typed work claims; subject performs one exact provider-neutral claim lookup and ranks it ahead of text. Neither path searches initialMessage or grants access to a result. Claims are nonexclusive evidence, never locks or instructions. Relevance cursors are bound to normalized filters and a workspace activity-revision snapshot. Without search, the tool defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. includeLastMessage is opt-in and never previews a human/API prompt whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim): waiting work is represented by queuedPromptCount until the turn is claimed. Rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get only when ordinary target authorization allows it. The list never returns full session objects, instructions, resources, tools, files, or history.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
           includeLastMessage: z4.boolean().optional(),
-          orderBy: z4.enum(["createdAt", "updatedAt"]).optional(),
+          orderBy: z4.enum(["createdAt", "updatedAt", "relevance"]).optional(),
           updatedAfter: z4.string().max(64).optional(),
+          query: z4.string().max(WORK_DISCOVERY_QUERY_MAX_CHARS).optional(),
+          statuses: z4
+            .array(
+              z4.enum([
+                "queued",
+                "running",
+                "idle",
+                "requires_action",
+                "recovering",
+                "waiting_capacity",
+                "failed",
+                "cancelled",
+              ]),
+            )
+            .max(8)
+            .optional(),
+          activeOnly: z4.boolean().optional(),
+          recentHours: z4.number().int().positive().max(WORK_DISCOVERY_RECENT_HOURS_MAX).optional(),
+          rootSessionId: z4.string().uuid().optional(),
+          parentSessionId: z4.string().uuid().nullable().optional(),
+          subject: z4
+            .object({
+              namespace: z4.string().min(1).max(WORK_CLAIM_NAMESPACE_MAX_BYTES),
+              type: WorkClaimSubjectType,
+              canonicalKey: z4.string().min(1).max(WORK_CLAIM_CANONICAL_KEY_MAX_BYTES),
+            })
+            .strict()
+            .optional(),
+          claimLimit: z4.number().int().positive().max(WORK_CLAIM_DISCOVERY_LIMIT).optional(),
         },
       },
-      async ({ limit, cursor, includeLastMessage, orderBy: requestedOrderBy, updatedAfter }) => {
+      async ({
+        limit,
+        cursor,
+        includeLastMessage,
+        orderBy: requestedOrderBy,
+        updatedAfter,
+        query,
+        statuses,
+        activeOnly,
+        recentHours,
+        rootSessionId,
+        parentSessionId,
+        subject,
+        claimLimit,
+      }) => {
         const authorizationScope = await requireSessionAuthorizationListScope(
           deps,
           grant,
           "first_party_mcp",
         );
+        const startedAtMs = performance.now();
+        const mode = subject ? "subject" : query?.trim() ? "query" : "browse";
+        const metricAuthorizationScope =
+          authorizationScope?.kind === "scoped" ? "scoped" : "workspace";
         const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
-        const orderBy: SessionDiscoveryOrderBy =
-          requestedOrderBy ?? decodedCursor?.orderBy ?? "createdAt";
-        if (decodedCursor && decodedCursor.orderBy !== orderBy) {
-          throw new Error("sessions_list cursor order does not match orderBy");
+        const relevanceRequested = Boolean(query?.trim() || subject);
+        if (relevanceRequested && !deps.settings.workDiscoveryEnabled) {
+          observeWorkDiscovery(deps.observability, {
+            surface: "first_party_mcp",
+            mode,
+            outcome: "disabled",
+            authorizationScope: metricAuthorizationScope,
+            durationMs: performance.now() - startedAtMs,
+            responseBytes: 0,
+            resultCount: 0,
+            overlapCount: 0,
+            matchCounts: {},
+          });
+          throw new Error("sessions_list work discovery is disabled by the operator");
         }
-        const normalizedUpdatedAfter =
-          updatedAfter !== undefined
-            ? normalizeSessionDiscoveryRevision(updatedAfter, "updatedAfter")
-            : (decodedCursor?.updatedAfter ?? undefined);
-        if (normalizedUpdatedAfter !== undefined && orderBy !== "updatedAt") {
-          throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
+        try {
+          const orderBy: SessionDiscoveryOrderBy =
+            requestedOrderBy ??
+            decodedCursor?.orderBy ??
+            (relevanceRequested ? "relevance" : "createdAt");
+          if (decodedCursor && decodedCursor.orderBy !== orderBy) {
+            throw new Error("sessions_list cursor order does not match orderBy");
+          }
+          const normalizedUpdatedAfter =
+            updatedAfter !== undefined
+              ? normalizeSessionDiscoveryRevision(updatedAfter, "updatedAfter")
+              : (decodedCursor?.updatedAfter ?? undefined);
+          if (normalizedUpdatedAfter !== undefined && orderBy !== "updatedAt") {
+            throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
+          }
+          if (decodedCursor && decodedCursor.updatedAfter !== (normalizedUpdatedAfter ?? null)) {
+            throw new Error("sessions_list cursor does not match updatedAfter");
+          }
+          const page = await listSessionDiscoverySummaries(deps.db, grant.workspaceId, {
+            limit: boundedSessionDiscoveryLimit(limit),
+            ...(decodedCursor ? { cursor: decodedCursor } : {}),
+            includeLastMessage: includeLastMessage === true,
+            orderBy,
+            ...(normalizedUpdatedAfter ? { updatedAfter: normalizedUpdatedAfter } : {}),
+            ...(query?.trim() ? { query } : {}),
+            ...(statuses ? { statuses: statuses as SessionStatus[] } : {}),
+            activeOnly: activeOnly === true,
+            ...(recentHours !== undefined ? { recentHours } : {}),
+            ...(rootSessionId ? { rootSessionId } : {}),
+            ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+            ...(subject ? { subject: subject as WorkClaimSubjectFilter } : {}),
+            ...(claimLimit !== undefined ? { claimLimit } : {}),
+            includeWorkDiscovery: deps.settings.workDiscoveryEnabled,
+            subjectId: grant.subjectId,
+            ...(authorizationScope ? { authorizationScope } : {}),
+          });
+          const result = capSessionDiscoveryPage(page, includeLastMessage === true);
+          observeWorkDiscovery(deps.observability, {
+            surface: "first_party_mcp",
+            mode,
+            outcome: result.sessions.length === 0 ? "empty" : "ok",
+            authorizationScope: metricAuthorizationScope,
+            durationMs: performance.now() - startedAtMs,
+            responseBytes: result.bytes,
+            ...summarizeWorkDiscoveryRows(result.sessions),
+          });
+          return json(result);
+        } catch (error) {
+          observeWorkDiscovery(deps.observability, {
+            surface: "first_party_mcp",
+            mode,
+            outcome: "error",
+            authorizationScope: metricAuthorizationScope,
+            durationMs: performance.now() - startedAtMs,
+            responseBytes: 0,
+            resultCount: 0,
+            overlapCount: 0,
+            matchCounts: {},
+          });
+          throw error;
         }
-        if (decodedCursor && decodedCursor.updatedAfter !== (normalizedUpdatedAfter ?? null)) {
-          throw new Error("sessions_list cursor does not match updatedAfter");
-        }
-        const page = await listSessionDiscoverySummaries(deps.db, grant.workspaceId, {
-          limit: boundedSessionDiscoveryLimit(limit),
-          ...(decodedCursor ? { cursor: decodedCursor } : {}),
-          includeLastMessage: includeLastMessage === true,
-          orderBy,
-          ...(normalizedUpdatedAfter ? { updatedAfter: normalizedUpdatedAfter } : {}),
-          ...(authorizationScope ? { authorizationScope } : {}),
-        });
-        return json(capSessionDiscoveryPage(page, includeLastMessage === true));
       },
     );
 
@@ -4537,27 +4785,18 @@ function registerWorkspaceOrchestrationTools(
             controlled.authorization?.relatedSessionAccess ?? "root",
           );
           return json(
-            mcpMutationReceipt({
+            sessionControlMutationReceipt({
               operation: "session_pause",
-              committed: true,
-              outcome: controlled.replay ? "replayed" : "updated",
-              changed: !controlled.replay,
-              resource: {
-                type: "session",
-                id: sessionId,
-                state: effectiveControl.state,
-              },
-              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              sessionId,
+              state: effectiveControl.state,
+              receiptId: controlled.receipt.id,
               timestamp: controlled.receipt.createdAt.toISOString(),
-              idempotency: {
-                status: controlled.replay ? "replayed" : "applied",
-              },
-              facts: { interruptionCount: controlled.interruptionCount },
-              nextAction: { tool: "session_get", arguments: { sessionId } },
+              outcome: controlled.outcome,
+              interruptionCount: controlled.interruptionCount,
             }),
           );
         }
-        const controlled = await controlHumanSessionWorkstream(
+        const controlled = await controlHumanSessionWorkstreamWithOutcome(
           deps,
           {
             accountId: grant.accountId,
@@ -4572,7 +4811,17 @@ function registerWorkspaceOrchestrationTools(
             ...(reason ? { reason } : {}),
           },
         );
-        return json(controlled);
+        return json(
+          sessionControlMutationReceipt({
+            operation: "session_pause",
+            sessionId,
+            state: controlled.response.effectiveControl.state,
+            receiptId: controlled.response.receipt.id,
+            timestamp: controlled.response.receipt.createdAt,
+            outcome: controlled.outcome,
+            interruptionCount: controlled.response.interruptionCount,
+          }),
+        );
       },
     );
 
@@ -4605,27 +4854,18 @@ function registerWorkspaceOrchestrationTools(
             controlled.authorization?.relatedSessionAccess ?? "root",
           );
           return json(
-            mcpMutationReceipt({
+            sessionControlMutationReceipt({
               operation: "session_resume",
-              committed: true,
-              outcome: controlled.replay ? "replayed" : "updated",
-              changed: !controlled.replay,
-              resource: {
-                type: "session",
-                id: sessionId,
-                state: effectiveControl.state,
-              },
-              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              sessionId,
+              state: effectiveControl.state,
+              receiptId: controlled.receipt.id,
               timestamp: controlled.receipt.createdAt.toISOString(),
-              idempotency: {
-                status: controlled.replay ? "replayed" : "applied",
-              },
-              facts: { interruptionCount: controlled.interruptionCount },
-              nextAction: { tool: "session_get", arguments: { sessionId } },
+              outcome: controlled.outcome,
+              interruptionCount: controlled.interruptionCount,
             }),
           );
         }
-        const controlled = await controlHumanSessionWorkstream(
+        const controlled = await controlHumanSessionWorkstreamWithOutcome(
           deps,
           {
             accountId: grant.accountId,
@@ -4640,7 +4880,17 @@ function registerWorkspaceOrchestrationTools(
             ...(reason ? { reason } : {}),
           },
         );
-        return json(controlled);
+        return json(
+          sessionControlMutationReceipt({
+            operation: "session_resume",
+            sessionId,
+            state: controlled.response.effectiveControl.state,
+            receiptId: controlled.response.receipt.id,
+            timestamp: controlled.response.receipt.createdAt,
+            outcome: controlled.outcome,
+            interruptionCount: controlled.response.interruptionCount,
+          }),
+        );
       },
     );
 
@@ -4741,13 +4991,13 @@ function registerWorkspaceOrchestrationTools(
             });
           }
           if (accepted.action === "conflict") {
-            throw new Error(`human-input request is ${accepted.request.status}`);
+            throw new Error("human-input request is not currently actionable");
           }
           return json(
             mcpMutationReceipt({
               operation: "session_human_input_respond",
               committed: true,
-              outcome: accepted.events.length === 0 ? "replayed" : "updated",
+              outcome: accepted.action === "completed" ? "replayed" : "updated",
               changed: accepted.events.length > 0,
               resource: {
                 type: "session_human_input_request",
@@ -4757,7 +5007,7 @@ function registerWorkspaceOrchestrationTools(
               relatedResources: [{ type: "session", id: sessionId }],
               timestamp: accepted.request.respondedAt ?? new Date().toISOString(),
               idempotency: {
-                status: accepted.events.length === 0 ? "replayed" : "applied",
+                status: accepted.action === "completed" ? "replayed" : "applied",
               },
               facts: { outcome: accepted.request.response?.outcome ?? null },
               nextAction: { tool: "session_get", arguments: { sessionId } },
@@ -5464,10 +5714,12 @@ function boundedSessionDiscoveryLimit(limit: number | undefined): number {
 }
 
 export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): string {
+  const relevance = cursor.orderBy === "relevance";
   return Buffer.from(
     JSON.stringify({
-      v: 2,
+      v: relevance ? 3 : 2,
       orderBy: cursor.orderBy,
+      ...(relevance ? { sortRank: cursor.sortRank, filterHash: cursor.filterHash } : {}),
       sortRevision: cursor.sortRevision,
       sortAt: cursor.sortAt,
       id: cursor.id,
@@ -5517,6 +5769,8 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       snapshotAt?: unknown;
       snapshotRevision?: unknown;
       updatedAfter?: unknown;
+      sortRank?: unknown;
+      filterHash?: unknown;
     };
     if (
       parsed.v === undefined &&
@@ -5530,12 +5784,14 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       );
       return {
         orderBy: "createdAt",
+        sortRank: null,
         sortRevision: "0",
         sortAt: createdAt,
         id: parsed.id,
         snapshotAt: createdAt,
         snapshotRevision: "0",
         updatedAfter: null,
+        filterHash: null,
       };
     }
     // The timestamp-fenced v1 format was never safe for updated-order
@@ -5552,17 +5808,22 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     ) {
       return {
         orderBy: "createdAt",
+        sortRank: null,
         sortRevision: "0",
         sortAt: normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt"),
         id: parsed.id,
         snapshotAt: normalizeSessionDiscoveryTimestamp(parsed.snapshotAt, "cursor snapshotAt"),
         snapshotRevision: "0",
         updatedAfter: null,
+        filterHash: null,
       };
     }
+    const isV2 = parsed.v === 2;
+    const isV3 = parsed.v === 3;
     if (
-      parsed.v !== 2 ||
-      (parsed.orderBy !== "createdAt" && parsed.orderBy !== "updatedAt") ||
+      (!isV2 && !isV3) ||
+      (isV2 && parsed.orderBy !== "createdAt" && parsed.orderBy !== "updatedAt") ||
+      (isV3 && parsed.orderBy !== "relevance") ||
       typeof parsed.sortRevision !== "string" ||
       typeof parsed.sortAt !== "string" ||
       typeof parsed.snapshotAt !== "string" ||
@@ -5572,6 +5833,18 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       !SESSION_DISCOVERY_UUID.test(parsed.id)
     ) {
       throw new Error("invalid cursor fields");
+    }
+    if (
+      isV3 &&
+      (!Number.isSafeInteger(parsed.sortRank) ||
+        (parsed.sortRank as number) < 0 ||
+        typeof parsed.filterHash !== "string" ||
+        !/^[0-9a-f]{64}$/.test(parsed.filterHash))
+    ) {
+      throw new Error("invalid relevance cursor fields");
+    }
+    if (isV2 && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
+      throw new Error("chronological cursor cannot carry relevance fields");
     }
     const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
     const snapshotAt = normalizeSessionDiscoveryTimestamp(parsed.snapshotAt, "cursor snapshotAt");
@@ -5593,14 +5866,19 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     if (parsed.orderBy === "createdAt" && (sortRevision !== "0" || snapshotRevision !== "0")) {
       throw new Error("creation cursor cannot carry activity revisions");
     }
+    const orderBy: SessionDiscoveryOrderBy = isV3
+      ? "relevance"
+      : (parsed.orderBy as "createdAt" | "updatedAt");
     return {
-      orderBy: parsed.orderBy,
+      orderBy,
+      sortRank: isV3 ? (parsed.sortRank as number) : null,
       sortRevision,
       sortAt,
       id: parsed.id,
       snapshotAt,
       snapshotRevision,
       updatedAfter: normalizedUpdatedAfter,
+      filterHash: isV3 ? (parsed.filterHash as string) : null,
     };
   } catch {
     throw new Error("sessions_list cursor is invalid");
@@ -5691,6 +5969,7 @@ export function capSessionDiscoveryPage(
         : null,
       queuedPromptCount: session.queuedPromptCount,
       children: session.treeStats,
+      relatedWork: session.workDiscovery,
       ...(includeLastMessage
         ? {
             latestMessage: session.latestMessage
@@ -5768,12 +6047,14 @@ export function capSessionDiscoveryPage(
       ? sourceLast
         ? encodeSessionDiscoveryCursor({
             orderBy: page.orderBy,
+            sortRank: sourceLast.sortRank,
             sortRevision: sourceLast.sortRevision,
             sortAt: sourceLast.sortAt,
             id: sourceLast.id,
             snapshotAt: page.snapshotAt,
             snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
+            filterHash: page.filterHash,
           })
         : null
       : page.nextCursor

@@ -285,6 +285,79 @@ describe("useFileAttachments", () => {
     await hook.unmount();
   });
 
+  test("send removal keeps an open preview URL alive until its lease releases", async () => {
+    const asset = fakeAsset({ id: "sent-file" });
+    const client = fakeClient({ uploadFile: async () => asset });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("sent.png")]));
+    await flush();
+    const attachment = hook.result.current.attachments[0]!;
+    const previewUrl = attachment.previewUrl!;
+    const releasePreview = hook.result.current.retainPreview(attachment.id);
+
+    expect(releasePreview).toBeFunction();
+    await flushing(() => hook.result.current.removeReadyFiles([asset.id]));
+    expect(hook.result.current.attachments).toEqual([]);
+    expect(revoked).not.toContain(previewUrl);
+
+    releasePreview?.();
+    releasePreview?.();
+    expect(revoked.filter((url) => url === previewUrl)).toHaveLength(1);
+    await hook.unmount();
+    expect(revoked.filter((url) => url === previewUrl)).toHaveLength(1);
+  });
+
+  test("explicit attachment removal keeps an open preview alive until close", async () => {
+    const client = fakeClient({ uploadFile: async () => fakeAsset() });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("removed.png")]));
+    const attachment = hook.result.current.attachments[0]!;
+    const previewUrl = attachment.previewUrl!;
+    const releasePreview = hook.result.current.retainPreview(attachment.id);
+
+    await flushing(() => hook.result.current.remove(attachment.id));
+    expect(hook.result.current.attachments).toEqual([]);
+    expect(revoked).not.toContain(previewUrl);
+
+    releasePreview?.();
+    expect(revoked.filter((url) => url === previewUrl)).toHaveLength(1);
+    await hook.unmount();
+  });
+
+  test("clear and hook unmount defer retained preview cleanup until every holder releases", async () => {
+    const client = fakeClient({ uploadFile: async () => fakeAsset() });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("retained.png")]));
+    const attachment = hook.result.current.attachments[0]!;
+    const previewUrl = attachment.previewUrl!;
+    const releaseFirst = hook.result.current.retainPreview(attachment.id);
+    const releaseSecond = hook.result.current.retainPreview(attachment.id);
+
+    await flushing(() => hook.result.current.clear());
+    expect(hook.result.current.attachments).toEqual([]);
+    expect(revoked).not.toContain(previewUrl);
+
+    releaseFirst?.();
+    expect(revoked).not.toContain(previewUrl);
+    await hook.unmount();
+    expect(revoked).not.toContain(previewUrl);
+
+    releaseSecond?.();
+    expect(revoked.filter((url) => url === previewUrl)).toHaveLength(1);
+  });
+
   for (const operation of ["restoreReadyFiles", "removeReadyFiles"] as const) {
     test(`${operation} does not revoke a committed preview from an abandoned render`, async () => {
       const asset = fakeAsset({ id: `${operation}-ready` });

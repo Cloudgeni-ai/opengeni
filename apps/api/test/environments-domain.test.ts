@@ -71,3 +71,42 @@ describe("environment encryption guard", () => {
     expect(key.length).toBe(32);
   });
 });
+
+describe("variable set attachment metadata surface", () => {
+  test("uses attach/use authority without widening the metadata catalog permissions", async () => {
+    const source = await Bun.file(new URL("../src/routes/environments.ts", import.meta.url)).text();
+    const start = source.indexOf("app.post(`${prefix}/resolve-attachments`");
+    const end = source.indexOf("app.get(`${prefix}/:variableSetId`", start);
+    const resolver = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(resolver).toContain('requirePermission(grant, "variable-sets:attach")');
+    expect(resolver).toContain('requirePermission(grant, "variable-sets:use")');
+    expect(resolver).not.toContain('"variable-sets:list"');
+    expect(resolver).not.toContain('"secrets:list"');
+    expect(resolver).toContain("resolveVariableSetAttachments(");
+    expect(resolver).not.toContain("Promise.all(");
+    expect(resolver).not.toContain("getVariableSet(");
+  });
+
+  test("resolves requested ids set-wise in one transaction-pinned RLS scope", async () => {
+    const source = await Bun.file(
+      new URL("../../../packages/db/src/index.ts", import.meta.url),
+    ).text();
+    const start = source.indexOf("export async function resolveVariableSetAttachments(");
+    const end = source.indexOf("export async function getVariableSet(", start);
+    const resolver = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(resolver.match(/withRlsContext\(/gu)?.length).toBe(1);
+    expect(resolver).toContain("setSubjectRlsContext(scopedDb, context.subjectId)");
+    expect(resolver).toContain("const requestedValues = sql.join(");
+    expect(resolver).toContain("values ${requestedValues}");
+    expect(resolver).toContain("cross join lateral list_scoped_variable_sets(");
+    expect(resolver).toContain("order by requested.ordinal");
+    expect(resolver).not.toContain("Promise.all(");
+    expect(resolver).not.toContain(".map(async");
+  });
+});

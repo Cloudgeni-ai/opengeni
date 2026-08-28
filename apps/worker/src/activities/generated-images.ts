@@ -50,7 +50,10 @@ export type RetainedGeneratedImage = {
 };
 
 export class GeneratedImageValidationError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly reason?: ScreenshotValidationError["reason"],
+  ) {
     super(message);
     this.name = "GeneratedImageValidationError";
   }
@@ -211,7 +214,7 @@ export function validateGeneratedImage(input: {
     );
   } catch (error) {
     if (error instanceof ScreenshotValidationError) {
-      throw new GeneratedImageValidationError(error.message);
+      throw new GeneratedImageValidationError(error.message, error.reason);
     }
     throw error;
   }

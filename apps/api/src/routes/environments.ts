@@ -1,5 +1,7 @@
 import {
   CreateVariableSetRequest,
+  ResolveVariableSetAttachmentsRequest,
+  ResolveVariableSetAttachmentsResponse,
   SetVariableSetVariableRequest,
   UpdateVariableSetRequest,
   VariableSetVariableName,
@@ -14,6 +16,7 @@ import {
   getVariableSetByName,
   listVariableSets,
   readVariableSetSecretAtomically,
+  resolveVariableSetAttachments,
   setVariableSetVariable,
   updateVariableSet,
   VariableSetAttachedError,
@@ -134,6 +137,26 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
       return c.json(created, 201);
     });
+
+    if (prefix.endsWith("/variable-sets")) {
+      app.post(`${prefix}/resolve-attachments`, async (c) => {
+        const workspaceId = c.req.param("workspaceId")!;
+        const grant = await requireAccessGrant(c, deps, workspaceId);
+        requirePermission(grant, "variable-sets:attach");
+        requirePermission(grant, "variable-sets:use");
+        const payload = ResolveVariableSetAttachmentsRequest.parse(await c.req.json());
+        const variableSets = await resolveVariableSetAttachments(
+          db,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+          },
+          payload.variableSetIds,
+        );
+        return c.json(ResolveVariableSetAttachmentsResponse.parse({ variableSets }));
+      });
+    }
 
     app.get(`${prefix}/:variableSetId`, async (c) => {
       const workspaceId = c.req.param("workspaceId")!;

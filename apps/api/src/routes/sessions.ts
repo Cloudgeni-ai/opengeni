@@ -66,12 +66,23 @@ import {
   UpdateSessionToolPolicyRequest,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
+  WORK_CLAIM_CANONICAL_KEY_MAX_BYTES,
+  WORK_CLAIM_DISCOVERY_LIMIT,
+  WORK_CLAIM_NAMESPACE_MAX_BYTES,
+  WORK_DISCOVERY_QUERY_MAX_CHARS,
+  WORK_DISCOVERY_RECENT_HOURS_MAX,
+  WorkClaimSubjectFilter as WorkClaimSubjectFilterSchema,
+  WorkClaimSubjectType,
+  normalizeWorkClaimCanonicalKey,
+  normalizeWorkClaimNamespace,
   workspaceControlUtf8Bytes,
   type AccessGrant,
   type AttachViewerResponse,
   type SandboxBackend,
   type LineageNode,
   type Session,
+  type SessionStatus,
+  type WorkClaimSubjectFilter,
   type SessionGoalRevision,
   type AgentTopologyPageResponse,
   type ErrorCode,
@@ -173,6 +184,7 @@ import {
   type SandboxRetainedProcess,
   type Database,
   type SessionDiscoveryCursor,
+  type SessionDiscoveryOrderBy,
   type SessionDiscoveryAncestor,
 } from "@opengeni/db";
 import {
@@ -211,6 +223,7 @@ import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
+  getManagedAuthRequestActorEpoch,
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -243,7 +256,6 @@ import {
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
-  acceptSessionUserMessageWithOutcome,
   controlHumanSessionWorkstream,
   createSessionForRequest,
   deleteHumanQueuePrompt,
@@ -259,6 +271,7 @@ import {
   SessionSpawnDeniedError,
   sessionSpawnDenialEnvelope,
   steerHumanQueuePrompt,
+  submitComposerDraftForRequest,
   updateSessionMcpApprovalPolicy,
   updateManagedHumanSessionVisibility,
   updateSessionToolPolicy,
@@ -279,6 +292,7 @@ import {
 } from "./workspace-capture";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import { ApiHttpError } from "../http/api-error";
+import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -699,71 +713,144 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw sessionAuthorizationHttpError(error);
     }
     const query = agentTopologyQuery(c.req.query());
-    const page = await listSessionDiscoverySummaries(db, workspaceId, {
-      limit: query.limit,
-      orderBy: "updatedAt",
-      subjectId: grant.subjectId,
-      ...(query.cursor ? { cursor: query.cursor } : {}),
-      ...(query.search ? { search: query.search } : { parentSessionId: query.parentSessionId }),
-      ...(authorizationScope ? { authorizationScope } : {}),
-    });
-    const ancestorPaths = query.search
-      ? await listSessionDiscoveryAncestorPaths(
-          db,
-          workspaceId,
-          page.sessions.map((session) => session.id),
-          authorizationScope ?? undefined,
-        )
-      : new Map<string, SessionDiscoveryAncestor[]>();
-    const sessions: AgentTopologyPageResponse["sessions"] = page.sessions.map((session) => {
-      const blocker = session.effectiveControl.primaryBlocker;
-      return {
-        id: session.id,
-        title: session.title,
-        titleTruncated:
-          session.titleOriginalChars !== null &&
-          session.titleOriginalChars > Array.from(session.title ?? "").length,
-        parentSessionId: session.parentSessionId,
-        rootSessionId: session.rootSessionId,
-        nestedAgentDepth: session.nestedAgentDepth,
-        ancestorPath: (ancestorPaths.get(session.id) ?? []).map((ancestor) => ({
-          id: ancestor.id,
-          title: ancestor.title,
+    const startedAtMs = performance.now();
+    const mode = query.subject ? "subject" : query.query ? "query" : "browse";
+    const metricAuthorizationScope = authorizationScope?.kind === "scoped" ? "scoped" : "workspace";
+    if ((query.query || query.subject) && !settings.workDiscoveryEnabled) {
+      observeWorkDiscovery(deps.observability, {
+        surface: "agent_topology",
+        mode,
+        outcome: "disabled",
+        authorizationScope: metricAuthorizationScope,
+        durationMs: performance.now() - startedAtMs,
+        responseBytes: 0,
+        resultCount: 0,
+        overlapCount: 0,
+        matchCounts: {},
+      });
+      throw new HTTPException(503, {
+        message: "Agent work discovery is disabled by the operator.",
+      });
+    }
+    try {
+      const orderBy: SessionDiscoveryOrderBy =
+        query.query || query.subject ? "relevance" : "updatedAt";
+      const page = await listSessionDiscoverySummaries(db, workspaceId, {
+        limit: query.limit,
+        orderBy,
+        subjectId: grant.subjectId,
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+        ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
+        ...(query.rootSessionId ? { rootSessionId: query.rootSessionId } : {}),
+        ...(query.query ? { query: query.query } : {}),
+        ...(query.statuses ? { statuses: query.statuses } : {}),
+        activeOnly: query.activeOnly,
+        ...(query.recentHours !== undefined ? { recentHours: query.recentHours } : {}),
+        ...(query.subject ? { subject: query.subject } : {}),
+        ...(query.claimLimit !== undefined ? { claimLimit: query.claimLimit } : {}),
+        includeWorkDiscovery: settings.workDiscoveryEnabled,
+        ...(authorizationScope ? { authorizationScope } : {}),
+      });
+      const ancestorPaths =
+        query.query || query.subject
+          ? await listSessionDiscoveryAncestorPaths(
+              db,
+              workspaceId,
+              page.sessions.map((session) => session.id),
+              authorizationScope ?? undefined,
+              grant.subjectId,
+            )
+          : new Map<string, SessionDiscoveryAncestor[]>();
+      const sessions: AgentTopologyPageResponse["sessions"] = page.sessions.map((session) => {
+        const blocker = session.effectiveControl.primaryBlocker;
+        return {
+          id: session.id,
+          title: session.title,
           titleTruncated:
-            ancestor.titleOriginalChars !== null &&
-            ancestor.titleOriginalChars > Array.from(ancestor.title ?? "").length,
-        })),
-        status: session.status,
-        pause: {
-          state: session.effectiveControl.state,
-          additionalBlockerCount: session.effectiveControl.additionalBlockerCount,
-          source: blocker
+            session.titleOriginalChars !== null &&
+            session.titleOriginalChars > Array.from(session.title ?? "").length,
+          parentSessionId: session.parentSessionId,
+          rootSessionId: session.rootSessionId,
+          nestedAgentDepth: session.nestedAgentDepth,
+          ancestorPath: (ancestorPaths.get(session.id) ?? []).map((ancestor) => ({
+            id: ancestor.id,
+            title: ancestor.title,
+            titleTruncated:
+              ancestor.titleOriginalChars !== null &&
+              ancestor.titleOriginalChars > Array.from(ancestor.title ?? "").length,
+          })),
+          status: session.status,
+          goal: session.goal
             ? {
-                kind: blocker.kind,
-                ...(blocker.sessionId ? { sessionId: blocker.sessionId } : {}),
-                displayName: blocker.displayName,
-                displayNameTruncated:
-                  blocker.displayNameOriginalChars > Array.from(blocker.displayName).length,
+                status: session.goal.status,
+                summary: session.goal.text,
+                summaryTruncated:
+                  session.goal.textOriginalChars > Array.from(session.goal.text).length,
               }
             : null,
-        },
-        children: session.treeStats,
-        createdAt: session.createdAt,
-        updatedAt: session.updatedAt,
-      };
-    });
-    return c.json({
-      sessions,
-      total: page.total,
-      hasMore: page.hasMore,
-      nextCursor: page.nextCursor
-        ? encodeAgentTopologyCursor({
-            cursor: page.nextCursor,
-            parentSessionId: query.parentSessionId,
-            search: query.search ?? null,
-          })
-        : null,
-    } satisfies AgentTopologyPageResponse);
+          pause: {
+            state: session.effectiveControl.state,
+            additionalBlockerCount: session.effectiveControl.additionalBlockerCount,
+            source: blocker
+              ? {
+                  kind: blocker.kind,
+                  ...(blocker.sessionId ? { sessionId: blocker.sessionId } : {}),
+                  displayName: blocker.displayName,
+                  displayNameTruncated:
+                    blocker.displayNameOriginalChars > Array.from(blocker.displayName).length,
+                }
+              : null,
+          },
+          children: session.treeStats,
+          relatedWork: session.workDiscovery,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+        };
+      });
+      const response = {
+        sessions,
+        total: page.total,
+        hasMore: page.hasMore,
+        humanAdvisoriesEnabled:
+          settings.workDiscoveryEnabled && settings.workDiscoveryHumanAdvisoriesEnabled,
+        nextCursor: page.nextCursor
+          ? encodeAgentTopologyCursor({
+              cursor: page.nextCursor,
+              parentSessionId: query.parentSessionId === undefined ? "all" : query.parentSessionId,
+              rootSessionId: query.rootSessionId ?? null,
+              query: query.query ?? null,
+              statuses: query.statuses ?? [],
+              activeOnly: query.activeOnly,
+              recentHours: query.recentHours ?? null,
+              subject: query.subject ?? null,
+              claimLimit: query.claimLimit ?? null,
+            })
+          : null,
+      } satisfies AgentTopologyPageResponse;
+      observeWorkDiscovery(deps.observability, {
+        surface: "agent_topology",
+        mode,
+        outcome: sessions.length === 0 ? "empty" : "ok",
+        authorizationScope: metricAuthorizationScope,
+        durationMs: performance.now() - startedAtMs,
+        responseBytes: Buffer.byteLength(JSON.stringify(response), "utf8"),
+        ...summarizeWorkDiscoveryRows(sessions),
+      });
+      return c.json(response);
+    } catch (error) {
+      observeWorkDiscovery(deps.observability, {
+        surface: "agent_topology",
+        mode,
+        outcome: "error",
+        authorizationScope: metricAuthorizationScope,
+        durationMs: performance.now() - startedAtMs,
+        responseBytes: 0,
+        resultCount: 0,
+        overlapCount: 0,
+        matchCounts: {},
+      });
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
@@ -1572,7 +1659,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // while the actively-working label remains independent of acknowledgment.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/attention", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
@@ -1586,6 +1679,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
+        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
         ...parsed.data,
       });
       if (!session) throw new HTTPException(404, { message: "session not found" });
@@ -1618,7 +1712,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // for this member and remain recoverable through the archived list view.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     const parsed = UpdateSessionArchiveRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
@@ -1629,6 +1729,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
+        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
         ...parsed.data,
       });
       if (!session) throw new HTTPException(404, { message: "session not found" });
@@ -2559,6 +2660,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.req.raw.signal,
       {
         observability: deps.observability,
+        actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
         reauthorizeAfterMs:
           authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
         reauthorize: async () => {
@@ -2832,46 +2934,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
-    let result: Awaited<ReturnType<typeof acceptSessionUserMessageWithOutcome>>;
+    let result: Awaited<ReturnType<typeof submitComposerDraftForRequest>>;
     try {
-      result = await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, {
-        text: payload.text,
-        annotations: payload.annotations,
-        modelContext: payload.modelContext ?? null,
-        resources: payload.resources,
-        model: payload.model,
-        reasoningEffort: payload.reasoningEffort,
-        latencyMode: payload.latencyMode,
-        mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
-        connectionAuthorities: payload.connectionAuthorities,
-        ...(payload.personalResourceAttachment
-          ? { personalResourceAttachment: payload.personalResourceAttachment }
-          : {}),
+      result = await submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
         authorization,
-        delivery: payload.delivery,
-        origin: "human",
-        expectedDraftRevision: payload.expectedDraftRevision,
-        clientEventId: payload.clientEventId,
-        ...(payload.controlEtag ? { controlEtag: payload.controlEtag } : {}),
       });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
-    if (!result.draft) {
-      throw new Error("Accepted composer draft submission did not return its next draft");
-    }
-    return c.json(
-      {
-        accepted: result.accepted,
-        turn: result.turn,
-        draft: result.draft,
-        receipt: result.receipt,
-        routing: result.routing,
-        interruptionCount: result.interruptionCount,
-        replay: result.replay,
-      },
-      202,
-    );
+    return c.json(result, 202);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -2995,10 +3066,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
       if (accepted.action === "conflict") {
         throw new HTTPException(409, {
-          message: `human-input request is ${accepted.request.status}`,
+          message: "human-input request is not currently actionable",
         });
       }
-      return c.json(accepted.event, 202);
+      return c.json(accepted.event, accepted.action === "completed" ? 200 : 202);
     }
   });
 
@@ -4524,12 +4595,18 @@ function sessionListQuery(
 
 export type AgentTopologyCursorEnvelope = {
   cursor: SessionDiscoveryCursor;
-  parentSessionId: string | null;
-  search: string | null;
+  parentSessionId: string | null | "all";
+  rootSessionId: string | null;
+  query: string | null;
+  statuses: SessionStatus[];
+  activeOnly: boolean;
+  recentHours: number | null;
+  subject: WorkClaimSubjectFilter | null;
+  claimLimit: number | null;
 };
 
 export function encodeAgentTopologyCursor(value: AgentTopologyCursorEnvelope): string {
-  return Buffer.from(JSON.stringify({ v: 1, ...value }), "utf8").toString("base64url");
+  return Buffer.from(JSON.stringify({ v: 2, ...value }), "utf8").toString("base64url");
 }
 
 function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
@@ -4539,25 +4616,92 @@ function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
     });
   }
   try {
-    const parsed = z
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as unknown;
+    const legacy = z
       .object({
         v: z.literal(1),
         parentSessionId: z.string().uuid().nullable(),
-        search: z.string().max(200).nullable(),
+        search: z.string().max(WORK_DISCOVERY_QUERY_MAX_CHARS).nullable(),
         cursor: z.object({
-          orderBy: z.enum(["createdAt", "updatedAt"]),
+          orderBy: z.literal("updatedAt"),
           sortRevision: z.string().max(64),
           sortAt: z.string().max(64),
           id: z.string().uuid(),
           snapshotAt: z.string().max(64),
           snapshotRevision: z.string().max(64),
-          updatedAfter: z.string().max(64).nullable(),
+          updatedAfter: z.null(),
         }),
       })
-      .parse(JSON.parse(Buffer.from(value, "base64url").toString("utf8")));
+      .safeParse(decoded);
+    if (legacy.success) {
+      if (legacy.data.search !== null) {
+        throw new Error("legacy search cursor is not relevance-fenced");
+      }
+      const cursor = {
+        ...legacy.data.cursor,
+        sortRank: null,
+        filterHash: null,
+      } satisfies SessionDiscoveryCursor;
+      return {
+        cursor,
+        parentSessionId: legacy.data.parentSessionId,
+        rootSessionId: null,
+        query: null,
+        statuses: [],
+        activeOnly: false,
+        recentHours: null,
+        subject: null,
+        claimLimit: null,
+      };
+    }
+    const parsed = z
+      .object({
+        v: z.literal(2),
+        parentSessionId: z.union([z.string().uuid(), z.literal("all"), z.null()]),
+        rootSessionId: z.string().uuid().nullable(),
+        query: z.string().max(WORK_DISCOVERY_QUERY_MAX_CHARS).nullable(),
+        statuses: z
+          .array(
+            z.enum([
+              "queued",
+              "running",
+              "idle",
+              "requires_action",
+              "recovering",
+              "waiting_capacity",
+              "failed",
+              "cancelled",
+            ]),
+          )
+          .max(8),
+        activeOnly: z.boolean(),
+        recentHours: z.number().int().positive().max(WORK_DISCOVERY_RECENT_HOURS_MAX).nullable(),
+        subject: z
+          .object({
+            namespace: z.string().min(1).max(WORK_CLAIM_NAMESPACE_MAX_BYTES),
+            type: WorkClaimSubjectType,
+            canonicalKey: z.string().min(1).max(WORK_CLAIM_CANONICAL_KEY_MAX_BYTES),
+          })
+          .strict()
+          .nullable(),
+        claimLimit: z.number().int().positive().max(WORK_CLAIM_DISCOVERY_LIMIT).nullable(),
+        cursor: z.object({
+          orderBy: z.enum(["updatedAt", "relevance"]),
+          sortRank: z.number().int().nonnegative().nullable(),
+          sortRevision: z.string().max(64),
+          sortAt: z.string().max(64),
+          id: z.string().uuid(),
+          snapshotAt: z.string().max(64),
+          snapshotRevision: z.string().max(64),
+          updatedAfter: z.null(),
+          filterHash: z
+            .string()
+            .regex(/^[0-9a-f]{64}$/)
+            .nullable(),
+        }),
+      })
+      .parse(decoded);
     if (
-      parsed.cursor.orderBy !== "updatedAt" ||
-      parsed.cursor.updatedAfter !== null ||
       !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.sortRevision) ||
       !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.snapshotRevision) ||
       BigInt(parsed.cursor.sortRevision) > 9_223_372_036_854_775_807n ||
@@ -4566,6 +4710,14 @@ function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
       Number.isNaN(Date.parse(parsed.cursor.snapshotAt))
     ) {
       throw new Error("invalid topology cursor fields");
+    }
+    if (
+      (parsed.cursor.orderBy === "relevance" &&
+        (parsed.cursor.sortRank === null || parsed.cursor.filterHash === null)) ||
+      (parsed.cursor.orderBy === "updatedAt" &&
+        (parsed.cursor.sortRank !== null || parsed.cursor.filterHash !== null))
+    ) {
+      throw new Error("invalid topology cursor relevance fields");
     }
     return parsed;
   } catch {
@@ -4577,8 +4729,14 @@ function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
 
 export function agentTopologyQuery(query: Record<string, string>): {
   limit: number;
-  parentSessionId: string | null;
-  search: string | undefined;
+  parentSessionId: string | null | undefined;
+  rootSessionId: string | undefined;
+  query: string | undefined;
+  statuses: SessionStatus[] | undefined;
+  activeOnly: boolean;
+  recentHours: number | undefined;
+  subject: WorkClaimSubjectFilter | undefined;
+  claimLimit: number | undefined;
   cursor: SessionDiscoveryCursor | undefined;
 } {
   const rawLimit = query.limit;
@@ -4598,22 +4756,139 @@ export function agentTopologyQuery(query: Record<string, string>): {
       message: 'parentSessionId must be a session id or the literal "null"',
     });
   }
-  const parentSessionId = rawParent === undefined || rawParent === "null" ? null : rawParent;
-  const search = query.search?.trim();
-  if (search && search.length > 200) {
+  const rootSessionId = query.rootSessionId?.trim();
+  if (rootSessionId && !z.string().uuid().safeParse(rootSessionId).success) {
+    throw new HTTPException(400, { message: "rootSessionId must be a session id" });
+  }
+  const normalizeSearchQuery = (value: string | undefined): string | undefined => {
+    if (value === undefined) return undefined;
+    const canonical = value.normalize("NFKC");
+    if (/[\u0000-\u001f\u007f-\u009f]/u.test(canonical)) {
+      throw new HTTPException(400, { message: "query must not contain control characters" });
+    }
+    const normalized = canonical.trim().replace(/\s+/gu, " ").toLowerCase();
+    if (!normalized) return undefined;
+    if (Array.from(normalized).length > WORK_DISCOVERY_QUERY_MAX_CHARS) {
+      throw new HTTPException(400, {
+        message: `query must be at most ${WORK_DISCOVERY_QUERY_MAX_CHARS} characters`,
+      });
+    }
+    return normalized;
+  };
+  const requestedQuery = normalizeSearchQuery(query.query);
+  const legacySearch = normalizeSearchQuery(query.search);
+  const searchQuery = requestedQuery ?? legacySearch;
+  if (requestedQuery && legacySearch && requestedQuery !== legacySearch) {
+    throw new HTTPException(400, { message: "query and legacy search must match" });
+  }
+  const statuses = query.statuses
+    ? [
+        ...new Set(
+          query.statuses
+            .split(",")
+            .map((status) => status.trim())
+            .filter(Boolean),
+        ),
+      ].sort()
+    : [];
+  const parsedStatuses = z
+    .array(
+      z.enum([
+        "queued",
+        "running",
+        "idle",
+        "requires_action",
+        "recovering",
+        "waiting_capacity",
+        "failed",
+        "cancelled",
+      ]),
+    )
+    .max(8)
+    .safeParse(statuses);
+  if (!parsedStatuses.success) {
+    throw new HTTPException(400, { message: "statuses contains an unsupported lifecycle state" });
+  }
+  const activeOnly = query.activeOnly === "true";
+  if (
+    query.activeOnly !== undefined &&
+    query.activeOnly !== "true" &&
+    query.activeOnly !== "false"
+  ) {
+    throw new HTTPException(400, { message: "activeOnly must be true or false" });
+  }
+  const recentHours = query.recentHours === undefined ? undefined : Number(query.recentHours);
+  if (
+    recentHours !== undefined &&
+    (!Number.isSafeInteger(recentHours) ||
+      recentHours < 1 ||
+      recentHours > WORK_DISCOVERY_RECENT_HOURS_MAX)
+  ) {
     throw new HTTPException(400, {
-      message: "search must be at most 200 characters",
+      message: `recentHours must be an integer between 1 and ${WORK_DISCOVERY_RECENT_HOURS_MAX}`,
     });
   }
-  if (search && rawParent !== undefined) {
+  const subjectFields = [query.subjectNamespace, query.subjectType, query.subjectKey];
+  if (subjectFields.some((value) => value !== undefined) && subjectFields.some((value) => !value)) {
     throw new HTTPException(400, {
-      message: "search cannot be combined with parentSessionId",
+      message: "subjectNamespace, subjectType, and subjectKey must be supplied together",
+    });
+  }
+  const parsedSubject = subjectFields.every((value) => value !== undefined)
+    ? WorkClaimSubjectFilterSchema.safeParse({
+        namespace: normalizeWorkClaimNamespace(query.subjectNamespace!),
+        type: query.subjectType,
+        canonicalKey: normalizeWorkClaimCanonicalKey(query.subjectKey!),
+      })
+    : null;
+  if (parsedSubject && !parsedSubject.success) {
+    throw new HTTPException(400, { message: "exact subject filter is invalid" });
+  }
+  const subject = parsedSubject?.success ? parsedSubject.data : undefined;
+  if (searchQuery && subject) {
+    throw new HTTPException(400, { message: "query cannot be combined with an exact subject" });
+  }
+  const relevanceRequested = Boolean(searchQuery || subject);
+  const parentSessionId =
+    rawParent === undefined
+      ? relevanceRequested
+        ? undefined
+        : null
+      : rawParent === "null"
+        ? null
+        : rawParent;
+  const claimLimit = query.claimLimit === undefined ? undefined : Number(query.claimLimit);
+  if (
+    claimLimit !== undefined &&
+    (!Number.isSafeInteger(claimLimit) || claimLimit < 1 || claimLimit > WORK_CLAIM_DISCOVERY_LIMIT)
+  ) {
+    throw new HTTPException(400, {
+      message: `claimLimit must be an integer between 1 and ${WORK_CLAIM_DISCOVERY_LIMIT}`,
     });
   }
   const envelope = query.cursor ? decodeAgentTopologyCursor(query.cursor) : undefined;
+  const expectedEnvelope = {
+    parentSessionId: parentSessionId === undefined ? "all" : parentSessionId,
+    rootSessionId: rootSessionId ?? null,
+    query: searchQuery || null,
+    statuses: parsedStatuses.data,
+    activeOnly,
+    recentHours: recentHours ?? null,
+    subject: subject ?? null,
+    claimLimit: claimLimit ?? null,
+  };
   if (
     envelope &&
-    (envelope.parentSessionId !== parentSessionId || envelope.search !== (search || null))
+    JSON.stringify({
+      parentSessionId: envelope.parentSessionId,
+      rootSessionId: envelope.rootSessionId,
+      query: envelope.query,
+      statuses: envelope.statuses,
+      activeOnly: envelope.activeOnly,
+      recentHours: envelope.recentHours,
+      subject: envelope.subject,
+      claimLimit: envelope.claimLimit,
+    }) !== JSON.stringify(expectedEnvelope)
   ) {
     throw new HTTPException(400, {
       message: "agent topology cursor does not match its filters",
@@ -4622,7 +4897,13 @@ export function agentTopologyQuery(query: Record<string, string>): {
   return {
     limit,
     parentSessionId,
-    search: search || undefined,
+    rootSessionId: rootSessionId || undefined,
+    query: searchQuery || undefined,
+    statuses: parsedStatuses.data.length > 0 ? parsedStatuses.data : undefined,
+    activeOnly,
+    recentHours,
+    subject,
+    claimLimit,
     cursor: envelope?.cursor,
   };
 }

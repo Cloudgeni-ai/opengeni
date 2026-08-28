@@ -1,5 +1,34 @@
 # @opengeni/sdk
 
+## 3.1.0
+
+### Minor Changes
+
+- 7238fa4: Add permission-scoped advisory work discovery, durable non-exclusive typed work claims, bounded related-work projections, independent rollout controls, observability, and SDK topology filters.
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/contracts@2.7.0
+
+## 2.6.0
+
+### Minor Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+- 986f5fe: Add provider-neutral browser login session sets with bounded independently revocable slots, explicit actor switching, isolated add and re-authentication, scoped logout, non-enumerating cross-slot deep-link recovery, and rolling legacy/dual/broker compatibility.
+- 6e12f3a: Add canonical-human organization recovery custody with exactly three accepted custodians, two-person approval, a fixed seven-day cooldown, promotion-only co-owner execution, durable notification evidence, and immutable workspace organization ownership.
+
+### Patch Changes
+
+- 9ef491b: Add the Agent Knowledge product surface, Personal workspace knowledge views and defaults, workspace learning-autonomy administration, explicit routing guidance between Memory, Skills, and Workspace instructions, authority-first organization Document search, exact replay-safe confirmed Memory materialization, and the narrower organization identity/mission boundary with richer facts retrieved from organization knowledge.
+- 9a8c822: Add a focused `@opengeni/sdk/browser` client that keeps operator-only Document authority and tenancy-backfill methods out of browser bundles while preserving them on the root and `core` clients and exposing `@opengeni/sdk/document-authority` directly.
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+  - @opengeni/contracts@2.6.0
+
 ## 2.5.0
 
 ### Minor Changes

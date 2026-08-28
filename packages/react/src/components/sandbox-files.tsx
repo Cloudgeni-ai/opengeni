@@ -10,6 +10,7 @@ import {
   type UseSandboxFilesResult,
 } from "../hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../hooks/use-sandbox-git";
+import { filePathVisibility, type FileNodeVisibilityPredicate } from "../file-node-visibility";
 import { CodeEditor } from "./code-editor";
 import { FileBrowser } from "./file-browser";
 import { PierreFile } from "./pierre-file";
@@ -37,6 +38,8 @@ export type SandboxFilesProps = {
    * surface the ordinary file-view error instead of changing files silently. */
   initialSelectedPath?: string | null | undefined;
   onSelectedPathChange?: ((path: string | null) => void) | undefined;
+  /** Presentation-only node filter shared with the tree and selected-file view. */
+  isNodeVisible?: FileNodeVisibilityPredicate | undefined;
   /** A deliberate file-open path routed here by the parent workspace. */
   requestedPath?: string | undefined;
   /** 1-based line to reveal after `requestedPath` opens. */
@@ -76,6 +79,7 @@ export function SandboxFiles({
   onEditIntent,
   initialSelectedPath,
   onSelectedPathChange,
+  isNodeVisible,
   requestedPath,
   requestedLine,
   requestedPathRequestId,
@@ -118,6 +122,19 @@ export function SandboxFiles({
       setTreeRevealRequest(null);
       return;
     }
+    if (isNodeVisible && files.loading && files.tree.length === 0) return;
+    if (isNodeVisible && !files.loading && files.tree.length === 0) {
+      handledRequestRef.current = requestKey;
+      pendingRequestRef.current = null;
+      setTreeRevealRequest(null);
+      return;
+    }
+    if (filePathVisibility(files.tree, requestedPath, isNodeVisible) === "hidden") {
+      handledRequestRef.current = requestKey;
+      pendingRequestRef.current = null;
+      setTreeRevealRequest(null);
+      return;
+    }
     handledRequestRef.current = requestKey;
     pendingRequestRef.current = null;
     setSelected(requestedPath);
@@ -126,7 +143,16 @@ export function SandboxFiles({
     setFocusLine(requestedLine != null && requestedLine > 0 ? requestedLine : null);
     setTreeRevealRequest({ path: requestedPath, requestId: requestKey });
     setViewReloadRevision((revision) => revision + 1);
-  }, [onSelectedPathChange, requestKey, requestedLine, requestedPath, requestedPathReady]);
+  }, [
+    files.loading,
+    files.tree,
+    isNodeVisible,
+    onSelectedPathChange,
+    requestKey,
+    requestedLine,
+    requestedPath,
+    requestedPathReady,
+  ]);
 
   // Side-by-side (tree left, viewer right) once the surface is wide enough;
   // stacked (tree over viewer) on a narrow dock. Tracked off the container so it
@@ -165,7 +191,20 @@ export function SandboxFiles({
   // The selected tree file opens in the viewer (read-only) or the editor (when
   // writable). Nothing is auto-selected — the pane waits for a tree click, so the
   // Files tab opens as a calm browser, not a diff.
-  const viewPath = selected;
+  const selectedVisibility = selected
+    ? filePathVisibility(files.tree, selected, isNodeVisible)
+    : "unknown";
+  const visibilityPending = Boolean(isNodeVisible && files.loading && files.tree.length === 0);
+  const viewPath = selectedVisibility === "hidden" || visibilityPending ? null : selected;
+  useEffect(() => {
+    if (selected === null || selectedVisibility !== "hidden") return;
+    setSelected(null);
+    onSelectedPathChange?.(null);
+    setEditMode(false);
+    setFocusLine(null);
+    setTreeRevealRequest(null);
+    setLiveRequestedPath(null);
+  }, [onSelectedPathChange, selected, selectedVisibility]);
   const fileView = useFileView(
     viewPath,
     files.readFile,
@@ -297,6 +336,7 @@ export function SandboxFiles({
         >
           <FileBrowser
             result={files}
+            isNodeVisible={isNodeVisible}
             selectedPath={selected ?? undefined}
             {...(treeRevealRequest
               ? {

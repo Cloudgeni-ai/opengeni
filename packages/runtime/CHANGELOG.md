@@ -1,5 +1,32 @@
 # @opengeni/runtime
 
+## 1.4.2
+
+### Patch Changes
+
+- Updated dependencies [7238fa4]
+  - @opengeni/config@0.22.0
+  - @opengeni/contracts@2.7.0
+  - @opengeni/sdk@3.1.0
+  - @opengeni/codemode@0.4.17
+
+## 1.4.1
+
+### Patch Changes
+
+- 9ef491b: Add the Agent Knowledge product surface, Personal workspace knowledge views and defaults, workspace learning-autonomy administration, explicit routing guidance between Memory, Skills, and Workspace instructions, authority-first organization Document search, exact replay-safe confirmed Memory materialization, and the narrower organization identity/mission boundary with richer facts retrieved from organization knowledge.
+- f6375f2: Accept sparse Responses output indices while preserving numeric provider order and duplicate-index rejection.
+- a521e65: Preserve provider-reported tool-search call identities across durable receipts, runtime events, and replay sanitization.
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+- Updated dependencies [9a8c822]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+  - @opengeni/sdk@2.6.0
+  - @opengeni/codemode@0.4.16
+
 ## 1.4.0
 
 ### Minor Changes

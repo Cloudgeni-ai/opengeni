@@ -4,7 +4,7 @@ import type {
   PrReviewProvider,
   PrReviewRepositoryBinding,
 } from "@opengeni/sdk";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniPrReviewClient } from "@opengeni/sdk/pr-review";
 import { BotIcon, CheckCircle2Icon, CopyIcon, Loader2Icon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -17,7 +17,7 @@ import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
 export function PrReviewSetupCard(props: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   workspaceId: string;
   canManage: boolean;
 }) {

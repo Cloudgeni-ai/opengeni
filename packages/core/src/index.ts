@@ -35,7 +35,19 @@ export * from "./workflow-wake-contract";
 // structural TYPES live here.
 export * from "./sandbox-types";
 export * from "./managed-auth-type";
-export * from "./managed-session";
+export {
+  getManagedAuthRequestActorAbortSignal,
+  getManagedAuthRequestActorAdmissionStamp,
+  getManagedAuthRequestActorEpoch,
+  getManagedAuthRequestActorLeaseStamp,
+  getManagedSession,
+  ManagedAuthActorLeaseOutcomeUnknownError,
+  markManagedAuthRequestActorTransitionApplied,
+  releaseManagedAuthRequestActorLease,
+  validateManagedAuthRequestActorLease,
+  type ManagedAuthActorAdmissionStamp,
+  type ManagedAuthActorMutationLeaseStamp,
+} from "./managed-session";
 export * from "./transcription";
 
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`
@@ -87,6 +99,7 @@ export * from "./domain/video-generation";
 export * from "./domain/video-generation-capabilities";
 export * from "./domain/organization-membership-lifecycle";
 export * from "./application/new-session-drafts";
+export * from "./application/composer-submit";
 export * from "./application/session-commands";
 export * from "./application/session-tenancy";
 export * from "./application/user-resource-grants";

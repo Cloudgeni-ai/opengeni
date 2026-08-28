@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import { SessionTenancyControl } from "../src/components/session/session-tenancy-control";
 import { SessionTenancyOperationController } from "../src/lib/session-tenancy-operation-controller";
@@ -30,7 +30,7 @@ function SessionTenancyControlFixture() {
             },
           } as Session
         }
-        client={{} as OpenGeniCoreClient}
+        client={{} as OpenGeniBrowserClient}
         managedSession
         scopeLabel="Roadmap Personal workspace"
         captureWorkspaceInvocation={() => ({ workspaceId, revision: 1 })}

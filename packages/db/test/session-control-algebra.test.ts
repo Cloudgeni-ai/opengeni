@@ -228,7 +228,8 @@ describe("recursive session control algebra", () => {
       ),
     ).toMatchObject({ state: "paused" });
 
-    await control(value, value.root.id, "pause");
+    const pausedAgain = await control(value, value.root.id, "pause");
+    expect(pausedAgain.outcome).toBe("changed");
     expect(
       await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
         evaluateSessionControl(db, value.grant.workspaceId!, value.child.id),
@@ -237,6 +238,74 @@ describe("recursive session control algebra", () => {
       state: "paused",
       primaryBlocker: { kind: "session", sessionId: value.root.id },
     });
+  });
+
+  test("a child Pause under inherited Pause installs a narrower blocker", async () => {
+    const value = await fixture();
+    await control(value, value.root.id, "pause");
+
+    const childPause = await control(value, value.child.id, "pause");
+    expect(childPause).toMatchObject({
+      outcome: "changed",
+      control: {
+        state: "paused",
+        directState: "paused",
+        primaryBlocker: { kind: "session", sessionId: value.child.id },
+      },
+    });
+
+    await control(value, value.root.id, "resume");
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, value.grant.workspaceId!, value.child.id),
+      ),
+    ).toMatchObject({
+      state: "paused",
+      primaryBlocker: { kind: "session", sessionId: value.child.id },
+    });
+  });
+
+  test("fresh desired-state repeats are unchanged and exact retries stay replayed", async () => {
+    const value = await fixture();
+
+    const firstPause = await control(value, value.root.id, "pause");
+    expect(firstPause.outcome).toBe("changed");
+    const repeatedPauseKey = crypto.randomUUID();
+    const repeatedPause = await control(value, value.root.id, "pause", repeatedPauseKey);
+    expect(repeatedPause).toMatchObject({
+      outcome: "unchanged",
+      replay: false,
+      sessionControlEventId: null,
+      workspaceControlEventId: null,
+      interruptionCount: 0,
+      wakeCount: 0,
+    });
+    expect(repeatedPause.receipt.appliedControlRevision).toBeNull();
+    const replayedPause = await control(value, value.root.id, "pause", repeatedPauseKey);
+    expect(replayedPause).toMatchObject({
+      outcome: "replayed",
+      replay: true,
+      sessionControlEventId: null,
+      workspaceControlEventId: null,
+    });
+    expect(replayedPause.receipt.id).toBe(repeatedPause.receipt.id);
+
+    const firstResume = await control(value, value.root.id, "resume");
+    expect(firstResume.outcome).toBe("changed");
+    const repeatedResume = await control(value, value.root.id, "resume");
+    expect(repeatedResume).toMatchObject({
+      outcome: "unchanged",
+      replay: false,
+      sessionControlEventId: null,
+      workspaceControlEventId: null,
+      wakeCount: 0,
+    });
+
+    expect(
+      (await listWorkspaceControlEvents(client.db, value.grant.workspaceId!, 0, 10)).map(
+        (event) => event.action,
+      ),
+    ).toEqual(["pause", "resume"]);
   });
 
   test("Pause creates exact live-attempt interruptions without application-side descendant IDs", async () => {
@@ -327,6 +396,21 @@ describe("recursive session control algebra", () => {
       state: "pending",
     });
 
+    const repeatedPause = await control(value, value.root.id, "pause");
+    expect(repeatedPause).toMatchObject({
+      outcome: "unchanged",
+      interruptionCount: 0,
+      wakeCount: 0,
+    });
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        db
+          .select()
+          .from(schema.sessionAttemptInterruptions)
+          .where(eq(schema.sessionAttemptInterruptions.attemptId, attemptId)),
+      ),
+    ).toHaveLength(1);
+
     const settled = await settleSessionAttemptInterruptions(
       client.db,
       value.grant.workspaceId!,
@@ -416,7 +500,14 @@ describe("recursive session control algebra", () => {
         }),
       );
 
-    await workspaceControl("pause");
+    const firstPause = await workspaceControl("pause");
+    expect(firstPause.outcome).toBe("changed");
+    const repeatedPause = await workspaceControl("pause");
+    expect(repeatedPause).toMatchObject({
+      outcome: "unchanged",
+      workspaceControlEventId: null,
+      wakeCount: 0,
+    });
     expect(
       await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
         evaluateSessionControl(db, value.grant.workspaceId!, value.child.id),
@@ -434,7 +525,8 @@ describe("recursive session control algebra", () => {
       ),
     ).toMatchObject({ state: "paused", primaryBlocker: { kind: "workspace" } });
 
-    await workspaceControl("pause");
+    const invalidatingPause = await workspaceControl("pause");
+    expect(invalidatingPause.outcome).toBe("changed");
     expect(
       await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
         evaluateSessionControl(db, value.grant.workspaceId!, value.child.id),

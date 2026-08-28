@@ -1,4 +1,4 @@
-import type { GetSessionOptions } from "@opengeni/sdk/core";
+import type { GetSessionOptions } from "@opengeni/sdk/browser";
 import type { Session } from "@/types";
 
 type SessionChannelPointReadClient = {

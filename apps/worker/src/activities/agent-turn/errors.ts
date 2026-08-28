@@ -35,10 +35,16 @@ import {
   isXaiSubscriptionTransportError,
   XaiSubscriptionReloginRequired,
 } from "@opengeni/xai-subscription";
-import type { EscapedMcpTimeoutRecoveryDetail, PreClaimFailureDetail } from "../types";
+import type {
+  EscapedMcpTimeoutRecoveryDetail,
+  PostClaimDatabaseRecoveryDetail,
+  PreClaimFailureDetail,
+} from "../types";
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
 } from "../types";
@@ -52,6 +58,16 @@ import {
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
+export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
+
+export class PostCompactionContinuationEmptyError extends Error {
+  readonly code = POST_COMPACTION_CONTINUATION_EMPTY_CODE;
+
+  constructor() {
+    super("Post-compaction continuation stream ended before a terminal model response");
+    this.name = "PostCompactionContinuationEmptyError";
+  }
+}
 
 export type ProviderRecoveryResult =
   | {
@@ -89,7 +105,8 @@ export function providerRecoveryResult(input: {
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
           input.failureCode === "mcp_transport_timeout" ||
-          input.failureCode === "mcp_transport_unavailable"
+          input.failureCode === "mcp_transport_unavailable" ||
+          input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
         ? Math.max(
             providerDelay ?? 0,
             PROVIDER_CONNECTIVITY_BACKOFF_MS[
@@ -246,36 +263,94 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
  */
 export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
-  const sqlState = persistenceFailure?.details.sqlState ?? null;
-  const rawTransportFailure = sqlState === null && isRetryableDatabaseTransportFailure(error);
+  const retryableCode = retryableDatabaseFailureCode(error);
   // The database transaction itself retries only the two contention failures
   // proven safe for immediate replay. Once the activity has failed, the
   // workflow may also retry operational outages after a durable re-read and
   // bounded delay. Unknown driver/database failures stay recoverable because
   // they commonly represent a lost connection; known constraint, auth, and
   // application SQLSTATEs are permanent and must not create an infinite loop.
-  const retryable = Boolean(
-    rawTransportFailure ||
-    (persistenceFailure &&
-      (sqlState === null ||
-        sqlState.startsWith("08") ||
-        sqlState.startsWith("40") ||
-        sqlState.startsWith("53") ||
-        sqlState === "55P03" ||
-        sqlState === "57014" ||
-        sqlState === "57P01" ||
-        sqlState === "57P02" ||
-        sqlState === "57P03" ||
-        sqlState.startsWith("58"))),
-  );
   const detail: PreClaimFailureDetail = {
-    disposition: retryable ? "retryable" : "permanent",
-    code:
-      persistenceFailure?.details.code ?? (rawTransportFailure ? "db_failure" : "claim_invariant"),
+    disposition: retryableCode ? "retryable" : "permanent",
+    code: retryableCode ?? persistenceFailure?.details.code ?? "claim_invariant",
   };
   return ApplicationFailure.create({
     message: PRE_CLAIM_FAILURE_MESSAGE,
     type: PRE_CLAIM_FAILURE_TYPE,
+    nonRetryable: true,
+    details: [detail],
+  });
+}
+
+function retryableDatabaseFailureCode(
+  error: unknown,
+): PostClaimDatabaseRecoveryDetail["code"] | null {
+  const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
+  const sqlState = persistenceFailure?.details.sqlState ?? null;
+  if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
+    return "db_failure";
+  }
+  if (
+    !persistenceFailure ||
+    !(
+      sqlState === null ||
+      sqlState.startsWith("08") ||
+      sqlState.startsWith("40") ||
+      sqlState.startsWith("53") ||
+      sqlState === "55P03" ||
+      sqlState === "57014" ||
+      sqlState === "57P01" ||
+      sqlState === "57P02" ||
+      sqlState === "57P03" ||
+      sqlState.startsWith("58")
+    )
+  ) {
+    return null;
+  }
+  return persistenceFailure.details.code;
+}
+
+/**
+ * Carry one exact claimed-but-not-started attempt into the workflow's DB-only
+ * recovery lane. Permanent database/state failures remain terminal; only the
+ * same operational outage classes that are safe before claim are admitted.
+ */
+export function postClaimDatabaseRecoveryFailure(input: {
+  error: unknown;
+  turnId: string;
+  triggerEventId: string;
+  executionGeneration: number;
+  providerRecovery?: {
+    failureCode: string;
+    providerRecoveryCount: number;
+  };
+}): ApplicationFailure | null {
+  const code = retryableDatabaseFailureCode(input.error);
+  if (!code || input.executionGeneration < 1) return null;
+  if (
+    input.providerRecovery &&
+    (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
+      input.providerRecovery.providerRecoveryCount <= 0 ||
+      input.providerRecovery.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
+      !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode))
+  ) {
+    return null;
+  }
+  const detail: PostClaimDatabaseRecoveryDetail = {
+    turnId: input.turnId,
+    triggerEventId: input.triggerEventId,
+    executionGeneration: input.executionGeneration,
+    code,
+    ...(input.providerRecovery
+      ? {
+          providerFailureCode: input.providerRecovery.failureCode,
+          providerRecoveryCount: input.providerRecovery.providerRecoveryCount,
+        }
+      : {}),
+  };
+  return ApplicationFailure.create({
+    message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+    type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
     nonRetryable: true,
     details: [detail],
   });
@@ -727,6 +802,14 @@ export function agentRunFailurePayload(
       code: error.code,
       retryable: false,
       detail: error.message,
+    };
+  }
+  if (error instanceof PostCompactionContinuationEmptyError) {
+    return {
+      error:
+        "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
+      code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
+      retryable: true,
     };
   }
   // An accepted Codex stream with no terminal response is malformed/partial,

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type ResourceAuthorityScope } from "@opengeni/sdk";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   actRun,
   flush,
@@ -106,7 +106,10 @@ function authorityPage(active: boolean, kind: ResourceKind) {
   };
 }
 
-function personalClient(input?: { active?: boolean; failure?: Error | null }): OpenGeniCoreClient {
+function personalClient(input?: {
+  active?: boolean;
+  failure?: Error | null;
+}): OpenGeniBrowserClient {
   return {
     listVariableSets: async () => {
       if (input?.failure) throw input.failure;
@@ -123,7 +126,7 @@ function personalClient(input?: { active?: boolean; failure?: Error | null }): O
       if (input?.failure) throw input.failure;
       return authorityPage(input?.active !== false, options.resourceKind);
     },
-  } as unknown as OpenGeniCoreClient;
+  } as unknown as OpenGeniBrowserClient;
 }
 
 describe("useFixedResourceScopes", () => {
@@ -138,7 +141,7 @@ describe("useFixedResourceScopes", () => {
         requested.push(`rig:${requestedWorkspaceId}:${requestedId}`);
         return { ...rig(), scope: "workspace" as const };
       },
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const hook = await renderHook(
       () => useFixedResourceScopes(client, workspaceId, [variableSetId], rigId),
       undefined,
@@ -158,7 +161,7 @@ describe("useFixedResourceScopes", () => {
         if (requestedWorkspaceId !== workspaceId) throw new Error("ordinary catalog unavailable");
         return { ...variableSet(), scope: "user" as const };
       },
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const hook = await renderHook(
       ({ routedWorkspaceId }: { routedWorkspaceId: string }) =>
         useFixedResourceScopes(client, routedWorkspaceId, [variableSetId], null),
@@ -190,7 +193,7 @@ describe("usePersonalResourceAttachment", () => {
         calls += 1;
         throw new Error("personal catalog unavailable");
       },
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const current = identity("owner");
     const hook = await renderHook(
       () =>
@@ -231,7 +234,7 @@ describe("usePersonalResourceAttachment", () => {
         _workspaceId: string,
         options: { resourceKind: string },
       ) => (options.resourceKind === "variable_set" ? variablePromise : rigPromise),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const hook = await renderHook(
       ({ principal }: { principal: string }) => {
         const current = identity(principal);
@@ -269,7 +272,7 @@ describe("usePersonalResourceAttachment", () => {
         _workspaceId: string,
         options: { resourceKind: string },
       ) => authorityPage(active, options.resourceKind as "variable_set" | "rig"),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const current = identity("owner");
     const hook = await renderHook(
       () =>
@@ -310,7 +313,7 @@ describe("usePersonalResourceAttachment", () => {
         _workspaceId: string,
         options: { resourceKind: string },
       ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const current = identity("owner");
     const hook = await renderHook(
       () =>
@@ -389,7 +392,7 @@ describe("usePersonalResourceAttachment", () => {
             : [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const current = identity("owner");
     const hook = await renderHook(
       () =>
@@ -553,7 +556,7 @@ describe("usePersonalResourceAttachment", () => {
           calls += 1;
           throw new Error("must remain inert");
         },
-      } as unknown as OpenGeniCoreClient;
+      } as unknown as OpenGeniBrowserClient;
       const hook = await renderHook(
         () =>
           usePersonalResourceAttachment({
@@ -594,7 +597,7 @@ describe("usePersonalResourceAttachment", () => {
           if (failure) throw failure;
           return authorityPage(true, options.resourceKind);
         },
-      } as unknown as OpenGeniCoreClient;
+      } as unknown as OpenGeniBrowserClient;
       const current = identity("owner");
       const hook = await renderHook(
         () =>
@@ -640,7 +643,7 @@ describe("usePersonalResourceAttachment", () => {
           if (failing) throw new Error("initial failure");
           return authorityPage(true, options.resourceKind);
         },
-      } as unknown as OpenGeniCoreClient;
+      } as unknown as OpenGeniBrowserClient;
       const current = identity("owner");
       const hook = await renderHook(
         () =>
@@ -677,7 +680,7 @@ describe("usePersonalResourceAttachment", () => {
         _workspaceId: string,
         options: { resourceKind: string },
       ) => authorityPage(true, options.resourceKind as "variable_set" | "rig"),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const current = identity("owner");
     const hook = await renderHook(
       ({ enabled }: { enabled: boolean }) =>

@@ -39,6 +39,8 @@ import type {
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
+  PersonalGitHubConnectionStatusResponse,
+  PersonalGitHubRepositoryCatalogItem,
   ResourceRef,
 } from "@/types";
 
@@ -111,6 +113,14 @@ export type RepositoryContextPickerProps = {
   linkUrl: string | null;
   installations: GitHubInstallationBinding[];
   repositories: GitHubRepository[];
+  personalGitHubStatus?: PersonalGitHubConnectionStatusResponse | null;
+  personalGitHubRepositories?: PersonalGitHubRepositoryCatalogItem[];
+  selectedPersonalGitHubRepoIds?: Set<string>;
+  selectedPersonalGitHubRepoRefs?: Record<string, string>;
+  personalGitHubBusy?: boolean;
+  onConnectPersonalGitHub?: () => void;
+  onTogglePersonalGitHubRepo?: (repo: PersonalGitHubRepositoryCatalogItem) => void;
+  onPersonalGitHubRefChange?: (repositoryId: string, ref: string) => void;
   groups: RepositoryGroup[];
   selectedRepoIds: Set<number>;
   selectedRepoRefs: Record<number, string>;
@@ -135,6 +145,8 @@ export type RepositoryContextPickerProps = {
   onDisconnectInstallation: (installationId: number) => Promise<void>;
   /** Repositories already mounted on an additive surface cannot be removed or retargeted. */
   lockedRepoIds?: ReadonlySet<number>;
+  /** Personal repositories already mounted on an additive surface cannot be removed or retargeted. */
+  lockedPersonalGitHubRepoIds?: ReadonlySet<string>;
   /** Manual rows already mounted on an additive surface are rendered read-only. */
   lockedManualRepoIds?: ReadonlySet<number>;
   /** Inline validation for pending manual repository additions. */
@@ -148,14 +160,19 @@ export type RepositoryContextPickerProps = {
 /** Shared picker body — desktop dropdown and mobile “+” drill-in. */
 export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
   const selectedInstalledCount = props.selectedRepoIds.size;
+  const personalRepositories = (props.personalGitHubRepositories ?? []).filter(
+    (repository) => repository.selectedAccess !== null,
+  );
+  const selectedPersonalCount = props.selectedPersonalGitHubRepoIds?.size ?? 0;
   const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
-  const selectedCount = selectedInstalledCount + manualCount;
+  const selectedCount = selectedInstalledCount + selectedPersonalCount + manualCount;
   const hasRepos = props.repositories.length > 0;
   const bindingPresentation = repositoryBindingPresentation(
     props.status,
     props.installUrl,
     props.setupMode,
   );
+  const canRefresh = bindingPresentation.canRefresh || props.personalGitHubStatus?.enabled === true;
   // Two-step inline confirm for removing a manual repo, so a stray click in a
   // dense picker doesn't drop a repo the user typed out.
   const [confirmRemoveId, setConfirmRemoveId] = useState<number | null>(null);
@@ -333,7 +350,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           variant="ghost"
           size="icon-xs"
           onClick={() => void props.onRefresh()}
-          disabled={!bindingPresentation.canRefresh || props.repoBusy}
+          disabled={!canRefresh || props.repoBusy}
           aria-label="Refresh repositories"
           className="size-7"
         >
@@ -343,6 +360,130 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain max-h-[min(calc(var(--radix-dropdown-menu-content-available-height,70vh)-3.5rem),620px)]">
         <div className="space-y-2.5 p-2.5">
+          {props.personalGitHubStatus?.enabled ? (
+            props.personalGitHubStatus.connection?.status === "active" ? (
+              <section className="overflow-hidden rounded-lg border border-border bg-bg/25">
+                <div className="border-b border-border px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0 truncate text-xs font-medium text-fg">
+                      Your GitHub identity
+                    </div>
+                    <MetaChip dot="running" rounded="full">
+                      @
+                      {String(
+                        props.personalGitHubStatus.connection.metadata.githubLogin ?? "connected",
+                      )}
+                    </MetaChip>
+                  </div>
+                  <p className="mt-1 text-2xs leading-4 text-fg-subtle">
+                    Reviews, merges, and other writes appear as you. Selecting a repository lets
+                    this workspace remember that identity.
+                  </p>
+                </div>
+                {props.personalGitHubBusy ? (
+                  <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                    Loading your repositories
+                  </div>
+                ) : personalRepositories.length === 0 ? (
+                  <div className="p-3 text-xs leading-5 text-fg-muted">
+                    No personal repositories are allowed yet. Choose them from Integrations.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-border/70">
+                    {personalRepositories.map((repo) => {
+                      const checked = props.selectedPersonalGitHubRepoIds?.has(repo.repositoryId);
+                      const locked =
+                        props.lockedPersonalGitHubRepoIds?.has(repo.repositoryId) === true;
+                      return (
+                        <div key={repo.repositoryId} className="px-2 py-2 hover:bg-surface-2/45">
+                          <button
+                            type="button"
+                            onClick={() => props.onTogglePersonalGitHubRepo?.(repo)}
+                            disabled={props.pending || props.personalGitHubBusy || locked}
+                            aria-pressed={checked}
+                            aria-label={`Use ${repo.fullName} as your GitHub identity`}
+                            className="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-md text-left outline-none"
+                          >
+                            <span
+                              className={cn(
+                                "flex size-4 items-center justify-center rounded border",
+                                checked
+                                  ? "border-brand bg-brand-strong text-brand-fg"
+                                  : "border-border-strong bg-surface",
+                              )}
+                            >
+                              {checked ? <CheckIcon className="size-3" /> : null}
+                            </span>
+                            <span className="min-w-0">
+                              <span className="flex min-w-0 items-center gap-1.5">
+                                <span className="truncate text-xs font-medium text-fg">
+                                  {repo.fullName}
+                                </span>
+                                {repo.private ? (
+                                  <LockIcon className="size-3 shrink-0 text-fg-subtle" />
+                                ) : null}
+                              </span>
+                              <span className="mt-0.5 block truncate text-2xs text-fg-subtle">
+                                {repo.selectedAccess === "write" ? "Read and write" : "Read only"}
+                              </span>
+                            </span>
+                            {locked ? (
+                              <MetaChip dot="idle" rounded="full">
+                                Mounted
+                              </MetaChip>
+                            ) : checked ? (
+                              <MetaChip dot="running" rounded="full">
+                                As you
+                              </MetaChip>
+                            ) : null}
+                          </button>
+                          {checked ? (
+                            <div className="mt-2 flex items-center gap-2 pl-6">
+                              <GitBranchIcon className="size-3.5 shrink-0 text-fg-subtle" />
+                              <Input
+                                value={
+                                  props.selectedPersonalGitHubRepoRefs?.[repo.repositoryId] ??
+                                  repo.defaultBranch
+                                }
+                                onChange={(event) =>
+                                  props.onPersonalGitHubRefChange?.(
+                                    repo.repositoryId,
+                                    event.target.value,
+                                  )
+                                }
+                                disabled={props.pending || locked}
+                                aria-label={`${repo.fullName} ref`}
+                                className="h-7 text-xs"
+                              />
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            ) : (
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg/25 p-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-fg">Use your GitHub identity</div>
+                  <div className="mt-0.5 text-2xs text-fg-subtle">
+                    Approve, review, and merge as yourself.
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="xs"
+                  onClick={props.onConnectPersonalGitHub}
+                  disabled={props.pending || props.personalGitHubBusy}
+                >
+                  Connect
+                </Button>
+              </div>
+            )
+          ) : null}
+
           {props.status === "disabled" ? (
             <div className="space-y-3">
               <EmptyState
@@ -632,18 +773,23 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
 
 export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
   const selectedInstalledCount = props.selectedRepoIds.size;
+  const selectedPersonalCount = props.selectedPersonalGitHubRepoIds?.size ?? 0;
   const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
-  const selectedCount = selectedInstalledCount + manualCount;
+  const selectedCount = selectedInstalledCount + selectedPersonalCount + manualCount;
   const bindingPresentation = repositoryBindingPresentation(
     props.status,
     props.installUrl,
     props.setupMode,
   );
+  const personalGitHubActive = props.personalGitHubStatus?.connection?.status === "active";
   const selectedInstalled = props.repositories.filter((repo) => props.selectedRepoIds.has(repo.id));
   const selectedManual = props.manualRepos.filter((repo) => repo.url.trim().length > 0);
   const selectedNames = [
     ...selectedInstalled.map((repo) => repo.fullName),
     ...selectedManual.map((repo) => repo.url.trim()),
+    ...(props.personalGitHubRepositories ?? [])
+      .filter((repo) => props.selectedPersonalGitHubRepoIds?.has(repo.repositoryId))
+      .map((repo) => repo.fullName),
   ];
   const selectedLabel =
     selectedCount === 1 ? (selectedNames[0] ?? repoCountLabel(1)) : repoCountLabel(selectedCount);
@@ -674,7 +820,9 @@ export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
           <span
             className={cn(
               "size-1.5 shrink-0 rounded-full",
-              bindingPresentation.healthy ? "bg-status-idle" : "bg-status-waiting",
+              bindingPresentation.healthy || personalGitHubActive
+                ? "bg-status-idle"
+                : "bg-status-waiting",
             )}
             aria-hidden="true"
           />

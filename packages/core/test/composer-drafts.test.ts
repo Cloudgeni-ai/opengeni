@@ -5,12 +5,19 @@ import {
   appendSessionEvents,
   createDb,
   createSession,
+  SessionCommandIdempotencyError,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import { submitComposerDraftForRequest } from "../src/application/composer-submit";
 import { saveHumanComposerDraft } from "../src/application/session-commands";
 import { normalizeResources } from "../src/domain/resources";
 
@@ -274,5 +281,139 @@ describe("established-session composer drafts", () => {
         }),
       ),
     ).resolves.toMatchObject({ replay: false });
+  }, 180_000);
+
+  test("accepts, rotates, and replays one composer command through the public application seam", async () => {
+    if (!available) return;
+
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(db, {
+      accountExternalSource: "test",
+      accountExternalId: `submit-account-${suffix}`,
+      accountName: "Composer application submit",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `submit-workspace-${suffix}`,
+      workspaceName: "Composer application submit",
+      subjectId: `submit-subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const workspaceId = grant.workspaceId!;
+    const session = await createSession(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const saved = await saveHumanComposerDraft(
+      { db },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+      },
+      {
+        expectedRevision: 0,
+        text: "accept this exact draft",
+        annotations: [],
+        resources: [],
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+      },
+    );
+    const clientEventId = crypto.randomUUID();
+    const hostRepository: ResourceRef = {
+      kind: "repository",
+      uri: "https://dev.azure.com/example/project/_git/repository",
+      ref: "main",
+      mountPath: "repositories/host-authorized",
+      provider: "azure_devops",
+      repositoryId: "host-authorized",
+      connectionId: "connection-host-authorized",
+      access: "write",
+    };
+    const input = {
+      clientEventId,
+      expectedDraftRevision: saved.revision,
+      delivery: "send" as const,
+      text: saved.text,
+      annotations: saved.annotations,
+      resources: saved.resources,
+      model: saved.model,
+      reasoningEffort: saved.reasoningEffort,
+      latencyMode: saved.latencyMode,
+      connectionAuthorities: [],
+    };
+    const deps = {
+      settings: testSettings({ sandboxBackend: "none" }),
+      db,
+      bus: new MemoryEventBus(),
+      workflowClient: { wakeSessionWorkflow: async () => undefined },
+      objectStorage: null,
+    } as unknown as Parameters<typeof submitComposerDraftForRequest>[0];
+
+    const accepted = await submitComposerDraftForRequest(
+      deps,
+      grant,
+      workspaceId,
+      session.id,
+      input,
+      { additionalResources: [hostRepository] },
+    );
+    expect(accepted).toMatchObject({
+      replay: false,
+      accepted: { clientEventId },
+      draft: {
+        revision: saved.revision + 1,
+        text: "",
+        resources: [],
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+      },
+      receipt: { operationKey: clientEventId },
+      turn: { resources: [hostRepository] },
+    });
+
+    const replay = await submitComposerDraftForRequest(
+      deps,
+      grant,
+      workspaceId,
+      session.id,
+      input,
+      { additionalResources: [hostRepository] },
+    );
+    expect(replay).toMatchObject({
+      replay: true,
+      accepted: { id: accepted.accepted.id, clientEventId },
+      turn: { id: accepted.turn.id },
+      receipt: { id: accepted.receipt.id, operationKey: clientEventId },
+      draft: accepted.draft,
+    });
+
+    await expect(
+      submitComposerDraftForRequest(
+        deps,
+        grant,
+        workspaceId,
+        session.id,
+        {
+          ...input,
+          text: "changed after acceptance",
+        },
+        { additionalResources: [hostRepository] },
+      ),
+    ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
+
+    await expect(
+      submitComposerDraftForRequest(deps, grant, workspaceId, session.id, input, {
+        additionalResources: [{ ...hostRepository, ref: "changed" }],
+      }),
+    ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
   }, 180_000);
 });

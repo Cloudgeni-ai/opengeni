@@ -77,6 +77,7 @@ export const GITHUB_REST_READ_TOOL_NAMES = Object.freeze([
   "issue_get",
   "pull_requests_list",
   "pull_request_get",
+  "pull_request_reviews_list",
   "checks_summary",
   "code_search",
 ] as const);
@@ -90,6 +91,8 @@ export const GITHUB_REST_WRITE_TOOL_NAMES = Object.freeze([
   "pull_request_update",
   "pull_request_comment",
   "pull_request_request_review",
+  "pull_request_review_submit",
+  "pull_request_merge",
 ] as const);
 
 export const GITHUB_REST_TOOL_NAMES = Object.freeze([
@@ -157,6 +160,17 @@ export const GITHUB_REST_MCP_TOOLS: GitHubTool[] = [
     {
       ...repositoryProperties(),
       pullNumber: integer(1, Number.MAX_SAFE_INTEGER),
+    },
+    ["repository", "pullNumber"],
+  ),
+  tool(
+    "pull_request_reviews_list",
+    "List reviews on a pull request with bounded pagination.",
+    {
+      ...repositoryProperties(),
+      pullNumber: integer(1, Number.MAX_SAFE_INTEGER),
+      limit: integer(1, MAX_PAGE_SIZE),
+      page: integer(1, 100),
     },
     ["repository", "pullNumber"],
   ),
@@ -265,6 +279,31 @@ export const GITHUB_REST_MCP_TOOLS: GitHubTool[] = [
       pullNumber: integer(1, Number.MAX_SAFE_INTEGER),
       reviewers: stringArrayProperty(20, 128),
       teamReviewers: stringArrayProperty(20, 128),
+    },
+    ["repository", "pullNumber"],
+  ),
+  mutationTool(
+    "pull_request_review_submit",
+    "Submit a comment, approval, or change request as the connected GitHub user.",
+    {
+      ...repositoryProperties(),
+      pullNumber: integer(1, Number.MAX_SAFE_INTEGER),
+      event: enumProperty(["COMMENT", "APPROVE", "REQUEST_CHANGES"]),
+      body: stringProperty("Review summary.", MAX_TEXT),
+      commitId: stringProperty("Optional exact commit SHA to review.", 40),
+    },
+    ["repository", "pullNumber", "event"],
+  ),
+  destructiveMutationTool(
+    "pull_request_merge",
+    "Merge a pull request as the connected GitHub user.",
+    {
+      ...repositoryProperties(),
+      pullNumber: integer(1, Number.MAX_SAFE_INTEGER),
+      method: enumProperty(["merge", "squash", "rebase"]),
+      expectedHeadSha: stringProperty("Optional exact expected head commit SHA.", 40),
+      commitTitle: stringProperty("Optional merge commit title.", 256),
+      commitMessage: stringProperty("Optional merge commit message.", MAX_TEXT),
     },
     ["repository", "pullNumber"],
   ),
@@ -446,6 +485,14 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
           `/repos/${repository.fullName}/pulls/${positiveInteger(args.pullNumber, "pullNumber")}`,
           projectPullRequest,
         );
+      case "pull_request_reviews_list":
+        return await this.getList(
+          toolName,
+          repository,
+          `/repos/${repository.fullName}/pulls/${positiveInteger(args.pullNumber, "pullNumber")}/reviews`,
+          args,
+          projectReview,
+        );
       case "checks_summary":
         return await this.checksSummary(repository, args);
       case "code_search":
@@ -560,6 +607,29 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
           ),
           projectReviewRequest,
         );
+      case "pull_request_review_submit":
+        return await this.mutate(
+          toolName,
+          repository,
+          `/repos/${repository.fullName}/pulls/${positiveInteger(args.pullNumber, "pullNumber")}/reviews`,
+          "POST",
+          reviewSubmissionBody(args),
+          projectReview,
+        );
+      case "pull_request_merge":
+        return await this.mutate(
+          toolName,
+          repository,
+          `/repos/${repository.fullName}/pulls/${positiveInteger(args.pullNumber, "pullNumber")}/merge`,
+          "PUT",
+          compact({
+            merge_method: optionalEnum(args.method, "method", ["merge", "squash", "rebase"]),
+            sha: optionalSha(args.expectedHeadSha, "expectedHeadSha"),
+            commit_title: optionalString(args.commitTitle, "commitTitle", 256),
+            commit_message: optionalString(args.commitMessage, "commitMessage", MAX_TEXT),
+          }),
+          projectMerge,
+        );
     }
   }
 
@@ -607,7 +677,7 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     toolName: string,
     repository: GitHubRestRepository,
     path: string,
-    method: "POST" | "PATCH",
+    method: "POST" | "PATCH" | "PUT",
     body: Record<string, unknown>,
     project: (payload: unknown) => T,
   ): Promise<unknown> {
@@ -865,6 +935,23 @@ function mutationTool(
   } as GitHubTool;
 }
 
+function destructiveMutationTool(
+  name: string,
+  description: string,
+  properties: Record<string, unknown>,
+  required: string[],
+): GitHubTool {
+  const entry = mutationTool(name, description, properties, required);
+  return {
+    ...entry,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+    },
+  } as GitHubTool;
+}
+
 function repositoryProperties() {
   return {
     repository: stringProperty("Exact owner/name from repositories_list.", 256),
@@ -955,6 +1042,11 @@ function optionalEnum<T extends string>(
     throw new GitHubRestInputError(`${name} is invalid`);
   return value as T;
 }
+function requiredEnum<T extends string>(value: unknown, name: string, values: readonly T[]): T {
+  const parsed = optionalEnum(value, name, values);
+  if (parsed === undefined) throw new GitHubRestInputError(`${name} is invalid`);
+  return parsed;
+}
 function optionalStringArray(
   value: unknown,
   name: string,
@@ -978,6 +1070,13 @@ function requiredSha(value: unknown): string {
     throw new GitHubRestInputError("sha must be an exact commit SHA");
   return sha.toLowerCase();
 }
+function optionalSha(value: unknown, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  const sha = requiredString(value, name, 40);
+  if (!/^[0-9a-f]{40}$/iu.test(sha))
+    throw new GitHubRestInputError(`${name} must be an exact commit SHA`);
+  return sha.toLowerCase();
+}
 function repositoryPath(value: string): string {
   const parts = value.split("/");
   if (value.startsWith("/") || parts.some((part) => !part || part === "." || part === ".."))
@@ -999,6 +1098,18 @@ function requireMutationFields(input: Record<string, unknown>): Record<string, u
   if (Object.keys(input).length === 0)
     throw new GitHubRestInputError("At least one update field is required");
   return input;
+}
+function reviewSubmissionBody(args: Record<string, unknown>): Record<string, unknown> {
+  const event = requiredEnum(args.event, "event", ["COMMENT", "APPROVE", "REQUEST_CHANGES"]);
+  const body = optionalString(args.body, "body", MAX_TEXT);
+  if ((event === "COMMENT" || event === "REQUEST_CHANGES") && !body) {
+    throw new GitHubRestInputError(`body is required when event is ${event}`);
+  }
+  return compact({
+    event,
+    body,
+    commit_id: optionalSha(args.commitId, "commitId"),
+  });
 }
 function headersRecord(headers: HeadersInit | undefined): Record<string, string> {
   if (!headers) return {};
@@ -1223,6 +1334,26 @@ function projectReviewRequest(value: unknown) {
           slug: optionalOutputString(objectRecord(team).slug, 128),
         }))
       : [],
+  };
+}
+function projectReview(value: unknown) {
+  const row = objectRecord(value);
+  return {
+    id: outputInteger(row.id),
+    state: optionalOutputString(row.state, 64),
+    body: optionalOutputString(row.body, MAX_TEXT),
+    commitId: optionalOutputString(row.commit_id, 40),
+    author: projectUser(row.user),
+    submittedAt: optionalOutputString(row.submitted_at, 64),
+    htmlUrl: optionalOutputString(row.html_url, 1_024),
+  };
+}
+function projectMerge(value: unknown) {
+  const row = objectRecord(value);
+  return {
+    sha: optionalOutputString(row.sha, 40),
+    merged: row.merged === true,
+    message: optionalOutputString(row.message, 512),
   };
 }
 function projectCheckRun(value: unknown) {

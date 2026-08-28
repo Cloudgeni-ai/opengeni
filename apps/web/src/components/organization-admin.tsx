@@ -1,4 +1,4 @@
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   getOrganizationPrivateSessionSettings,
   updateOrganizationPrivateSessionSettings,
@@ -172,7 +172,7 @@ type PendingWorkspaceRevoke = {
 };
 
 export function OrganizationPrivateSessionsSection(props: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   identity: OrganizationAdminIdentity;
   actorRole: OrganizationMembershipRole | null;
   managedSession: boolean;
@@ -356,7 +356,7 @@ function organizationMemberLabel(member: OrganizationMember, currentSubjectId?: 
 }
 
 export function OrganizationOverviewSection(props: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   identity: OrganizationAdminIdentity;
   actorRole: OrganizationMembershipRole | null;
   managedSession: boolean;
@@ -1351,7 +1351,7 @@ function Metric({ label, value }: { label: string; value: string | number }) {
 }
 
 export function OrganizationPeopleSection(props: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   identity: OrganizationAdminIdentity;
   actorRole: OrganizationMembershipRole | null;
   managedSession: boolean;
@@ -2586,7 +2586,7 @@ function memberActionDescription(action: MemberAction): string {
 }
 
 export function OrganizationRetentionSection(props: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   identity: OrganizationAdminIdentity;
   actorRole: OrganizationMembershipRole | null;
   managedSession: boolean;

@@ -40,6 +40,7 @@ import { useSessionLineage } from "../src/hooks/use-session-lineage";
 import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approval-policy";
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
+import { createEmbeddedSessionClient } from "../src/embedded-session-client";
 
 registerDom();
 
@@ -2828,6 +2829,85 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("a host submit response wins over an older in-flight draft read", async () => {
+    const initial: ComposerDraft = {
+      revision: 3,
+      text: "ship through the host",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let reads = 0;
+    let releaseStaleRead: (() => void) | null = null;
+    const staleReadGate = new Promise<void>((resolve) => {
+      releaseStaleRead = resolve;
+    });
+    const base = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 1) return initial;
+        await staleReadGate;
+        return initial;
+      },
+    });
+    const client = createEmbeddedSessionClient(base, {
+      overrides: {
+        submitComposerDraft: async (_workspaceId, _sessionId, request) => {
+          const turn = fakeTurn({ prompt: request.text });
+          return {
+            accepted: {
+              ...makeEvent(2, "user.message", { text: request.text }),
+              clientEventId: request.clientEventId,
+            },
+            turn,
+            draft: {
+              ...initial,
+              revision: request.expectedDraftRevision + 1,
+              text: "",
+            },
+            receipt: promptReceipt(turn.id),
+            routing: "accepted_for_execution",
+            interruptionCount: 0,
+            replay: false,
+          };
+        },
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+        }),
+      noEvents,
+    );
+    await flush();
+    expect(hook.result.current.value).toBe(initial.text);
+
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "edit" })]);
+    await flush();
+    expect(reads).toBe(2);
+
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(hook.result.current.draftRevision).toBe(4);
+    expect(hook.result.current.value).toBe("");
+
+    await flushing(async () => {
+      releaseStaleRead!();
+      await staleReadGate;
+    });
+    await flush();
+    expect(hook.result.current.draftRevision).toBe(4);
+    expect(hook.result.current.value).toBe("");
+    await hook.unmount();
+  });
+
   test("historical feed hydration reconciles once without replaying every old event", async () => {
     let reads = 0;
     const client = fakeClient({
@@ -3158,6 +3238,42 @@ describe("useComposer durable draft and control binding", () => {
     );
     await flush();
     expect(reads).toBe(1);
+    await hook.unmount();
+  });
+
+  test("same-revision soft reloads do not republish decoded draft state", async () => {
+    let reads = 0;
+    const authoritative: ComposerDraft = {
+      revision: 7,
+      text: "settled draft",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard" as const,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return { ...authoritative, resources: [] };
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+    const firstProjection = hook.result.current.draft;
+    expect(firstProjection?.revision).toBe(7);
+
+    await hook.rerender([makeEvent(1, "session.queue.changed", { operation: "edit" })]);
+    await flush();
+
+    expect(reads).toBe(2);
+    expect(hook.result.current.draft).toBe(firstProjection);
     await hook.unmount();
   });
 
@@ -3808,6 +3924,33 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.error?.message).toBe(
       "OpenGeni is temporarily unavailable — retry. Reference: edge-503-safe.",
     );
+    await hook.unmount();
+  });
+
+  test("retryable draft hydrate failures stay bounded across client identity churn", async () => {
+    let reads = 0;
+    const failingClient = () =>
+      fakeClient({
+        getComposerDraft: async () => {
+          reads += 1;
+          throw gatewayError(503);
+        },
+      });
+    const hook = await renderHook(
+      (client: ReturnType<typeof failingClient>) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      failingClient(),
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    for (let index = 0; index < 10; index += 1) {
+      await hook.rerender(failingClient());
+    }
+    await flush();
+
+    expect(reads).toBe(1);
+    expect(hook.result.current.error).toMatchObject({ status: 503, retryable: true });
     await hook.unmount();
   });
 

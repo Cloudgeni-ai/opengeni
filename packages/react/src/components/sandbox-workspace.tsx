@@ -45,6 +45,7 @@ import { xtermThemeFromTokens } from "../lib/xterm-theme";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import type { BrowserFrameWebSocketFactory } from "../hooks/use-browser-frame-stream";
 import type { ComputerFrameWebSocketFactory } from "../hooks/use-computer-frame-stream";
+import type { FileNodeVisibilityPredicate } from "../file-node-visibility";
 import { useSessionCapabilities } from "../hooks/use-session-capabilities";
 import { useSandboxFiles } from "../hooks/use-sandbox-files";
 import {
@@ -301,6 +302,8 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   /** Restore and report navigation inside the built-in workbench surfaces. */
   initialFilePath?: string | null | undefined;
   onFilePathChange?: ((path: string | null) => void) | undefined;
+  /** Presentation-only filter for Files tree nodes and selected-file viewing. */
+  isFileNodeVisible?: FileNodeVisibilityPredicate | undefined;
   initialBrowserSessionId?: string | null | undefined;
   onBrowserSessionIdChange?: ((browserSessionId: string | null) => void) | undefined;
   initialComputerSessionId?: string | null | undefined;
@@ -361,6 +364,7 @@ export function useSandboxWorkspaceTabs(
     onOpenFile,
     initialFilePath,
     onFilePathChange,
+    isFileNodeVisible,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
     initialComputerSessionId,
@@ -752,6 +756,7 @@ export function useSandboxWorkspaceTabs(
             key={sessionId}
             files={files}
             git={git}
+            isNodeVisible={isFileNodeVisible}
             fileSystemAvailable={fileSystemOn || captureAvailable}
             editable={
               filesEditable && files.source === "live" && files.error === null && !files.loading
@@ -900,6 +905,7 @@ export function useSandboxWorkspaceTabs(
     onOpenFile,
     initialFilePath,
     onFilePathChange,
+    isFileNodeVisible,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
     initialComputerSessionId,
@@ -965,6 +971,8 @@ export type SandboxWorkspaceProps = ClientOverride & {
   onActiveTabChange?: ((activeTab: string) => void) | undefined;
   initialFilePath?: string | null | undefined;
   onFilePathChange?: ((path: string | null) => void) | undefined;
+  /** Presentation-only filter for Files tree nodes and selected-file viewing. */
+  isFileNodeVisible?: FileNodeVisibilityPredicate | undefined;
   /**
    * Host request to open a workspace file (and optional line) in Files. A new
    * `requestId` re-opens even the same path.
@@ -1022,6 +1030,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     onActiveTabChange,
     initialFilePath,
     onFilePathChange,
+    isFileNodeVisible,
     openFileRequest,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
@@ -1117,6 +1126,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     ...(browserExtensionSetupUrl ? { browserExtensionSetupUrl } : {}),
     initialFilePath,
     onFilePathChange,
+    isFileNodeVisible,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
     initialComputerSessionId,

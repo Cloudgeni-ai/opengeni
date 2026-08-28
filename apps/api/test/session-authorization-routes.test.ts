@@ -21,6 +21,7 @@ import {
   getSessionHumanInputRequest,
   mutateSessionControlInTransaction,
   submitHumanPromptInTransaction,
+  updateSessionTitle,
   updateSessionVariableSets,
   withWorkspaceSubjectSessionActivityRls,
   withWorkspaceSessionActivityRls,
@@ -72,7 +73,11 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-function appWith(port?: SessionAuthorizationPort, database: Database = client.db): Hono {
+function appWith(
+  port?: SessionAuthorizationPort,
+  database: Database = client.db,
+  settingsOverrides: Parameters<typeof testSettings>[0] = {},
+): Hono {
   const noop = async () => undefined;
   const app = new Hono();
   registerSessionRoutes(app, {
@@ -84,6 +89,7 @@ function appWith(port?: SessionAuthorizationPort, database: Database = client.db
       sandboxDesktopEnabled: true,
       streamTokenSecret: "session-authorization-stream-secret",
       sandboxOwnershipEnabled: true,
+      ...settingsOverrides,
     }),
     db: database,
     bus: new MemoryEventBus(),
@@ -586,6 +592,79 @@ async function expectControlledVariableSetCreateRemovalRace(
 }
 
 describe("embedding host session authorization routes", () => {
+  test("rejects operator-disabled HTTP relevance discovery before storage", async () => {
+    const accountId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const subjectId = `user:${crypto.randomUUID()}`;
+    const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId,
+      workspaceId,
+      subjectId,
+      permissions: ["sessions:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    let databaseTouches = 0;
+    const database = new Proxy(
+      {},
+      {
+        get() {
+          databaseTouches += 1;
+          throw new Error("disabled work discovery reached storage");
+        },
+      },
+    ) as Database;
+    const app = appWith(
+      {
+        authorizeSession: async () => ({ allowed: true }),
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      database,
+      { workDiscoveryEnabled: false },
+    );
+
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/agent-topology?query=permission-scoped`,
+      { headers: { authorization } },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("work discovery is disabled");
+    expect(databaseTouches).toBe(0);
+  });
+
+  test("projects the independent human-advisory rollout decision", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const app = appWith(
+      {
+        authorizeSession: async () => ({ allowed: true }),
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      client.db,
+      { workDiscoveryHumanAdvisoriesEnabled: false },
+    );
+
+    const response = await app.request(`/v1/workspaces/${value.grant.workspaceId}/agent-topology`, {
+      headers: { authorization: value.authorization },
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      sessions: Array<{
+        relatedWork: { advisoryOnly: boolean; noAdditionalAccess: boolean };
+      }>;
+      humanAdvisoriesEnabled: boolean;
+    };
+    expect(body.humanAdvisoriesEnabled).toBe(false);
+    expect(body.sessions.length).toBeGreaterThan(0);
+    expect(
+      body.sessions.every(
+        (session) =>
+          session.relatedWork.advisoryOnly === true &&
+          session.relatedWork.noAdditionalAccess === true,
+      ),
+    ).toBe(true);
+  });
+
   test("keeps the legacy raw revision array and exposes pagination separately", async () => {
     if (!available || !shared) return;
     const value = await fixture();
@@ -1468,6 +1547,16 @@ describe("embedding host session authorization routes", () => {
   test("applies exact host scope to first-party MCP target reads and discovery", async () => {
     if (!available) return;
     const value = await fixture();
+    for (const sessionId of [value.child.id, value.hidden.id]) {
+      expect(
+        await updateSessionTitle(client.db, {
+          workspaceId: value.grant.workspaceId,
+          sessionId,
+          title: "Shared host search target",
+          source: "user",
+        }),
+      ).toMatchObject({ updated: true });
+    }
     const calls: Array<{ sessionId: string; operation: string; surface: string }> = [];
     const port: SessionAuthorizationPort = {
       authorizeSession: async ({ target, operation, surface }) => {
@@ -1482,6 +1571,18 @@ describe("embedding host session authorization routes", () => {
         sessionIds: [value.child.id],
       }),
     };
+    const topologyResponse = await appWith(port).request(
+      `/v1/workspaces/${value.grant.workspaceId}/agent-topology?query=${encodeURIComponent("Shared host search target")}`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(topologyResponse.status).toBe(200);
+    const topology = (await topologyResponse.json()) as {
+      sessions: Array<{ id: string }>;
+      total: number;
+    };
+    expect(topology.total).toBe(1);
+    expect(topology.sessions).toEqual([expect.objectContaining({ id: value.child.id })]);
+
     const noop = async () => undefined;
     const server = buildOpenGeniMcpServer(
       {
@@ -1517,7 +1618,9 @@ describe("embedding host session authorization routes", () => {
 
     const listed = await callMcpTool<{
       sessions: Array<{ id: string; parentSessionId: string | null }>;
-    }>(server, "sessions_list", {});
+      total: number;
+    }>(server, "sessions_list", { query: "Shared host search target" });
+    expect(listed.total).toBe(1);
     expect(listed.sessions).toEqual([
       expect.objectContaining({ id: value.child.id, parentSessionId: null }),
     ]);
@@ -1596,12 +1699,47 @@ describe("embedding host session authorization routes", () => {
       sessionId: target.id,
       idempotencyKey: crypto.randomUUID(),
     });
-    expect(paused.resource.state).toBe("paused");
+    expect(paused).toMatchObject({
+      operation: "session_pause",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "paused" },
+      idempotency: { status: "applied" },
+    });
+    const unchangedPauseKey = crypto.randomUUID();
+    const unchangedPause = await callMcpTool<McpMutationReceiptType>(server, "session_pause", {
+      sessionId: target.id,
+      idempotencyKey: unchangedPauseKey,
+    });
+    expect(unchangedPause).toMatchObject({
+      operation: "session_pause",
+      outcome: "unchanged",
+      changed: false,
+      resource: { type: "session", id: target.id, state: "paused" },
+      idempotency: { status: "applied" },
+    });
+    const replayedPause = await callMcpTool<McpMutationReceiptType>(server, "session_pause", {
+      sessionId: target.id,
+      idempotencyKey: unchangedPauseKey,
+    });
+    expect(replayedPause).toMatchObject({
+      operation: "session_pause",
+      outcome: "replayed",
+      changed: false,
+      resource: { type: "session", id: target.id, state: "paused" },
+      idempotency: { status: "replayed" },
+    });
+    expect(replayedPause.relatedResources).toEqual(unchangedPause.relatedResources);
     const resumed = await callMcpTool<McpMutationReceiptType>(server, "session_resume", {
       sessionId: target.id,
       idempotencyKey: crypto.randomUUID(),
     });
-    expect(resumed.resource.state).toBe("active");
+    expect(resumed).toMatchObject({
+      operation: "session_resume",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "active" },
+    });
     const steered = await callMcpTool<{ updateId: string }>(server, "session_steer", {
       sessionId: target.id,
       instruction: "Take the newest direction exactly once",
@@ -1613,22 +1751,51 @@ describe("embedding host session authorization routes", () => {
       ...value.grant,
       permissions: ["workspace:read", "sessions:read", "sessions:control"],
     });
-    const operatorPaused = await callMcpTool<{
-      effectiveControl: { state: string };
-    }>(operatorServer, "session_pause", {
-      sessionId: target.id,
-      idempotencyKey: crypto.randomUUID(),
+    const operatorPaused = await callMcpTool<McpMutationReceiptType>(
+      operatorServer,
+      "session_pause",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(operatorPaused).toMatchObject({
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_pause",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "paused" },
+      relatedResources: [{ type: "session_command_receipt" }],
     });
-    expect(operatorPaused.effectiveControl.state).toBe("paused");
-    const operatorResumed = await callMcpTool<{
-      effectiveControl: { state: string };
-    }>(operatorServer, "session_resume", {
-      sessionId: target.id,
-      idempotencyKey: crypto.randomUUID(),
+    expect(operatorPaused).not.toHaveProperty("effectiveControl");
+    const operatorResumed = await callMcpTool<McpMutationReceiptType>(
+      operatorServer,
+      "session_resume",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(operatorResumed).toMatchObject({
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_resume",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "active" },
     });
-    expect(operatorResumed.effectiveControl.state).toBe("active");
+    expect(operatorResumed).not.toHaveProperty("effectiveControl");
 
     expect(decisions).toEqual([
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
       {
         operation: "session.control",
         surface: "first_party_mcp",

@@ -16,6 +16,7 @@ import {
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
+import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
 import {
@@ -459,6 +460,15 @@ export function OrgSettingsRoute({
             client={client}
             identity={adminIdentity}
             actorRole={actorRole}
+            managedSession={context.clientConfig.auth.mode === "managedSession"}
+          />
+        ) : null}
+
+        {section === "recovery" ? (
+          <OrganizationRecoverySection
+            key={`${identityKey}:recovery`}
+            client={client}
+            identity={adminIdentity}
             managedSession={context.clientConfig.auth.mode === "managedSession"}
           />
         ) : null}

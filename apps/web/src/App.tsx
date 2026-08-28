@@ -23,6 +23,7 @@
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
+//   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
@@ -41,7 +42,13 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
-type OrganizationAdminSection = "overview" | "knowledge" | "people" | "retention" | "billing";
+type OrganizationAdminSection =
+  | "overview"
+  | "knowledge"
+  | "people"
+  | "recovery"
+  | "retention"
+  | "billing";
 type WorkspaceSettingsSection =
   | "general"
   | "members"
@@ -83,6 +90,10 @@ const LazyResetPasswordRoute = lazyRouteComponent(
 const LazySetupAccountRoute = lazyRouteComponent(
   () => import("@/routes/setup-account"),
   "SetupAccountRoute",
+);
+const LazyAccountAuthRoute = lazyRouteComponent(
+  () => import("@/routes/account-auth"),
+  "AccountAuthRoute",
 );
 const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
@@ -178,6 +189,14 @@ const setupAccountRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "setup-account",
   component: SetupAccount,
+});
+const accountAuthRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "account-auth",
+  validateSearch: (search: Record<string, unknown>): { transaction?: string } => ({
+    ...(typeof search.transaction === "string" ? { transaction: search.transaction } : {}),
+  }),
+  component: AccountAuth,
 });
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
@@ -399,6 +418,7 @@ const workspaceOrganizationRoute = createRoute({
       search.section === "overview" ||
       search.section === "knowledge" ||
       search.section === "people" ||
+      search.section === "recovery" ||
       search.section === "retention" ||
       search.section === "billing"
         ? search.section
@@ -425,6 +445,7 @@ const routeTree = rootRoute.addChildren([
   deviceRoute,
   resetPasswordRoute,
   setupAccountRoute,
+  accountAuthRoute,
   ...(import.meta.env.DEV
     ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, onboardingPreviewRoute]
     : []),
@@ -696,6 +717,11 @@ function ResetPassword() {
 
 function SetupAccount() {
   return <LazySetupAccountRoute />;
+}
+
+function AccountAuth() {
+  const { transaction } = accountAuthRoute.useSearch();
+  return <LazyAccountAuthRoute transactionId={transaction} />;
 }
 
 function ComposerChromeGallery() {

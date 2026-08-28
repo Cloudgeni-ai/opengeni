@@ -384,6 +384,7 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
 export function personalConnectionDelegationsFromParent(input: {
   servers: McpServerConfig[];
   parentDelegations: McpPersonalConnectionDelegation[];
+  personalGitHubResources?: ResourceRef[];
   targetSessionId?: string;
   rejectActivatedConnections?: boolean;
 }): McpPersonalConnectionDelegation[] {
@@ -416,19 +417,55 @@ export function personalConnectionDelegationsFromParent(input: {
           childEligible(item) &&
           (item.connectionType === "social" ||
             item.connectionType === "atlassian" ||
+            item.connectionType === "github_personal" ||
             item.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID),
       )
       .map((item) => ({ ...item })),
   ];
+  const requestedGitHub = personalGitHubRepositoryResources(input.personalGitHubResources ?? []);
+  const inherited = projected.flatMap((delegation) => {
+    if (delegation.connectionType !== "github_personal") return [delegation];
+    if (requestedGitHub.length === 0) return [];
+    const snapshot = delegation.personalGitHubRepositorySelection;
+    if (!snapshot) return [];
+    const repositories = requestedGitHub.map((resource) => {
+      const parent = snapshot.repositories.find(
+        (candidate) =>
+          candidate.repositoryId === resource.repositoryId &&
+          candidate.canonicalUrl === resource.uri &&
+          candidate.ref === resource.ref,
+      );
+      if (
+        !parent ||
+        resource.credentialBindingId !== snapshot.credentialBindingId ||
+        (resource.access === "write" && parent.access !== "write")
+      ) {
+        throw new Error("agent-created personal GitHub repository exceeds parent authority");
+      }
+      return { ...parent, access: resource.access };
+    });
+    return [
+      {
+        ...delegation,
+        personalGitHubRepositorySelection: { ...snapshot, repositories },
+      },
+    ];
+  });
+  if (
+    requestedGitHub.length > 0 &&
+    !inherited.some((delegation) => delegation.connectionType === "github_personal")
+  ) {
+    throw new Error("agent-created personal GitHub repository authority is unavailable");
+  }
   if (
     input.rejectActivatedConnections &&
-    projected.some((delegation) => delegation.userDelegation)
+    inherited.some((delegation) => delegation.userDelegation)
   ) {
     throw new Error(
       "scheduled connection authority is not available until task occurrence authority is activated",
     );
   }
-  return projected;
+  return inherited;
 }
 
 /**
@@ -798,11 +835,6 @@ export async function freezePersonalConnectionDelegations(input: {
         "agent-created work inherits connection authority from its exact parent turn",
       );
     }
-    if (personalGitHubResources.length > 0) {
-      throw new Error(
-        "agent-created personal GitHub repository authority is not activated in this delivery phase",
-      );
-    }
     const inherited = personalConnectionDelegationsFromParent({
       servers,
       parentDelegations: await getSessionTurnPersonalConnectionDelegations(
@@ -811,6 +843,7 @@ export async function freezePersonalConnectionDelegations(input: {
         input.source.sessionId,
         input.source.turnId,
       ),
+      personalGitHubResources,
       ...(input.targetSessionId ? { targetSessionId: input.targetSessionId } : {}),
       ...(input.rejectUnselectedActivatedConnections !== undefined
         ? { rejectActivatedConnections: input.rejectUnselectedActivatedConnections }

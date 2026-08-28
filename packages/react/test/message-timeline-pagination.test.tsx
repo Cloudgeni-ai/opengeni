@@ -3708,6 +3708,35 @@ describe("MessageTimeline pagination affordances", () => {
     }
   }
 
+  test("large pinned catch-up offers an immediate jump to the live tip", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const { r, scroller, layout, initial } = await renderPinnedAtTip(frames);
+
+    // Returning to a long-lived surface may expose pre-existing camera debt
+    // (for example, from a prior hot follow frame). Keep the smooth follower,
+    // but let the reader skip the remaining travel immediately.
+    scroller.scrollTop -= 320;
+    await r.rerender(<MessageTimeline events={initial} status="running" />);
+    await flush();
+
+    expect(distanceFromBottom(scroller)).toBeGreaterThan(240);
+    const button = r.container.querySelector<HTMLButtonElement>("[data-og-jump-to-latest]");
+    expect(button?.textContent).toContain("Jump to latest");
+
+    await actRun(() => button?.click());
+    expect(distanceFromBottom(scroller)).toBe(0);
+
+    await drainFrames(frames);
+    layout.restore();
+    await r.unmount();
+  });
+
   test("same-commit settle-fold + chrome dock glues BOTH shrinks in one write", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {

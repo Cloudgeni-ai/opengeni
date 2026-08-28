@@ -5,23 +5,42 @@ const adminSource = await Bun.file(`${import.meta.dir}/components/organization-a
 const shellSource = await Bun.file(
   `${import.meta.dir}/components/settings/organization-settings-shell.tsx`,
 ).text();
+const recoverySource = await Bun.file(
+  `${import.meta.dir}/components/organization-recovery.tsx`,
+).text();
+const normalizedRecoverySource = recoverySource.replace(/\s+/gu, " ");
+const workspaceSettingsSource = await Bun.file(
+  `${import.meta.dir}/routes/workspace-settings.tsx`,
+).text();
 const tenancyDocs = await Bun.file(
   `${import.meta.dir}/../../../docs/organization-tenancy.md`,
 ).text();
 
 describe("organization administration surface", () => {
-  test("routes accessible overview, knowledge, people, retention, and billing sections", () => {
+  test("routes accessible overview, knowledge, people, recovery, retention, and billing sections", () => {
     expect(routeSource).toContain("<OrganizationSettingsShell");
     expect(shellSource).toContain('aria-label="Organization settings"');
     expect(shellSource).toContain('aria-current={selected ? "page" : undefined}');
-    for (const section of ["overview", "knowledge", "people", "retention", "billing"]) {
+    for (const section of ["overview", "knowledge", "people", "recovery", "retention", "billing"]) {
       expect(shellSource).toContain(`id: "${section}"`);
     }
     expect(routeSource).toContain('section === "knowledge"');
+    expect(routeSource).toContain('section === "recovery"');
+    expect(routeSource).toContain("OrganizationRecoverySection");
     expect(routeSource).toContain("OrganizationKnowledgePrompt");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
     expect(routeSource).toContain('"account:admin"');
     expect(routeSource).toContain("Organization identity is read-only for you");
+    expect(recoverySource).toContain("overview.eligibleMembers");
+    expect(recoverySource).not.toContain("listOrganizationAdministrationMembers");
+    expect(normalizedRecoverySource).toContain("including organization administration and");
+    expect(normalizedRecoverySource).toContain("billing management");
+    expect(normalizedRecoverySource).toContain("No Personal content, workspace ownership");
+    expect(normalizedRecoverySource).toContain("Recovery unavailable");
+    expect(normalizedRecoverySource).toContain("A current owner must rotate the policy");
+    expect(workspaceSettingsSource).toContain("permanently owned by its organization");
+    expect(workspaceSettingsSource).toContain("Cross-organization transfer");
+    expect(workspaceSettingsSource).toContain("granting or revoking named workspace roles");
   });
 
   test("uses only lifecycle APIs and never links a member personal workspace", () => {

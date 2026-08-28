@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/core",
-  "version": "2.4.0",
+  "version": "2.5.3",
   "description": "OpenGeni framework-agnostic core: the domain, access, and billing layers (neutral access, off-HTTP V2 surface). Behavior-preserving extraction from apps/api — keeps Hono's HTTPException for error throwing (typed-errors cleanup deferred).",
   "license": "Apache-2.0",
   "repository": {
@@ -33,6 +33,10 @@
     "./canonical-human-identities": {
       "types": "./src/canonical-human-identities.ts",
       "default": "./src/canonical-human-identities.ts"
+    },
+    "./managed-auth-session-sets": {
+      "types": "./src/managed-auth-session-sets.ts",
+      "default": "./src/managed-auth-session-sets.ts"
     },
     "./connection-authority": {
       "types": "./src/domain/connection-authority.ts",

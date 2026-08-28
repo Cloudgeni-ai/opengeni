@@ -992,6 +992,8 @@ export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "provider_binding_missing",
   "provider_binding_mismatch",
   "provider_binding_adopted",
+  "quarantined_binding_missing",
+  "quarantined_binding_mismatch",
   "defer_failed",
 ] as const;
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
   applySessionChannelMove,
@@ -81,7 +81,7 @@ describe("optimistic session channel moves", () => {
     const preWriteFreshStarted = new Promise<void>((resolve) => {
       markPreWriteFreshStarted = resolve;
     });
-    const client = new OpenGeniCoreClient({
+    const client = new OpenGeniBrowserClient({
       baseUrl: "https://api.example.test",
       fetch: async () => {
         requests += 1;

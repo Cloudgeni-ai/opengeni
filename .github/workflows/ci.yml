@@ -233,7 +233,7 @@ jobs:
           echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 6)" >> "$GITHUB_OUTPUT"
           echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
-          echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none"}] else map({lane:.}) end' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "browser_lane_matrix=$(jq -c '.browserAcceptanceLanes | if length == 0 then [{lane:"none",engine:"chromium"}] else map(if . == "accounts" then [{lane:.,engine:"chromium"},{lane:.,engine:"firefox"},{lane:.,engine:"webkit"}] else [{lane:.,engine:"chromium"}] end) | add end' impact-plan.json)" >> "$GITHUB_OUTPUT"
           {
             echo '### Change-impact plan'
             echo
@@ -668,7 +668,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -720,7 +720,24 @@ jobs:
         uses: ./.github/actions/playwright-browsers
         timeout-minutes: 17
         with:
-          browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}
+          browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}
+
+      - name: Browser account session-set acceptance
+        if: ${{ matrix.lane == 'accounts' }}
+        id: browser_accounts
+        timeout-minutes: 14
+        env:
+          # This lane must prove the migrated owner plus restricted opengeni_app
+          # FORCE-RLS boundary. A missing real database is a hard failure.
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_ACCOUNT_BROWSER_ENGINE: ${{ matrix.engine }}
+          OPENGENI_ACCOUNT_EVIDENCE_DIR: /tmp/opengeni-account-acceptance
+        run: |
+          bun test --max-concurrency=1 --timeout 180000 \
+            ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \
+            ./apps/api/test/managed-auth-session-sets.integration.test.ts
+          bun scripts/run-browser-e2e.ts \
+            ./test/e2e/browser-accounts-acceptance.e2e.ts
 
       - name: Editable artifact browser acceptance
         if: ${{ matrix.lane == 'workbench' }}
@@ -818,6 +835,15 @@ jobs:
         id: workbench_browser
         timeout-minutes: 4
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
+
+      - name: Upload browser account acceptance evidence
+        if: ${{ matrix.lane == 'accounts' && steps.browser_accounts.outcome == 'success' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: browser-account-acceptance-${{ matrix.engine }}
+          if-no-files-found: error
+          retention-days: 14
+          path: /tmp/opengeni-account-acceptance
 
       - name: Upload session pin visual evidence
         # A preceding repository-wide gate may fail before the browser command

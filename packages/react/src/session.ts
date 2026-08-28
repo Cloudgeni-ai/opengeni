@@ -22,6 +22,11 @@ export type {
   EmbeddedSessionReadClientOverride as SessionReadClientOverride,
   EmbeddedSessionClientOverride as ClientOverride,
 } from "./session-context";
+export { createEmbeddedSessionClient } from "./embedded-session-client";
+export type {
+  ComposerDraftMapContext,
+  CreateEmbeddedSessionClientOptions,
+} from "./embedded-session-client";
 
 export { useSession, isTitleEvent } from "./hooks/use-session";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";

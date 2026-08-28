@@ -26,6 +26,12 @@ export function useFollowUpRepositories(session: Session): {
   const context = useAppContext();
   const [pendingRepoIds, setPendingRepoIds] = useState<Set<number>>(() => new Set());
   const [pendingRepoRefs, setPendingRepoRefs] = useState<Record<number, string>>({});
+  const [pendingPersonalRepoIds, setPendingPersonalRepoIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [pendingPersonalRepoRefs, setPendingPersonalRepoRefs] = useState<Record<string, string>>(
+    {},
+  );
   const [pendingManualRepos, setPendingManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [optimisticMountedRepos, setOptimisticMountedRepos] = useState<ResourceRef[]>([]);
@@ -51,6 +57,31 @@ export function useFollowUpRepositories(session: Session): {
       })),
     [mountedRepositorySelection.manualRepos],
   );
+  const mountedPersonalRepoIds = useMemo(
+    () =>
+      new Set(
+        mountedRepositoryResources.flatMap((resource) =>
+          resource.connectionType === "github_personal" && typeof resource.repositoryId === "string"
+            ? [resource.repositoryId]
+            : [],
+        ),
+      ),
+    [mountedRepositoryResources],
+  );
+  const selectedPersonalRepoIds = useMemo(
+    () => new Set([...mountedPersonalRepoIds, ...pendingPersonalRepoIds]),
+    [mountedPersonalRepoIds, pendingPersonalRepoIds],
+  );
+  const selectedPersonalRepoRefs = useMemo(() => {
+    const mounted = Object.fromEntries(
+      mountedRepositoryResources.flatMap((resource) =>
+        resource.connectionType === "github_personal"
+          ? [[resource.repositoryId, resource.ref] as const]
+          : [],
+      ),
+    );
+    return { ...mounted, ...pendingPersonalRepoRefs };
+  }, [mountedRepositoryResources, pendingPersonalRepoRefs]);
   const lockedManualRepoIds = useMemo(
     () => new Set(mountedManualRepos.map((repo) => repo.id)),
     [mountedManualRepos],
@@ -78,6 +109,10 @@ export function useFollowUpRepositories(session: Session): {
           repositories: context.githubRepos,
           selectedRepoIds: pendingRepoIds,
           selectedRepoRefs: pendingRepoRefs,
+          personalRepositories: context.personalGitHubRepositories,
+          selectedPersonalRepositoryIds: pendingPersonalRepoIds,
+          selectedPersonalRepositoryRefs: pendingPersonalRepoRefs,
+          personalCredentialBindingId: context.personalGitHubSelection?.credentialBindingId,
         }),
         error: null,
       };
@@ -87,15 +122,35 @@ export function useFollowUpRepositories(session: Session): {
         error: error instanceof Error ? error.message : String(error),
       };
     }
-  }, [context.githubRepos, mountedResources, pendingManualRepos, pendingRepoIds, pendingRepoRefs]);
+  }, [
+    context.githubRepos,
+    context.personalGitHubRepositories,
+    context.personalGitHubSelection?.credentialBindingId,
+    mountedResources,
+    pendingManualRepos,
+    pendingPersonalRepoIds,
+    pendingPersonalRepoRefs,
+    pendingRepoIds,
+    pendingRepoRefs,
+  ]);
   const selectionCount =
     selectedRepoIds.size +
+    selectedPersonalRepoIds.size +
     [...mountedManualRepos, ...pendingManualRepos].filter((repo) => repo.url.trim().length > 0)
       .length;
 
   const togglePendingRepository = useCallback(
     (repo: GitHubRepository) => {
       if (mountedRepositorySelection.selectedRepoIds.has(repo.id)) return;
+      const mountedPersonalConflict = context.personalGitHubRepositories.some(
+        (personalRepo) =>
+          mountedPersonalRepoIds.has(personalRepo.repositoryId) &&
+          personalRepo.fullName === repo.fullName,
+      );
+      if (mountedPersonalConflict) {
+        toast.info("This repository is already mounted as you");
+        return;
+      }
       if (
         selectedInstallationId !== null &&
         selectedInstallationId !== repo.installationId &&
@@ -116,8 +171,22 @@ export function useFollowUpRepositories(session: Session): {
         ...current,
         [repo.id]: current[repo.id] ?? repo.defaultBranch,
       }));
+      const personalConflictIds = new Set(
+        context.personalGitHubRepositories
+          .filter((personalRepo) => personalRepo.fullName === repo.fullName)
+          .map((personalRepo) => personalRepo.repositoryId),
+      );
+      setPendingPersonalRepoIds(
+        (current) => new Set([...current].filter((id) => !personalConflictIds.has(id))),
+      );
     },
-    [mountedRepositorySelection.selectedRepoIds, pendingRepoIds, selectedInstallationId],
+    [
+      context.personalGitHubRepositories,
+      mountedPersonalRepoIds,
+      mountedRepositorySelection.selectedRepoIds,
+      pendingRepoIds,
+      selectedInstallationId,
+    ],
   );
 
   const disconnectRepositoryInstallation = useCallback(
@@ -140,6 +209,51 @@ export function useFollowUpRepositories(session: Session): {
     [context, session.workspaceId],
   );
 
+  const togglePendingPersonalRepository = useCallback(
+    async (repo: (typeof context.personalGitHubRepositories)[number]) => {
+      if (mountedPersonalRepoIds.has(repo.repositoryId)) return;
+      if (pendingPersonalRepoIds.has(repo.repositoryId)) {
+        setPendingPersonalRepoIds((current) => {
+          const next = new Set(current);
+          next.delete(repo.repositoryId);
+          return next;
+        });
+        return;
+      }
+      if (!repo.selectedAccess) return;
+      const mountedWorkspaceConflict = context.githubRepos.some(
+        (workspaceRepo) =>
+          mountedRepositorySelection.selectedRepoIds.has(workspaceRepo.id) &&
+          workspaceRepo.fullName === repo.fullName,
+      );
+      if (mountedWorkspaceConflict) {
+        toast.info("This repository is already mounted with the workspace GitHub App");
+        return;
+      }
+      if (!(await context.ensurePersonalGitHubAuthority(session.workspaceId))) return;
+      const workspaceConflictIds = new Set(
+        context.githubRepos
+          .filter((workspaceRepo) => workspaceRepo.fullName === repo.fullName)
+          .map((workspaceRepo) => workspaceRepo.id),
+      );
+      setPendingRepoIds(
+        (current) => new Set([...current].filter((id) => !workspaceConflictIds.has(id))),
+      );
+      setPendingPersonalRepoIds((current) => new Set(current).add(repo.repositoryId));
+      setPendingPersonalRepoRefs((current) => ({
+        ...current,
+        [repo.repositoryId]: current[repo.repositoryId] ?? repo.defaultBranch,
+      }));
+    },
+    [
+      context,
+      mountedPersonalRepoIds,
+      mountedRepositorySelection.selectedRepoIds,
+      pendingPersonalRepoIds,
+      session.workspaceId,
+    ],
+  );
+
   const pickerProps = useCallback(
     (disabled: boolean): RepositoryContextPickerProps => ({
       setupMode:
@@ -151,6 +265,11 @@ export function useFollowUpRepositories(session: Session): {
       linkUrl: context.githubStatus?.linkUrl ?? null,
       installations: context.githubStatus?.installations ?? [],
       repositories: context.githubRepos,
+      personalGitHubStatus: context.personalGitHubStatus,
+      personalGitHubRepositories: context.personalGitHubRepositories,
+      selectedPersonalGitHubRepoIds: selectedPersonalRepoIds,
+      selectedPersonalGitHubRepoRefs: selectedPersonalRepoRefs,
+      personalGitHubBusy: context.personalGitHubBusy,
       groups: context.repositoryGroups,
       selectedRepoIds,
       selectedRepoRefs,
@@ -163,9 +282,19 @@ export function useFollowUpRepositories(session: Session): {
       repoBusy: context.repoBusy,
       githubAppBusy: context.githubAppBusy,
       lockedRepoIds: mountedRepositorySelection.selectedRepoIds,
+      lockedPersonalGitHubRepoIds: mountedPersonalRepoIds,
       lockedManualRepoIds,
       validationError: pendingBuild.error,
-      onRefresh: () => context.refreshGitHub(session.workspaceId, undefined, { sync: true }),
+      onRefresh: async () => {
+        await Promise.all([
+          context.refreshGitHub(session.workspaceId, undefined, { sync: true }),
+          context.refreshPersonalGitHub(session.workspaceId),
+        ]);
+      },
+      onConnectPersonalGitHub: () => void context.connectPersonalGitHub(session.workspaceId),
+      onTogglePersonalGitHubRepo: (repo) => void togglePendingPersonalRepository(repo),
+      onPersonalGitHubRefChange: (repositoryId, ref) =>
+        setPendingPersonalRepoRefs((current) => ({ ...current, [repositoryId]: ref })),
       onToggleRepo: togglePendingRepository,
       onRefChange: (repoId, ref) =>
         setPendingRepoRefs((current) => ({ ...current, [repoId]: ref })),
@@ -192,14 +321,18 @@ export function useFollowUpRepositories(session: Session): {
       lockedManualRepoIds,
       manualReposOpen,
       mountedManualRepos,
+      mountedPersonalRepoIds,
       mountedRepositorySelection.selectedRepoIds,
       pendingBuild.error,
       pendingManualRepos,
       selectedInstallationId,
+      selectedPersonalRepoIds,
+      selectedPersonalRepoRefs,
       selectedRepoIds,
       selectedRepoRefs,
       session.workspaceId,
       togglePendingRepository,
+      togglePendingPersonalRepository,
     ],
   );
 
@@ -214,6 +347,8 @@ export function useFollowUpRepositories(session: Session): {
     // to the immutable wire input accepted by this callback.
     setPendingRepoIds(new Set());
     setPendingRepoRefs({});
+    setPendingPersonalRepoIds(new Set());
+    setPendingPersonalRepoRefs({});
     setPendingManualRepos([]);
   }, []);
 

@@ -361,6 +361,28 @@ describe("embedded worker lifecycle contract", () => {
   test("worker database readiness enforces supplied posture and retains the embedded probe", async () => {
     let directExecutions = 0;
     let catalogQueries = 0;
+    const managedAuthSessionSetTables = [
+      "managed_auth_actor_mutation_leases",
+      "managed_auth_browser_installations",
+      "managed_auth_login_return_intents",
+      "managed_auth_login_slots",
+      "managed_auth_login_transaction_rate_limits",
+      "managed_auth_login_transactions",
+      "managed_auth_session_set_operations",
+      "managed_auth_session_sets",
+    ];
+    const organizationRecoveryTables = [
+      "organization_recovery_approvals",
+      "organization_recovery_command_receipts",
+      "organization_recovery_custodian_acceptances",
+      "organization_recovery_custodians",
+      "organization_recovery_events",
+      "organization_recovery_notification_attempts",
+      "organization_recovery_notification_outbox",
+      "organization_recovery_operations",
+      "organization_recovery_policies",
+      "organization_recovery_policy_heads",
+    ];
     const catalogResults: unknown[] = [
       [
         {
@@ -455,6 +477,8 @@ describe("embedded worker lifecycle contract", () => {
           "canonical_human_identity_subjects",
           "canonical_human_login_bindings",
           "canonical_human_identity_operations",
+          ...managedAuthSessionSetTables,
+          ...organizationRecoveryTables,
           "organization_user_setup_deliveries",
           "organization_user_setup_delivery_attempts",
         ].map((name) => ({
@@ -606,6 +630,8 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        ...managedAuthSessionSetTables,
+        ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
       ],
@@ -615,6 +641,8 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        ...managedAuthSessionSetTables,
+        ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
       ],

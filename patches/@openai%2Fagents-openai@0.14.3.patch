@@ -14,7 +14,7 @@ diff --git a/dist/openaiResponsesModel.js b/dist/openaiResponsesModel.js
 index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc2463568b684 100644
 --- a/dist/openaiResponsesModel.js
 +++ b/dist/openaiResponsesModel.js
-@@ -2262,14 +2262,55 @@ function convertToOutputItem(items) {
+@@ -2262,14 +2262,52 @@ function convertToOutputItem(items) {
  }
  const TERMINAL_RESPONSES_STREAM_EVENT_TYPES = new Set([
      'response.completed',
@@ -57,20 +57,17 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
 +    if (completedOutputItemsByIndex.size === 0) {
 +        return response;
 +    }
-+    const output = [];
-+    for (let index = 0; index < completedOutputItemsByIndex.size; index += 1) {
-+        const item = completedOutputItemsByIndex.get(index);
-+        if (!item) {
-+            throw new agents_core_1.ModelBehaviorError('Responses stream contained sparse output_item.done indices.');
-+        }
-+        output.push(item);
-+    }
++    // Provider positions can be sparse; only numeric order is semantic.
++    // Every index was validated at output_item.done ingress.
++    const output = [...completedOutputItemsByIndex.entries()]
++        .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
++        .map(([, item]) => item);
 +    return { ...response, output };
 +}
  function getOpenAIResponseRequestId(response) {
      const requestId = response
          ?._request_id;
-@@ -2345,6 +2386,16 @@ class OpenAIResponsesModel {
+@@ -2345,6 +2383,16 @@ class OpenAIResponsesModel {
      _shouldEmitRawModelEvent(_event) {
          return true;
      }
@@ -87,7 +84,7 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
      /**
       * @internal
       */
-@@ -2419,7 +2470,7 @@ class OpenAIResponsesModel {
+@@ -2419,7 +2467,7 @@ class OpenAIResponsesModel {
          return response;
      }
      _buildResponsesCreateRequest(request, stream) {
@@ -96,7 +93,7 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
          const prompt = getPrompt(request.prompt);
          // When a prompt template already declares a model, skip sending the agent's default model.
          // If the caller explicitly requests an override, include the resolved model name in the request.
-@@ -2540,6 +2591,12 @@ class OpenAIResponsesModel {
+@@ -2540,6 +2588,12 @@ class OpenAIResponsesModel {
      async getResponse(request) {
          const response = await (0, agents_core_1.withResponseSpan)(async (span) => {
              const response = await this._fetchResponse(request, false);
@@ -109,7 +106,7 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
              if (request.tracing) {
                  span.spanData.response_id = response.id;
                  span.spanData._input = request.input;
-@@ -2576,7 +2633,10 @@ class OpenAIResponsesModel {
+@@ -2576,7 +2630,10 @@ class OpenAIResponsesModel {
              }
              const response = await this._fetchResponse(request, true);
              let finalResponse;
@@ -120,14 +117,14 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
              for await (const event of response) {
                  const eventType = event.type;
                  const shouldEmitRawModelEvent = this._shouldEmitRawModelEvent(event);
-@@ -2587,6 +2647,16 @@ class OpenAIResponsesModel {
+@@ -2587,6 +2644,16 @@ class OpenAIResponsesModel {
                          outputItemsByIndex.set(outputItemAdded.output_index, outputItemAdded.item);
                      }
                  }
 +                if (eventType === 'response.output_item.done') {
 +                    const outputItemDone = event;
-+                    if (typeof outputItemDone.output_index !== 'number' || !outputItemDone.item) {
-+                        throw new agents_core_1.ModelBehaviorError('Responses stream emitted output_item.done without an indexed item.');
++                    if (!Number.isSafeInteger(outputItemDone.output_index) || outputItemDone.output_index < 0 || !outputItemDone.item) {
++                        throw new agents_core_1.ModelBehaviorError('Responses stream emitted output_item.done with an invalid index or missing item.');
 +                    }
 +                    if (completedOutputItemsByIndex.has(outputItemDone.output_index)) {
 +                        throw new agents_core_1.ModelBehaviorError('Responses stream emitted a duplicate output_item.done index.');
@@ -137,7 +134,7 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
                  if (eventType === 'response.created') {
                      yield {
                          type: 'response_started',
-@@ -2596,22 +2666,11 @@ class OpenAIResponsesModel {
+@@ -2596,22 +2663,11 @@ class OpenAIResponsesModel {
                      };
                  }
                  else if (isTerminalResponsesStreamEventType(eventType)) {
@@ -165,7 +162,7 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
                  }
                  else if (eventType === 'response.output_text.delta') {
                      const { delta, ...remainingEvent } = event;
-@@ -2638,6 +2697,32 @@ class OpenAIResponsesModel {
+@@ -2638,6 +2694,32 @@ class OpenAIResponsesModel {
                      };
                  }
              }
@@ -208,7 +205,7 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
  import OpenAI from 'openai';
  import logger from "./logger.mjs";
  import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE } from "./rawModelEvents.mjs";
-@@ -2253,14 +2253,55 @@ function convertToOutputItem(items) {
+@@ -2253,14 +2253,52 @@ function convertToOutputItem(items) {
  export { getToolChoice, convertTool, getInputItems, convertToOutputItem };
  const TERMINAL_RESPONSES_STREAM_EVENT_TYPES = new Set([
      'response.completed',
@@ -251,20 +248,17 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
 +    if (completedOutputItemsByIndex.size === 0) {
 +        return response;
 +    }
-+    const output = [];
-+    for (let index = 0; index < completedOutputItemsByIndex.size; index += 1) {
-+        const item = completedOutputItemsByIndex.get(index);
-+        if (!item) {
-+            throw new ModelBehaviorError('Responses stream contained sparse output_item.done indices.');
-+        }
-+        output.push(item);
-+    }
++    // Provider positions can be sparse; only numeric order is semantic.
++    // Every index was validated at output_item.done ingress.
++    const output = [...completedOutputItemsByIndex.entries()]
++        .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
++        .map(([, item]) => item);
 +    return { ...response, output };
 +}
  function getOpenAIResponseRequestId(response) {
      const requestId = response
          ?._request_id;
-@@ -2336,6 +2377,16 @@ export class OpenAIResponsesModel {
+@@ -2336,6 +2374,16 @@ export class OpenAIResponsesModel {
      _shouldEmitRawModelEvent(_event) {
          return true;
      }
@@ -281,7 +275,7 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
      /**
       * @internal
       */
-@@ -2410,7 +2461,7 @@ export class OpenAIResponsesModel {
+@@ -2410,7 +2458,7 @@ export class OpenAIResponsesModel {
          return response;
      }
      _buildResponsesCreateRequest(request, stream) {
@@ -290,7 +284,7 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
          const prompt = getPrompt(request.prompt);
          // When a prompt template already declares a model, skip sending the agent's default model.
          // If the caller explicitly requests an override, include the resolved model name in the request.
-@@ -2531,6 +2582,12 @@ export class OpenAIResponsesModel {
+@@ -2531,6 +2579,12 @@ export class OpenAIResponsesModel {
      async getResponse(request) {
          const response = await withResponseSpan(async (span) => {
              const response = await this._fetchResponse(request, false);
@@ -303,7 +297,7 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
              if (request.tracing) {
                  span.spanData.response_id = response.id;
                  span.spanData._input = request.input;
-@@ -2567,7 +2624,10 @@ export class OpenAIResponsesModel {
+@@ -2567,7 +2621,10 @@ export class OpenAIResponsesModel {
              }
              const response = await this._fetchResponse(request, true);
              let finalResponse;
@@ -314,14 +308,14 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
              for await (const event of response) {
                  const eventType = event.type;
                  const shouldEmitRawModelEvent = this._shouldEmitRawModelEvent(event);
-@@ -2578,6 +2638,16 @@ export class OpenAIResponsesModel {
+@@ -2578,6 +2635,16 @@ export class OpenAIResponsesModel {
                          outputItemsByIndex.set(outputItemAdded.output_index, outputItemAdded.item);
                      }
                  }
 +                if (eventType === 'response.output_item.done') {
 +                    const outputItemDone = event;
-+                    if (typeof outputItemDone.output_index !== 'number' || !outputItemDone.item) {
-+                        throw new ModelBehaviorError('Responses stream emitted output_item.done without an indexed item.');
++                    if (!Number.isSafeInteger(outputItemDone.output_index) || outputItemDone.output_index < 0 || !outputItemDone.item) {
++                        throw new ModelBehaviorError('Responses stream emitted output_item.done with an invalid index or missing item.');
 +                    }
 +                    if (completedOutputItemsByIndex.has(outputItemDone.output_index)) {
 +                        throw new ModelBehaviorError('Responses stream emitted a duplicate output_item.done index.');
@@ -331,7 +325,7 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
                  if (eventType === 'response.created') {
                      yield {
                          type: 'response_started',
-@@ -2587,22 +2657,11 @@ export class OpenAIResponsesModel {
+@@ -2587,22 +2654,11 @@ export class OpenAIResponsesModel {
                      };
                  }
                  else if (isTerminalResponsesStreamEventType(eventType)) {
@@ -359,7 +353,7 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
                  }
                  else if (eventType === 'response.output_text.delta') {
                      const { delta, ...remainingEvent } = event;
-@@ -2629,6 +2688,32 @@ export class OpenAIResponsesModel {
+@@ -2629,6 +2685,32 @@ export class OpenAIResponsesModel {
                      };
                  }
              }

@@ -19,6 +19,35 @@ describe("session control surface architecture", () => {
     expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
   });
 
+  test("makes the full chat viewport a file drop target", async () => {
+    const route = await source("routes/session.tsx");
+    expect(route).toContain("<ChatViewportFileDropTarget");
+    expect(route).toContain('data-workspace-scroll-owner="self-managed"');
+    expect(route).toContain(
+      "enabled={!terminal && context.clientConfig.fileUploads.enabled === true}",
+    );
+    expect(route).toContain("onFiles={attachments.addFiles}");
+  });
+
+  test("shares one route-level attachment lightbox across the timeline and composer", async () => {
+    const [sessionRoute, newSessionRoute, chatComposer] = await Promise.all([
+      source("routes/session.tsx"),
+      source("routes/sessions-index.tsx"),
+      source("../../../packages/react/src/components/chat-composer.tsx"),
+    ]);
+    const provider = sessionRoute.indexOf("createElement(\n    LightboxProvider,");
+    const timeline = sessionRoute.indexOf("<MessageTimeline", provider);
+    const composer = sessionRoute.indexOf("<ConsoleComposer", timeline);
+    const providerEnd = sessionRoute.indexOf("</ChatViewportFileDropTarget>,", composer);
+
+    expect(provider).toBeGreaterThan(-1);
+    expect(timeline).toBeGreaterThan(provider);
+    expect(composer).toBeGreaterThan(timeline);
+    expect(providerEnd).toBeGreaterThan(composer);
+    expect(newSessionRoute).toContain("createElement(\n    LightboxProvider,");
+    expect(chatComposer).not.toContain("<LightboxProvider>");
+  });
+
   test("wires the authenticated retained screenshot loader into the production timeline", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("createSessionRetainedScreenshotLoader(");
@@ -63,6 +92,49 @@ describe("session control surface architecture", () => {
     expect(setupImplementation).toContain("<SessionFolderPicker");
     expect(setupImplementation).toContain("<WorkspaceRepositoryPicker");
     expect(setupImplementation).not.toContain("<ModelPicker");
+  });
+
+  test("keeps Variable Set access inside the multi-select setup instead of a status box", async () => {
+    const [route, establishedControl] = await Promise.all([
+      source("routes/sessions-index.tsx"),
+      source("components/personal-resource-attachment-control.tsx"),
+    ]);
+    expect(route).toContain("Add Variable Set…");
+    expect(route).toContain("<SelectedVariableSetList");
+    expect(route).toContain(
+      "const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets",
+    );
+    expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
+    expect(route).toContain("PersonalResourceAccessInline");
+    expect(route).not.toContain("PersonalResourceAttachmentControl");
+    expect(route).not.toContain("Your resource access");
+    expect(route).not.toContain("loadPersonalResourceCatalog");
+    expect(route).toContain("reconcileNewSessionFixedResources");
+    expect(route).toContain("newSessionFixedResourceCatalogFailed");
+    expect(route).toContain('"variable-sets:list"');
+    expect(route).toContain('"secrets:list"');
+    expect(route).toContain("resolveVariableSetAttachments");
+    expect(route).toContain("fixedResourceSelection.selectionResolved");
+    expect(route).toContain("personalResourceSelectionIdentityKey");
+    expect(route).toContain("recoverPersonalResourceAttachment(error, request)");
+    expect(route).toContain("recoverNewSessionPersonalResourceAttachment");
+    expect(route).toContain("refreshPersonalResourceCatalogs");
+    expect(route).toContain("canLoadVariableSetCatalog");
+    expect(route).toContain("canResolveVariableSetAttachments");
+    expect(route).toContain(
+      "newSessionDraftOptionsFromSessionDraft(\n        draft,\n        defaultFirstPartyMcpTools,\n        newSessionCreateVisibility(personalWorkspace, draft.visibility),\n      )",
+    );
+    expect(route).toContain("const selectedRigDefaultVariableSetIds =");
+    expect(route).toContain("selectedRigDefaultVariableSetIds,");
+    expect(route).toContain(
+      "selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey",
+    );
+    expect(route).toContain("Couldn’t verify the selected Variable Set or Rig");
+    expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
+    expect(establishedControl).not.toContain("<fieldset");
+    expect(establishedControl).toContain("aria-labelledby={durationLabelId}");
+    expect(establishedControl).not.toContain("Your resource access");
+    expect(establishedControl).not.toContain("couldn’t check access");
   });
 
   test("announces pin results through an independent live region", async () => {

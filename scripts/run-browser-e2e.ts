@@ -13,6 +13,7 @@ const testFiles =
         "./test/e2e/connected-machine-removal.browser.e2e.ts",
         "./test/e2e/knowledge-surfaces.browser.e2e.ts",
         "./test/e2e/organization-workspace-administration.browser.e2e.ts",
+        "./test/e2e/organization-recovery.browser.e2e.ts",
         "./test/e2e/personal-workspace-accessibility.browser.e2e.ts",
         "./test/e2e/codex-overview.e2e.ts",
         "./test/e2e/code-editor.browser.e2e.ts",

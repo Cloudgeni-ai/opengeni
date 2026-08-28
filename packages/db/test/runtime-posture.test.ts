@@ -105,6 +105,70 @@ function canonicalHumanIdentityAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+const managedAuthSessionSetAuthorityTableNames = [
+  "managed_auth_actor_mutation_leases",
+  "managed_auth_browser_installations",
+  "managed_auth_login_return_intents",
+  "managed_auth_login_slots",
+  "managed_auth_login_transaction_rate_limits",
+  "managed_auth_login_transactions",
+  "managed_auth_session_set_operations",
+  "managed_auth_session_sets",
+] as const;
+
+const organizationRecoveryAuthorityTableNames = [
+  "organization_recovery_approvals",
+  "organization_recovery_command_receipts",
+  "organization_recovery_custodian_acceptances",
+  "organization_recovery_custodians",
+  "organization_recovery_events",
+  "organization_recovery_notification_attempts",
+  "organization_recovery_notification_outbox",
+  "organization_recovery_operations",
+  "organization_recovery_policies",
+  "organization_recovery_policy_heads",
+] as const;
+
+function managedAuthSessionSetAuthorityTables(): RuntimeTablePosture[] {
+  return managedAuthSessionSetAuthorityTableNames.map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
+function organizationRecoveryAuthorityTables(): RuntimeTablePosture[] {
+  return organizationRecoveryAuthorityTableNames.map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function companyBrainPreferenceAuthorityTables(): RuntimeTablePosture[] {
   return [
     "company_brain_preference_proposal_receipts",
@@ -310,6 +374,8 @@ function safePosture(): RuntimeDatabasePosture {
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...managedAuthSessionSetAuthorityTables(),
+      ...organizationRecoveryAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
       ...organizationMembershipLifecycleAuthorityTables(),
@@ -474,33 +540,48 @@ describe("runtime database posture evaluator", () => {
           new Set<string>(FORCE_RLS_TABLES).has(table) &&
           new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
       ).length;
+      const managedAuthSessionSetProtectedTableCount =
+        managedAuthSessionSetAuthorityTableNames.filter(
+          (table) =>
+            new Set<string>(FORCE_RLS_TABLES).has(table) &&
+            new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
+        ).length;
+      const organizationRecoveryProtectedTableCount =
+        organizationRecoveryAuthorityTableNames.filter(
+          (table) =>
+            new Set<string>(FORCE_RLS_TABLES).has(table) &&
+            new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
+        ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 300],
+            [FORCE_RLS_TABLES, 303],
             [NON_RLS_RUNTIME_TABLES, 13],
             [RUNTIME_FULL_DML_TABLES, 150],
-            [RUNTIME_READ_ONLY_TABLES, 20],
+            [RUNTIME_READ_ONLY_TABLES, 21],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 46],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 64],
-            [RUNTIME_DML_TABLES, 249],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 66],
+            [RUNTIME_DML_TABLES, 250],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 201],
+            [FORCE_RLS_TABLES, 204],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 118],
-            [RUNTIME_READ_ONLY_TABLES, 16],
+            [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 28],
-            [RUNTIME_DML_TABLES, 184],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 30],
+            [RUNTIME_DML_TABLES, 185],
           ] as const);
       for (const [tables, length] of contracts) {
         const expectedLength =
           tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
-            ? length + personalResourceProtectedTableCount
+            ? length +
+              personalResourceProtectedTableCount +
+              managedAuthSessionSetProtectedTableCount +
+              organizationRecoveryProtectedTableCount
             : length;
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
@@ -508,12 +589,18 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 313 : 212;
+      const tableCount = hasCurrentMainActivityLedger ? 316 : 215;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
-        tableCount + personalResourceProtectedTableCount,
+        tableCount +
+          personalResourceProtectedTableCount +
+          managedAuthSessionSetProtectedTableCount +
+          organizationRecoveryProtectedTableCount,
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
-        tableCount + personalResourceProtectedTableCount,
+        tableCount +
+          personalResourceProtectedTableCount +
+          managedAuthSessionSetProtectedTableCount +
+          organizationRecoveryProtectedTableCount,
       );
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
         "SELECT",
@@ -569,15 +656,15 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 218],
+      [FORCE_RLS_TABLES, 221],
       [NON_RLS_RUNTIME_TABLES, 11],
       [RUNTIME_FULL_DML_TABLES, 135],
-      [RUNTIME_READ_ONLY_TABLES, 14],
+      [RUNTIME_READ_ONLY_TABLES, 15],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 25],
-      [RUNTIME_DML_TABLES, 209],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 27],
+      [RUNTIME_DML_TABLES, 210],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -586,8 +673,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(234);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(229);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(237);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(232);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -948,6 +1035,64 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("fails closed on missing or split managed-auth session-set authority", () => {
+    const routineName = "managed_auth_session_set_authority_state(text)";
+    const missing = safePosture();
+    missing.tables = missing.tables.filter((table) => table.name !== "managed_auth_session_sets");
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      `target-schema runtime capability ${routineName} managed auth session-set authority tables are missing`,
+    );
+
+    const split = safePosture();
+    split.tables.find((table) => table.name === "managed_auth_session_set_operations")!.owner =
+      "another_owner";
+    expect(
+      evaluateRuntimeDatabasePosture(split, options).some(
+        (violation) =>
+          violation.startsWith(
+            `target-schema runtime capability ${routineName} authority table owners do not match:`,
+          ) && violation.includes("managed_auth_session_set_operations=another_owner"),
+      ),
+    ).toBe(true);
+
+    const routineMismatch = safePosture();
+    routineMismatch.targetRoutines.find((routine) => routine.name === routineName)!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(routineMismatch, options)).toContain(
+      `target-schema runtime capability ${routineName} owner another_owner does not match authority table owner opengeni_migrator`,
+    );
+  });
+
+  test("fails closed on missing or split organization recovery authority", () => {
+    const routineName = "organization_recovery_command(jsonb)";
+    const missing = safePosture();
+    missing.tables = missing.tables.filter(
+      (table) => table.name !== "organization_recovery_policy_heads",
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      `target-schema runtime capability ${routineName} organization recovery authority tables are missing`,
+    );
+
+    const split = safePosture();
+    split.tables.find((table) => table.name === "organization_recovery_operations")!.owner =
+      "another_owner";
+    expect(
+      evaluateRuntimeDatabasePosture(split, options).some(
+        (violation) =>
+          violation.startsWith(
+            `target-schema runtime capability ${routineName} authority table owners do not match:`,
+          ) && violation.includes("organization_recovery_operations=another_owner"),
+      ),
+    ).toBe(true);
+
+    const routineMismatch = safePosture();
+    routineMismatch.targetRoutines.find((routine) => routine.name === routineName)!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(routineMismatch, options)).toContain(
+      `target-schema runtime capability ${routineName} owner another_owner does not match authority table owner opengeni_migrator`,
+    );
+  });
+
   test("requires same-owner organization membership lifecycle authority", () => {
     const routineName = "organization_membership_command(jsonb)";
 
@@ -992,6 +1137,38 @@ describe("runtime database posture evaluator", () => {
     }
   });
 
+  test("classifies managed-auth session-set tables as FORCE-RLS with no direct DML", () => {
+    for (const table of managedAuthSessionSetAuthorityTableNames) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toEqual(
+      expect.arrayContaining([
+        "managed_auth_session_set_authority_state(text)",
+        "managed_auth_session_set_snapshot(text, text, boolean, boolean, boolean)",
+        "managed_auth_session_set_mutate(text, text, uuid, text, bigint, bigint, text, uuid, uuid, uuid, text, text)",
+        "managed_auth_actor_mutation_lease_acquire(text, bigint, uuid, integer)",
+        "managed_auth_actor_mutation_lease_release(text, uuid)",
+        "managed_auth_actor_mutation_lease_validate(text, bigint, uuid)",
+      ]),
+    );
+  });
+
+  test("classifies organization recovery tables as FORCE-RLS with no direct DML", () => {
+    for (const table of organizationRecoveryAuthorityTableNames) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toEqual(
+      expect.arrayContaining([
+        "get_organization_recovery_overview(uuid, text, jsonb, text, text)",
+        "organization_recovery_command(jsonb)",
+      ]),
+    );
+  });
+
   test("classifies organization private-session settings as capability-only FORCE-RLS state", () => {
     for (const table of [
       "organization_private_session_setting_events",
@@ -1018,6 +1195,30 @@ describe("runtime database posture evaluator", () => {
     expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("session_variable_set_attachments");
     expect(RUNTIME_FULL_DML_TABLES).not.toContain("session_variable_set_attachments");
     expect(RUNTIME_TABLE_PRIVILEGES.session_variable_set_attachments).toBeUndefined();
+  });
+
+  test("classifies advisory work claims as readable heads with capability-only history", () => {
+    expect(FORCE_RLS_TABLES).toEqual(
+      expect.arrayContaining([
+        "session_work_claims",
+        "session_work_claim_revisions",
+        "session_work_claim_write_capabilities",
+      ]),
+    );
+    expect(RUNTIME_TABLE_PRIVILEGES.session_work_claims).toEqual(["SELECT"]);
+    for (const table of [
+      "session_work_claim_revisions",
+      "session_work_claim_write_capabilities",
+    ] as const) {
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toEqual(
+      expect.arrayContaining([
+        "upsert_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text, text, text, text, text)",
+        "release_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
+      ]),
+    );
   });
 
   test("classifies organization setup delivery journals as capability-only FORCE-RLS state", () => {
@@ -1315,6 +1516,8 @@ describe("runtime database posture evaluator", () => {
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...managedAuthSessionSetAuthorityTables(),
+      ...organizationRecoveryAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
     ];
@@ -1504,6 +1707,8 @@ describe("runtime database posture evaluator", () => {
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...managedAuthSessionSetAuthorityTables(),
+      ...organizationRecoveryAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
       ...organizationMembershipLifecycleAuthorityTables(),

@@ -8,6 +8,7 @@ export const ORGANIZATION_ADMIN_SECTIONS = [
   "overview",
   "knowledge",
   "people",
+  "recovery",
   "retention",
   "billing",
 ] as const;
@@ -19,6 +20,7 @@ export type OrganizationAdminResource =
   | "members"
   | "admin-invitations"
   | "incoming-invitations"
+  | "recovery"
   | "retention"
   | "billing"
   | "invoices"

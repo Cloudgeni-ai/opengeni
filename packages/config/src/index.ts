@@ -386,6 +386,21 @@ const SettingsSchema = z.object({
   // holder of stream:control gets 403 until this flips. Keeps stream:control a
   // declared-but-inert permission so later hardening is a flag flip.
   streamControlEnabled: EnvBoolean.default(false),
+  // Provider-neutral advisory work discovery rollout. Disabling this keeps
+  // ordinary session listings available while rejecting relevance discovery
+  // and omitting claim evidence from their compact projections.
+  workDiscoveryEnabled: EnvBoolean.default(true),
+  // Exact-attempt claim mutations are independently reversible. Turning this
+  // off removes the first-party mutation tools; durable claims and lifecycle
+  // settlement evidence remain readable.
+  workClaimMutationsEnabled: EnvBoolean.default(true),
+  // Human presentation is a separate rollout stage from the read API. The
+  // topology response carries this decision so clients can hide advisory UI
+  // without inventing authorization or ownership semantics.
+  workDiscoveryHumanAdvisoriesEnabled: EnvBoolean.default(true),
+  // Automatic overlap nudges are deliberately unshipped and default OFF until
+  // an evaluated precision threshold and operator runbook approve them.
+  workDiscoveryAutomaticNudgesEnabled: EnvBoolean.default(false),
   // Optional release-coherent bootstrap hint for custom rigs/connected machines
   // that do not carry the stock-image ogtool binary. Exact stable versions only:
   // the agent must never guess a tag or silently install `latest`.
@@ -1251,6 +1266,9 @@ const SettingsSchema = z.object({
   betterAuthAllowedHosts: z.string().default(""),
   betterAuthCookieDomain: z.string().optional(),
   betterAuthTrustedOrigins: z.string().default(""),
+  // Rolling browser login-slot compatibility. Repository/deployment default is
+  // deliberately legacy; changing to broker is an operator-authorized rollout.
+  managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
   resendApiKey: z.string().optional(),
   emailFrom: z.string().default("OpenGeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
@@ -2319,6 +2337,14 @@ export function getSettings(): Settings {
     allowedFirstPartyMcpTools: optional("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
+    workDiscoveryEnabled: optional("OPENGENI_WORK_DISCOVERY_ENABLED"),
+    workClaimMutationsEnabled: optional("OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED"),
+    workDiscoveryHumanAdvisoriesEnabled: optional(
+      "OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED",
+    ),
+    workDiscoveryAutomaticNudgesEnabled: optional(
+      "OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED",
+    ),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
@@ -2638,6 +2664,7 @@ export function getSettings(): Settings {
     betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
     betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),
     betterAuthTrustedOrigins: optional("OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS"),
+    managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
@@ -5290,6 +5317,15 @@ function validateSettings(settings: Settings): void {
         "OPENGENI_DELEGATION_SECRET is required when OPENGENI_PRODUCT_ACCESS_MODE=managed",
       );
     }
+    if (
+      settings.managedAuthSessionSetMode !== "legacy" &&
+      !["local", "test"].includes(settings.environment) &&
+      !settings.publicBaseUrl.startsWith("https://")
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when browser session sets are enabled outside local/test",
+      );
+    }
     if (!["local", "test"].includes(settings.environment) && !settings.resendApiKey) {
       throw new Error("OPENGENI_RESEND_API_KEY is required for managed mode outside local/test");
     }
@@ -5363,11 +5399,6 @@ function validateSettings(settings: Settings): void {
     if (!settings.integrationsEnabled) {
       throw new Error(
         "OPENGENI_INTEGRATIONS_ENABLED=true is required when personal GitHub OAuth is enabled",
-      );
-    }
-    if (settings.productAccessMode !== "managed") {
-      throw new Error(
-        "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
       );
     }
     if (!settings.githubPersonalOauthClientId || !settings.githubPersonalOauthClientSecret) {

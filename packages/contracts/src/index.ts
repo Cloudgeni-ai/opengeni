@@ -13,6 +13,12 @@ import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
 import { KnowledgeProviderCitation } from "./knowledge";
 import { XaiProviderAccountAuthoritySnapshotV1 } from "./xai-provider-account-authority";
+import {
+  MAX_NESTED_AGENT_DEPTH,
+  NestedAgentDepthValue,
+  SessionGoalStatus,
+  SessionStatus,
+} from "./session-topology-primitives";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -31,6 +37,9 @@ export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./session-titles";
+export * from "./session-topology-primitives";
+export * from "./agent-topology";
+export * from "./work-claims";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -148,18 +157,6 @@ export {
   canonicalModalCheckpointProviderBinding,
   type ModalCheckpointProviderBinding,
 } from "./checkpoint-provider-bindings";
-
-export const SessionStatus = z.enum([
-  "queued",
-  "running",
-  "idle",
-  "requires_action",
-  "recovering",
-  "waiting_capacity",
-  "failed",
-  "cancelled",
-]);
-export type SessionStatus = z.infer<typeof SessionStatus>;
 
 // 12 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
 // `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
@@ -680,10 +677,6 @@ export const ErrorEnvelope = z.object({
 });
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
 
-/** Physical ceiling of the PostgreSQL integer columns that persist depth policy. */
-export const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
-export const NestedAgentDepthValue = z.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH);
-export type NestedAgentDepthValue = z.infer<typeof NestedAgentDepthValue>;
 /** A denied child can be one greater than the persisted PostgreSQL int ceiling. */
 export const NestedAgentDepthAttemptValue = z
   .number()
@@ -779,6 +772,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "task_note_save",
   "task_note_archive",
   "task_note_replace",
+  "work_claim_upsert",
+  "work_claim_release",
   "knowledge_propose",
   "knowledge_correct",
   "task_note_promote_knowledge",
@@ -2965,13 +2960,15 @@ export const CreateWorkspaceRequest = z.object({
 });
 export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequest>;
 
-export const UpdateWorkspaceRequest = z.object({
-  name: z.string().min(1).optional(),
-  slug: z.string().min(1).nullable().optional(),
-  // White-label persona override. Pass null to clear it back to the deployment
-  // default; omit to leave it unchanged.
-  agentInstructions: z.string().min(1).nullable().optional(),
-});
+export const UpdateWorkspaceRequest = z
+  .object({
+    name: z.string().min(1).optional(),
+    slug: z.string().min(1).nullable().optional(),
+    // White-label persona override. Pass null to clear it back to the deployment
+    // default; omit to leave it unchanged.
+    agentInstructions: z.string().min(1).nullable().optional(),
+  })
+  .strict();
 export type UpdateWorkspaceRequest = z.infer<typeof UpdateWorkspaceRequest>;
 
 export const ApiKey = z.object({
@@ -5561,9 +5558,6 @@ export type SessionControlState = z.infer<typeof SessionControlState>;
 export const WorkspaceInferenceState = z.enum(["active", "paused"]);
 export type WorkspaceInferenceState = z.infer<typeof WorkspaceInferenceState>;
 
-export const SessionGoalStatus = z.enum(["active", "paused", "completed"]);
-export type SessionGoalStatus = z.infer<typeof SessionGoalStatus>;
-
 export const SessionGoalCreatedBy = z.enum(["api", "agent", "scheduled_task"]);
 export type SessionGoalCreatedBy = z.infer<typeof SessionGoalCreatedBy>;
 
@@ -7727,6 +7721,44 @@ export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 export const VariableSetScope = z.enum(["organization", "workspace", "user"]);
 export type VariableSetScope = z.infer<typeof VariableSetScope>;
 
+/**
+ * Exact-ID metadata used only to validate attachments. This deliberately omits
+ * names, descriptions, and variable-name metadata so attach/use authority does
+ * not become general catalog access.
+ */
+export const VariableSetAttachmentMetadata = z.object({
+  id: z.string().uuid(),
+  scope: VariableSetScope,
+});
+export type VariableSetAttachmentMetadata = z.infer<typeof VariableSetAttachmentMetadata>;
+
+export const MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS = MAX_SELECTED_VARIABLE_SETS * 2;
+export const ResolveVariableSetAttachmentsRequest = z
+  .object({
+    // One create can carry 25 explicit selections plus 25 defaults from its Rig.
+    variableSetIds: z.array(z.string().uuid()).max(MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["variableSetIds"],
+        message: "variableSetIds must not contain duplicates",
+      });
+    }
+  });
+export type ResolveVariableSetAttachmentsRequest = z.infer<
+  typeof ResolveVariableSetAttachmentsRequest
+>;
+
+export const ResolveVariableSetAttachmentsResponse = z.object({
+  variableSets: z.array(VariableSetAttachmentMetadata),
+});
+export type ResolveVariableSetAttachmentsResponse = z.infer<
+  typeof ResolveVariableSetAttachmentsResponse
+>;
+
 export const VariableSet = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -8008,6 +8040,10 @@ export const RigChange = z.object({
 });
 export type RigChange = z.infer<typeof RigChange>;
 
+// Rig setup payloads are transferred to sandboxes in bounded chunks. Keep the
+// public definition limit independent from provider command-argument ceilings.
+export const RIG_SETUP_SCRIPT_MAX_CHARS = 1024 * 1024;
+
 export const CreateRigRequest = z.object({
   // Omitted remains the compatibility workspace-owned creation path.
   scope: ResourceAuthorityScope.default("workspace"),
@@ -8020,7 +8056,7 @@ export const CreateRigRequest = z.object({
   // explicit never-field instead of silently stripping `image` from older
   // clients: callers must receive a validation error and remove the override.
   image: z.never().optional(),
-  setupScript: z.string().max(131072).optional(),
+  setupScript: z.string().max(RIG_SETUP_SCRIPT_MAX_CHARS).optional(),
   checks: z.array(RigCheck).max(100).default([]),
   credentialHooks: z.array(z.string().min(1).max(200)).max(50).default([]),
   defaultVariableSetIds: z.array(z.string().uuid()).max(25).default([]),
@@ -8090,7 +8126,7 @@ export const RigDefinitionEditPayload = z.object({
   // the read model for compatibility, but no new definition may set or clear
   // one through the public write contract.
   image: z.never().optional(),
-  setupScript: z.string().max(131072).nullish(),
+  setupScript: z.string().max(RIG_SETUP_SCRIPT_MAX_CHARS).nullish(),
   checks: z.array(RigCheck).max(100).optional(),
   credentialHooks: z.array(z.string().min(1).max(200)).max(50).optional(),
   defaultVariableSetIds: z.array(z.string().uuid()).max(25).optional(),
@@ -11680,57 +11716,6 @@ export const SessionListResponse = z.object({
   nextCursor: z.string().nullable(),
 });
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
-
-/** Compact, bounded session projection for workspace agent-topology browsers. */
-export const AgentTopologySession = z.object({
-  id: z.string().uuid(),
-  title: z.string().nullable(),
-  titleTruncated: z.boolean(),
-  parentSessionId: z.string().uuid().nullable(),
-  rootSessionId: z.string().uuid(),
-  nestedAgentDepth: NestedAgentDepthValue,
-  ancestorPath: z.array(
-    z.object({
-      id: z.string().uuid(),
-      title: z.string().nullable(),
-      titleTruncated: z.boolean(),
-    }),
-  ),
-  status: SessionStatus,
-  pause: z.object({
-    state: z.enum(["active", "paused"]),
-    additionalBlockerCount: z.number().int().nonnegative(),
-    source: z
-      .object({
-        kind: z.enum(["session", "workspace"]),
-        sessionId: z.string().uuid().optional(),
-        displayName: z.string(),
-        displayNameTruncated: z.boolean(),
-      })
-      .nullable(),
-  }),
-  children: z.object({
-    directChildren: z.number().int().nonnegative(),
-    totalDescendants: z.number().int().nonnegative(),
-    runningDescendants: z.number().int().nonnegative(),
-    queuedDescendants: z.number().int().nonnegative(),
-    attentionDescendants: z.number().int().nonnegative(),
-    pausedDescendants: z.number().int().nonnegative(),
-    failedDescendants: z.number().int().nonnegative(),
-    truncated: z.boolean(),
-  }),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
-export type AgentTopologySession = z.infer<typeof AgentTopologySession>;
-
-export const AgentTopologyPageResponse = z.object({
-  sessions: z.array(AgentTopologySession),
-  total: z.number().int().nonnegative(),
-  hasMore: z.boolean(),
-  nextCursor: z.string().nullable(),
-});
-export type AgentTopologyPageResponse = z.infer<typeof AgentTopologyPageResponse>;
 
 // Recursive: the TS type is declared first so the schema annotation can carry
 // the FULL recursive shape (a shallow annotation loses type information for
@@ -15704,8 +15689,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION =
-  "2026-08-personal-only-organization-setup-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -15755,6 +15739,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
     productAccessMode: ProductAccessMode,
+    // Safe rollout discriminator: the browser only mounts the optional
+    // @opengeni/sdk/accounts controller when this is dual or broker.
+    managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
     auth: ClientAuthConfig.default({ mode: "none" }),
     analytics: z
       .object({
@@ -15891,6 +15878,7 @@ export * from "./governed-learning-activation";
 export * from "./knowledge";
 export * from "./task-notes";
 export * from "./canonical-human-identities";
+export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
 export * from "./agent-authored-durable-text";

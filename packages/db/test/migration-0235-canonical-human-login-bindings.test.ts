@@ -90,16 +90,19 @@ async function createVerifiedBinding(
 async function createStampedSession(
   userId: string,
   identity: { identityId: string; identityRevision: number; authRevision: number },
+  binding: { id: string; revision: number },
 ): Promise<string> {
   if (!shared) throw new Error("test database unavailable");
   const sessionId = crypto.randomUUID();
   await shared.admin`
     insert into auth_sessions (
       id, user_id, token, expires_at,
-      identity_id, identity_revision, auth_revision
+      identity_id, identity_revision, auth_revision,
+      login_binding_id, login_binding_revision
     ) values (
       ${sessionId}, ${userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
-      ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+      ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision},
+      ${binding.id}, ${binding.revision}
     )
   `;
   return sessionId;
@@ -189,14 +192,18 @@ describe("migration 0235 canonical human identities and login bindings", () => {
       "password",
     ]);
 
-    const sessionId = await createStampedSession(userId, {
-      identityId: second.identity.activeIdentity.id,
-      identityRevision: second.identity.activeIdentity.identityRevision,
-      authRevision: second.identity.activeIdentity.authRevision,
-    });
     const passwordBinding = second.identity.loginBindings.find(
       (binding) => binding.providerId === "password",
     )!;
+    const sessionId = await createStampedSession(
+      userId,
+      {
+        identityId: second.identity.activeIdentity.id,
+        identityRevision: second.identity.activeIdentity.identityRevision,
+        authRevision: second.identity.activeIdentity.authRevision,
+      },
+      passwordBinding,
+    );
     const unlinked = await applyCanonicalHumanIdentityOperation(client.db, {
       operationId: crypto.randomUUID(),
       authUserId: userId,
@@ -260,11 +267,15 @@ describe("migration 0235 canonical human identities and login bindings", () => {
       reason: "Attach only verified factor",
     });
     const onlyBinding = linked.identity.loginBindings[0]!;
-    const originalSession = await createStampedSession(userId, {
-      identityId: linked.identity.activeIdentity.id,
-      identityRevision: linked.identity.activeIdentity.identityRevision,
-      authRevision: linked.identity.activeIdentity.authRevision,
-    });
+    const originalSession = await createStampedSession(
+      userId,
+      {
+        identityId: linked.identity.activeIdentity.id,
+        identityRevision: linked.identity.activeIdentity.identityRevision,
+        authRevision: linked.identity.activeIdentity.authRevision,
+      },
+      onlyBinding,
+    );
 
     const recovery = await applyCanonicalHumanIdentityOperation(client.db, {
       operationId: crypto.randomUUID(),
@@ -288,11 +299,18 @@ describe("migration 0235 canonical human identities and login bindings", () => {
       }),
     ).toBe(false);
 
-    const recoverySession = await createStampedSession(userId, {
-      identityId: recovery.identity.activeIdentity.id,
-      identityRevision: recovery.identity.activeIdentity.identityRevision,
-      authRevision: recovery.identity.activeIdentity.authRevision,
-    });
+    const recoveryBinding = recovery.identity.loginBindings.find(
+      (binding) => binding.id === onlyBinding.id,
+    )!;
+    const recoverySession = await createStampedSession(
+      userId,
+      {
+        identityId: recovery.identity.activeIdentity.id,
+        identityRevision: recovery.identity.activeIdentity.identityRevision,
+        authRevision: recovery.identity.activeIdentity.authRevision,
+      },
+      recoveryBinding,
+    );
     expect(
       await validateCanonicalHumanSession(client.db, {
         authSessionId: recoverySession,
@@ -371,11 +389,15 @@ describe("migration 0235 canonical human identities and login bindings", () => {
       providerAccountId,
       reason: "Attach first collision claimant",
     });
-    const firstSession = await createStampedSession(firstUser, {
-      identityId: linked.identity.activeIdentity.id,
-      identityRevision: linked.identity.activeIdentity.identityRevision,
-      authRevision: linked.identity.activeIdentity.authRevision,
-    });
+    const firstSession = await createStampedSession(
+      firstUser,
+      {
+        identityId: linked.identity.activeIdentity.id,
+        identityRevision: linked.identity.activeIdentity.identityRevision,
+        authRevision: linked.identity.activeIdentity.authRevision,
+      },
+      linked.identity.loginBindings.find((binding) => binding.providerId === "github")!,
+    );
     await shared.admin`
       update auth_identities
       set user_id = ${secondUser}, updated_at = now()

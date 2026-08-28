@@ -46,6 +46,8 @@ import {
 import { losslessCodecVersion, losslessJsonb, losslessText } from "./lossless-columns";
 
 export * from "./editable-artifacts-schema";
+export * from "./managed-auth-session-set-schema";
+export * from "./organization-recovery-schema";
 
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
@@ -12481,6 +12483,7 @@ export * from "./preference-registry-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
 export * from "./task-notes-schema";
+export * from "./work-claims-schema";
 export * from "./company-brain-context-selection-schema";
 export * from "./governed-learning-evaluator-schema";
 export * from "./governed-learning-activation-schema";

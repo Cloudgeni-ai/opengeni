@@ -21,6 +21,8 @@ import {
   saveNewSessionDraftInTransaction,
   SessionListAccessError,
   SessionPinAccessError,
+  setSessionArchive,
+  setSessionAttention,
   setSessionPin,
   subjectHasLiveWorkspaceAuthorityInScope,
   transitionSessionVisibility,
@@ -209,11 +211,11 @@ async function provisionManagedHuman(): Promise<ManagedHuman> {
 }
 
 /**
- * Assert that a principal reaches NONE of the three seams inside `owner`'s
+ * Assert that a principal reaches NONE of the session surfaces inside `owner`'s
  * personal workspace. Applied to every non-owner principal so a widening at one
  * seam cannot hide behind another seam's denial.
  */
-async function expectAllThreeSeamsDenied(
+async function expectAllPersonalSessionSurfacesDenied(
   owner: ManagedHuman,
   headers: Record<string, string>,
 ): Promise<void> {
@@ -231,6 +233,22 @@ async function expectAllThreeSeamsDenied(
     { method: "PUT", headers: json, body: JSON.stringify({ pinned: true }) },
   );
   expect(pin.status).toBe(403);
+
+  const attention = await owner.app.request(
+    `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/attention`,
+    {
+      method: "PUT",
+      headers: json,
+      body: JSON.stringify({ unread: false, acknowledgedThroughSequence: 0 }),
+    },
+  );
+  expect(attention.status).toBe(403);
+
+  const archive = await owner.app.request(
+    `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/archive`,
+    { method: "PUT", headers: json, body: JSON.stringify({ archived: true }) },
+  );
+  expect(archive.status).toBe(403);
 
   const draft = await owner.app.request(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/new-session-draft`,
@@ -936,20 +954,94 @@ describe("managed-human session surface inside their own personal workspace", ()
     });
   }, 180_000);
 
-  test("PUT /v1/workspaces/:id/new-session-draft works in the owner's own personal workspace", async () => {
+  test("attention and archive writes work in the owner's own personal workspace", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
+    const sessionId = await seedSession(human, human.personalWorkspaceId);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+
+    const attention = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/attention`,
+      {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ unread: true, expectedVersion: 0 }),
+      },
+    );
+    expect(attention.status).toBe(200);
+    expect((await attention.json()) as { id: string; unread: boolean }).toMatchObject({
+      id: sessionId,
+      unread: true,
+    });
+
+    const archive = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/archive`,
+      {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ archived: true, expectedVersion: 0 }),
+      },
+    );
+    expect(archive.status).toBe(200);
+    expect((await archive.json()) as { id: string; archived: boolean }).toMatchObject({
+      id: sessionId,
+      archived: true,
+    });
+  }, 180_000);
+
+  test("persists and consumes the private create snapshot in the owner's own personal workspace", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    await activateSessionTenancy(human);
+    const text = "draft in my own private Personal workspace";
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
 
     const response = await human.app.request(
       `http://x/v1/workspaces/${human.personalWorkspaceId}/new-session-draft`,
       {
         method: "PUT",
-        headers: { cookie: human.cookie, "content-type": "application/json" },
-        body: JSON.stringify(draftBody),
+        headers,
+        body: JSON.stringify({
+          ...draftBody,
+          text,
+          options: { visibility: "private" },
+        }),
       },
     );
     expect(response.status).toBe(200);
-    expect((await response.json()) as { revision: number }).toMatchObject({ revision: 1 });
+    const saved = (await response.json()) as { revision: number };
+    expect(saved).toMatchObject({ revision: 1 });
+
+    const createdResponse = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          initialMessage: text,
+          resources: [],
+          tools: [],
+          model: draftBody.model,
+          reasoningEffort: draftBody.reasoningEffort,
+          latencyMode: draftBody.latencyMode,
+          visibility: "private",
+          expectedNewSessionDraftRevision: saved.revision,
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(createdResponse.status).toBe(202);
+    const created = (await createdResponse.json()) as { id: string };
+
+    const detail = await human.app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${created.id}`,
+      { headers: { cookie: human.cookie } },
+    );
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({
+      id: created.id,
+      tenancy: { visibility: "private", ownedByCurrentUser: true },
+    });
   }, 180_000);
 });
 
@@ -960,7 +1052,7 @@ describe("the personal-workspace exception stays owner-only", () => {
     const intruder = await provisionManagedHuman();
     await seedSession(owner, owner.personalWorkspaceId);
 
-    await expectAllThreeSeamsDenied(owner, { cookie: intruder.cookie });
+    await expectAllPersonalSessionSurfacesDenied(owner, { cookie: intruder.cookie });
   }, 180_000);
 
   test("a SAME-organization co-member never reaches another member's personal workspace", async () => {
@@ -1017,8 +1109,8 @@ describe("the personal-workspace exception stays owner-only", () => {
         and subject_id = ${organizationOwner.subjectId}`;
     expect(role).toEqual({ role: "owner" });
 
-    // Denied at the route on all three seams ...
-    await expectAllThreeSeamsDenied(member, { cookie: organizationOwner.cookie });
+    // Denied at every route seam ...
+    await expectAllPersonalSessionSurfacesDenied(member, { cookie: organizationOwner.cookie });
 
     // ... and still denied below the route with the exception forced on, so
     // owning the organization is not authority over a member's private
@@ -1225,7 +1317,7 @@ describe("the personal-workspace exception stays owner-only", () => {
       permissions: ["account:read", "account:admin"],
     });
 
-    await expectAllThreeSeamsDenied(owner, { authorization: `Bearer ${token}` });
+    await expectAllPersonalSessionSurfacesDenied(owner, { authorization: `Bearer ${token}` });
   }, 180_000);
 
   test("a delegated service initiator never reaches the personal workspace", async () => {
@@ -1242,7 +1334,7 @@ describe("the personal-workspace exception stays owner-only", () => {
       exp: Math.floor(Date.now() / 1_000) + 3_600,
     });
 
-    await expectAllThreeSeamsDenied(owner, { authorization: `Bearer ${token}` });
+    await expectAllPersonalSessionSurfacesDenied(owner, { authorization: `Bearer ${token}` });
   }, 180_000);
 
   test("a delegated bearer with a substituted user: subject never reaches the personal workspace", async () => {
@@ -1259,7 +1351,7 @@ describe("the personal-workspace exception stays owner-only", () => {
       exp: Math.floor(Date.now() / 1_000) + 3_600,
     });
 
-    await expectAllThreeSeamsDenied(owner, { authorization: `Bearer ${token}` });
+    await expectAllPersonalSessionSurfacesDenied(owner, { authorization: `Bearer ${token}` });
   }, 180_000);
 
   test("an unauthenticated request fails closed rather than defaulting to the exception", async () => {
@@ -1285,7 +1377,7 @@ describe("the personal-workspace exception stays owner-only", () => {
  */
 describe("the exception is owner-scoped at the database seam, not only at the route", () => {
   for (const role of ["admin", "member"] as const) {
-    test(`a same-organization ${role.toUpperCase()} is denied at all three seams even when the caller asserts the exception`, async () => {
+    test(`a same-organization ${role.toUpperCase()} is denied at every seam even when the caller asserts the exception`, async () => {
       if (!shared || !client) return;
       const owner = await provisionManagedHuman();
       const other = await inviteIntoOrganization(owner, role);
@@ -1304,6 +1396,26 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
           subjectId: other.subjectId,
           sessionId,
           pinned: true,
+          personalWorkspaceOwnerException: true,
+        }),
+      ).rejects.toBeInstanceOf(SessionPinAccessError);
+
+      await expect(
+        setSessionAttention(client.db, {
+          workspaceId: owner.personalWorkspaceId,
+          subjectId: other.subjectId,
+          sessionId,
+          unread: true,
+          personalWorkspaceOwnerException: true,
+        }),
+      ).rejects.toBeInstanceOf(SessionPinAccessError);
+
+      await expect(
+        setSessionArchive(client.db, {
+          workspaceId: owner.personalWorkspaceId,
+          subjectId: other.subjectId,
+          sessionId,
+          archived: true,
           personalWorkspaceOwnerException: true,
         }),
       ).rejects.toBeInstanceOf(SessionPinAccessError);
@@ -1328,6 +1440,24 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
           personalWorkspaceOwnerException: true,
         }),
       ).toMatchObject({ id: sessionId, pinned: true });
+      expect(
+        await setSessionAttention(client.db, {
+          workspaceId: owner.personalWorkspaceId,
+          subjectId: owner.subjectId,
+          sessionId,
+          unread: true,
+          personalWorkspaceOwnerException: true,
+        }),
+      ).toMatchObject({ id: sessionId, unread: true });
+      expect(
+        await setSessionArchive(client.db, {
+          workspaceId: owner.personalWorkspaceId,
+          subjectId: owner.subjectId,
+          sessionId,
+          archived: true,
+          personalWorkspaceOwnerException: true,
+        }),
+      ).toMatchObject({ id: sessionId, archived: true });
       expect(
         await saveDraftDirectly(owner.personalWorkspaceId, owner.accountId, owner.subjectId),
       ).toMatchObject({ revision: 1 });
@@ -1368,6 +1498,24 @@ describe("the exception is owner-scoped at the database seam, not only at the ro
         subjectId: suspended.subjectId,
         sessionId,
         pinned: true,
+        personalWorkspaceOwnerException: true,
+      }),
+    ).rejects.toBeInstanceOf(SessionPinAccessError);
+    await expect(
+      setSessionAttention(client.db, {
+        workspaceId: suspended.personalWorkspaceId,
+        subjectId: suspended.subjectId,
+        sessionId,
+        unread: true,
+        personalWorkspaceOwnerException: true,
+      }),
+    ).rejects.toBeInstanceOf(SessionPinAccessError);
+    await expect(
+      setSessionArchive(client.db, {
+        workspaceId: suspended.personalWorkspaceId,
+        subjectId: suspended.subjectId,
+        sessionId,
+        archived: true,
         personalWorkspaceOwnerException: true,
       }),
     ).rejects.toBeInstanceOf(SessionPinAccessError);

@@ -32,6 +32,8 @@ const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
 const PERSONAL_RESOURCE_ATTACHMENTS_E2E = "test/e2e/personal-resource-attachments.browser.e2e.ts";
 const ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E =
   "test/e2e/organization-workspace-administration.browser.e2e.ts";
+const ORGANIZATION_RECOVERY_E2E = "test/e2e/organization-recovery.browser.e2e.ts";
+const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
 const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
@@ -92,7 +94,9 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
+      PERSONAL_GITHUB_IDENTITY_E2E,
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
@@ -102,6 +106,7 @@ describe("fail-closed change impact", () => {
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
     expect(sdk.browserAcceptanceLanes).toEqual([
+      "accounts",
       "interaction",
       "knowledge",
       "onboarding",
@@ -213,6 +218,7 @@ describe("fail-closed change impact", () => {
     );
     for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
     expect(plan.browserAcceptanceLanes).toEqual([
+      "accounts",
       "interaction",
       "knowledge",
       "onboarding",
@@ -236,6 +242,21 @@ describe("fail-closed change impact", () => {
       expect(plan.browserAcceptanceLanes).toContain("interaction");
       expect(plan.e2eTests).not.toContain(TIMELINE_SCROLL_BROWSER_E2E);
       expect(plan.e2eTests).not.toContain(TIMELINE_TIP_FOLLOW_BROWSER_E2E);
+    }
+  });
+
+  test("every browser-account owner selects the real account acceptance lane", () => {
+    for (const path of [
+      "apps/api/src/routes/managed-auth-session-sets.ts",
+      "apps/web/src/components/browser-account-menu.tsx",
+      "packages/contracts/src/managed-auth-session-sets.ts",
+      "packages/core/src/managed-auth-session-sets.ts",
+      "packages/db/src/managed-auth-session-sets.ts",
+      "packages/react/src/accounts.tsx",
+      "packages/sdk/src/accounts.ts",
+      "test/e2e/browser-accounts-acceptance.e2e.ts",
+    ]) {
+      expect(createImpactPlan([path]).browserAcceptanceLanes).toContain("accounts");
     }
   });
 
@@ -268,6 +289,15 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("personal GitHub identity browser coverage follows only its web dependency", () => {
+    const web = createImpactPlan(["apps/web/src/routes/capabilities.tsx"]);
+    expect(web.e2eTests).toContain(PERSONAL_GITHUB_IDENTITY_E2E);
+
+    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+      expect(createImpactPlan([path]).e2eTests).not.toContain(PERSONAL_GITHUB_IDENTITY_E2E);
+    }
+  });
+
   test("artifact database migrations retain the full schema and service safety net", () => {
     const plan = createImpactPlan(["packages/db/drizzle/0191_editable_artifact_engine.sql"]);
     expect(plan.mode).toBe("full");
@@ -289,7 +319,9 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
+      PERSONAL_GITHUB_IDENTITY_E2E,
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
@@ -307,6 +339,10 @@ describe("fail-closed change impact", () => {
     expect(tests.e2e).not.toContain("test/e2e/organization-onboarding-acceptance.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/organization-onboarding-acceptance.e2e.ts"]).toContain(
       "onboarding",
+    );
+    expect(tests.e2e).not.toContain("test/e2e/browser-accounts-acceptance.e2e.ts");
+    expect(OPT_IN_TESTS["test/e2e/browser-accounts-acceptance.e2e.ts"]).toContain(
+      "account-acceptance",
     );
     expect(tests.e2e).not.toContain("test/e2e/opstream-runner.e2e.ts");
   });
@@ -327,6 +363,7 @@ describe("fail-closed change impact", () => {
     expect(plan.integrationTests).toEqual(tests.integration);
     expect(plan.e2eTests).toEqual(tests.e2e);
     expect(plan.browserAcceptanceLanes).toEqual([
+      "accounts",
       "interaction",
       "knowledge",
       "onboarding",

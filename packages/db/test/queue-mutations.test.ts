@@ -5,13 +5,16 @@ import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/cont
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   applySessionTurnSettlement,
+  appendSessionEvents,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
+  enqueueSessionTurn,
   evaluateSessionControl,
+  getScheduledTargetSessionExecution,
   getSessionTurn,
   getSessionQueueSnapshot,
   listSessionTurns,
@@ -1274,7 +1277,7 @@ describe("canonical queue commands", () => {
   });
 
   test("Send stores no private turn tools and never mutates the session policy", async () => {
-    const value = await fixture(1);
+    const value = await fixture(0);
     const workspaceId = value.grant.workspaceId!;
     const selected = [{ kind: "mcp" as const, id: "cap-docs" }];
     await withWorkspaceRls(client.db, workspaceId, (db) =>
@@ -1336,6 +1339,107 @@ describe("canonical queue commands", () => {
       tools: selected,
       toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
     });
+
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId: value.session.id,
+      workflowId: value.session.temporalWorkflowId ?? `session-${value.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`turn was not claimed: ${claimed.action}`);
+    expect(claimed.turn.id).toBe(submitted.turnId);
+    await applySessionTurnSettlement(client.db, workspaceId, {
+      sessionId: value.session.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "running",
+      sessionStatus: "running",
+      activeTurnId: claimed.turn.id,
+      events: [
+        {
+          type: "turn.started",
+          payload: { triggerEventId: claimed.turn.triggerEventId },
+        },
+      ],
+    });
+    expect(
+      (await getScheduledTargetSessionExecution(client.db, workspaceId, value.session.id))?.tools,
+    ).toEqual(selected);
+  });
+
+  test("scheduled target preserves an explicit empty turn tool override", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const selected = [{ kind: "mcp" as const, id: "cap-docs" }];
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .update(schema.sessions)
+        .set({
+          tools: selected,
+          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+        })
+        .where(eq(schema.sessions.id, value.session.id)),
+    );
+
+    const prompt = "run without session tools";
+    const [trigger] = await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      { type: "user.message", payload: { text: prompt } },
+    ]);
+    if (!trigger) throw new Error("explicit-empty turn trigger was not created");
+    const enqueued = await enqueueSessionTurn(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId,
+      sessionId: value.session.id,
+      triggerEventId: trigger.id,
+      temporalWorkflowId: value.session.temporalWorkflowId ?? `session-${value.session.id}`,
+      source: "user",
+      prompt,
+      resources: [],
+      tools: [],
+      toolsProvided: true,
+      model: "scripted-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "subject", subjectId: value.grant.subjectId },
+    });
+
+    const turn = await getSessionTurn(client.db, workspaceId, enqueued.id);
+    expect(turn).toMatchObject({ tools: [], toolsProvided: true });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId: value.session.id,
+      workflowId: value.session.temporalWorkflowId ?? `session-${value.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`turn was not claimed: ${claimed.action}`);
+    expect(claimed.turn.id).toBe(enqueued.id);
+    await applySessionTurnSettlement(client.db, workspaceId, {
+      sessionId: value.session.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "running",
+      sessionStatus: "running",
+      activeTurnId: claimed.turn.id,
+      events: [
+        {
+          type: "turn.started",
+          payload: { triggerEventId: claimed.turn.triggerEventId },
+        },
+      ],
+    });
+    expect(
+      (await getScheduledTargetSessionExecution(client.db, workspaceId, value.session.id))?.tools,
+    ).toEqual([]);
   });
 
   test("Send and Steer persist canonical execution identity and replay its original evidence", async () => {

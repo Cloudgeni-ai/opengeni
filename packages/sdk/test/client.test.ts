@@ -434,6 +434,46 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("actor-private draft and file reads forward AbortSignal cancellation", async () => {
+    const fileId = "00000000-0000-4000-8000-000000000011";
+    const received: Array<{ path: string; signal: AbortSignal | undefined }> = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const signal = init?.signal ?? undefined;
+        received.push({ path: new URL(String(input)).pathname, signal });
+        return await new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const abort = new AbortController();
+    const settled = Promise.allSettled([
+      client.getNewSessionDraft(WORKSPACE_ID, { signal: abort.signal }),
+      client.getFile(WORKSPACE_ID, fileId, { signal: abort.signal }),
+    ]);
+    abort.abort();
+
+    expect(received).toEqual([
+      {
+        path: `/v1/workspaces/${WORKSPACE_ID}/new-session-draft`,
+        signal: abort.signal,
+      },
+      {
+        path: `/v1/workspaces/${WORKSPACE_ID}/files/${fileId}`,
+        signal: abort.signal,
+      },
+    ]);
+    expect(await settled).toEqual([
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+    ]);
+  });
+
   test("submits one exact revision-fenced established-session draft", async () => {
     const response = {
       accepted: makeEvent(9),
@@ -1790,7 +1830,7 @@ describe("OpenGeniClient", () => {
     );
   });
 
-  test("lists compact topology roots, children, and searches through the dedicated endpoint", async () => {
+  test("lists compact topology roots, children, and scoped discovery through the dedicated endpoint", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ sessions: [], total: 0, hasMore: false, nextCursor: null }),
     );
@@ -1800,11 +1840,38 @@ describe("OpenGeniClient", () => {
       parentSessionId: SESSION_ID,
       cursor: "opaque",
     });
+    await client.listAgentTopology(WORKSPACE_ID, {
+      rootSessionId: SESSION_ID,
+      query: "  rollout  ",
+      statuses: ["running", "requires_action"],
+      activeOnly: true,
+      recentHours: 24,
+      claimLimit: 3,
+    });
+    await client.listAgentTopology(WORKSPACE_ID, {
+      subject: {
+        namespace: "github",
+        type: "pull_request",
+        canonicalKey: "cloudgeni-ai/opengeni#384",
+      },
+    });
     await client.listAgentTopology(WORKSPACE_ID, { search: "  rollout  " });
+    await expect(
+      client.listAgentTopology(WORKSPACE_ID, {
+        query: "rollout",
+        subject: {
+          namespace: "github",
+          type: "pull_request",
+          canonicalKey: "cloudgeni-ai/opengeni#384",
+        },
+      }),
+    ).rejects.toThrow("query cannot be combined with an exact subject");
     expect(requests.map((request) => request.url)).toEqual([
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?limit=25&parentSessionId=null`,
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?limit=10&parentSessionId=${SESSION_ID}&cursor=opaque`,
-      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?search=rollout`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?rootSessionId=${SESSION_ID}&query=rollout&statuses=running%2Crequires_action&activeOnly=true&recentHours=24&claimLimit=3`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?subjectNamespace=github&subjectType=pull_request&subjectKey=cloudgeni-ai%2Fopengeni%23384`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?query=rollout`,
     ]);
   });
 
