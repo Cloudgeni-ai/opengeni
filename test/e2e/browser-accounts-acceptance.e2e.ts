@@ -85,7 +85,16 @@ type BrowserProblems = {
   boundedHttp1StreamDispatches: number;
   boundedHttp1NativeSeams: number;
   actorDispatches: Array<{ actorEpoch: string; startedAt: number }>;
-  actorFenceResponses: string[];
+  actorFenceResponses: Array<{
+    actorEpoch: string | null;
+    dispatchPhase: string;
+    endedAt: number;
+    method: string;
+    pathname: string;
+    responsePhase: string;
+    startedAt: number;
+    status: number;
+  }>;
   actorTransitionResponses: Array<{
     actorEpoch: string | null;
     dispatchPhase: string;
@@ -704,9 +713,16 @@ function observeBrowser(page: Page): BrowserProblems {
     }
     if (response.status() === 401 && pathname.startsWith("/v1/workspaces/")) {
       const dispatch = requestPhases.get(request);
-      problems.actorFenceResponses.push(
-        `[dispatch=${dispatch?.phase ?? "unknown"}; actor=${dispatch?.actorEpoch ?? "missing"}; start=${dispatch?.startedAt.toFixed(1) ?? "unknown"}; response=${problems.phase}; end=${performance.now().toFixed(1)}] ${request.method()} 401 ${pathname}`,
-      );
+      problems.actorFenceResponses.push({
+        actorEpoch: dispatch?.actorEpoch ?? null,
+        dispatchPhase: dispatch?.phase ?? "unknown",
+        endedAt: performance.now(),
+        method: request.method(),
+        pathname,
+        responsePhase: problems.phase,
+        startedAt: dispatch?.startedAt ?? Number.NaN,
+        status: response.status(),
+      });
     }
     const recordsActorTransition =
       (response.status() === 403 &&
@@ -1173,6 +1189,63 @@ function optionalWebKitReauthenticationAccessControlPageError(
     problems.acceptedRequestTerminals.splice(terminalIndex, 1);
   }
   return candidates.map(({ message }) => message);
+}
+
+function logoutAllActorFenceResponseProblem(
+  response: BrowserProblems["actorFenceResponses"][number],
+  input: {
+    acceptedAt: number;
+    actorEpoch: string;
+    workspaceId: string;
+  },
+): string | null {
+  const expectedPath = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sessions`;
+  const exactShape =
+    response.actorEpoch === input.actorEpoch &&
+    response.dispatchPhase === "logout-all-response-loss-replay" &&
+    response.responsePhase === "logout-all-response-loss-replay" &&
+    response.method === "GET" &&
+    response.pathname === expectedPath &&
+    response.status === 401;
+  const exactTiming =
+    Number.isFinite(response.startedAt) &&
+    Number.isFinite(response.endedAt) &&
+    response.startedAt <= input.settledAt &&
+    response.endedAt >= input.acceptedAt &&
+    response.endedAt <= input.settledAt;
+  return exactShape && exactTiming
+    ? null
+    : `unexpected logout-all actor fence: ${JSON.stringify({ input, response })}`;
+}
+
+async function expectAndConsumeLogoutAllActorFenceResponses(
+  page: Page,
+  problems: BrowserProblems,
+  input: {
+    acceptedAt: number;
+    actorEpoch: string;
+    settledAt: number;
+    workspaceId: string;
+  },
+): Promise<void> {
+  // A sibling tab can dispatch its current session-list read immediately
+  // before the accepted logout rotates the shared HttpOnly authority. The API
+  // must fence that exact old-actor request with 401; Firefox may deliver the
+  // response instead of the cancellation observed by Chromium/WebKit. Keep the
+  // optional race strict by actor, phase, path, method, status, and acceptance
+  // window, and leave every other 401 in the final failure ledger.
+  await page.waitForTimeout(1_000);
+  const validationInput = { ...input, settledAt: performance.now() };
+  expect(problems.actorFenceResponses.length).toBeLessThanOrEqual(1);
+  for (const response of problems.actorFenceResponses) {
+    expect(logoutAllActorFenceResponseProblem(response, validationInput)).toBeNull();
+  }
+  const exactConsoleErrors = problems.actorFenceResponses.map(
+    ({ pathname }) =>
+      `[logout-all-response-loss-replay] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ ${pathname}`,
+  );
+  await expectAndConsumeConsoleErrors(page, problems, exactConsoleErrors, []);
+  problems.actorFenceResponses.splice(0);
 }
 
 async function expectAndConsumeActorTransitionResponse(
@@ -2892,6 +2965,39 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream`,
       }),
     ).toBe(false);
+
+    const logoutAllFence = {
+      actorEpoch: "old-actor",
+      dispatchPhase: "logout-all-response-loss-replay",
+      endedAt: 220,
+      method: "GET",
+      pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions",
+      responsePhase: "logout-all-response-loss-replay",
+      startedAt: 100,
+      status: 401,
+    } satisfies BrowserProblems["actorFenceResponses"][number];
+    const logoutAllFenceInput = {
+      acceptedAt: 200,
+      actorEpoch: "old-actor",
+      settledAt: 300,
+      workspaceId: "00000000-0000-0000-0000-000000000001",
+    };
+    expect(logoutAllActorFenceResponseProblem(logoutAllFence, logoutAllFenceInput)).toBeNull();
+    for (const invalid of [
+      { ...logoutAllFence, actorEpoch: "new-actor" },
+      { ...logoutAllFence, dispatchPhase: "signed-out-settled" },
+      { ...logoutAllFence, responsePhase: "signed-out-settled" },
+      { ...logoutAllFence, method: "POST" },
+      { ...logoutAllFence, pathname: "/v1/workspaces" },
+      { ...logoutAllFence, status: 403 },
+      { ...logoutAllFence, endedAt: 199 },
+      { ...logoutAllFence, endedAt: 301 },
+      { ...logoutAllFence, startedAt: 301, endedAt: 302 },
+    ]) {
+      expect(logoutAllActorFenceResponseProblem(invalid, logoutAllFenceInput)).toContain(
+        "unexpected logout-all actor fence",
+      );
+    }
   });
 
   test("real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state", async () => {
@@ -3335,7 +3441,6 @@ describe("provider-neutral browser account acceptance", () => {
       )?.value;
       expect(authorityAfterLogoutAll).toHaveLength(43);
       expect(authorityAfterLogoutAll).not.toBe(authorityBeforeLogoutAll);
-      setBrowserPhase(pageProblems, "signed-out-settled");
       await secondTab.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor({
         timeout: 30_000,
       });
@@ -3371,6 +3476,19 @@ describe("provider-neutral browser account acceptance", () => {
       ]) {
         expect(signedOutSecondTabBody).not.toContain(tenantValue);
       }
+      await Promise.all([
+        expectAndConsumeLogoutAllActorFenceResponses(page, pageProblems, {
+          acceptedAt: logoutAllResponseLoss!.acceptedAt!,
+          actorEpoch: projectionBeforeLogoutAll.actorEpoch,
+          workspaceId: beta.workspaceId,
+        }),
+        expectAndConsumeLogoutAllActorFenceResponses(secondTab, secondTabProblems, {
+          acceptedAt: logoutAllResponseLoss!.acceptedAt!,
+          actorEpoch: projectionBeforeLogoutAll.actorEpoch,
+          workspaceId: beta.workspaceId,
+        }),
+      ]);
+      setBrowserPhase(pageProblems, "signed-out-settled");
       setBrowserPhase(secondTabProblems, "signed-out-settled");
       setBrowserPhase(otherProblems, "independent-set-after-other-logout-all");
       await otherPage.reload({ waitUntil: "domcontentloaded" });
