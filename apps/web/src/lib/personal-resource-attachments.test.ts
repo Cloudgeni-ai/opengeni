@@ -26,11 +26,11 @@ const workspaceVariableSetId = "99999999-9999-4999-8999-999999999999";
 const rigId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const enrollmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
-function personalVariableSet() {
+function personalVariableSet(originWorkspaceId = personalWorkspaceId) {
   return {
     id: variableSetId,
     accountId: organizationId,
-    workspaceId: personalWorkspaceId,
+    workspaceId: originWorkspaceId,
     scope: "user" as const,
     generation: 1,
     status: "active" as const,
@@ -42,11 +42,11 @@ function personalVariableSet() {
   };
 }
 
-function personalRig() {
+function personalRig(originWorkspaceId = personalWorkspaceId) {
   return {
     id: rigId,
     accountId: organizationId,
-    workspaceId: personalWorkspaceId,
+    workspaceId: originWorkspaceId,
     scope: "user" as const,
     generation: 1,
     status: "active" as const,
@@ -61,12 +61,16 @@ function personalRig() {
   };
 }
 
-function authority(resourceKind: "variable_set" | "rig", resourceId: string) {
+function authority(
+  resourceKind: "variable_set" | "rig",
+  resourceId: string,
+  originWorkspaceId = personalWorkspaceId,
+) {
   return {
     authorityId: `${resourceKind === "rig" ? "bbbbbbbb-bbbb-4bbb-8bbb" : "77777777-7777-4777-8777"}-777777777777`,
     resourceKind,
     resourceId,
-    originWorkspaceId: personalWorkspaceId,
+    originWorkspaceId,
     generation: 1,
     status: "active" as const,
     grants: [],
@@ -332,13 +336,13 @@ describe("personal resource attachment authority", () => {
     ).toBeNull();
   });
 
-  test("joins metadata to only active exact-origin authority rows", async () => {
+  test("joins metadata to active authority rows using each resource's exact origin", async () => {
     const scope = ownerScope();
     if (!scope) throw new Error("fixture owner scope missing");
     const client = {
       listVariableSets: async (routeWorkspaceId: string) => {
         expect(routeWorkspaceId).toBe(personalWorkspaceId);
-        return [personalVariableSet()];
+        return [personalVariableSet(workspaceId)];
       },
       listRigs: async () => [],
       listUserResourceAuthorities: async (
@@ -355,7 +359,7 @@ describe("personal resource attachment authority", () => {
                     authorityId: "77777777-7777-4777-8777-777777777777",
                     resourceKind: "variable_set" as const,
                     resourceId: variableSetId,
-                    originWorkspaceId: personalWorkspaceId,
+                    originWorkspaceId: workspaceId,
                     generation: 1,
                     status: "active" as const,
                     grants: [],
@@ -363,8 +367,8 @@ describe("personal resource attachment authority", () => {
                   {
                     authorityId: "88888888-8888-4888-8888-888888888888",
                     resourceKind: "variable_set" as const,
-                    resourceId: "99999999-9999-4999-8999-999999999999",
-                    originWorkspaceId: workspaceId,
+                    resourceId: variableSetId,
+                    originWorkspaceId: personalWorkspaceId,
                     generation: 1,
                     status: "active" as const,
                     grants: [],
@@ -379,6 +383,7 @@ describe("personal resource attachment authority", () => {
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(catalog.variableSets.map((resource) => resource.name)).toEqual(["Private deploy keys"]);
     expect(catalog.variableSetAuthorities).toHaveLength(1);
+    expect(catalog.variableSetAuthorities[0]?.originWorkspaceId).toBe(workspaceId);
     expect(catalog.rigs).toEqual([]);
   });
 

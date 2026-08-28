@@ -136,36 +136,38 @@ export async function loadPersonalResourceCatalog(
     listAuthorityPages(client, scope.targetWorkspaceId, "rig"),
     listAuthorityPages(client, scope.targetWorkspaceId, "connected_machine"),
   ]);
-  const eligible = (
-    authority: UserResourceAuthoritySummary,
-    kind: "variable_set" | "rig",
-  ): boolean =>
-    authority.resourceKind === kind &&
-    authority.status === "active" &&
-    authority.originWorkspaceId === scope.personalWorkspaceId;
   const personalVariableSets = variableSets.filter(
     (resource) => resource.scope === "user" && resource.status === "active",
   );
   const personalRigs = rigs.filter(
     (resource) => resource.scope === "user" && resource.status === "active",
   );
+  const matchesResource = (
+    authority: UserResourceAuthoritySummary,
+    kind: "variable_set" | "rig",
+    resource: { id: string; workspaceId: string },
+  ): boolean =>
+    authority.resourceKind === kind &&
+    authority.resourceId === resource.id &&
+    authority.status === "active" &&
+    authority.originWorkspaceId === resource.workspaceId;
+  const variableSetAuthorities = variableSetPage.authorities.filter((authority) =>
+    personalVariableSets.some((resource) => matchesResource(authority, "variable_set", resource)),
+  );
+  const rigAuthorities = rigPage.authorities.filter((authority) =>
+    personalRigs.some((resource) => matchesResource(authority, "rig", resource)),
+  );
   return {
     personalVariableSets,
     personalRigs,
     variableSets: personalVariableSets.filter((resource) =>
-      variableSetPage.authorities.some(
-        (authority) => eligible(authority, "variable_set") && authority.resourceId === resource.id,
-      ),
+      variableSetAuthorities.some((authority) => authority.resourceId === resource.id),
     ),
     rigs: personalRigs.filter((resource) =>
-      rigPage.authorities.some(
-        (authority) => eligible(authority, "rig") && authority.resourceId === resource.id,
-      ),
+      rigAuthorities.some((authority) => authority.resourceId === resource.id),
     ),
-    variableSetAuthorities: variableSetPage.authorities.filter((authority) =>
-      eligible(authority, "variable_set"),
-    ),
-    rigAuthorities: rigPage.authorities.filter((authority) => eligible(authority, "rig")),
+    variableSetAuthorities,
+    rigAuthorities,
     connectedMachineAuthorities: connectedMachinePage.authorities.filter(
       (authority) =>
         authority.resourceKind === "connected_machine" && authority.status === "active",
