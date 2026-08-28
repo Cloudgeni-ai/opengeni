@@ -1481,11 +1481,6 @@ async function openResponsiveAccountMenu(
   displayName: string,
   width: number,
 ): Promise<Locator> {
-  const menu = accountMenuSurface(page);
-  if (await menu.isVisible()) {
-    await waitForStableAccountMenu(page, menu);
-    return menu;
-  }
   const prepareTrigger =
     width < 1_024
       ? async () => {
