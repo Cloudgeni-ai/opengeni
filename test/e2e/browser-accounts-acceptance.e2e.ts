@@ -1409,7 +1409,11 @@ function accountMenuSurface(page: Page): Locator {
     .last();
 }
 
-async function openAccountMenu(page: Page, displayName: string): Promise<Locator> {
+async function openAccountMenu(
+  page: Page,
+  displayName: string,
+  prepareTrigger?: () => Promise<void>,
+): Promise<Locator> {
   const trigger = accountMenuTrigger(page, displayName);
   const menu = accountMenuSurface(page);
   let lastError: unknown;
@@ -1424,10 +1428,23 @@ async function openAccountMenu(page: Page, displayName: string): Promise<Locator
         await page.waitForTimeout(100);
       }
     }
-    if ((await trigger.getAttribute("aria-expanded")) === "true") {
-      await page.keyboard.press("Escape");
+    try {
+      await prepareTrigger?.();
+      await trigger.waitFor({ state: "visible", timeout: 3_000 });
+      if ((await trigger.getAttribute("aria-expanded", { timeout: 1_000 })) === "true") {
+        await page.keyboard.press("Escape");
+      }
+      await trigger.click({ timeout: 3_000 });
+    } catch (error) {
+      // Responsive navigation can finish a route transition after its account
+      // trigger first becomes visible, remounting or closing the drawer between
+      // two locator operations. Retry that bounded UI transition instead of
+      // spending Playwright's full default timeout on the vanished element.
+      lastError = error;
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await page.waitForTimeout(100);
+      continue;
     }
-    await trigger.click();
     try {
       await menu.waitFor({ timeout: 3_000 });
       await waitForStableAccountMenu(page, menu);
@@ -1469,15 +1486,20 @@ async function openResponsiveAccountMenu(
     await waitForStableAccountMenu(page, menu);
     return menu;
   }
-  if (width < 1_024) {
-    const trigger = accountMenuTrigger(page, displayName);
-    if (!(await trigger.isVisible())) {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-      await page.getByRole("tab", { name: "Workspace" }).click();
-      await trigger.waitFor();
-    }
-  }
-  const opened = await openAccountMenu(page, displayName);
+  const prepareTrigger =
+    width < 1_024
+      ? async () => {
+          const trigger = accountMenuTrigger(page, displayName);
+          if (await trigger.isVisible()) return;
+          const workspaceTab = page.getByRole("tab", { name: "Workspace" });
+          if (!(await workspaceTab.isVisible())) {
+            await page.getByRole("button", { name: "Open navigation" }).click({ timeout: 3_000 });
+          }
+          await workspaceTab.click({ timeout: 3_000 });
+          await trigger.waitFor({ state: "visible", timeout: 3_000 });
+        }
+      : undefined;
+  const opened = await openAccountMenu(page, displayName, prepareTrigger);
   return opened;
 }
 
