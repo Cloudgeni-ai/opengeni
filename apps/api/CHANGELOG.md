@@ -1,5 +1,31 @@
 # @opengeni/api-router
 
+## 2.5.2
+
+### Patch Changes
+
+- 595939e: Add managed Google and GitHub sign-in through fenced browser session-set transactions, server-side OAuth state, provider-aware canonical login bindings, and isolated popup UI flows.
+- e4655a7: Make common Documents uploads reliable by replacing ImageMagick-dependent image conversion, shipping Office conversion and local OCR prerequisites in the stock workloads, recognizing ordinary text files with generic MIME types, and surfacing indexing failures during upload.
+- Updated dependencies [595939e]
+- Updated dependencies [8dc432d]
+- Updated dependencies [c705de3]
+- Updated dependencies [e4655a7]
+- Updated dependencies [246b71f]
+- Updated dependencies [95d3971]
+- Updated dependencies [80d7594]
+  - @opengeni/config@0.22.2
+  - @opengeni/contracts@2.8.0
+  - @opengeni/core@2.5.5
+  - @opengeni/db@3.6.2
+  - @opengeni/runtime@1.4.4
+  - @opengeni/documents@0.8.8
+  - @opengeni/github@0.6.3
+  - @opengeni/storage@0.2.112
+  - @opengeni/artifact-tool@0.3.11
+  - @opengeni/codemode@0.4.19
+  - @opengeni/events@0.4.6
+  - @opengeni/observability@0.8.11
+
 ## 2.5.1
 
 ### Patch Changes

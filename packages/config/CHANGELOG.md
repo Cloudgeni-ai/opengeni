@@ -1,5 +1,14 @@
 # @opengeni/config
 
+## 0.22.2
+
+### Patch Changes
+
+- 595939e: Add managed Google and GitHub sign-in through fenced browser session-set transactions, server-side OAuth state, provider-aware canonical login bindings, and isolated popup UI flows.
+- Updated dependencies [595939e]
+- Updated dependencies [80d7594]
+  - @opengeni/contracts@2.8.0
+
 ## 0.22.1
 
 ### Patch Changes

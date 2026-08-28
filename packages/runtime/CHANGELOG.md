@@ -1,5 +1,18 @@
 # @opengeni/runtime
 
+## 1.4.4
+
+### Patch Changes
+
+- c705de3: Bound session-control settlement reads to the requested session subtrees, avoid redundant workspace refreshes for session-scoped control events, and add low-cardinality MCP lifecycle telemetry with failure, latency, and runtime reliability alerts and dashboards.
+- 95d3971: Use native Connected Machine browser control without bootstrapping a Linux display stack, and accept Modal's workspace-root diagnostic when selecting the secure streamed private-write fallback.
+- Updated dependencies [595939e]
+- Updated dependencies [80d7594]
+  - @opengeni/config@0.22.2
+  - @opengeni/contracts@2.8.0
+  - @opengeni/sdk@3.2.0
+  - @opengeni/codemode@0.4.19
+
 ## 1.4.3
 
 ### Patch Changes

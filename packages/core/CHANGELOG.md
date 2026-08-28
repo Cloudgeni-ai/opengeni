@@ -1,5 +1,26 @@
 # @opengeni/core
 
+## 2.5.5
+
+### Patch Changes
+
+- 595939e: Add managed Google and GitHub sign-in through fenced browser session-set transactions, server-side OAuth state, provider-aware canonical login bindings, and isolated popup UI flows.
+- 246b71f: Route explicit Connected Machine-to-session sandbox switches through the deployment's managed backend consistently across fleet projection, readiness, viewers, direct operations, worker manifests, and turns.
+- Updated dependencies [595939e]
+- Updated dependencies [8dc432d]
+- Updated dependencies [c705de3]
+- Updated dependencies [e4655a7]
+- Updated dependencies [95d3971]
+- Updated dependencies [80d7594]
+  - @opengeni/config@0.22.2
+  - @opengeni/contracts@2.8.0
+  - @opengeni/db@3.6.2
+  - @opengeni/runtime@1.4.4
+  - @opengeni/documents@0.8.8
+  - @opengeni/storage@0.2.112
+  - @opengeni/events@0.4.6
+  - @opengeni/observability@0.8.11
+
 ## 2.5.4
 
 ### Patch Changes
