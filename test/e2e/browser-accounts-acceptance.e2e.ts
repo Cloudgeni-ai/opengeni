@@ -1756,6 +1756,12 @@ async function captureResponsiveEvidenceInBrowser(
       });
       expect(screenshot.readUInt32BE(16)).toBe(capture.width);
       await closeResponsiveAccountMenu(evidencePage, capture.width);
+      // Menu open/close and accessibility inspection can trigger ordinary
+      // routed refreshes after the initial bootstrap has already settled.
+      // Close that second finite-read window before applying the strict final
+      // ledger; an in-flight successful read is neither a browser fault nor
+      // evidence that can be discarded by closing this short-lived context.
+      await waitForFiniteReadQuiescence(evidenceProblems);
       await expectNoBrowserProblems(evidenceProblems);
     } finally {
       await evidenceContext.close();
@@ -1798,6 +1804,7 @@ async function captureResponsiveEvidenceInBrowser(
     });
     expect(forcedColorsScreenshot.readUInt32BE(16)).toBe(768);
     await closeResponsiveAccountMenu(forcedColorsPage, 768);
+    await waitForFiniteReadQuiescence(forcedColorsProblems);
     await expectNoBrowserProblems(forcedColorsProblems);
   } finally {
     await forcedColors.close();
@@ -1827,6 +1834,7 @@ async function captureResponsiveEvidenceInBrowser(
     fullPage: true,
   });
   expect(zoomScreenshot.readUInt32BE(16)).toBe(768);
+  await waitForFiniteReadQuiescence(zoomProblems);
   await expectNoBrowserProblems(zoomProblems);
   await zoom.close();
 
@@ -1870,6 +1878,7 @@ async function captureResponsiveEvidenceInBrowser(
     fullPage: true,
   });
   expect(touchScreenshot.readUInt32BE(16)).toBe(320);
+  await waitForFiniteReadQuiescence(touchProblems);
   await expectNoBrowserProblems(touchProblems);
   await touch.close();
 }

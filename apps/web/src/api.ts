@@ -340,12 +340,17 @@ function managedActorTrackedResponse(
     const reason = signal.reason ?? new DOMException("The browser account changed", "AbortError");
     actorAbortReason = reason;
     settle();
-    queueMicrotask(() => {
-      void reader
-        .cancel(reason)
-        .catch(() => undefined)
-        .finally(releaseReader);
-    });
+    // The native fetch signal is aborted before this wrapper signal. Start
+    // cancelling its locked reader in the same task as well: a pagehide can
+    // destroy this realm before a queued microtask runs, leaving Chromium's
+    // old HTTP/1 stream alive and starving the replacement document's finite
+    // reads. The returned promise already owns any asynchronous rejection;
+    // the wrapper still publishes its AbortError only from the consumer's
+    // pull path below.
+    void reader
+      .cancel(reason)
+      .catch(() => undefined)
+      .finally(releaseReader);
   };
   // Keep actor-abort rejection consumer-owned. WebKit can report a stream
   // error raised directly inside the abort event as an unhandled page error
