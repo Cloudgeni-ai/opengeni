@@ -1853,18 +1853,14 @@ beforeAll(async () => {
           if (!completionResponseLoss.dropped && response.ok) {
             completionResponseLoss.dropped = true;
             await response.body?.cancel();
-            const body = new ReadableStream<Uint8Array>({
-              start(controller) {
-                controller.enqueue(new TextEncoder().encode('{"projection":'));
-                queueMicrotask(() =>
-                  controller.error(new Error("injected completion response body loss")),
-                );
-              },
-            });
-            return new Response(body, {
+            const headers = new Headers(response.headers);
+            headers.delete("content-length");
+            // Preserve an accepted response with an unreadable completion payload without
+            // throwing from Bun's server-side stream controller after the test has settled.
+            return new Response('{"projection":', {
               status: response.status,
               statusText: response.statusText,
-              headers: response.headers,
+              headers,
             });
           }
           return response;
