@@ -107,7 +107,7 @@ describe("web API auth helpers", () => {
     }
   });
 
-  test("keeps an established response body actor-bound until the stream closes", async () => {
+  test("keeps a live response actor-bound and aborts its native transport on rotation", async () => {
     const originalFetch = globalThis.fetch;
     const observed: { cancelledWith?: unknown; signal?: AbortSignal | null } = {};
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
@@ -136,7 +136,8 @@ describe("web API auth helpers", () => {
       await expect(read).resolves.toMatchObject({ done: false });
       const lateRead = reader.read();
       configureManagedActorEpoch("13");
-      expect(observed.signal?.aborted).toBe(false);
+      await Promise.resolve();
+      expect(observed.signal?.aborted).toBe(true);
       expect(observed.cancelledWith).toMatchObject({ name: "AbortError" });
       await expect(lateRead).rejects.toMatchObject({ name: "AbortError" });
       await Promise.resolve();
