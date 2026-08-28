@@ -110,15 +110,18 @@ describe("web API auth helpers", () => {
   test("keeps a live response actor-bound and aborts its native transport on rotation", async () => {
     const originalFetch = globalThis.fetch;
     const observed: { cancelledWith?: unknown; signal?: AbortSignal | null } = {};
+    const transportCloseOrder: string[] = [];
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
     let source!: ReadableStream<Uint8Array>;
     globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       observed.signal = init?.signal ?? null;
+      observed.signal?.addEventListener("abort", () => transportCloseOrder.push("native-abort"));
       source = new ReadableStream<Uint8Array>({
         start(controller) {
           bodyController = controller;
         },
         cancel(reason) {
+          transportCloseOrder.push("source-cancel");
           observed.cancelledWith = reason;
         },
       });
@@ -139,6 +142,7 @@ describe("web API auth helpers", () => {
       await Promise.resolve();
       expect(observed.signal?.aborted).toBe(true);
       expect(observed.cancelledWith).toMatchObject({ name: "AbortError" });
+      expect(transportCloseOrder).toEqual(["native-abort", "source-cancel"]);
       await expect(lateRead).rejects.toMatchObject({ name: "AbortError" });
       await Promise.resolve();
       expect(source.locked).toBe(false);
@@ -151,11 +155,14 @@ describe("web API auth helpers", () => {
   test("aborts a live native transport when its consumer closes the wrapper", async () => {
     const originalFetch = globalThis.fetch;
     const observed: { cancelledWith?: unknown; signal?: AbortSignal | null } = {};
+    const transportCloseOrder: string[] = [];
     let source!: ReadableStream<Uint8Array>;
     globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       observed.signal = init?.signal ?? null;
+      observed.signal?.addEventListener("abort", () => transportCloseOrder.push("native-abort"));
       source = new ReadableStream<Uint8Array>({
         cancel(reason) {
+          transportCloseOrder.push("source-cancel");
           observed.cancelledWith = reason;
         },
       });
@@ -173,6 +180,7 @@ describe("web API auth helpers", () => {
       expect(observed.signal?.aborted).toBe(true);
       expect(observed.signal?.reason).toBe(reason);
       expect(observed.cancelledWith).toBe(reason);
+      expect(transportCloseOrder).toEqual(["native-abort", "source-cancel"]);
       expect(source.locked).toBe(false);
     } finally {
       configureManagedActorEpoch(null);
