@@ -58,6 +58,16 @@ import {
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
+export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
+
+export class PostCompactionContinuationEmptyError extends Error {
+  readonly code = POST_COMPACTION_CONTINUATION_EMPTY_CODE;
+
+  constructor() {
+    super("Post-compaction continuation stream ended before a terminal model response");
+    this.name = "PostCompactionContinuationEmptyError";
+  }
+}
 
 export type ProviderRecoveryResult =
   | {
@@ -95,7 +105,8 @@ export function providerRecoveryResult(input: {
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
           input.failureCode === "mcp_transport_timeout" ||
-          input.failureCode === "mcp_transport_unavailable"
+          input.failureCode === "mcp_transport_unavailable" ||
+          input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
         ? Math.max(
             providerDelay ?? 0,
             PROVIDER_CONNECTIVITY_BACKOFF_MS[
@@ -309,14 +320,33 @@ export function postClaimDatabaseRecoveryFailure(input: {
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  providerRecovery?: {
+    failureCode: string;
+    providerRecoveryCount: number;
+  };
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error);
   if (!code || input.executionGeneration < 1) return null;
+  if (
+    input.providerRecovery &&
+    (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
+      input.providerRecovery.providerRecoveryCount <= 0 ||
+      input.providerRecovery.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
+      !/^[a-z][a-z0-9_]{0,63}$/.test(input.providerRecovery.failureCode))
+  ) {
+    return null;
+  }
   const detail: PostClaimDatabaseRecoveryDetail = {
     turnId: input.turnId,
     triggerEventId: input.triggerEventId,
     executionGeneration: input.executionGeneration,
     code,
+    ...(input.providerRecovery
+      ? {
+          providerFailureCode: input.providerRecovery.failureCode,
+          providerRecoveryCount: input.providerRecovery.providerRecoveryCount,
+        }
+      : {}),
   };
   return ApplicationFailure.create({
     message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
@@ -772,6 +802,14 @@ export function agentRunFailurePayload(
       code: error.code,
       retryable: false,
       detail: error.message,
+    };
+  }
+  if (error instanceof PostCompactionContinuationEmptyError) {
+    return {
+      error:
+        "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
+      code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
+      retryable: true,
     };
   }
   // An accepted Codex stream with no terminal response is malformed/partial,

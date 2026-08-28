@@ -119,4 +119,3 @@ REVOKE ALL ON FUNCTION list_workspace_member_management_candidates(uuid, uuid, t
   FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION list_workspace_member_management_candidates(uuid, uuid, text)
   TO opengeni_app;
-

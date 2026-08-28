@@ -212,6 +212,8 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   CreateVariableSetRequest,
+  ResolveVariableSetAttachmentsRequest,
+  ResolveVariableSetAttachmentsResponse,
   CreateRigRequest,
   CreateWorkspaceRequest,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
@@ -322,6 +324,8 @@ import type {
   ForkSessionRequest,
   ForkSessionResponse,
   Session,
+  SessionStatus,
+  WorkClaimSubjectType,
   SessionBackgroundCommandListResponse,
   CancelSessionBackgroundCommandResult,
   SessionListResponse,
@@ -1194,11 +1198,26 @@ export class OpenGeniClient {
     options: {
       limit?: number;
       parentSessionId?: string | null;
+      rootSessionId?: string;
       cursor?: string;
+      query?: string;
+      /** @deprecated use query. */
       search?: string;
+      statuses?: SessionStatus[];
+      activeOnly?: boolean;
+      recentHours?: number;
+      subject?: {
+        namespace: string;
+        type: WorkClaimSubjectType;
+        canonicalKey: string;
+      };
+      claimLimit?: number;
     } = {},
   ): Promise<AgentTopologyPageResponse> {
-    const search = options.search?.trim();
+    const query = options.query?.trim() || options.search?.trim();
+    if (query && options.subject) {
+      throw new TypeError("listAgentTopology query cannot be combined with an exact subject");
+    }
     return await this.requestJson<AgentTopologyPageResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/agent-topology`,
@@ -1208,8 +1227,22 @@ export class OpenGeniClient {
         ...(options.parentSessionId === undefined
           ? {}
           : { parentSessionId: options.parentSessionId ?? "null" }),
+        ...(options.rootSessionId ? { rootSessionId: options.rootSessionId } : {}),
         ...(options.cursor ? { cursor: options.cursor } : {}),
-        ...(search ? { search } : {}),
+        ...(query ? { query } : {}),
+        ...(options.statuses?.length ? { statuses: options.statuses.join(",") } : {}),
+        ...(options.activeOnly !== undefined
+          ? { activeOnly: options.activeOnly ? "true" : "false" }
+          : {}),
+        ...(options.recentHours !== undefined ? { recentHours: String(options.recentHours) } : {}),
+        ...(options.subject
+          ? {
+              subjectNamespace: options.subject.namespace,
+              subjectType: options.subject.type,
+              subjectKey: options.subject.canonicalKey,
+            }
+          : {}),
+        ...(options.claimLimit !== undefined ? { claimLimit: String(options.claimLimit) } : {}),
       },
     );
   }
@@ -4902,6 +4935,18 @@ export class OpenGeniClient {
     return await this.requestJson<VariableSet[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/variable-sets`,
+    );
+  }
+
+  /** Resolve only caller-supplied attachment ids without enumerating the catalog. */
+  async resolveVariableSetAttachments(
+    workspaceId: string,
+    request: ResolveVariableSetAttachmentsRequest,
+  ): Promise<ResolveVariableSetAttachmentsResponse> {
+    return await this.requestJson<ResolveVariableSetAttachmentsResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/variable-sets/resolve-attachments`,
+      request,
     );
   }
 

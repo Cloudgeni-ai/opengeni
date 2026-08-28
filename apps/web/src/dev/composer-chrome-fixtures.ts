@@ -273,6 +273,7 @@ export function emptyAttachments(): UseFileAttachmentsResult {
     addFromPaste: () => {},
     restoreReadyFiles: () => {},
     retry: () => {},
+    retainPreview: () => undefined,
     remove: () => {},
     removeReadyFiles: () => {},
     clear: () => {},

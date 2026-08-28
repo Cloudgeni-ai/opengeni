@@ -1,4 +1,4 @@
-import type { HumanInputQuestion, SessionEvent } from "@opengeni/sdk";
+import type { HumanInputQuestion, SessionEvent, SessionHumanInputRequest } from "@opengeni/sdk";
 
 /** Minimal actionable request shape available from the durable event log. */
 export type PendingHumanInputRequest = {
@@ -8,6 +8,17 @@ export type PendingHumanInputRequest = {
   allowSkip: boolean;
   expiresAt: string | null;
 };
+
+/** A pending row stops being actionable at its durable deadline, even before refresh. */
+export function isActionableHumanInputRequest(
+  request: Pick<SessionHumanInputRequest, "status" | "expiresAt">,
+  nowMs = Date.now(),
+): boolean {
+  if (request.status !== "pending") return false;
+  if (!request.expiresAt) return true;
+  const deadline = Date.parse(request.expiresAt);
+  return Number.isFinite(deadline) && deadline > nowMs;
+}
 
 /** Parse one generic `session.humanInput.requested` event defensively. */
 export function humanInputRequestFromEvent(

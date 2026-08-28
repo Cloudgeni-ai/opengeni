@@ -1,5 +1,36 @@
 # @opengeni/worker-bundle
 
+## 0.22.8
+
+### Patch Changes
+
+- 35db41b: Preserve the exact provider retry count when an operational database outage interrupts same-turn recovery, preventing stale replacement attempts from reopening an already-consumed retry generation.
+- Updated dependencies [7238fa4]
+  - @opengeni/config@0.22.0
+  - @opengeni/contracts@2.7.0
+  - @opengeni/db@3.6.0
+  - @opengeni/core@2.5.3
+  - @opengeni/documents@0.8.6
+  - @opengeni/github@0.6.1
+  - @opengeni/runtime@1.4.2
+  - @opengeni/storage@0.2.110
+  - @opengeni/codemode@0.4.17
+  - @opengeni/events@0.4.4
+  - @opengeni/observability@0.8.9
+
+## 0.22.7
+
+### Patch Changes
+
+- f8c7b3b: Keep a turn active when its post-compaction continuation ends without a terminal model response, recovering from the durable compacted checkpoint instead of emitting an empty completion and advancing queued prompts.
+- Updated dependencies [18afc44]
+- Updated dependencies [bc88a28]
+- Updated dependencies [3a004ff]
+  - @opengeni/db@3.5.2
+  - @opengeni/core@2.5.2
+  - @opengeni/documents@0.8.5
+  - @opengeni/events@0.4.3
+
 ## 0.22.6
 
 ### Patch Changes

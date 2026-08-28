@@ -105,7 +105,8 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "set_other_session_title" ||
       tool.startsWith("goal_") ||
       tool.startsWith("session_") ||
-      tool.startsWith("sessions_"),
+      tool.startsWith("sessions_") ||
+      tool.startsWith("work_claim_"),
   },
   {
     id: "interaction",

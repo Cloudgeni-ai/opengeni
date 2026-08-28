@@ -11,6 +11,7 @@ import {
   layoutAgentTopologyDiagram,
   limitAgentTopology,
   mergeAgentTopologySessions,
+  normalizeAgentTopologySession,
   selectAgentTopologyBranchesToLoad,
   summarizeAgentTopology,
 } from "./agent-topology";
@@ -28,6 +29,15 @@ function session(
     rootSessionId: options.parentSessionId ? "root" : id,
     nestedAgentDepth: options.parentSessionId ? 1 : 0,
     ancestorPath: [],
+    goal: null,
+    relatedWork: {
+      claims: [],
+      claimsTruncated: false,
+      match: null,
+      possibleOverlap: false,
+      advisoryOnly: true,
+      noAdditionalAccess: true,
+    },
     updatedAt: "2026-08-10T10:00:00.000Z",
     createdAt: "2026-08-10T10:00:00.000Z",
     pause: { state: "active", additionalBlockerCount: 0, source: null },
@@ -45,6 +55,23 @@ function session(
 }
 
 describe("agent topology", () => {
+  test("normalizes additive advisory fields from a draining older API replica", () => {
+    const legacy = { ...session("legacy") } as Partial<AgentTopologySession>;
+    delete legacy.goal;
+    delete legacy.relatedWork;
+
+    expect(normalizeAgentTopologySession(legacy as AgentTopologySession)).toMatchObject({
+      goal: null,
+      relatedWork: {
+        claims: [],
+        match: null,
+        possibleOverlap: false,
+        advisoryOnly: true,
+        noAdditionalAccess: true,
+      },
+    });
+  });
+
   test("builds spawned sessions beneath their durable parent", () => {
     const root = session("root", { status: "running" });
     const child = session("child", { parentSessionId: "root" });

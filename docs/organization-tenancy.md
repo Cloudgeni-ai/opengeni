@@ -30,6 +30,14 @@ receives no direct table DML. Privileged migration/operator connections can
 inspect the scaffold. No API, SDK, worker, MCP, UI, or resource DAO uses it in
 Slice A.
 
+Advisory related-work discovery does not create another visibility lane. A
+session and its typed work claims can influence matches, totals, cursors, or
+ancestor labels only after the existing workspace/session-tenancy,
+`user_private`, Slack-private, subject, and optional host-scope predicates admit
+that session. Claim provenance, shared subject identity, or an exact subject
+match never grants access or changes an authority epoch. See
+[`work-discovery.md`](work-discovery.md).
+
 ## Common owner grant lifecycle
 
 Migration `0253_common_user_resource_authority_lifecycle.sql` activates the

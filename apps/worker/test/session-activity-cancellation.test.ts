@@ -148,6 +148,21 @@ describe("post-claim database recovery wire classification", () => {
     expect(postClaimDatabaseRecoveryDetail(activityFailure(failure))).toEqual(detail);
   });
 
+  test("accepts a complete provider recovery authority pair", () => {
+    const providerDetail = {
+      ...detail,
+      providerFailureCode: "mcp_transport_unavailable",
+      providerRecoveryCount: 2,
+    };
+    const failure = ApplicationFailure.create({
+      message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+      type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+      nonRetryable: true,
+      details: [providerDetail],
+    });
+    expect(postClaimDatabaseRecoveryDetail(activityFailure(failure))).toEqual(providerDetail);
+  });
+
   test("rejects malformed identity, permanent codes, and unrelated activities", () => {
     const failure = (candidate: Record<string, unknown>) =>
       activityFailure(
@@ -162,6 +177,18 @@ describe("post-claim database recovery wire classification", () => {
     ).toBeNull();
     expect(
       postClaimDatabaseRecoveryDetail(failure({ ...detail, code: "claim_invariant" })),
+    ).toBeNull();
+    expect(
+      postClaimDatabaseRecoveryDetail(failure({ ...detail, providerRecoveryCount: 2 })),
+    ).toBeNull();
+    expect(
+      postClaimDatabaseRecoveryDetail(
+        failure({
+          ...detail,
+          providerFailureCode: "unsafe provider code",
+          providerRecoveryCount: 2,
+        }),
+      ),
     ).toBeNull();
     expect(
       postClaimDatabaseRecoveryDetail(

@@ -90,6 +90,8 @@ import {
   pendingToolCallFromSdkEvent,
   pointerReconcileReason,
   postClaimDatabaseRecoveryFailure,
+  POST_COMPACTION_CONTINUATION_EMPTY_CODE,
+  PostCompactionContinuationEmptyError,
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
   persistOrSignalSessionAttemptQuiescence,
@@ -4506,6 +4508,21 @@ describe("Codex response timeout fail-closed settlement", () => {
 // goal-continuation recovery instead of a terminal session.failed — the gap that
 // hard-failed a fleet of prod sessions during a provider degradation window.
 describe("transient provider error classifier", () => {
+  test("an empty post-compaction continuation recovers the same compacted turn", () => {
+    expect(agentRunFailurePayload(new PostCompactionContinuationEmptyError())).toEqual({
+      error:
+        "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
+      code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
+      retryable: true,
+    });
+    expect(
+      providerRecoveryResult({
+        failureCode: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
+        attemptNumber: 1,
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+  });
+
   test("an unknown Chat Completions finish reason recovers the same accepted turn", () => {
     expect(agentRunFailurePayload(new UnknownModelFinishReasonError())).toEqual({
       error:
@@ -4758,10 +4775,26 @@ describe("transient provider error classifier", () => {
       retryOutcome: "exhausted",
       database: { table: "session_turns" },
     });
-    expect(postClaimDatabaseRecoveryFailure({ error: deadlock, ...identity })).toMatchObject({
+    expect(
+      postClaimDatabaseRecoveryFailure({
+        error: deadlock,
+        ...identity,
+        providerRecovery: {
+          failureCode: "mcp_transport_unavailable",
+          providerRecoveryCount: 2,
+        },
+      }),
+    ).toMatchObject({
       type: "OpenGeniPostClaimDatabaseRecovery",
       nonRetryable: true,
-      details: [{ ...identity, code: "db_deadlock" }],
+      details: [
+        {
+          ...identity,
+          code: "db_deadlock",
+          providerFailureCode: "mcp_transport_unavailable",
+          providerRecoveryCount: 2,
+        },
+      ],
     });
     expect(
       postClaimDatabaseRecoveryFailure({
@@ -4784,6 +4817,16 @@ describe("transient provider error classifier", () => {
     expect(postClaimDatabaseRecoveryFailure({ error: constraint, ...identity })).toBeNull();
     expect(
       postClaimDatabaseRecoveryFailure({ error: new Error("SECRET invariant"), ...identity }),
+    ).toBeNull();
+    expect(
+      postClaimDatabaseRecoveryFailure({
+        error: deadlock,
+        ...identity,
+        providerRecovery: {
+          failureCode: "unsafe provider code",
+          providerRecoveryCount: 2,
+        },
+      }),
     ).toBeNull();
   });
 
@@ -5046,6 +5089,7 @@ describe("transient provider error classifier", () => {
       "upstream_connectivity_unavailable",
       "mcp_transport_timeout",
       "mcp_transport_unavailable",
+      POST_COMPACTION_CONTINUATION_EMPTY_CODE,
     ]) {
       expect(
         [1, 2, 3, 4, 5].map((attemptNumber) =>

@@ -3,16 +3,21 @@ import { describe, expect, test } from "bun:test";
 import {
   DIRECT_SESSION_RAW_BUDGET,
   DIRECT_SESSION_RAW_MEASUREMENT,
+  EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   KIB,
   MINIMUM_RAW_HEADROOM_BYTES,
+  VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET,
+  VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT,
+  WORK_DISCOVERY_MERGE_TREE_RAW_BUDGET,
+  WORK_DISCOVERY_MERGE_TREE_RAW_MEASUREMENT,
   wholeKibEnvelope,
 } from "./web-bundle-budget-policy";
 
 describe("web bundle budget policy", () => {
-  test("retains at least one KiB above the exact embedded-client graph", () => {
-    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_198_390);
-    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2148 * KIB);
-    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_162);
+  test("retains at least one KiB above the exact embedded attachment-preview graph", () => {
+    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_200_819);
+    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2151 * KIB);
+    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_805);
     expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBeGreaterThanOrEqual(
       MINIMUM_RAW_HEADROOM_BYTES,
     );
@@ -30,5 +35,29 @@ describe("web bundle budget policy", () => {
       "non-negative safe integer",
     );
     expect(() => wholeKibEnvelope(1, 0)).toThrow("positive safe integer");
+  });
+
+  test("retains the exact version-frozen release-source envelope", () => {
+    expect(VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT).toBe(2_205_043);
+    expect(VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET).toBe(2155 * KIB);
+    expect(
+      VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET -
+        VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT,
+    ).toBe(1_677);
+  });
+
+  test("retains the exact current-main permission-scoped discovery envelope", () => {
+    expect(WORK_DISCOVERY_MERGE_TREE_RAW_MEASUREMENT).toBe(2_206_112);
+    expect(WORK_DISCOVERY_MERGE_TREE_RAW_BUDGET).toBe(2156 * KIB);
+    expect(WORK_DISCOVERY_MERGE_TREE_RAW_BUDGET - WORK_DISCOVERY_MERGE_TREE_RAW_MEASUREMENT).toBe(
+      1_632,
+    );
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(
+      Math.max(
+        DIRECT_SESSION_RAW_BUDGET,
+        VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET,
+        WORK_DISCOVERY_MERGE_TREE_RAW_BUDGET,
+      ),
+    );
   });
 });

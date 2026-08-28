@@ -554,26 +554,26 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 300],
+            [FORCE_RLS_TABLES, 303],
             [NON_RLS_RUNTIME_TABLES, 13],
             [RUNTIME_FULL_DML_TABLES, 150],
-            [RUNTIME_READ_ONLY_TABLES, 20],
+            [RUNTIME_READ_ONLY_TABLES, 21],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 46],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 64],
-            [RUNTIME_DML_TABLES, 249],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 66],
+            [RUNTIME_DML_TABLES, 250],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 201],
+            [FORCE_RLS_TABLES, 204],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 118],
-            [RUNTIME_READ_ONLY_TABLES, 16],
+            [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 28],
-            [RUNTIME_DML_TABLES, 184],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 30],
+            [RUNTIME_DML_TABLES, 185],
           ] as const);
       for (const [tables, length] of contracts) {
         const expectedLength =
@@ -589,7 +589,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 313 : 212;
+      const tableCount = hasCurrentMainActivityLedger ? 316 : 215;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
@@ -656,15 +656,15 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 218],
+      [FORCE_RLS_TABLES, 221],
       [NON_RLS_RUNTIME_TABLES, 11],
       [RUNTIME_FULL_DML_TABLES, 135],
-      [RUNTIME_READ_ONLY_TABLES, 14],
+      [RUNTIME_READ_ONLY_TABLES, 15],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
-      [PROTECTED_NO_DIRECT_DML_TABLES, 25],
-      [RUNTIME_DML_TABLES, 209],
+      [PROTECTED_NO_DIRECT_DML_TABLES, 27],
+      [RUNTIME_DML_TABLES, 210],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -673,8 +673,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(234);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(229);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(237);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(232);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -1195,6 +1195,30 @@ describe("runtime database posture evaluator", () => {
     expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("session_variable_set_attachments");
     expect(RUNTIME_FULL_DML_TABLES).not.toContain("session_variable_set_attachments");
     expect(RUNTIME_TABLE_PRIVILEGES.session_variable_set_attachments).toBeUndefined();
+  });
+
+  test("classifies advisory work claims as readable heads with capability-only history", () => {
+    expect(FORCE_RLS_TABLES).toEqual(
+      expect.arrayContaining([
+        "session_work_claims",
+        "session_work_claim_revisions",
+        "session_work_claim_write_capabilities",
+      ]),
+    );
+    expect(RUNTIME_TABLE_PRIVILEGES.session_work_claims).toEqual(["SELECT"]);
+    for (const table of [
+      "session_work_claim_revisions",
+      "session_work_claim_write_capabilities",
+    ] as const) {
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toEqual(
+      expect.arrayContaining([
+        "upsert_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text, text, text, text, text)",
+        "release_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
+      ]),
+    );
   });
 
   test("classifies organization setup delivery journals as capability-only FORCE-RLS state", () => {

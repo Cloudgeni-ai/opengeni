@@ -13,6 +13,12 @@ import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
 import { KnowledgeProviderCitation } from "./knowledge";
 import { XaiProviderAccountAuthoritySnapshotV1 } from "./xai-provider-account-authority";
+import {
+  MAX_NESTED_AGENT_DEPTH,
+  NestedAgentDepthValue,
+  SessionGoalStatus,
+  SessionStatus,
+} from "./session-topology-primitives";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -31,6 +37,9 @@ export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./session-titles";
+export * from "./session-topology-primitives";
+export * from "./agent-topology";
+export * from "./work-claims";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -148,18 +157,6 @@ export {
   canonicalModalCheckpointProviderBinding,
   type ModalCheckpointProviderBinding,
 } from "./checkpoint-provider-bindings";
-
-export const SessionStatus = z.enum([
-  "queued",
-  "running",
-  "idle",
-  "requires_action",
-  "recovering",
-  "waiting_capacity",
-  "failed",
-  "cancelled",
-]);
-export type SessionStatus = z.infer<typeof SessionStatus>;
 
 // 12 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
 // `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
@@ -680,10 +677,6 @@ export const ErrorEnvelope = z.object({
 });
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
 
-/** Physical ceiling of the PostgreSQL integer columns that persist depth policy. */
-export const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
-export const NestedAgentDepthValue = z.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH);
-export type NestedAgentDepthValue = z.infer<typeof NestedAgentDepthValue>;
 /** A denied child can be one greater than the persisted PostgreSQL int ceiling. */
 export const NestedAgentDepthAttemptValue = z
   .number()
@@ -779,6 +772,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "task_note_save",
   "task_note_archive",
   "task_note_replace",
+  "work_claim_upsert",
+  "work_claim_release",
   "knowledge_propose",
   "knowledge_correct",
   "task_note_promote_knowledge",
@@ -5579,9 +5574,6 @@ export type SessionControlState = z.infer<typeof SessionControlState>;
 export const WorkspaceInferenceState = z.enum(["active", "paused"]);
 export type WorkspaceInferenceState = z.infer<typeof WorkspaceInferenceState>;
 
-export const SessionGoalStatus = z.enum(["active", "paused", "completed"]);
-export type SessionGoalStatus = z.infer<typeof SessionGoalStatus>;
-
 export const SessionGoalCreatedBy = z.enum(["api", "agent", "scheduled_task"]);
 export type SessionGoalCreatedBy = z.infer<typeof SessionGoalCreatedBy>;
 
@@ -7744,6 +7736,44 @@ export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 
 export const VariableSetScope = z.enum(["organization", "workspace", "user"]);
 export type VariableSetScope = z.infer<typeof VariableSetScope>;
+
+/**
+ * Exact-ID metadata used only to validate attachments. This deliberately omits
+ * names, descriptions, and variable-name metadata so attach/use authority does
+ * not become general catalog access.
+ */
+export const VariableSetAttachmentMetadata = z.object({
+  id: z.string().uuid(),
+  scope: VariableSetScope,
+});
+export type VariableSetAttachmentMetadata = z.infer<typeof VariableSetAttachmentMetadata>;
+
+export const MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS = MAX_SELECTED_VARIABLE_SETS * 2;
+export const ResolveVariableSetAttachmentsRequest = z
+  .object({
+    // One create can carry 25 explicit selections plus 25 defaults from its Rig.
+    variableSetIds: z.array(z.string().uuid()).max(MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["variableSetIds"],
+        message: "variableSetIds must not contain duplicates",
+      });
+    }
+  });
+export type ResolveVariableSetAttachmentsRequest = z.infer<
+  typeof ResolveVariableSetAttachmentsRequest
+>;
+
+export const ResolveVariableSetAttachmentsResponse = z.object({
+  variableSets: z.array(VariableSetAttachmentMetadata),
+});
+export type ResolveVariableSetAttachmentsResponse = z.infer<
+  typeof ResolveVariableSetAttachmentsResponse
+>;
 
 export const VariableSet = z.object({
   id: z.string().uuid(),
@@ -11702,57 +11732,6 @@ export const SessionListResponse = z.object({
   nextCursor: z.string().nullable(),
 });
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
-
-/** Compact, bounded session projection for workspace agent-topology browsers. */
-export const AgentTopologySession = z.object({
-  id: z.string().uuid(),
-  title: z.string().nullable(),
-  titleTruncated: z.boolean(),
-  parentSessionId: z.string().uuid().nullable(),
-  rootSessionId: z.string().uuid(),
-  nestedAgentDepth: NestedAgentDepthValue,
-  ancestorPath: z.array(
-    z.object({
-      id: z.string().uuid(),
-      title: z.string().nullable(),
-      titleTruncated: z.boolean(),
-    }),
-  ),
-  status: SessionStatus,
-  pause: z.object({
-    state: z.enum(["active", "paused"]),
-    additionalBlockerCount: z.number().int().nonnegative(),
-    source: z
-      .object({
-        kind: z.enum(["session", "workspace"]),
-        sessionId: z.string().uuid().optional(),
-        displayName: z.string(),
-        displayNameTruncated: z.boolean(),
-      })
-      .nullable(),
-  }),
-  children: z.object({
-    directChildren: z.number().int().nonnegative(),
-    totalDescendants: z.number().int().nonnegative(),
-    runningDescendants: z.number().int().nonnegative(),
-    queuedDescendants: z.number().int().nonnegative(),
-    attentionDescendants: z.number().int().nonnegative(),
-    pausedDescendants: z.number().int().nonnegative(),
-    failedDescendants: z.number().int().nonnegative(),
-    truncated: z.boolean(),
-  }),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
-export type AgentTopologySession = z.infer<typeof AgentTopologySession>;
-
-export const AgentTopologyPageResponse = z.object({
-  sessions: z.array(AgentTopologySession),
-  total: z.number().int().nonnegative(),
-  hasMore: z.boolean(),
-  nextCursor: z.string().nullable(),
-});
-export type AgentTopologyPageResponse = z.infer<typeof AgentTopologyPageResponse>;
 
 // Recursive: the TS type is declared first so the schema annotation can carry
 // the FULL recursive shape (a shallow annotation loses type information for

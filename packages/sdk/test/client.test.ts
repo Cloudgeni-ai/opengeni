@@ -1830,7 +1830,7 @@ describe("OpenGeniClient", () => {
     );
   });
 
-  test("lists compact topology roots, children, and searches through the dedicated endpoint", async () => {
+  test("lists compact topology roots, children, and scoped discovery through the dedicated endpoint", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ sessions: [], total: 0, hasMore: false, nextCursor: null }),
     );
@@ -1840,11 +1840,38 @@ describe("OpenGeniClient", () => {
       parentSessionId: SESSION_ID,
       cursor: "opaque",
     });
+    await client.listAgentTopology(WORKSPACE_ID, {
+      rootSessionId: SESSION_ID,
+      query: "  rollout  ",
+      statuses: ["running", "requires_action"],
+      activeOnly: true,
+      recentHours: 24,
+      claimLimit: 3,
+    });
+    await client.listAgentTopology(WORKSPACE_ID, {
+      subject: {
+        namespace: "github",
+        type: "pull_request",
+        canonicalKey: "cloudgeni-ai/opengeni#384",
+      },
+    });
     await client.listAgentTopology(WORKSPACE_ID, { search: "  rollout  " });
+    await expect(
+      client.listAgentTopology(WORKSPACE_ID, {
+        query: "rollout",
+        subject: {
+          namespace: "github",
+          type: "pull_request",
+          canonicalKey: "cloudgeni-ai/opengeni#384",
+        },
+      }),
+    ).rejects.toThrow("query cannot be combined with an exact subject");
     expect(requests.map((request) => request.url)).toEqual([
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?limit=25&parentSessionId=null`,
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?limit=10&parentSessionId=${SESSION_ID}&cursor=opaque`,
-      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?search=rollout`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?rootSessionId=${SESSION_ID}&query=rollout&statuses=running%2Crequires_action&activeOnly=true&recentHours=24&claimLimit=3`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?subjectNamespace=github&subjectType=pull_request&subjectKey=cloudgeni-ai%2Fopengeni%23384`,
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/agent-topology?query=rollout`,
     ]);
   });
 

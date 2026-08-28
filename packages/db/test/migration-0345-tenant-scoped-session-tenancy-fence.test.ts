@@ -64,7 +64,9 @@ const directHotMutatorInventory = [
   "opengeni_private.request_due_sandbox_rotations(bigint,integer)",
   "organization_membership_command(jsonb)",
   "organization_membership_command_0263(jsonb)",
+  "release_session_work_claim_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,integer,text)",
   "transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text,integer)",
+  "upsert_session_work_claim_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,integer,text,text,text,text,text,text,text)",
   "workspace_membership_removal_command(jsonb)",
 ] as const;
 

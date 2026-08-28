@@ -284,6 +284,14 @@ snapshot continuation, and MCP discovery queries. It does not hydrate a broad
 page and filter afterward. Revocation between cursor pages skips newly hidden
 rows and continues scanning to fill the next authorized page.
 
+The same rule is load-bearing for advisory related-work discovery. The host
+scope, OpenGeni private-session checks, and exact live caller authority are
+materialized before title/active-goal/typed-claim matching, rank, counts,
+relevance cursors, or ancestor expansion. A host must not filter a completed
+discovery page in its adapter, because hidden rows would already have affected
+those aggregates. Work claims remain non-exclusive evidence and cannot grant a
+host or caller access; see [`work-discovery.md`](work-discovery.md).
+
 Once the port is bound, unknown session-addressed HTTP routes fail closed. The
 same policy is enforced by shared core mutation entrypoints, cross-session
 first-party MCP tools, every session-bound first-party MCP transport request,

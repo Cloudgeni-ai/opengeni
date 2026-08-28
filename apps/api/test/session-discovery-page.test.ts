@@ -306,16 +306,28 @@ describe("sessions_list compact discovery projection", () => {
   test("round-trips versioned cursors, upgrades legacy cursors, and rejects tampering", () => {
     const cursor = {
       orderBy: "updatedAt" as const,
+      sortRank: null,
       sortRevision: "42",
       sortAt: "2026-07-19T14:58:57.123456Z",
       id: uuid(9),
       snapshotAt: "2026-07-19T15:00:00.654321Z",
       snapshotRevision: "50",
       updatedAfter: "12",
+      filterHash: null,
     };
     const encoded = encodeSessionDiscoveryCursor(cursor);
     expect(encoded).not.toContain("2026");
     expect(decodeSessionDiscoveryCursor(encoded)).toEqual(cursor);
+
+    const relevanceCursor = {
+      ...cursor,
+      orderBy: "relevance" as const,
+      sortRank: 20,
+      updatedAfter: null,
+      filterHash: "a".repeat(64),
+    };
+    const encodedRelevance = encodeSessionDiscoveryCursor(relevanceCursor);
+    expect(decodeSessionDiscoveryCursor(encodedRelevance)).toEqual(relevanceCursor);
 
     const legacy = Buffer.from(
       JSON.stringify({ createdAt: cursor.sortAt, id: cursor.id }),
@@ -323,12 +335,14 @@ describe("sessions_list compact discovery projection", () => {
     ).toString("base64url");
     expect(decodeSessionDiscoveryCursor(legacy)).toEqual({
       orderBy: "createdAt",
+      sortRank: null,
       sortRevision: "0",
       sortAt: cursor.sortAt,
       id: cursor.id,
       snapshotAt: cursor.sortAt,
       snapshotRevision: "0",
       updatedAfter: null,
+      filterHash: null,
     });
     const incompatible = Buffer.from(
       JSON.stringify({ v: 2, ...cursor, orderBy: "createdAt" }),
@@ -337,5 +351,16 @@ describe("sessions_list compact discovery projection", () => {
     expect(() => decodeSessionDiscoveryCursor(incompatible)).toThrow(
       "sessions_list cursor is invalid",
     );
+    for (const malformed of [
+      { v: 3, ...relevanceCursor, sortRank: -1 },
+      { v: 3, ...relevanceCursor, sortRank: 1.5 },
+      { v: 3, ...relevanceCursor, filterHash: "not-a-digest" },
+      { v: 2, ...cursor, sortRank: 20 },
+    ]) {
+      const encodedMalformed = Buffer.from(JSON.stringify(malformed), "utf8").toString("base64url");
+      expect(() => decodeSessionDiscoveryCursor(encodedMalformed)).toThrow(
+        "sessions_list cursor is invalid",
+      );
+    }
   });
 });

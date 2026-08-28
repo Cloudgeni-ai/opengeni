@@ -78,7 +78,7 @@ describe("failSessionAttempt child-terminal identity", () => {
     );
   });
 
-  test("recovers an exact claimed turn after operational database failure", async () => {
+  test("preserves provider recovery authority after an operational database failure", async () => {
     const published: unknown[] = [];
     const recoveryCalls: unknown[] = [];
     const terminalSettlement = mock(async () => ({ action: "settled" as const, events: [] }));
@@ -100,6 +100,7 @@ describe("failSessionAttempt child-terminal identity", () => {
               id: "turn-1",
               triggerEventId: "trigger-1",
               executionGeneration: 4,
+              metadata: { providerRecoveryCount: 1 },
             }) as any,
         ),
         requestSessionTurnRecovery: mock(async (...args: unknown[]) => {
@@ -133,6 +134,8 @@ describe("failSessionAttempt child-terminal identity", () => {
           triggerEventId: "trigger-1",
           executionGeneration: 4,
           code: "db_failure",
+          providerFailureCode: "mcp_transport_unavailable",
+          providerRecoveryCount: 2,
         },
       }),
     ).toEqual({ action: "recovering" });
@@ -142,10 +145,13 @@ describe("failSessionAttempt child-terminal identity", () => {
         turnId: "turn-1",
         triggerEventId: "trigger-1",
         attemptId: "attempt-1",
-        reason: "claimed_attempt_database_failure",
+        reason: "mcp_transport_unavailable",
+        providerRecoveryCount: 2,
         detail: {
-          code: "db_failure",
+          code: "mcp_transport_unavailable",
           retryable: true,
+          databaseFailureCode: "db_failure",
+          providerRecoveryCount: 2,
           recoverySource: "workflow_activity_failure",
         },
         fromStatuses: ["running"],
@@ -154,6 +160,50 @@ describe("failSessionAttempt child-terminal identity", () => {
     expect(published).toEqual([{ id: "recovery-1", type: "turn.recovery.requested" }]);
     expect(terminalSettlement).not.toHaveBeenCalled();
     expect(parentWake).not.toHaveBeenCalled();
+
+    recoveryCalls.length = 0;
+    expect(
+      await activities.failSessionAttempt({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        workflowId: "session-session-1",
+        postClaimDatabaseRecovery: {
+          turnId: "turn-1",
+          triggerEventId: "trigger-1",
+          executionGeneration: 4,
+          code: "db_failure",
+          providerFailureCode: "mcp_transport_unavailable",
+          providerRecoveryCount: 1,
+        },
+      }),
+    ).toEqual({ action: "stale" });
+    expect(recoveryCalls).toHaveLength(0);
+
+    for (const malformedAuthority of [
+      { providerFailureCode: "mcp_transport_unavailable" },
+      { providerRecoveryCount: 2 },
+      { providerFailureCode: "unsafe provider code", providerRecoveryCount: 2 },
+    ]) {
+      expect(
+        await activities.failSessionAttempt({
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+          workflowId: "session-session-1",
+          postClaimDatabaseRecovery: {
+            turnId: "turn-1",
+            triggerEventId: "trigger-1",
+            executionGeneration: 4,
+            code: "db_failure",
+            ...malformedAuthority,
+          },
+        } as any),
+      ).toEqual({ action: "stale" });
+    }
+    expect(recoveryCalls).toHaveLength(0);
   });
 
   test("recovers an ambiguously committed claim from retryable pre-claim truth", async () => {

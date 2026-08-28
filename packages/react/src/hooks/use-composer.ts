@@ -115,7 +115,6 @@ type StoredOptimisticSendOperation = Omit<OptimisticSendOperation, "input" | "ca
 
 const PENDING_COMPOSER_STORAGE_PREFIX = "opengeni.pending-composer.v1:";
 const OPTIMISTIC_SEND_STORAGE_PREFIX = "opengeni.optimistic-sends.v1:";
-
 // A remount must not manufacture a new operation while the previous mutation
 // is still outcome-unknown. Keep only non-credential request fields here; the
 // mounted hook retains the exact input, including any credential updates. The
@@ -697,6 +696,12 @@ export function useComposer(
   const localEditRevision = useRef(initialShadow ? 1 : 0);
   const targetGeneration = useRef(0);
   const draftReadGeneration = useRef(0);
+  const draftReadInFlightRef = useRef<string | null>(null);
+  const draftReadRetryRef = useRef<{
+    targetKey: string;
+    failures: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>({ targetKey, failures: 0, timer: null });
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const onSent = options.onSent;
@@ -725,6 +730,10 @@ export function useComposer(
   const targetKeyRef = useRef(targetKey);
   useLayoutEffect(() => {
     if (targetKeyRef.current === targetKey) return;
+    if (draftReadRetryRef.current.timer !== null) {
+      clearTimeout(draftReadRetryRef.current.timer);
+    }
+    draftReadRetryRef.current = { targetKey, failures: 0, timer: null };
     targetKeyRef.current = targetKey;
     targetGeneration.current += 1;
     draftReadGeneration.current += 1;
@@ -777,6 +786,14 @@ export function useComposer(
     setDraftConflict(null);
     setRestoredResources(shadow?.resources ?? []);
   }, [durableDrafts, options.initialPolicy, pendingOperationKey, sessionId, targetKey]);
+  useEffect(
+    () => () => {
+      if (draftReadRetryRef.current.timer !== null) {
+        clearTimeout(draftReadRetryRef.current.timer);
+      }
+    },
+    [],
+  );
 
   const setOptimisticDraftShadow = useCallback(
     (shadow: ComposerDraftShadow): void => {
@@ -886,6 +903,30 @@ export function useComposer(
         setDraftLoading(false);
         return;
       }
+      let retry = draftReadRetryRef.current;
+      if (retry.targetKey !== targetKey) {
+        if (retry.timer !== null) clearTimeout(retry.timer);
+        retry = { targetKey, failures: 0, timer: null };
+        draftReadRetryRef.current = retry;
+      }
+      const scheduleRetry = (): void => {
+        if (retry.timer !== null) return;
+        retry.timer = setTimeout(
+          () => {
+            if (draftReadRetryRef.current !== retry || targetKeyRef.current !== targetKey) return;
+            retry.timer = null;
+            void loadDraft(false);
+          },
+          Math.min(25_000, 1_000 * 2 ** (retry.failures - 1)) * (0.8 + Math.random() * 0.4),
+        );
+      };
+      if (!replaceLocal && retry.timer !== null) return;
+      if (draftReadInFlightRef.current === targetKey) return;
+      if (retry.timer !== null) {
+        clearTimeout(retry.timer);
+        retry.timer = null;
+      }
+      draftReadInFlightRef.current = targetKey;
       const generation = targetGeneration.current;
       const readTicket = ++draftReadGeneration.current;
       const localAtStart = localEditRevision.current;
@@ -925,8 +966,15 @@ export function useComposer(
         ) {
           return;
         }
+        if (retry.timer !== null) clearTimeout(retry.timer);
+        retry.failures = 0;
+        retry.timer = null;
         const currentRevision = draftRef.current?.revision ?? -1;
-        if (fetched.revision >= currentRevision) {
+        // Reconnect and client-generation effects can legitimately ask for the
+        // draft again. A same-revision response is not new authority: publishing
+        // its freshly decoded object back into React creates a response -> render
+        // -> read feedback loop. Hard reload remains the explicit exception.
+        if (replaceLocal || fetched.revision > currentRevision) {
           draftRef.current = fetched;
           setDraft(fetched);
           setDraftConflict(null);
@@ -978,6 +1026,17 @@ export function useComposer(
           readTicket === draftReadGeneration.current
         ) {
           setError(asError(cause));
+          if (
+            cause instanceof TypeError ||
+            (cause && typeof cause === "object" && "retryable" in cause && cause.retryable === true)
+          ) {
+            retry.failures += 1;
+            scheduleRetry();
+          } else {
+            if (retry.timer !== null) clearTimeout(retry.timer);
+            retry.failures = 0;
+            retry.timer = null;
+          }
         }
       } finally {
         if (
@@ -986,6 +1045,9 @@ export function useComposer(
           readTicket === draftReadGeneration.current
         ) {
           setDraftLoading(false);
+        }
+        if (draftReadInFlightRef.current === targetKey) {
+          draftReadInFlightRef.current = null;
         }
       }
     },
