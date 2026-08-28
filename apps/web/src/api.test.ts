@@ -141,6 +141,75 @@ describe("web API auth helpers", () => {
     }
   });
 
+  test("bounds a stream while it waits for foreground API reads", async () => {
+    jest.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    let finiteController!: ReadableStreamDefaultController<Uint8Array>;
+    let streamDispatches = 0;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: new URL("https://api.example.test/workspaces/current") },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: (type: string) => (type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : []),
+    });
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v1/workspaces") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              finiteController = controller;
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      streamDispatches += 1;
+      return new Response(": connected\n\n", {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "content-length": "13",
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("foreground-deadline");
+      const finite = managedActorFetch("https://api.example.test/v1/workspaces");
+      await Promise.resolve();
+      const stream = managedActorFetch(
+        "https://api.example.test/v1/workspaces/current/live-events/stream",
+        { headers: { accept: "text/event-stream" } },
+      );
+      await Promise.resolve();
+      jest.advanceTimersByTime(11_000);
+      await expect(stream).rejects.toMatchObject({
+        message: "The bounded HTTP/1 stream did not receive response headers in time",
+        name: "AbortError",
+      });
+      expect(streamDispatches).toBe(0);
+      finiteController.enqueue(new TextEncoder().encode("[]"));
+      finiteController.close();
+      const finiteResponse = await finite;
+      await finiteResponse.body!.cancel();
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor) {
+        Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      } else {
+        Reflect.deleteProperty(performance, "getEntriesByType");
+      }
+      jest.useRealTimers();
+    }
+  });
+
   test("holds a clean bounded-stream EOF long enough for finite HTTP/1 reads to run", async () => {
     const source = new ReadableStream<Uint8Array>({
       start(controller) {

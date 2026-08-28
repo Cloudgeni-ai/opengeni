@@ -262,7 +262,6 @@ export async function managedActorFetch(
   let preHeaderTimer: ReturnType<typeof setTimeout> | null = null;
   try {
     if (boundedHttp1Sse) {
-      await waitForManagedActorForegroundIdle(controller.signal);
       preHeaderTimer = setTimeout(() => {
         controller.abort(
           new DOMException(
@@ -271,6 +270,7 @@ export async function managedActorFetch(
           ),
         );
       }, nativeLifetimeMs);
+      await waitForManagedActorForegroundIdle(controller.signal);
     }
     const response = await fetch(transportInput, {
       ...init,
