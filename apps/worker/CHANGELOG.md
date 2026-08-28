@@ -1,5 +1,28 @@
 # @opengeni/worker-bundle
 
+## 0.22.9
+
+### Patch Changes
+
+- 9069509: Reconcile goal continuations against authoritative state, pursue the full verified objective within each turn, and avoid repeating already-satisfied state mutations.
+- 17d253b: Complete personal GitHub identity support across managed, self-hosted, and local modes. Add a compact connect-and-repository UI, exact local-human authority persistence, Docker-safe credential brokering, durable child and goal propagation, and reviewed GitHub tools for pull-request reviews and merges without exposing provider tokens to agents.
+- 88c1155: Recover the same logical turn when sandbox deadline rotation aborts an SDK stream instead of committing an empty successful turn.
+- Updated dependencies [17d253b]
+- Updated dependencies [ff4af61]
+- Updated dependencies [c116379]
+- Updated dependencies [c116379]
+  - @opengeni/config@0.22.1
+  - @opengeni/core@2.5.4
+  - @opengeni/db@3.6.1
+  - @opengeni/runtime@1.4.3
+  - @opengeni/contracts@2.7.1
+  - @opengeni/documents@0.8.7
+  - @opengeni/github@0.6.2
+  - @opengeni/storage@0.2.111
+  - @opengeni/events@0.4.5
+  - @opengeni/codemode@0.4.18
+  - @opengeni/observability@0.8.10
+
 ## 0.22.8
 
 ### Patch Changes

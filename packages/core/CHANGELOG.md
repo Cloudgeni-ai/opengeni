@@ -1,5 +1,24 @@
 # @opengeni/core
 
+## 2.5.4
+
+### Patch Changes
+
+- 17d253b: Complete personal GitHub identity support across managed, self-hosted, and local modes. Add a compact connect-and-repository UI, exact local-human authority persistence, Docker-safe credential brokering, durable child and goal propagation, and reviewed GitHub tools for pull-request reviews and merges without exposing provider tokens to agents.
+- c116379: Improve organization and workspace administration with compact people management, workspace-admin member controls, personal integration and Codex subscription setup, clearer permission presets, consistent connector presentation, and organization-scoped resource navigation.
+- Updated dependencies [17d253b]
+- Updated dependencies [ff4af61]
+- Updated dependencies [c116379]
+- Updated dependencies [c116379]
+  - @opengeni/config@0.22.1
+  - @opengeni/db@3.6.1
+  - @opengeni/runtime@1.4.3
+  - @opengeni/contracts@2.7.1
+  - @opengeni/documents@0.8.7
+  - @opengeni/storage@0.2.111
+  - @opengeni/events@0.4.5
+  - @opengeni/observability@0.8.10
+
 ## 2.5.3
 
 ### Patch Changes
