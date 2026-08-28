@@ -138,7 +138,12 @@ BEGIN
     workspace_id,
     last_sequence
   )
-  SELECT id, account_id, workspace_id, last_sequence
+  -- A session row must exist before any event can reference it, so a newly
+  -- inserted session has no durable event history yet. Some lifecycle
+  -- functions pre-seed sessions.last_sequence for events they insert later in
+  -- the same transaction; copying that future projection here would make the
+  -- first real event look like a duplicate.
+  SELECT id, account_id, workspace_id, 0
   FROM inserted_sessions
   ON CONFLICT (session_id) DO NOTHING;
   RETURN NULL;
