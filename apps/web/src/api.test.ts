@@ -107,7 +107,7 @@ describe("web API auth helpers", () => {
     }
   });
 
-  test("keeps an established response body actor-bound until the stream closes", async () => {
+  test("keeps a live response actor-bound and aborts its native transport on rotation", async () => {
     const originalFetch = globalThis.fetch;
     const observed: { cancelledWith?: unknown; signal?: AbortSignal | null } = {};
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
@@ -136,10 +136,43 @@ describe("web API auth helpers", () => {
       await expect(read).resolves.toMatchObject({ done: false });
       const lateRead = reader.read();
       configureManagedActorEpoch("13");
-      expect(observed.signal?.aborted).toBe(false);
+      await Promise.resolve();
+      expect(observed.signal?.aborted).toBe(true);
       expect(observed.cancelledWith).toMatchObject({ name: "AbortError" });
       await expect(lateRead).rejects.toMatchObject({ name: "AbortError" });
       await Promise.resolve();
+      expect(source.locked).toBe(false);
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("aborts a live native transport when its consumer closes the wrapper", async () => {
+    const originalFetch = globalThis.fetch;
+    const observed: { cancelledWith?: unknown; signal?: AbortSignal | null } = {};
+    let source!: ReadableStream<Uint8Array>;
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      observed.signal = init?.signal ?? null;
+      source = new ReadableStream<Uint8Array>({
+        cancel(reason) {
+          observed.cancelledWith = reason;
+        },
+      });
+      return new Response(source, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("consumer-close");
+      const response = await managedActorFetch("https://api.example.test/v1/sessions/live");
+      const reason = new DOMException("consumer finished", "AbortError");
+      await response.body!.cancel(reason);
+      await Promise.resolve();
+      expect(observed.signal?.aborted).toBe(true);
+      expect(observed.signal?.reason).toBe(reason);
+      expect(observed.cancelledWith).toBe(reason);
       expect(source.locked).toBe(false);
     } finally {
       configureManagedActorEpoch(null);
