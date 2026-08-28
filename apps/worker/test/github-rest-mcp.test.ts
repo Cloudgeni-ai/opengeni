@@ -11,7 +11,7 @@ import { buildGitHubRestMcpForTurn } from "../src/github-rest-mcp";
 
 const appResource: ResourceRef = {
   kind: "repository",
-  uri: "https://github.com/Cloudgeni-ai/opengeni",
+  uri: "https://github.com/Cloudgeni-ai/opengeni.git",
   ref: "main",
   provider: "github",
   githubInstallationId: 71,

@@ -645,7 +645,8 @@ function githubConnectorBindings(
 function canonicalGitHubFullName(uri: string): string | null {
   try {
     const url = new URL(uri);
-    const path = url.pathname.replace(/^\/+|\/+$/gu, "");
+    const clonePath = url.pathname.replace(/^\/+|\/+$/gu, "");
+    const path = clonePath.endsWith(".git") ? clonePath.slice(0, -4) : clonePath;
     if (
       url.protocol !== "https:" ||
       url.hostname !== "github.com" ||
@@ -654,7 +655,6 @@ function canonicalGitHubFullName(uri: string): string | null {
       url.password ||
       url.search ||
       url.hash ||
-      path.endsWith(".git") ||
       !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(path)
     ) {
       return null;
