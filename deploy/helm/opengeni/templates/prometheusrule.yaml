@@ -263,6 +263,54 @@ spec:
           annotations:
             summary: OpenGeni same-turn recovery pressure exceeds 20%
             description: Recovery is preserving logical turns but consuming capacity and adding latency. Inspect typed MCP transport, sandbox, provider, and worker-shutdown evidence for the dominant retryable boundary.
+        - alert: OpenGeniTurnWorkerRestarted
+          expr: |
+            sum(
+              increase(kube_pod_container_status_restarts_total{namespace={{ .Release.Namespace | quote }},container="worker"}[10m])
+              * on(namespace, pod) group_left()
+              max by (namespace, pod) (
+                kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }},label_app_kubernetes_io_component="worker-turns"}
+              )
+            ) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenGeni turn worker restarted
+            description: A turn-worker process exited unexpectedly within the last 10 minutes. Correlate the affected Pod logs with same-turn recovery outcomes before assuming the active turn completed normally.
+        - alert: OpenGeniTurnWorkerCrashLoop
+          expr: |
+            sum(
+              increase(kube_pod_container_status_restarts_total{namespace={{ .Release.Namespace | quote }},container="worker"}[10m])
+              * on(namespace, pod) group_left()
+              max by (namespace, pod) (
+                kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }},label_app_kubernetes_io_component="worker-turns"}
+              )
+            ) > 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni turn workers are repeatedly restarting
+            description: More than one turn-worker container restart occurred within 10 minutes. Treat this as an active crash loop because repeated worker loss can exhaust bounded same-turn recovery and fail a session.
+        - alert: OpenGeniTurnWorkerDeathRecovered
+          expr: |
+            sum(increase(opengeni_turn_worker_death_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="recovering"}[10m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni recovered a turn after worker death
+            description: Durable same-turn recovery prevented immediate session failure, but an in-flight worker was lost. Inspect worker restarts, heartbeat health, the container termination reason, and the last worker log entry.
+        - alert: OpenGeniTurnWorkerDeathRecoveryExhausted
+          expr: |
+            sum(increase(opengeni_turn_worker_death_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="exhausted"}[15m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni exhausted same-turn worker-death recovery
+            description: One logical turn lost four workers and was durably failed after three re-dispatches. Inspect the turn-worker fatal boundary and the correlated turn.failed event with code worker_death_redispatch_exhausted.
         - alert: OpenGeniModelCallFailureRatioHigh
           expr: |
             (
@@ -744,7 +792,7 @@ spec:
         # layer: the model (TTFT), the durable write path (append), or delivery
         # (publish). Thresholds are starters — tune per deployment.
         - alert: OpenGeniStreamingFirstTokenSlow
-          expr: histogram_quantile(0.99, sum by (le, provider) (rate(opengeni_stream_ttft_seconds_bucket[10m]))) > 8
+          expr: histogram_quantile(0.99, sum by (le, provider) (rate(opengeni_stream_ttft_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 8
           for: 15m
           labels:
             severity: warning
@@ -752,7 +800,7 @@ spec:
             summary: OpenGeni p99 time-to-first-token exceeds 8s
             description: The model is slow to START streaming (p99 TTFT by provider above 8s for 15m). Suspect the model provider before the write/delivery path.
         - alert: OpenGeniEventAppendLatencyHigh
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket[10m]))) > 1
+          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 1
           for: 10m
           labels:
             severity: warning
@@ -768,7 +816,7 @@ spec:
             summary: OpenGeni session-event append p99 exceeds 2s
             description: The durable Postgres write path is critically saturated. Inspect database CPU, active sessions, hot statements, and application request pressure before scaling stateless pods.
         - alert: OpenGeniEventPublishLatencyHigh
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket[10m]))) > 0.5
+          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 0.5
           for: 10m
           labels:
             severity: warning
