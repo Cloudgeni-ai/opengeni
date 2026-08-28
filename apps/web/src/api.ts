@@ -236,14 +236,22 @@ export async function managedActorFetch(
     // abort first so downstream consumption still fails closed with the same
     // AbortError, then release the native transport in the next microtask.
     const actorBodyController = new AbortController();
+    const abortNativeTransport = finiteJsonResponse
+      ? undefined
+      : (reason: unknown) => queueMicrotask(() => controller.abort(reason));
     abortTarget = finiteJsonResponse
       ? (reason) => actorBodyController.abort(reason)
       : (reason) => {
           actorBodyController.abort(reason);
-          queueMicrotask(() => controller.abort(reason));
+          abortNativeTransport?.(reason);
         };
     responseOwnsCleanup = true;
-    return managedActorTrackedResponse(actorResponse, actorBodyController.signal, cleanup);
+    return managedActorTrackedResponse(
+      actorResponse,
+      actorBodyController.signal,
+      cleanup,
+      abortNativeTransport,
+    );
   } finally {
     if (!responseOwnsCleanup) cleanup();
   }
@@ -258,6 +266,7 @@ function managedActorTrackedResponse(
   response: Response,
   signal: AbortSignal,
   cleanup: () => void,
+  abortNativeTransport?: (reason: unknown) => void,
 ): Response {
   const reader = response.body!.getReader();
   let settled = false;
@@ -328,11 +337,12 @@ function managedActorTrackedResponse(
         }
       },
       async cancel(reason) {
+        const ownsSettlement = settle();
+        if (ownsSettlement) abortNativeTransport?.(reason);
         try {
           await reader.cancel(reason);
         } finally {
           releaseReader();
-          settle();
         }
       },
     },
