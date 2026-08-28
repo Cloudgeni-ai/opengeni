@@ -2320,6 +2320,7 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBeNull();
     const lateOldActorBootstrapRead = {
       ...crossTabBootstrapRead,
+      actorEpoch: "old-actor-epoch",
       dispatchPhase: "late-old-epoch-alpha-to-beta",
       responsePhase: "late-old-epoch-primary-settled-before-old-release",
     };
