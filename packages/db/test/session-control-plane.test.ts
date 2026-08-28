@@ -2297,6 +2297,59 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("settlement projection follows only the requested session subtrees", async () => {
+    const { grant, session: root } = await fixture();
+    const child = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "child with interrupted attempt",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      parentSessionId: root.id,
+    });
+    const unrelated = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "unrelated root",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+    });
+    await send(grant, child.id, "run until the child is paused");
+    const attemptId = crypto.randomUUID();
+    const running = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      child.id,
+      `session-${child.id}`,
+      { attemptId },
+    );
+    expect(running?.status).toBe("running");
+    expect((await controlSession(grant, child.id, "pause")).interruptionCount).toBe(1);
+
+    const projected = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControls(db, grant.workspaceId!, [root.id, child.id, unrelated.id], {
+        lock: "share",
+      }),
+    );
+    const expectedSettlement = {
+      state: "stopping" as const,
+      attemptCount: 1,
+      interruptionPendingCount: 1,
+      quiescencePendingCount: 0,
+    };
+    expect(projected.get(root.id)?.settlement).toEqual(expectedSettlement);
+    expect(projected.get(child.id)?.settlement).toEqual(expectedSettlement);
+    expect(projected.get(unrelated.id)?.settlement).toBeNull();
+  });
+
   test("compact discovery control matches full blocker truth across pause overrides", async () => {
     const { grant, session: root } = await fixture();
     const child = await createSession(client.db, {

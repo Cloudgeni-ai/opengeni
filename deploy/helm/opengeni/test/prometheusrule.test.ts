@@ -94,6 +94,63 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(idleTimeout).not.toContain("requestId");
   });
 
+  test("alerts on bounded runtime, tool, lifecycle, API, and recovery failures", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expected = new Map([
+      ["OpenGeniTurnFailureRatioHigh", ["opengeni_turns_total", 'outcome="failed"']],
+      ["OpenGeniTurnRecoveryRatioHigh", ["opengeni_turns_total", 'outcome="recovering"']],
+      [
+        "OpenGeniModelCallFailureRatioHigh",
+        ["opengeni_model_calls_total", 'outcome="failed"', "sum by (provider)"],
+      ],
+      [
+        "OpenGeniMcpStrictConnectFailed",
+        ["opengeni_mcp_lifecycle_operations_total", 'policy="strict"', 'outcome="failed"'],
+      ],
+      [
+        "OpenGeniMcpCloseFailed",
+        ["opengeni_mcp_lifecycle_operations_total", 'phase="close"', 'outcome="failed"'],
+      ],
+      [
+        "OpenGeniMcpBestEffortConnectFailureRatio",
+        ["opengeni_mcp_lifecycle_operations_total", 'policy="best_effort"'],
+      ],
+      [
+        "OpenGeniMcpToolFailureRatio",
+        [
+          "opengeni_mcp_tool_calls_total",
+          'outcome=~"provider_declared_error|auth_needed|outcome_uncertain|timeout|thrown_transport_error|thrown_protocol_error"',
+        ],
+      ],
+      ["OpenGeniMcpToolOutcomeUncertain", ["outcome_uncertain"]],
+      ["OpenGeniMcpToolLatencyHigh", ["opengeni_mcp_tool_call_duration_seconds_bucket"]],
+      ["OpenGeniHttp5xxRatioHigh", ["opengeni_http_requests_total", 'status=~"5.."']],
+      [
+        "OpenGeniCoreReadLatencyHigh",
+        [
+          "opengeni_http_request_duration_seconds_bucket",
+          'method="GET"',
+          'route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"',
+        ],
+      ],
+    ]);
+
+    for (const [alert, signals] of expected) {
+      const expression = alertExpression(template, alert);
+      for (const signal of signals)
+        expect(expression, `${alert} missing ${signal}`).toContain(signal);
+      for (const selector of metricSelectors(expression))
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      expect(expression).not.toMatch(/workspace_id|session_id|turn_id|tool_name|server_id/);
+      if (alert === "OpenGeniMcpToolFailureRatio") {
+        expect(expression).not.toContain("cancelled");
+      }
+    }
+  });
+
   test("correlates backlog and freshness before fleet aggregation", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),

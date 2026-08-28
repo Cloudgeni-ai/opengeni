@@ -6,7 +6,13 @@ import {
   xaiSubscriptionFetch,
 } from "@opengeni/xai-subscription";
 
-import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
+import type {
+  McpLifecycleOutcome,
+  McpLifecyclePhase,
+  McpLifecyclePolicy,
+  McpToolCallOutcome,
+  RuntimeMetricsHooks,
+} from "./metrics";
 import { WorkspaceGatewayUnavailableError } from "./model-provider-errors";
 import {
   azureModelRequestPolicy,
@@ -31,6 +37,20 @@ export function recordRuntimeMcpToolCallMetric(
     runtimeMetricsHooks?.onMcpToolCall?.({ outcome, durationSeconds });
   } catch {
     // Metrics emission must never affect an MCP call or rewrite its result.
+  }
+}
+
+export function recordRuntimeMcpLifecycleMetric(
+  phase: McpLifecyclePhase,
+  policy: McpLifecyclePolicy,
+  outcome: McpLifecycleOutcome,
+  startedAt: number,
+): void {
+  const durationSeconds = Math.max(0, (performance.now() - startedAt) / 1_000);
+  try {
+    runtimeMetricsHooks?.onMcpLifecycle?.({ phase, policy, outcome, durationSeconds });
+  } catch {
+    // Metrics emission must never affect MCP connection lifecycle behavior.
   }
 }
 

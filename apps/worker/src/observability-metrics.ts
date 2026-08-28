@@ -163,6 +163,19 @@ export function runtimeMetricsHooksForObservability(
         value: durationSeconds,
       });
     },
+    onMcpLifecycle: ({ phase, policy, outcome, durationSeconds }) => {
+      observability.incrementCounter({
+        name: "opengeni_mcp_lifecycle_operations_total",
+        help: "Total physical MCP lifecycle operations by bounded phase, policy, and outcome.",
+        labels: { phase, policy, outcome },
+      });
+      observability.observeHistogram({
+        name: "opengeni_mcp_lifecycle_operation_duration_seconds",
+        help: "MCP lifecycle operation duration in seconds by bounded phase, policy, and outcome.",
+        labels: { phase, policy, outcome },
+        value: durationSeconds,
+      });
+    },
     onSandboxOp: ({ backend, op, outcome, code, healed, durationSeconds, replyBytes }) => {
       observability.incrementCounter({
         name: "opengeni_machine_op_total",

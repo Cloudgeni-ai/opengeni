@@ -2,6 +2,7 @@
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
 import { OpenGeniProvider } from "@opengeni/react";
+import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -37,6 +38,16 @@ type SlackAccessState = {
   error: string | null;
   busy: boolean;
 };
+
+export function workspaceControlEventInvalidatesWorkspace(
+  event: Pick<WorkspaceControlEvent, "scope">,
+): boolean {
+  // Session-scoped controls invalidate session projections through the React
+  // provider's live event. The workspace projection changes only for the
+  // workspace-wide scope, so refetching it for every descendant pause/resume
+  // turns orchestrator traffic into an unnecessary database read storm.
+  return event.scope === "workspace";
+}
 
 function emptySlackAccessState(): SlackAccessState {
   return { request: null, error: null, busy: false };
@@ -476,7 +487,11 @@ function AuthorizedWorkspaceShell({
     <OpenGeniProvider
       client={context.client}
       workspaceId={workspaceId}
-      onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
+      onWorkspaceControlEvent={(event) => {
+        if (workspaceControlEventInvalidatesWorkspace(event)) {
+          void context.refreshWorkspace(workspaceId);
+        }
+      }}
     >
       {usesOrganizationShell ? (
         children
