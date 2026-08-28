@@ -636,6 +636,7 @@ export type SessionEventWriteLocks = {
   control: WorkspaceControlRow | null;
   workspace: typeof schema.workspaces.$inferSelect | null;
   sessions: Array<typeof schema.sessions.$inferSelect>;
+  cursors: Array<typeof schema.sessionEventCursors.$inferSelect>;
   turns: Array<typeof schema.sessionTurns.$inferSelect>;
   attempts: Array<typeof schema.sessionTurnAttempts.$inferSelect>;
 };
@@ -647,6 +648,7 @@ export type SessionEventWriteLocks = {
  *     (when control-aware; see `lockWorkspaceInferenceControl`)
  *     -> actual workspaces row FOR KEY SHARE
  *     -> session rows FOR NO KEY UPDATE, UUID ordered
+ *     -> session event cursor rows FOR UPDATE, UUID ordered
  *     -> exact turn rows FOR UPDATE, UUID ordered
  *     -> exact attempt rows FOR UPDATE, UUID ordered
  *
@@ -713,6 +715,43 @@ export async function lockSessionEventWriteRows(
           .for("no key update")
       : [];
 
+  const cursors =
+    sessions.length > 0
+      ? await db
+          .select()
+          .from(schema.sessionEventCursors)
+          .where(
+            and(
+              eq(schema.sessionEventCursors.workspaceId, input.workspaceId),
+              inArray(
+                schema.sessionEventCursors.sessionId,
+                sessions.map((session) => session.id),
+              ),
+            ),
+          )
+          .orderBy(schema.sessionEventCursors.sessionId)
+          .for("update")
+      : [];
+  if (cursors.length !== sessions.length) {
+    throw new SessionControlInvariantError(
+      `Session event cursor lock set was incomplete for workspace ${input.workspaceId}`,
+    );
+  }
+  for (let index = 0; index < sessions.length; index += 1) {
+    const session = sessions[index]!;
+    const cursor = cursors[index]!;
+    if (
+      cursor.sessionId !== session.id ||
+      cursor.accountId !== session.accountId ||
+      cursor.workspaceId !== session.workspaceId ||
+      cursor.lastSequence !== session.lastSequence
+    ) {
+      throw new SessionControlInvariantError(
+        `Session event cursor parity failed for session ${session.id}`,
+      );
+    }
+  }
+
   const turnIds = [...new Set(input.turnIds ?? [])].sort();
   const turns =
     turnIds.length > 0
@@ -745,7 +784,7 @@ export async function lockSessionEventWriteRows(
           .for("update")
       : [];
 
-  return { control, workspace, sessions, turns, attempts };
+  return { control, workspace, sessions, cursors, turns, attempts };
 }
 
 export async function registerSessionTurnAttemptClaim(

@@ -1003,13 +1003,14 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public'
         and c.relname in (
-          'workspace_inference_controls', 'sessions',
+          'workspace_inference_controls', 'sessions', 'session_event_cursors',
           'session_turns', 'session_turn_attempts', 'session_events'
         )
       order by c.relname`;
     expect(Array.from(lockedTables)).toEqual(
       [
         "session_events",
+        "session_event_cursors",
         "session_turn_attempts",
         "session_turns",
         "sessions",
