@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 
-test("bundled document parsing retains the Linux sharp native closure", async () => {
+test("bundled document parsing retains the LiteParse native closure", async () => {
   const temporaryRoot = await mkdtemp(join(root, "apps/worker/.native-closure-"));
   const entrypoint = join(temporaryRoot, "entry.ts");
   const outdir = join(temporaryRoot, "dist");
@@ -16,7 +16,7 @@ test("bundled document parsing retains the Linux sharp native closure", async ()
       `import { LiteParse } from "@llamaindex/liteparse";
 
 new LiteParse({ ocrEnabled: true, numWorkers: 1 });
-process.stdout.write("sharp-native-runtime-ready");
+process.stdout.write("liteparse-native-runtime-ready");
 `,
     );
 
@@ -63,7 +63,7 @@ process.stdout.write("sharp-native-runtime-ready");
 
     expect(stderr).toBe("");
     expect(exitCode).toBe(0);
-    expect(stdout).toContain("sharp-native-runtime-ready");
+    expect(stdout).toContain("liteparse-native-runtime-ready");
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }

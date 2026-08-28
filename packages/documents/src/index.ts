@@ -331,8 +331,8 @@ export class LiteParseDocumentParser implements DocumentParser {
   private async parseWithLiteParse(bytes: Uint8Array): Promise<string> {
     return await this.enqueueParse(async () => {
       const { LiteParse } = await import("@llamaindex/liteparse");
-      const parser = new LiteParse({ ocrEnabled: true, numWorkers: 1 });
-      const result = await parser.parse(Buffer.from(bytes), true);
+      const parser = new LiteParse({ ocrEnabled: true, numWorkers: 1, quiet: true });
+      const result = await parser.parse(Buffer.from(bytes));
       const text = typeof result?.text === "string" ? result.text : "";
       return text.replace(/\0/g, " ").trim();
     });
@@ -4168,13 +4168,17 @@ function validateEmbedding(values: number[], dimensions: number, model: string):
 }
 
 function isTextLike(file: FileAsset): boolean {
-  const contentType = file.contentType.toLowerCase();
+  const contentType = file.contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
   const filename = file.filename.toLowerCase();
   return (
     contentType.startsWith("text/") ||
     contentType === "application/json" ||
     contentType === "application/xml" ||
     contentType === "application/x-yaml" ||
+    contentType === "application/yaml" ||
+    contentType === "message/rfc822" ||
+    filename.endsWith(".txt") ||
+    filename.endsWith(".log") ||
     filename.endsWith(".md") ||
     filename.endsWith(".markdown") ||
     filename.endsWith(".json") ||
@@ -4182,7 +4186,10 @@ function isTextLike(file: FileAsset): boolean {
     filename.endsWith(".yml") ||
     filename.endsWith(".csv") ||
     filename.endsWith(".tsv") ||
-    filename.endsWith(".xml")
+    filename.endsWith(".xml") ||
+    filename.endsWith(".html") ||
+    filename.endsWith(".htm") ||
+    filename.endsWith(".eml")
   );
 }
 
