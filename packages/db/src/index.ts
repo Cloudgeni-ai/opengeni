@@ -2379,8 +2379,7 @@ export async function upsertWorkspaceMemberAsWorkspaceManager(
       administers(target.permissions) &&
       !administers(input.permissions) &&
       !roster.some(
-        (member) =>
-          member.subjectId !== input.targetSubjectId && administers(member.permissions),
+        (member) => member.subjectId !== input.targetSubjectId && administers(member.permissions),
       )
     ) {
       throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_LAST_ADMIN");
