@@ -142,7 +142,7 @@ export function canManageSlackReactionSummon(
   accessContext: ReturnType<typeof useAppContext>["accessContext"],
   workspaceId: string,
 ): boolean {
-  return hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
+  return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
 
 export function slackBotDocumentDestinationAuthority(

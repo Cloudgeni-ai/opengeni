@@ -828,34 +828,72 @@ describe("personal MCP connection delegation", () => {
     ).toEqual({ kind: "none" });
   });
 
-  test("fails closed instead of dropping agent-created personal GitHub authority", async () => {
-    await expect(
-      freezePersonalConnectionDelegations({
-        db: null as never,
+  test("narrows inherited personal GitHub authority to the child resources", () => {
+    const credentialBindingId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const parent: McpPersonalConnectionDelegation = {
+      serverId: "github:personal",
+      connectionId: crypto.randomUUID(),
+      originWorkspaceId: crypto.randomUUID(),
+      ownerSubjectId: "user:owner",
+      providerDomain: "github.com",
+      kind: "oauth2",
+      connectionType: "github_personal",
+      userDelegation: {
+        organizationId: crypto.randomUUID(),
+        authorityId: crypto.randomUUID(),
+        authorityGeneration: 1,
         workspaceId: crypto.randomUUID(),
-        settings: { mcpServers: [], githubPersonalOauthEnabled: true },
-        tools: [],
-        resources: [
+        sessionId: null,
+        action: "connection.use",
+        mode: "always",
+        context: "workspace_shared",
+        authorityEpoch: null,
+        grantId: crypto.randomUUID(),
+        grantGeneration: 1,
+      },
+      personalGitHubRepositorySelection: {
+        credentialBindingId,
+        connectionAuthorityGeneration: 1,
+        selectionGeneration: 2,
+        repositories: [
           {
-            kind: "repository",
-            uri: "https://github.com/octocat/private-repository",
-            ref: "main",
-            provider: "github",
-            connectionType: "github_personal",
-            credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             repositoryId: "9007199254740993123",
-            access: "read",
+            fullName: "octocat/private-repository",
+            canonicalUrl: "https://github.com/octocat/private-repository",
+            ref: "main",
+            access: "write",
+            selectionGeneration: 2,
           },
         ],
-        source: {
-          kind: "turn",
-          sessionId: crypto.randomUUID(),
-          turnId: crypto.randomUUID(),
+      },
+    };
+    const inherited = personalConnectionDelegationsFromParent({
+      servers: [],
+      parentDelegations: [parent],
+      personalGitHubResources: [
+        {
+          kind: "repository",
+          uri: "https://github.com/octocat/private-repository",
+          ref: "main",
+          provider: "github",
+          connectionType: "github_personal",
+          credentialBindingId,
+          repositoryId: "9007199254740993123",
+          access: "read",
         },
-      }),
-    ).rejects.toThrow(
-      "agent-created personal GitHub repository authority is not activated in this delivery phase",
-    );
+      ],
+    });
+    expect(inherited).toEqual([
+      {
+        ...parent,
+        personalGitHubRepositorySelection: {
+          ...parent.personalGitHubRepositorySelection!,
+          repositories: [
+            { ...parent.personalGitHubRepositorySelection!.repositories[0]!, access: "read" },
+          ],
+        },
+      },
+    ]);
   });
 
   test("fails closed instead of dropping personal GitHub authority without a causal human", async () => {

@@ -569,9 +569,17 @@ function reconcileOptimisticSendFromEvents(
   );
   const triggerEventId = operation.triggerEventId ?? accepted?.id ?? null;
   const turnId = operation.turnId ?? promptTurnIdForTrigger(triggerEventId, events);
+  const acceptedRouting = promptRoutingFromAcceptedEvent(accepted ?? null);
+  const destination =
+    acceptedRouting === "queued_for_execution"
+      ? "queue"
+      : acceptedRouting === "accepted_for_execution" || acceptedRouting === "accepted_for_steering"
+        ? "chat"
+        : operation.destination;
   const needsAdmissionUpdate =
     accepted !== undefined &&
     (operation.state !== "queued" ||
+      operation.destination !== destination ||
       operation.triggerEventId !== triggerEventId ||
       operation.turnId !== turnId ||
       operation.error !== undefined ||
@@ -580,6 +588,7 @@ function reconcileOptimisticSendFromEvents(
     ? {
         ...operation,
         state: "queued",
+        destination,
         triggerEventId,
         turnId,
         error: undefined,
@@ -1463,10 +1472,13 @@ export function useComposer(
         ) {
           return;
         }
+        const acceptedRouting =
+          acceptedResult?.routing ?? promptRoutingFromAcceptedEvent(acceptedEvent);
         const acceptedDestination =
-          acceptedResult?.routing === "queued_for_execution"
+          acceptedRouting === "queued_for_execution"
             ? "queue"
-            : acceptedResult?.routing === "accepted_for_execution"
+            : acceptedRouting === "accepted_for_execution" ||
+                acceptedRouting === "accepted_for_steering"
               ? "chat"
               : operation.destination;
         if (options.events === undefined && acceptedDestination === "chat") {
@@ -2741,6 +2753,24 @@ async function replayOutcomeUnknown<T>(command: () => Promise<T>): Promise<T> {
 
 function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
+}
+
+function promptRoutingFromAcceptedEvent(
+  event: SessionEvent | null,
+): "accepted_for_execution" | "queued_for_execution" | "accepted_for_steering" | null {
+  if (
+    typeof event?.payload !== "object" ||
+    event.payload === null ||
+    Array.isArray(event.payload)
+  ) {
+    return null;
+  }
+  const routing = (event.payload as Record<string, unknown>).routing;
+  return routing === "accepted_for_execution" ||
+    routing === "queued_for_execution" ||
+    routing === "accepted_for_steering"
+    ? routing
+    : null;
 }
 
 function isDraftConflictError(error: Error): boolean {

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/documents",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -39,7 +39,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@llamaindex/liteparse": "^1.5.3",
+    "@llamaindex/liteparse": "2.14.2",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/db": "workspace:*",
@@ -49,6 +49,7 @@
   },
   "devDependencies": {
     "@opengeni/testing": "workspace:*",
+    "sharp": "^0.34.5",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }

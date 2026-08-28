@@ -11,7 +11,7 @@ import { buildGitHubRestMcpForTurn } from "../src/github-rest-mcp";
 
 const appResource: ResourceRef = {
   kind: "repository",
-  uri: "https://github.com/Cloudgeni-ai/opengeni",
+  uri: "https://github.com/Cloudgeni-ai/opengeni.git",
   ref: "main",
   provider: "github",
   githubInstallationId: 71,
@@ -64,6 +64,15 @@ describe("buildGitHubRestMcpForTurn", () => {
     expect(
       result.settings.mcpServers.some((server) => server.id === GITHUB_REST_MCP_PERSONAL_SERVER_ID),
     ).toBe(false);
+  });
+
+  test("reports an invalid repository URL separately from missing App authority", async () => {
+    await expect(
+      build({
+        enabled: true,
+        resource: { ...appResource, uri: "https://github.com/Cloudgeni-ai/opengeni?ref=main" },
+      }),
+    ).rejects.toThrow("GitHub App repository URL is invalid");
   });
 
   test("keeps the personal OAuth actor in a separate namespace", async () => {
@@ -138,7 +147,7 @@ describe("buildGitHubRestMcpForTurn", () => {
   });
 });
 
-async function build(input: { enabled: boolean }) {
+async function build(input: { enabled: boolean; resource?: ResourceRef }) {
   return await buildGitHubRestMcpForTurn({
     db: {} as Database,
     settings: testSettings({ githubRestMcpEnabled: input.enabled }),
@@ -147,7 +156,7 @@ async function build(input: { enabled: boolean }) {
     sessionId: "00000000-0000-4000-8000-000000000003",
     attemptId: "00000000-0000-4000-8000-000000000004",
     turn: { personalConnectionDelegations: [] } as SessionTurn,
-    resources: [appResource],
+    resources: [input.resource ?? appResource],
     tools: [],
     resolveCredential: async () => ({
       status: "auth_needed",

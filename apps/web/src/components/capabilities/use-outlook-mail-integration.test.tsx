@@ -132,12 +132,13 @@ describe("useOutlookMailIntegration", () => {
     let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
     const rendered = await render(
       <Harness
-        permissions={["workspace:admin"]}
+        permissions={["capabilities:manage"]}
         instances={[]}
         onModel={(current) => (model = current)}
       />,
     );
     try {
+      expect(model?.mark).toMatchObject({ logoSrc: expect.stringContaining("outlook_48x1.svg") });
       expect(model?.chip).toEqual({ label: "Not connected", tone: "idle" });
       expect(model?.access).toBeUndefined();
       expect(model?.footer.kind).toBe("setup");
@@ -163,7 +164,7 @@ describe("useOutlookMailIntegration", () => {
     let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
     const rendered = await render(
       <Harness
-        permissions={["workspace:admin"]}
+        permissions={["capabilities:manage"]}
         instances={[account()]}
         onModel={(current) => (model = current)}
       />,
@@ -188,7 +189,7 @@ describe("useOutlookMailIntegration", () => {
     let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
     const rendered = await render(
       <Harness
-        permissions={["workspace:admin"]}
+        permissions={["capabilities:manage"]}
         instances={[account({ connected: false })]}
         onModel={(current) => (model = current)}
       />,
@@ -209,7 +210,7 @@ describe("useOutlookMailIntegration", () => {
     let model: ReturnType<typeof useOutlookMailIntegration>["model"] | undefined;
     const rendered = await render(
       <Harness
-        permissions={["workspace:admin"]}
+        permissions={["capabilities:manage"]}
         instances={[
           account({ instanceKey: "account-1", displayName: "ana@acme.com" }),
           account({

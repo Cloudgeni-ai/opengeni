@@ -3435,7 +3435,14 @@ async function ensureHeadedBrowserDisplayStack(
   headless: boolean,
   linkedComputer: boolean,
 ): Promise<void> {
-  if (!browserNeedsStandaloneDisplayStack({ headless, linkedComputer })) return;
+  if (
+    !browserNeedsStandaloneDisplayStack({
+      headless,
+      linkedComputer,
+      nativeBrowserControl: typeof session.ensureBrowserControl === "function",
+    })
+  )
+    return;
   if (typeof session.exec !== "function" && typeof session.execCommand !== "function") return;
   await ensureDisplayStack(session, {
     telemetryContext: { callerKind: "viewer" },
@@ -3445,8 +3452,9 @@ async function ensureHeadedBrowserDisplayStack(
 export function browserNeedsStandaloneDisplayStack(input: {
   headless: boolean;
   linkedComputer: boolean;
+  nativeBrowserControl: boolean;
 }): boolean {
-  return !input.headless && !input.linkedComputer;
+  return !input.headless && !input.linkedComputer && !input.nativeBrowserControl;
 }
 
 async function ensureLinkedComputerController(

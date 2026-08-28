@@ -195,8 +195,22 @@ function observeBrowser(page: Page): BrowserProblems {
   return problems;
 }
 
+function isExpectedNavigationReadCancellation(problem: string): boolean {
+  const match = /^GET (https?:\/\/[^/]+)(\/[^:]*): net::ERR_ABORTED$/u.exec(problem);
+  if (!match || match[1] !== publicOrigin) return false;
+  const pathname = new URL(`${match[1]}${match[2]}`).pathname;
+  return (
+    pathname === "/v1/config/client" ||
+    pathname === "/v1/auth/get-session" ||
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname)
+  );
+}
+
 function expectNoBrowserProblems(problems: BrowserProblems): void {
-  expect(problems).toEqual({
+  const failedRequests = problems.failedRequests.filter(
+    (problem) => !isExpectedNavigationReadCancellation(problem),
+  );
+  expect({ ...problems, failedRequests }).toEqual({
     consoleErrors: [],
     pageErrors: [],
     failedRequests: [],
@@ -425,7 +439,13 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(await page.getByLabel(/workspace/i).count()).toBe(0);
     expect(await page.getByText(/create another organization/i).count()).toBe(0);
     await page.getByLabel("Organization name").fill("Onboarding Greenfield Org");
+    const setupSettled = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/v1/auth/organization-onboarding",
+    );
     await page.getByRole("button", { name: "Create organization" }).click();
+    expect((await setupSettled).ok()).toBe(true);
 
     const ownerCookie = await cookieHeader(context);
     const owner = sdk(ownerCookie);
@@ -495,6 +515,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       { waitUntil: "domcontentloaded" },
     );
     await page.getByRole("heading", { name: "Workspaces & access" }).waitFor();
+    await page.getByRole("button", { name: "Create new workspace" }).click();
     await page.getByLabel("New workspace name").fill("Launch Room");
     await page.getByRole("button", { name: "Create workspace" }).click();
     await page.getByText("Launch Room created").waitFor();
@@ -559,10 +580,12 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       { waitUntil: "domcontentloaded" },
     );
     await ownerPage.getByRole("heading", { name: "People & invitations", level: 2 }).waitFor();
+    await ownerPage.getByRole("button", { name: "Invite person", exact: true }).click();
     await ownerPage.getByLabel("Email address").fill(invitedEmail);
     await ownerPage.getByLabel("Name", { exact: true }).fill("Onboarding Invited");
-    await ownerPage.getByText("Launch Operations", { exact: true }).last().click();
-    await ownerPage.getByRole("button", { name: "Invite", exact: true }).click();
+    await ownerPage.getByText("Workspace access", { exact: true }).click();
+    await ownerPage.getByLabel("Launch Operations", { exact: true }).check();
+    await ownerPage.getByRole("button", { name: "Send invitation", exact: true }).click();
     await ownerPage.getByText("Invitation sent", { exact: true }).waitFor();
 
     const setupEmail = await takeEmail("organization_user_setup", invitedEmail);

@@ -1,36 +1,23 @@
 import {
   AlertTriangleIcon,
-  CalendarIcon,
   CheckIcon,
   ChevronRightIcon,
-  CloudIcon,
-  ContactIcon,
-  FilesIcon,
   Loader2Icon,
-  MailIcon,
   PlusIcon,
 } from "lucide-react";
-import { useState, type ComponentType } from "react";
 
+import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import type {
   IntegrationChip,
   IntegrationMark,
-  IntegrationMarkIcon,
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 import { cn } from "@/lib/utils";
 
-const MARK_ICONS: Record<IntegrationMarkIcon, ComponentType<{ className?: string }>> = {
-  mail: MailIcon,
-  calendar: CalendarIcon,
-  contacts: ContactIcon,
-  files: FilesIcon,
-  cloud: CloudIcon,
-};
-
 /**
- * Provider mark: the hosted logo when we have one, then the named product
- * glyph, and a monogram only as the last resort.
+ * Provider identity uses the exact same logo tile as the catalog. Available
+ * logos render inside the shared frame; missing or failed images fall back to
+ * the same stable monogram without changing the row's layout.
  */
 export function IntegrationMarkView({
   mark,
@@ -41,40 +28,13 @@ export function IntegrationMarkView({
   name: string;
   size?: "sm" | "md";
 }) {
-  const [failed, setFailed] = useState(false);
-  const box = cn(
-    "grid shrink-0 place-items-center overflow-hidden rounded-lg border border-border bg-bg",
-    size === "md" ? "size-10" : "size-8",
-  );
-  if ("icon" in mark) {
-    const Icon = MARK_ICONS[mark.icon];
-    return (
-      <span className={cn(box, "text-fg-muted")} aria-hidden="true" title={name}>
-        <Icon className={size === "md" ? "size-5" : "size-4"} />
-      </span>
-    );
-  }
-  if ("logoSrc" in mark && !failed) {
-    return (
-      <span className={box} aria-hidden="true">
-        <img
-          src={mark.logoSrc}
-          alt=""
-          draggable={false}
-          onError={() => setFailed(true)}
-          className={cn("object-contain", size === "md" ? "size-6" : "size-5")}
-        />
-      </span>
-    );
-  }
   return (
-    <span
-      className={cn(box, "text-fg-muted", size === "md" ? "text-sm font-semibold" : "text-xs")}
-      aria-hidden="true"
-      title={name}
-    >
-      {mark.monogram}
-    </span>
+    <CapabilityLogo
+      src={"logoSrc" in mark ? mark.logoSrc : null}
+      name={name}
+      size={size === "md" ? "md" : "sm"}
+      fallback={mark.monogram}
+    />
   );
 }
 
@@ -224,7 +184,9 @@ export function IntegrationRow({
       data-integration-row={model.id}
       className={cn(
         "group flex w-full min-w-0 items-center gap-3 rounded-xl border border-border bg-surface p-3",
-        "transition-colors hover:border-border-strong",
+        "transition-[border-color,background-color,box-shadow] duration-150",
+        "hover:border-brand/40 hover:bg-accent hover:shadow-sm",
+        "focus-within:border-brand/60 focus-within:ring-1 focus-within:ring-brand/30",
       )}
     >
       <button
@@ -232,9 +194,8 @@ export function IntegrationRow({
         onClick={onOpen}
         aria-label={rowAccessibleName(model)}
         className={cn(
-          "flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left",
-          "hover:bg-accent",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
+          "flex min-w-0 flex-1 items-center gap-3 text-left",
+          "focus-visible:outline-none",
           "pointer-coarse:min-h-11",
         )}
       >

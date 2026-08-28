@@ -49,7 +49,7 @@ export function useAtlassianIntegration({
   const canManageWorkspace = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
-    "workspace:admin",
+    "capabilities:manage",
   );
   const workspaceGrant = context.accessContext?.workspaceGrants.find(
     (grant) => grant.workspaceId === workspaceId,

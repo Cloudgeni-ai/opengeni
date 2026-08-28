@@ -1337,6 +1337,10 @@ async function settlementAttemptCounts(
   workspaceId: string,
   sessionIds: string[],
 ): Promise<Map<string, SettlementAttemptCounts>> {
+  // Drive the projection from the requested targets through the indexed
+  // parent_session_id edge. The inverse plan scanned every interruption in a
+  // workspace before walking upward, making one session read proportional to
+  // a high-volume orchestrator workspace's entire interruption history.
   const rows = await db.execute<{
     sessionId: string;
     attemptCount: number | string;
@@ -1344,9 +1348,24 @@ async function settlementAttemptCounts(
     quiescencePendingCount: number | string;
   }>(sql`
     with recursive targets(id) as (values ${targetValues(sessionIds)}),
-    interruptions as (
+    descendant_sessions(target_id, session_id, depth, path) as (
+      select target.id, target.id, 0::integer, array[target.id]::uuid[]
+      from targets target
+      union all
       select
-        interruption.session_id,
+        descendant.target_id,
+        child.id,
+        descendant.depth + 1,
+        descendant.path || child.id
+      from descendant_sessions descendant
+      join ${schema.sessions} child
+        on child.workspace_id = ${workspaceId}
+       and child.parent_session_id = descendant.session_id
+      where not child.id = any(descendant.path)
+        and descendant.depth < ${SESSION_ANCESTRY_LIMIT}
+    ), interruptions as (
+      select
+        descendant.target_id,
         interruption.attempt_id,
         bool_or(interruption.state in ('pending', 'delivered', 'acknowledged'))
           as interruption_pending,
@@ -1354,62 +1373,31 @@ async function settlementAttemptCounts(
           interruption.state in ('settled', 'rejected_stale')
           and attempt.quiesced_at is null
         ) as quiescence_pending
-      from ${schema.sessionAttemptInterruptions} interruption
+      from descendant_sessions descendant
+      join ${schema.sessionAttemptInterruptions} interruption
+        on interruption.workspace_id = ${workspaceId}
+       and interruption.session_id = descendant.session_id
       join ${schema.sessionTurnAttempts} attempt
         on attempt.workspace_id = interruption.workspace_id
        and attempt.id = interruption.attempt_id
-      where interruption.workspace_id = ${workspaceId}
-        and (
+      where (
           interruption.state in ('pending', 'delivered', 'acknowledged')
           or (
             interruption.state in ('settled', 'rejected_stale')
             and attempt.quiesced_at is null
           )
         )
-      group by interruption.session_id, interruption.attempt_id
-    ), interruption_ancestry(
-      session_id,
-      ancestor_id,
-      attempt_id,
-      interruption_pending,
-      quiescence_pending,
-      depth,
-      path
-    ) as (
-      select
-        interruption.session_id,
-        interruption.session_id,
-        interruption.attempt_id,
-        interruption.interruption_pending,
-        interruption.quiescence_pending,
-        0::integer,
-        array[interruption.session_id]::uuid[]
-      from interruptions interruption
-      union all
-      select
-        ancestry.session_id,
-        current.parent_session_id,
-        ancestry.attempt_id,
-        ancestry.interruption_pending,
-        ancestry.quiescence_pending,
-        ancestry.depth + 1,
-        ancestry.path || current.parent_session_id
-      from interruption_ancestry ancestry
-      join ${schema.sessions} current
-        on current.workspace_id = ${workspaceId} and current.id = ancestry.ancestor_id
-      where current.parent_session_id is not null
-        and not current.parent_session_id = any(ancestry.path)
-        and ancestry.depth < ${SESSION_ANCESTRY_LIMIT}
+      group by descendant.target_id, interruption.attempt_id
     )
     select
       target.id as "sessionId",
-      count(distinct ancestry.attempt_id)::integer as "attemptCount",
-      count(distinct ancestry.attempt_id)
-        filter (where ancestry.interruption_pending)::integer as "interruptionPendingCount",
-      count(distinct ancestry.attempt_id)
-        filter (where ancestry.quiescence_pending)::integer as "quiescencePendingCount"
+      count(interruption.attempt_id)::integer as "attemptCount",
+      count(interruption.attempt_id)
+        filter (where interruption.interruption_pending)::integer as "interruptionPendingCount",
+      count(interruption.attempt_id)
+        filter (where interruption.quiescence_pending)::integer as "quiescencePendingCount"
     from targets target
-    join interruption_ancestry ancestry on ancestry.ancestor_id = target.id
+    join interruptions interruption on interruption.target_id = target.id
     group by target.id
   `);
   return new Map(

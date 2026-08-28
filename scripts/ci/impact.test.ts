@@ -33,9 +33,11 @@ const PERSONAL_RESOURCE_ATTACHMENTS_E2E = "test/e2e/personal-resource-attachment
 const ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E =
   "test/e2e/organization-workspace-administration.browser.e2e.ts";
 const ORGANIZATION_RECOVERY_E2E = "test/e2e/organization-recovery.browser.e2e.ts";
+const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
 const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
+const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -94,6 +96,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
+      PERSONAL_GITHUB_IDENTITY_E2E,
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
@@ -232,11 +235,13 @@ describe("fail-closed change impact", () => {
       "packages/react/src/components/message-timeline.tsx",
       "packages/react/demo/timeline-collapsed-history-test-harness.tsx",
       TIMELINE_SCROLL_BROWSER_E2E,
+      TIMELINE_TIP_FOLLOW_BROWSER_E2E,
     ]) {
       const plan = createImpactPlan([path]);
       expect(plan.mode).toBe("focused");
       expect(plan.browserAcceptanceLanes).toContain("interaction");
       expect(plan.e2eTests).not.toContain(TIMELINE_SCROLL_BROWSER_E2E);
+      expect(plan.e2eTests).not.toContain(TIMELINE_TIP_FOLLOW_BROWSER_E2E);
     }
   });
 
@@ -284,6 +289,15 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("personal GitHub identity browser coverage follows only its web dependency", () => {
+    const web = createImpactPlan(["apps/web/src/routes/capabilities.tsx"]);
+    expect(web.e2eTests).toContain(PERSONAL_GITHUB_IDENTITY_E2E);
+
+    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+      expect(createImpactPlan([path]).e2eTests).not.toContain(PERSONAL_GITHUB_IDENTITY_E2E);
+    }
+  });
+
   test("artifact database migrations retain the full schema and service safety net", () => {
     const plan = createImpactPlan(["packages/db/drizzle/0191_editable_artifact_engine.sql"]);
     expect(plan.mode).toBe("full");
@@ -307,6 +321,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
+      PERSONAL_GITHUB_IDENTITY_E2E,
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
@@ -319,6 +334,8 @@ describe("fail-closed change impact", () => {
     expect(OPT_IN_TESTS["test/e2e/codex-overview.e2e.ts"]).toContain("browser-acceptance");
     expect(tests.e2e).not.toContain(TIMELINE_SCROLL_BROWSER_E2E);
     expect(OPT_IN_TESTS[TIMELINE_SCROLL_BROWSER_E2E]).toContain("browser-acceptance");
+    expect(tests.e2e).not.toContain(TIMELINE_TIP_FOLLOW_BROWSER_E2E);
+    expect(OPT_IN_TESTS[TIMELINE_TIP_FOLLOW_BROWSER_E2E]).toContain("browser-acceptance");
     expect(tests.e2e).not.toContain("test/e2e/organization-onboarding-acceptance.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/organization-onboarding-acceptance.e2e.ts"]).toContain(
       "onboarding",

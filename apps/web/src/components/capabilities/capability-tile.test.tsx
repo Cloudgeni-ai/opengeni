@@ -121,6 +121,8 @@ describe("CapabilityTile", () => {
     try {
       const tiles = [...rendered.container.querySelectorAll("[data-capability-catalog-tile]")];
       expect(tiles).toHaveLength(2);
+      expect(tiles[0]!.className).toContain("hover:bg-accent");
+      expect(tiles[0]!.querySelector("button")!.className).not.toContain("hover:bg-");
       // Not connected: two buttons (open + connect).
       expect(tiles[0]!.querySelectorAll("button")).toHaveLength(2);
       const connect = [...tiles[0]!.querySelectorAll("button")].find(
@@ -193,6 +195,8 @@ describe("FeaturedConnectorTile", () => {
     try {
       const tiles = [...rendered.container.querySelectorAll("[data-featured-connector]")];
       expect(tiles).toHaveLength(2);
+      expect(tiles[0]!.className).toContain("hover:bg-accent");
+      expect(tiles[0]!.querySelector("button")!.className).not.toContain("hover:bg-");
       expect(tiles[0]!.querySelectorAll("button")).toHaveLength(2);
       expect(tiles[1]!.querySelectorAll("button")).toHaveLength(1);
       expect(tiles[1]!.querySelector("button")?.getAttribute("aria-label")).toBe(

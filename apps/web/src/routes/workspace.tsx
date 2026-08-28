@@ -2,6 +2,7 @@
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
 import { OpenGeniProvider } from "@opengeni/react";
+import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -19,6 +20,7 @@ import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
 import { useAppContext, type AppContextValue } from "@/context";
 import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
 import { isAbortError } from "@/lib/session-tools";
+import { orgLabel } from "@/lib/org";
 import { authorizedWorkspaceFromList } from "@/lib/workspace-scope-context";
 import {
   updateWorkspaceOwnedState,
@@ -36,6 +38,16 @@ type SlackAccessState = {
   error: string | null;
   busy: boolean;
 };
+
+export function workspaceControlEventInvalidatesWorkspace(
+  event: Pick<WorkspaceControlEvent, "scope">,
+): boolean {
+  // Session-scoped controls invalidate session projections through the React
+  // provider's live event. The workspace projection changes only for the
+  // workspace-wide scope, so refetching it for every descendant pause/resume
+  // turns orchestrator traffic into an unnecessary database read storm.
+  return event.scope === "workspace";
+}
 
 function emptySlackAccessState(): SlackAccessState {
   return { request: null, error: null, busy: false };
@@ -78,6 +90,7 @@ export function WorkspaceShellRouteContent({
     setSelectedRepoIds,
     setSelectedRepoRefs,
     refreshGitHub,
+    refreshPersonalGitHub,
     refreshWorkspaceMcpServers,
   } = context;
   const [ownedSlackAccess, setOwnedSlackAccess] = useState<WorkspaceOwnedState<SlackAccessState>>(
@@ -319,6 +332,7 @@ export function WorkspaceShellRouteContent({
     setSelectedRepoIds(new Set());
     setSelectedRepoRefs({});
     void refreshGitHub(workspaceId, abortController.signal);
+    void refreshPersonalGitHub(workspaceId, abortController.signal);
     void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
       if (!abortController.signal.aborted && !isAbortError(error)) {
         toast.error("Failed to load workspace MCP tools", {
@@ -331,6 +345,7 @@ export function WorkspaceShellRouteContent({
     accessKeyVersion,
     activeWorkspaceId,
     refreshGitHub,
+    refreshPersonalGitHub,
     refreshWorkspaceMcpServers,
     resetWorkspaceIntegrations,
     setSelectedRepoIds,
@@ -459,8 +474,12 @@ function AuthorizedWorkspaceShell({
     workspaceId,
     location.search.section,
   );
-  const workspaceName =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? "Workspace";
+  const activeWorkspace =
+    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const workspaceName = activeWorkspace?.name ?? "Workspace";
+  const organizationName = activeWorkspace
+    ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants)
+    : "Organization";
   useEffect(() => {
     onMount?.();
   }, [onMount]);
@@ -468,7 +487,11 @@ function AuthorizedWorkspaceShell({
     <OpenGeniProvider
       client={context.client}
       workspaceId={workspaceId}
-      onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
+      onWorkspaceControlEvent={(event) => {
+        if (workspaceControlEventInvalidatesWorkspace(event)) {
+          void context.refreshWorkspace(workspaceId);
+        }
+      }}
     >
       {usesOrganizationShell ? (
         children
@@ -476,6 +499,7 @@ function AuthorizedWorkspaceShell({
         <WorkspaceManagementShell
           workspaceId={workspaceId}
           workspaceName={workspaceName}
+          organizationName={organizationName}
           location={managementLocation}
         >
           {children}

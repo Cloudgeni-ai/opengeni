@@ -1,0 +1,396 @@
+{
+  "uid": "opengeni-runtime-failures",
+  "title": "OpenGeni · Runtime Failures",
+  "description": "One exact deployment's turn, MCP, sandbox, API, provider, and durable-write failures. Identity and error content stay in authenticated logs and durable events, never metric labels.",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["30s", "1m", "5m", "15m", "30m", "1h"],
+    "time_options": ["1h", "6h", "24h", "7d", "30d"]
+  },
+  "tags": ["opengeni", "observability", "failures", "runtime"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_turns_total, namespace)",
+          "refId": "namespace"
+        },
+        "definition": "label_values(opengeni_turns_total, namespace)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "environment",
+        "label": "Environment",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_turns_total{namespace=\"$namespace\"}, environment)",
+          "refId": "environment"
+        },
+        "definition": "label_values(opengeni_turns_total{namespace=\"$namespace\"}, environment)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "release",
+        "label": "Release",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": {
+          "query": "label_values(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+          "refId": "release"
+        },
+        "definition": "label_values(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Turn health",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Turn outcomes",
+      "description": "Terminal failures and same-turn recovery pressure are separated so safe recovery is visible without being mistaken for success.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 1, "w": 12, "h": 8 }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Turn failure and recovery ratios",
+      "description": "Failures and recoveries divided by all observed turn outcomes over the selected rate interval.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__rate_interval])) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "legendFormat": "failed",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"recovering\"}[$__rate_interval])) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "legendFormat": "recovering",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 1, "w": 12, "h": 8 }
+    },
+    {
+      "id": 4,
+      "type": "row",
+      "title": "MCP connections and tool use",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "MCP lifecycle operations",
+      "description": "Required failures are turn-blocking. Best-effort failures remove optional or connector-backed capabilities while allowing the turn to continue.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase, policy, outcome) (increase(opengeni_mcp_lifecycle_operations_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "legendFormat": "{{phase}} · {{policy}} · {{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "MCP tool calls by outcome",
+      "description": "Every physical tool call lands in one closed structural outcome, including provider errors, auth, timeouts, cancellation, uncertainty, transport, and protocol failures.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (increase(opengeni_mcp_tool_calls_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "legendFormat": "{{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "MCP tool-call p95 by outcome",
+      "description": "Separates slow successful tools from timeout and transport tails.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "{{outcome}} p95",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Failed startup phases",
+      "description": "The platform phase that failed before or around provider dispatch, with no session or turn identifiers in Prometheus.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase) (increase(opengeni_turn_startup_phase_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__range]))",
+          "legendFormat": "{{phase}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 }
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Sandbox, API, provider, and durable storage",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 1 }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Logical sandbox provision failures",
+      "description": "Typed logical failures only. Internal lease transitions and attempts stay on the Sandbox Health dashboard.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (backend, category, stage) (increase(opengeni_sandbox_provisions_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__range]))",
+          "legendFormat": "{{backend}} · {{category}} · {{stage}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 27, "w": 12, "h": 8 }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "API 5xx by route and status",
+      "description": "Bounded route templates, never raw paths or request identifiers.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route, status) (rate(opengeni_http_requests_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",status=~\"5..\"}[$__rate_interval]))",
+          "legendFormat": "{{status}} · {{route}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 27, "w": 12, "h": 8 }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Core workspace and session read p95",
+      "description": "The interactive workspace, session-list, and session-detail reads. These isolate database-backed control-plane degradation without mixing in long-lived streams or terminal operations.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(opengeni_http_request_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=\"api\",method=\"GET\",route=~\"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id\"}[$__rate_interval])))",
+          "legendFormat": "{{route}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 35, "w": 12, "h": 8 }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Durable append and live publish p99",
+      "description": "High append latency points to Postgres. High publish latency with healthy append points to NATS or live delivery.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "append p99",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])))",
+          "legendFormat": "publish p99",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 35, "w": 12, "h": 8 }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Model call outcomes",
+      "description": "Provider-level success and failure pressure after platform preparation.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider, outcome) (increase(opengeni_model_calls_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "legendFormat": "{{provider}} · {{outcome}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 0, "y": 43, "w": 12, "h": 8 }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Incident delivery path",
+      "description": "Managed deployments route alerts through obs-incident-translator. Desired/available replicas below one or failed Alertmanager webhooks mean Grafana can see incidents but the incident agent cannot receive them.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(kube_deployment_spec_replicas{namespace=\"observability\",deployment=\"obs-incident-translator\"})",
+          "legendFormat": "translator desired replicas",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "max(kube_deployment_status_replicas_available{namespace=\"observability\",deployment=\"obs-incident-translator\"})",
+          "legendFormat": "translator available replicas",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (reason) (rate(alertmanager_notifications_failed_total{integration=\"webhook\"}[$__rate_interval]))",
+          "legendFormat": "failed webhooks · {{reason}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": { "x": 12, "y": 43, "w": 12, "h": 8 }
+    }
+  ]
+}

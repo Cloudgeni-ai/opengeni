@@ -293,6 +293,7 @@ import type {
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
+  ListWorkspaceMemberCandidatesResponse,
   InstallPackRequest,
   PackInstallationPreview,
   ListSlackUserLinkAccessRequestsResponse,
@@ -454,6 +455,7 @@ import type {
   RigChange,
   ProposeRigChangeRequest,
   WorkspaceMember,
+  WorkspaceMemberCandidate,
   WorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse,
   WorkspaceRegisteredPack,
@@ -4721,9 +4723,17 @@ export class OpenGeniClient {
     return response.members;
   }
 
+  /** Active organization members who can be added to this workspace. */
+  async listWorkspaceMemberCandidates(workspaceId: string): Promise<WorkspaceMemberCandidate[]> {
+    const response = await this.requestJson<ListWorkspaceMemberCandidatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/member-candidates`,
+    );
+    return response.members;
+  }
+
   /**
-   * Add an already-registered user by email. 404s when no user with that email
-   * exists (email invites for unknown users are deferred).
+   * Add one active member selected from the workspace candidate inventory.
    */
   async addWorkspaceMember(
     workspaceId: string,

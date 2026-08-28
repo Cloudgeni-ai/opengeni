@@ -27,6 +27,7 @@ import {
   getWorkspaceGrant,
   loadConnectionCredentialForBroker,
   persistProviderOAuthConnection,
+  resolveNamedManagedPersonalWorkspaceGrant,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
@@ -739,9 +740,18 @@ async function providerFetch(
 
 async function requireProviderOAuthGrant(
   deps: ApiRouteDeps,
-  state: Pick<ProviderOAuthState, "accountId" | "workspaceId" | "subjectId">,
+  state: Pick<
+    ProviderOAuthState,
+    "accountId" | "workspaceId" | "subjectId" | "personalOwnerVerified"
+  >,
 ): Promise<void> {
-  const grant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
+  const membershipGrant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
+  const grant =
+    membershipGrant?.accountId === state.accountId
+      ? membershipGrant
+      : state.personalOwnerVerified
+        ? await resolveNamedManagedPersonalWorkspaceGrant(deps.db, state)
+        : null;
   if (
     !grant ||
     grant.accountId !== state.accountId ||

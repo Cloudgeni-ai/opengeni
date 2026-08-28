@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.22.1
+
+### Patch Changes
+
+- 17d253b: Complete personal GitHub identity support across managed, self-hosted, and local modes. Add a compact connect-and-repository UI, exact local-human authority persistence, Docker-safe credential brokering, durable child and goal propagation, and reviewed GitHub tools for pull-request reviews and merges without exposing provider tokens to agents.
+- Updated dependencies [c116379]
+  - @opengeni/contracts@2.7.1
+
 ## 0.22.0
 
 ### Minor Changes

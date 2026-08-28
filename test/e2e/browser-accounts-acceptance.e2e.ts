@@ -75,6 +75,11 @@ type PendingFiniteRead = {
 };
 
 type BrowserProblems = {
+  acceptedRequestFailures: Array<{
+    failedAt: number;
+    pathnameAndSearch: string;
+    responsePhase: string;
+  }>;
   activeStreams: Map<object, string>;
   actorDispatches: Array<{ actorEpoch: string; startedAt: number }>;
   actorFenceResponses: string[];
@@ -91,6 +96,7 @@ type BrowserProblems = {
   }>;
   consoleErrors: string[];
   phase: string;
+  pageErrorEvidence: Array<{ message: string; observedAt: number }>;
   pageErrors: string[];
   failedRequests: string[];
   pendingFiniteReads: Map<object, PendingFiniteRead>;
@@ -178,13 +184,51 @@ const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlyS
 
 const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<string, ReadonlySet<string>>([
   // These phases intentionally create or reload a whole document. React can
-  // cancel only its two bootstrap reads while replacing that document; keep
-  // the endpoint and same-phase checks exact so product/tenant reads stay red.
+  // cancel only its configuration/session bootstrap reads while replacing
+  // that document; keep endpoint and phase checks exact so other reads stay red.
+  ["primary-set-sign-in", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["add-response-loss-replay", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["second-tab-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["cross-tab-select-race", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["late-old-epoch-setup-beta-to-alpha", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["late-old-epoch-alpha-to-beta", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  [
+    "late-old-epoch-primary-settled-before-old-release",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
   ["cross-slot-deep-link", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["slot-revocation-reauthentication", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["logout-one", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["logout-all-response-loss-replay", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["signed-out-settled", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["responsive-evidence-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["independent-set-sign-in", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  [
+    "independent-set-after-other-logout-all",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+]);
+
+const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
+  "primary-set-sign-in",
+  "add-response-loss-replay",
+  "second-tab-bootstrap",
+  "cross-tab-select-race",
+  "late-old-epoch-setup-beta-to-alpha",
+  "late-old-epoch-alpha-to-beta",
+  "late-old-epoch-primary-settled-before-old-release",
+  "cross-slot-deep-link",
+  "slot-revocation-reauthentication",
+  "logout-one",
+  "logout-all-response-loss-replay",
+  "signed-out-settled",
+  "responsive-evidence-bootstrap",
+  "independent-set-sign-in",
+  "independent-set-after-other-logout-all",
+]);
+
+const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
+  ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
 ]);
 
 const EXPECTED_HTTP_CONSOLE_ERRORS: ReadonlyArray<{
@@ -296,7 +340,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
   const pathname = new URL(input.url).pathname;
   const isConnectionReset = /NET_RESET|CONNECTION_RESET/iu.test(input.failure);
   const isCancellation =
-    /ERR_ABORTED|NS_BINDING_ABORTED|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
+    /ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
       input.failure,
     );
   const isActorOwnedRead =
@@ -338,15 +382,18 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     !isConnectionReset &&
     input.method === "GET" &&
     input.actorEpoch !== null &&
-    input.dispatchPhase === "responsive-evidence-bootstrap" &&
-    input.responsePhase === "responsive-evidence-bootstrap" &&
+    input.dispatchPhase === input.responsePhase &&
+    DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES.has(input.responsePhase) &&
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname);
   const isExpectedDocumentBootstrapCancellation =
     isCancellation &&
     !isConnectionReset &&
     input.method === "GET" &&
-    input.dispatchPhase === input.responsePhase &&
-    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true;
+    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true &&
+    (input.dispatchPhase === input.responsePhase ||
+      DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES.get(input.responsePhase)?.has(
+        input.dispatchPhase,
+      ) === true);
   if (
     isExpectedScopedActorReadCancellation ||
     isAcceptedActorTransitionCancellation ||
@@ -491,12 +538,14 @@ async function authSessionCount(email: string): Promise<number> {
 
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
+    acceptedRequestFailures: [],
     activeStreams: new Map(),
     actorDispatches: [],
     actorFenceResponses: [],
     actorTransitionResponses: [],
     consoleErrors: [],
     phase: "initialization",
+    pageErrorEvidence: [],
     pageErrors: [],
     failedRequests: [],
     pendingFiniteReads: new Map(),
@@ -630,12 +679,16 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("pageerror", (error) => {
-    problems.pageErrors.push(`[${problems.phase}] ${error.message}`);
+    const message = `[${problems.phase}] ${error.message}`;
+    problems.pageErrorEvidence.push({ message, observedAt: performance.now() });
+    problems.pageErrors.push(message);
   });
   page.on("requestfailed", (request) => {
     const failedAt = performance.now();
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
+    const responsePhase = problems.phase;
+    const failedUrl = new URL(request.url());
     problems.activeStreams.delete(request);
     problems.retiredFiniteReadTombstones.delete(request);
     // A failed finite read is terminal whether expected or not. Remove it from
@@ -650,12 +703,20 @@ function observeBrowser(page: Page): BrowserProblems {
         failedAt,
         failure,
         method: request.method(),
-        responsePhase: problems.phase,
+        responsePhase,
         sessionSetAuthorityHash: dispatch ? await dispatch.sessionSetAuthorityHash : null,
         startedAt: dispatch?.startedAt,
         url: request.url(),
       });
-      if (problem !== null) problems.failedRequests.push(problem);
+      if (problem !== null) {
+        problems.failedRequests.push(problem);
+      } else {
+        problems.acceptedRequestFailures.push({
+          failedAt,
+          pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
+          responsePhase,
+        });
+      }
     })();
     problems.pendingRequestFailureChecks.add(check);
     void check.finally(() => problems.pendingRequestFailureChecks.delete(check));
@@ -792,10 +853,14 @@ async function retirePendingReadsAfterConfirmedActorTransition(
   }
 }
 
-async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void> {
+async function settlePendingRequestFailureChecks(problems: BrowserProblems): Promise<void> {
   while (problems.pendingRequestFailureChecks.size > 0) {
     await Promise.all([...problems.pendingRequestFailureChecks]);
   }
+}
+
+async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void> {
+  await settlePendingRequestFailureChecks(problems);
   expect({
     actorFenceResponses: problems.actorFenceResponses,
     actorTransitionResponses: problems.actorTransitionResponses,
@@ -844,6 +909,141 @@ async function expectAndConsumeConsoleErrors(
     missing: required.filter((message) => !problems.consoleErrors.includes(message)),
   }).toEqual({ excess: {}, missing: [] });
   problems.consoleErrors.splice(0);
+}
+
+async function expectAndConsumePageErrors(
+  page: Page,
+  problems: BrowserProblems,
+  allowed: string[],
+  required: string[] = allowed,
+): Promise<void> {
+  // A request-failure event is delivered over Playwright independently from
+  // the renderer task that reports the corresponding page error. Close the
+  // complete correlation window for every accepted failure, cross two renderer
+  // task boundaries, then check again for a later failure. This derives the
+  // wait from the same fail-closed time fence used by the matcher instead of an
+  // arbitrary delay, so delayed evidence is either present now or too late to
+  // be accepted and remains in the final strict ledger.
+  let latestFailureAt = Number.NEGATIVE_INFINITY;
+  while (true) {
+    await settlePendingRequestFailureChecks(problems);
+    latestFailureAt = Math.max(
+      latestFailureAt,
+      ...problems.acceptedRequestFailures.map(({ failedAt }) => failedAt),
+    );
+    const remainingCorrelationWindow =
+      latestFailureAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - performance.now();
+    if (remainingCorrelationWindow > 0) await Bun.sleep(remainingCorrelationWindow);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          setTimeout(() => setTimeout(resolve, 0), 0);
+        }),
+    );
+    await settlePendingRequestFailureChecks(problems);
+    const nextLatestFailureAt = Math.max(
+      Number.NEGATIVE_INFINITY,
+      ...problems.acceptedRequestFailures.map(({ failedAt }) => failedAt),
+    );
+    if (
+      nextLatestFailureAt <= latestFailureAt &&
+      performance.now() >= nextLatestFailureAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+    ) {
+      break;
+    }
+  }
+  const counts = Object.fromEntries(
+    [...new Set(problems.pageErrors)].map((message) => [
+      message,
+      problems.pageErrors.filter((candidate) => candidate === message).length,
+    ]),
+  );
+  const allowedCounts = Object.fromEntries(
+    [...new Set(allowed)].map((message) => [
+      message,
+      allowed.filter((candidate) => candidate === message).length,
+    ]),
+  );
+  expect({
+    excess: Object.fromEntries(
+      Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
+    ),
+    missing: required.filter((message) => !problems.pageErrors.includes(message)),
+  }).toEqual({ excess: {}, missing: [] });
+  problems.pageErrorEvidence.splice(0);
+  problems.pageErrors.splice(0);
+}
+
+function optionalWebKitReauthenticationReloadError(
+  problems: BrowserProblems,
+  engine: EngineName,
+): string[] {
+  if (engine !== "webkit") return [];
+  // WebKit can report the deliberately replaced document's canceled root
+  // module import after the re-authenticated document has already won. Keep
+  // the phase, message, hashed entry asset, and maximum count exact.
+  return problems.consoleErrors
+    .filter((message) =>
+      /^\[slot-revocation-reauthentication\] TypeError: Importing a module script failed\. @ \/assets\/index-[A-Za-z0-9_-]+\.js$/u.test(
+        message,
+      ),
+    )
+    .slice(0, 1);
+}
+
+const WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS = 1_000;
+
+function correlatedWebKitReauthenticationFailureIndex(
+  pageError: BrowserProblems["pageErrorEvidence"][number],
+  acceptedRequestFailures: BrowserProblems["acceptedRequestFailures"],
+): number | null {
+  const match =
+    /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_./?=&%-]+) due to access control checks\.$/u.exec(
+      pageError.message,
+    );
+  const pathnameAndSearch = match?.groups?.pathnameAndSearch;
+  if (pathnameAndSearch === undefined) return null;
+  const matchingFailureIndexes = acceptedRequestFailures.flatMap((failure, index) =>
+    failure.responsePhase === "slot-revocation-reauthentication" &&
+    failure.pathnameAndSearch === pathnameAndSearch &&
+    failure.failedAt <= pageError.observedAt &&
+    pageError.observedAt - failure.failedAt <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+      ? [index]
+      : [],
+  );
+  return matchingFailureIndexes.length === 1 ? matchingFailureIndexes[0]! : null;
+}
+
+function optionalWebKitReauthenticationAccessControlPageError(
+  problems: Pick<BrowserProblems, "acceptedRequestFailures" | "pageErrorEvidence">,
+  engine: EngineName,
+): string[] {
+  if (engine !== "webkit") return [];
+  // WebKit can surface reads from the deliberately replaced document as page
+  // errors in addition to their request-cancellation events. Native-first
+  // transport teardown can expose more than one of those errors, so require a
+  // bijection: every page error must have exactly one same-phase, exact-URL
+  // cancellation immediately before it, and no cancellation may authorize a
+  // second error. Duplicate, late, concurrent, or stale evidence keeps the
+  // strict page-error ledger red.
+  const candidates = problems.pageErrorEvidence.flatMap((pageError) => {
+    const failureIndex = correlatedWebKitReauthenticationFailureIndex(
+      pageError,
+      problems.acceptedRequestFailures,
+    );
+    return failureIndex === null ? [] : [{ failureIndex, message: pageError.message }];
+  });
+  const failureIndexes = candidates.map(({ failureIndex }) => failureIndex);
+  if (
+    candidates.length !== problems.pageErrorEvidence.length ||
+    new Set(failureIndexes).size !== failureIndexes.length
+  ) {
+    return [];
+  }
+  for (const failureIndex of [...failureIndexes].sort((left, right) => right - left)) {
+    problems.acceptedRequestFailures.splice(failureIndex, 1);
+  }
+  return candidates.map(({ message }) => message);
 }
 
 async function expectAndConsumeActorTransitionResponse(
@@ -1476,12 +1676,38 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
   );
 }
 
+async function launchAccountBrowser(engine: EngineName): Promise<Browser> {
+  return await ENGINES[engine].launch(
+    engine === "chromium" && process.env.OPENGENI_BROWSER_BIN
+      ? { executablePath: process.env.OPENGENI_BROWSER_BIN }
+      : undefined,
+  );
+}
+
 async function captureResponsiveEvidence(
-  browser: Browser,
   context: BrowserContext,
   engine: EngineName,
 ): Promise<void> {
   const storageState = await context.storageState();
+  // Keep responsive evidence out of the multi-tab journey's native connection
+  // pool. The journey deliberately retains live transports in two pages while
+  // these short-lived contexts exercise seven viewport/mode combinations; a
+  // shared Chromium process can otherwise queue a bootstrap read behind those
+  // unrelated transports and turn visual capture into a transport-liveness
+  // test. The journey itself continues to prove the shared-tab behavior.
+  const evidenceBrowser = await launchAccountBrowser(engine);
+  try {
+    await captureResponsiveEvidenceInBrowser(evidenceBrowser, storageState, engine);
+  } finally {
+    await evidenceBrowser.close();
+  }
+}
+
+async function captureResponsiveEvidenceInBrowser(
+  browser: Browser,
+  storageState: Awaited<ReturnType<BrowserContext["storageState"]>>,
+  engine: EngineName,
+): Promise<void> {
   const captures = [
     { width: 320, height: 780, scheme: "light" as const },
     { width: 768, height: 900, scheme: "dark" as const },
@@ -1783,18 +2009,15 @@ beforeAll(async () => {
           if (!completionResponseLoss.dropped && response.ok) {
             completionResponseLoss.dropped = true;
             await response.body?.cancel();
-            const body = new ReadableStream<Uint8Array>({
-              start(controller) {
-                controller.enqueue(new TextEncoder().encode('{"projection":'));
-                queueMicrotask(() =>
-                  controller.error(new Error("injected completion response body loss")),
-                );
-              },
-            });
-            return new Response(body, {
+            const headers = new Headers(response.headers);
+            headers.delete("content-encoding");
+            headers.delete("content-length");
+            // Preserve an accepted response with an unreadable completion payload without
+            // throwing from Bun's server-side stream controller after the test has settled.
+            return new Response('{"projection":', {
               status: response.status,
               statusText: response.statusText,
-              headers: response.headers,
+              headers,
             });
           }
           return response;
@@ -1870,6 +2093,7 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_ABORT" })).toBeNull();
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" })).toContain(
       "/sessions",
     );
@@ -1879,6 +2103,24 @@ describe("provider-neutral browser account acceptance", () => {
         dispatchPhase: "add-response-loss-replay",
         responsePhase: "cross-tab-select-race",
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "primary-actor",
+        dispatchPhase: "primary-set-sign-in",
+        responsePhase: "primary-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "add-replay-actor",
+        dispatchPhase: "add-response-loss-replay",
+        responsePhase: "add-response-loss-replay",
+        url: `${publicOrigin}/v1/config/client`,
       }),
     ).toBeNull();
     expect(
@@ -1905,6 +2147,33 @@ describe("provider-neutral browser account acceptance", () => {
     ).toContain("responsive-accessibility-evidence");
     expect(requestFailureProblem({ ...oldActorRead, method: "POST" })).toContain("POST");
     expect(requestFailureProblem({ ...oldActorRead, actorEpoch: null })).toContain("actor=missing");
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: null,
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-sign-in",
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "independent-actor",
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/realtime-model-catalog`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "independent-actor",
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
+      }),
+    ).toContain("/sessions");
     const longLivedOldActorStream = {
       ...oldActorRead,
       acceptedActorTransitions: [
@@ -1923,7 +2192,10 @@ describe("provider-neutral browser account acceptance", () => {
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(longLivedOldActorStream)).toBeNull();
     expect(
-      requestFailureProblem({ ...longLivedOldActorStream, failure: "NS_ERROR_NET_RESET" }),
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        failure: "NS_ERROR_NET_RESET",
+      }),
     ).toBeNull();
     expect(
       requestFailureProblem({
@@ -1976,6 +2248,16 @@ describe("provider-neutral browser account acceptance", () => {
         ...longLivedOldActorStream,
         acceptedActorTransitions: [],
         dispatchPhase: "primary-set-sign-in",
+        responsePhase: "primary-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        acceptedActorTransitions: [],
+        dispatchPhase: "primary-set-sign-in",
+        failure: "NS_ERROR_NET_RESET",
         responsePhase: "primary-set-sign-in",
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
       }),
@@ -2044,6 +2326,135 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/config/client`,
       }),
     ).toBeNull();
+    const reauthenticationBootstrapRead = {
+      ...crossTabBootstrapRead,
+      actorEpoch: "current-actor",
+      dispatchPhase: "slot-revocation-reauthentication",
+      responsePhase: "slot-revocation-reauthentication",
+    };
+    expect(requestFailureProblem(reauthenticationBootstrapRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        dispatchPhase: "cross-slot-deep-link",
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        dispatchPhase: "late-old-epoch-alpha-to-beta",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        url: `${publicOrigin}/v1/config/other`,
+      }),
+    ).toContain("/v1/config/other");
+    const acceptedWebKitCancellation = {
+      failedAt: 100,
+      pathnameAndSearch:
+        "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1",
+      responsePhase: "slot-revocation-reauthentication",
+    };
+    const correlatedWebKitPageError = {
+      message:
+        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+      observedAt: 150,
+    };
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+        acceptedWebKitCancellation,
+      ]),
+    ).toBe(0);
+    expect(correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [])).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(
+        {
+          message:
+            "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+          observedAt: 150,
+        },
+        [acceptedWebKitCancellation],
+      ),
+    ).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(
+        {
+          message:
+            "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog due to access control checks.",
+          observedAt: 150,
+        },
+        [
+          {
+            failedAt: 100,
+            pathnameAndSearch:
+              "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog",
+            responsePhase: "slot-revocation-reauthentication",
+          },
+        ],
+      ),
+    ).toBe(0);
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+        { ...acceptedWebKitCancellation, failedAt: 151 },
+      ]),
+    ).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+        {
+          ...acceptedWebKitCancellation,
+          failedAt: 150 - WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - 1,
+        },
+      ]),
+    ).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+        acceptedWebKitCancellation,
+        { ...acceptedWebKitCancellation, failedAt: 125 },
+      ]),
+    ).toBeNull();
+    const consumableWebKitFailures = [acceptedWebKitCancellation];
+    expect(
+      optionalWebKitReauthenticationAccessControlPageError(
+        {
+          acceptedRequestFailures: consumableWebKitFailures,
+          pageErrorEvidence: [correlatedWebKitPageError],
+        },
+        "webkit",
+      ),
+    ).toEqual([correlatedWebKitPageError.message]);
+    expect(consumableWebKitFailures).toEqual([]);
+    expect(
+      optionalWebKitReauthenticationAccessControlPageError(
+        {
+          acceptedRequestFailures: [acceptedWebKitCancellation],
+          pageErrorEvidence: [correlatedWebKitPageError, correlatedWebKitPageError],
+        },
+        "webkit",
+      ),
+    ).toEqual([]);
+    const secondAcceptedWebKitCancellation = {
+      ...acceptedWebKitCancellation,
+      pathnameAndSearch:
+        "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/queue",
+    };
+    const secondCorrelatedWebKitPageError = {
+      message:
+        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/queue due to access control checks.",
+      observedAt: 175,
+    };
+    const bijectiveWebKitFailures = [acceptedWebKitCancellation, secondAcceptedWebKitCancellation];
+    expect(
+      optionalWebKitReauthenticationAccessControlPageError(
+        {
+          acceptedRequestFailures: bijectiveWebKitFailures,
+          pageErrorEvidence: [correlatedWebKitPageError, secondCorrelatedWebKitPageError],
+        },
+        "webkit",
+      ),
+    ).toEqual([correlatedWebKitPageError.message, secondCorrelatedWebKitPageError.message]);
+    expect(bijectiveWebKitFailures).toEqual([]);
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
@@ -2094,13 +2505,21 @@ describe("provider-neutral browser account acceptance", () => {
     expect(finiteReadMayRetireAfterActorTransition(retirement)).toBe(true);
     const retiredDescription = "GET /v1/workspaces/old-workspace/sessions";
     expect(
-      retiredFiniteReadTerminalProblem(retiredDescription, { kind: "response", status: 200 }),
+      retiredFiniteReadTerminalProblem(retiredDescription, {
+        kind: "response",
+        status: 200,
+      }),
     ).toContain("unexpected-late-response=200");
-    expect(retiredFiniteReadTerminalProblem(retiredDescription, { kind: "finished" })).toContain(
-      "unexpected-late-finish",
-    );
     expect(
-      retiredFiniteReadTerminalProblem(undefined, { kind: "response", status: 200 }),
+      retiredFiniteReadTerminalProblem(retiredDescription, {
+        kind: "finished",
+      }),
+    ).toContain("unexpected-late-finish");
+    expect(
+      retiredFiniteReadTerminalProblem(undefined, {
+        kind: "response",
+        status: 200,
+      }),
     ).toBeNull();
     expect(
       finiteReadMayRetireAfterActorTransition({
@@ -2180,11 +2599,7 @@ describe("provider-neutral browser account acceptance", () => {
   test("real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state", async () => {
     if (!owned) throw new Error("database fixture unavailable");
     const engine = requestedEngine as EngineName;
-    const browser = await ENGINES[engine].launch(
-      engine === "chromium" && process.env.OPENGENI_BROWSER_BIN
-        ? { executablePath: process.env.OPENGENI_BROWSER_BIN }
-        : undefined,
-    );
+    const browser = await launchAccountBrowser(engine);
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
     });
@@ -2279,7 +2694,7 @@ describe("provider-neutral browser account acceptance", () => {
 
       if (engine === "chromium") {
         setBrowserPhase(pageProblems, "responsive-accessibility-evidence");
-        await captureResponsiveEvidence(browser, context, engine);
+        await captureResponsiveEvidence(context, engine);
       }
 
       setBrowserPhase(pageProblems, "cross-tab-select-race");
@@ -2474,9 +2889,17 @@ describe("provider-neutral browser account acceptance", () => {
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+          ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
         ],
+        [],
+      );
+      await expectAndConsumePageErrors(
+        page,
+        pageProblems,
+        optionalWebKitReauthenticationAccessControlPageError(pageProblems, engine),
         [],
       );
 

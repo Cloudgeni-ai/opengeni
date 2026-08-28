@@ -2062,7 +2062,9 @@ function requirePlacementRequestSurface(session: BrowserControlPlacementSession)
 function isWorkspaceConfinedWrite(error: unknown): boolean {
   return (
     error instanceof Error &&
-    /must stay within|confines|workspace mount|within \/workspace/iu.test(error.message)
+    /must stay within|confines|workspace mount|within \/workspace|escapes? the workspace(?: root)?/iu.test(
+      error.message,
+    )
   );
 }
 

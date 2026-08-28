@@ -6,7 +6,7 @@ workspace-owned OpenGeni GitHub App described in [`github-app.md`](github-app.md
 The two clients, callbacks, stored authorities, and runtime identities must not
 be substituted for one another.
 
-## Current backend contract
+## Setup
 
 The deployment must explicitly enable the feature and provide one dedicated
 OAuth App client for that environment:
@@ -20,11 +20,57 @@ OAuth App client for that environment:
 - `OPENGENI_PUBLIC_BASE_URL`, whose exact callback is
   `/v1/integrations/github-personal/oauth/callback`
 
-The feature is disabled by default, is supported only in managed product mode,
-and requires HTTPS outside local/test. Staging and production use different
-OAuth Apps and client secrets. Device flow stays disabled. Creating those apps
-and installing their secrets is an external operator action; repository code
-does not create or mutate them.
+The feature is disabled by default and requires HTTPS outside local/test.
+Managed staging and production use different OAuth Apps and client secrets so
+their callbacks, consent screens, credentials, and revocation boundaries cannot
+cross. Creating those apps and installing their secrets is an external operator
+action; repository code does not create or mutate them.
+
+Local and self-hosted installations use the same ordinary browser OAuth flow:
+
+1. Create a GitHub OAuth App for that installation.
+2. Set its callback to the browser-reachable API origin plus
+   `/v1/integrations/github-personal/oauth/callback`. For a stock local run this
+   can be `http://127.0.0.1:8000/v1/integrations/github-personal/oauth/callback`.
+3. Configure the client ID, client secret, state-signing secret, and environment
+   encryption key above, then restart OpenGeni.
+4. Open **Integrations → GitHub → Your GitHub identity**, connect, and choose the
+   repositories OpenGeni may use as that user.
+
+Single-user `local` mode recognizes only its exact built-in `dev` human as the
+credential owner and stores a standing grant for that same local workspace.
+A self-hosted deployment with managed human sign-in uses the normal per-user
+authority path. A shared configured/service key by itself is deliberately not a
+personal identity; that deployment must provide verified delegated-human auth
+or managed sign-in before personal OAuth can be enabled.
+
+Device flow is unnecessary because OpenGeni already has a browser UI. OAuth
+authorization code + PKCE keeps the same flow usable in managed, self-hosted,
+and local environments without teaching agents or containers the user's GitHub
+password or provider token.
+
+When the Docker sandbox backend is used, set `OPENGENI_MCP_URL` to an API URL
+reachable from sandbox containers. A Compose service URL such as
+`http://api:8000/v1/workspaces/{workspaceId}/mcp` is accepted; a loopback URL is
+translated to the Docker host gateway for stock local runs. The broker remains
+the only recipient of the short-lived OpenGeni bearer.
+
+## User experience
+
+GitHub remains one integration tile. The workspace GitHub App is the bot
+identity used for workspace-owned automation; **Your GitHub identity** is the
+personal connection used when an action must appear as the signed-in user. The
+personal dialog contains only sign-in status, a searchable repository allowlist,
+read/write choice, reconnect, and disconnect.
+
+The session repository picker labels personal choices with `@login` and
+**As you**. Choosing one both selects the exact repository and grants this
+workspace reusable access to the connection for that user; the OAuth token is
+not copied into the session. A repository already mounted through one identity
+cannot also be mounted through the other at the same path. Existing-session
+pickers keep mounted choices visible and locked.
+
+## Authority contract
 
 The start route accepts only an exact authenticated human with
 `connections:write`. It uses authorization code + PKCE S256 and signed,
@@ -136,5 +182,24 @@ the separate `github_app__*` namespace acts as the OpenGeni bot. Tool arguments
 cannot choose either actor or a repository outside the accepted resource set.
 Writes use the attempt-frozen connector Allow/Ask/Block policy, default to Ask
 when no explicit policy exists, and are never replayed after an ambiguous
-outcome. Agent-created inheritance, child/goal propagation, and recovery remain
-a separately audited dependent phase and continue to fail closed.
+outcome. The reviewed surface covers repository, branch, ref, file, issue,
+pull-request, review, check, and code-search reads plus ref creation, issue
+creation/update/comment, pull-request creation/update/comment/reviewer request,
+review submission (`COMMENT`, `APPROVE`, or `REQUEST_CHANGES`), and merge
+(`merge`, `squash`, or `rebase`). Merge is marked destructive and all writes
+remain subject to the configured confirmation policy.
+
+## Durable propagation
+
+Durable propagation means accepted follow-up work, goal continuations, recovery,
+and agent-created child sessions keep the already-approved personal identity
+without asking the user to reconnect on every turn. It does not broaden access:
+the child must request an exact subset of the parent's personal GitHub
+repositories and may narrow write access to read, never widen read to write.
+`once` grants stop at their accepted work; `session` grants remain within the
+same session; `always` grants may cross to causally linked child/goal work. The
+frozen connection and selection generations travel with the work, and every
+physical Git or API operation revalidates the live connection, grant, and
+repository selection before use. Revocation, reconnect generation changes, or
+repository removal therefore stop later calls even when an older task snapshot
+still exists.

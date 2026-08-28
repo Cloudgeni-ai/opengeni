@@ -19,6 +19,7 @@ export function createBetterAuthSessionAdapter(
       }
       const result = await runManagedAuthAttempt(
         input.transactionId,
+        "credential",
         async () =>
           await auth.api.signInEmail({
             body: {

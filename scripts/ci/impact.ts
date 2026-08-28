@@ -240,6 +240,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   ],
   "test/e2e/source-packages-control-center.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/timeline-scroll.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/timeline-tip-follow.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/knowledge-surfaces.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
@@ -267,6 +268,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/personal-github-identity.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/browser-accounts-acceptance.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
@@ -305,6 +307,7 @@ const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly 
     "test/e2e/custom-api-control-center.browser.e2e.ts",
     "test/e2e/queue-surface.browser.e2e.ts",
     "test/e2e/timeline-scroll.browser.e2e.ts",
+    "test/e2e/timeline-tip-follow.browser.e2e.ts",
     "test/e2e/user-message-disclosure.browser.e2e.ts",
     "test/e2e/realtime-demo.browser.e2e.ts",
     "test/e2e/source-packages-control-center.browser.e2e.ts",

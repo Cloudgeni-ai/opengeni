@@ -11,6 +11,14 @@ export const MCP_TOOL_CALL_OUTCOMES = [
 
 export type McpToolCallOutcome = (typeof MCP_TOOL_CALL_OUTCOMES)[number];
 
+export const MCP_LIFECYCLE_PHASES = ["connect", "close"] as const;
+export const MCP_LIFECYCLE_POLICIES = ["strict", "best_effort"] as const;
+export const MCP_LIFECYCLE_OUTCOMES = ["completed", "failed"] as const;
+
+export type McpLifecyclePhase = (typeof MCP_LIFECYCLE_PHASES)[number];
+export type McpLifecyclePolicy = (typeof MCP_LIFECYCLE_POLICIES)[number];
+export type McpLifecycleOutcome = (typeof MCP_LIFECYCLE_OUTCOMES)[number];
+
 export type RuntimeMetricsHooks = {
   onModelCall?: (input: {
     provider: string;
@@ -45,6 +53,16 @@ export type RuntimeMetricsHooks = {
    * excludes server, tool, tenant, request, and error-content labels.
    */
   onMcpToolCall?: (input: { outcome: McpToolCallOutcome; durationSeconds: number }) => void;
+  /**
+   * One physical MCP connection lifecycle operation. Labels stay structural:
+   * no server, tenant, request, URL, or error-content dimensions are admitted.
+   */
+  onMcpLifecycle?: (input: {
+    phase: McpLifecyclePhase;
+    policy: McpLifecyclePolicy;
+    outcome: McpLifecycleOutcome;
+    durationSeconds: number;
+  }) => void;
   /**
    * One completed Connected Machine (selfhosted) control op — the out-of-band
    * telemetry twin of the in-band fault rendering. `code` is the typed wire-code

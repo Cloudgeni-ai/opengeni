@@ -1,5 +1,5 @@
 import type { SessionEvent, SessionStatus, StreamConnectionState } from "@opengeni/sdk";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { createOlderHistoryLoadReceipt, type OlderHistoryLoadReceipt } from "../older-history";
 import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
@@ -283,7 +283,10 @@ export function useSessionEvents(
           batchResumeSequence,
         );
       }
-      observeSessionStatus(batch, sessionStatusRef, setSessionStatusProjection);
+      const status = observeSessionStatus(batch, sessionStatusRef);
+      if (status !== undefined) {
+        setSessionStatusProjection(status);
+      }
       const current = eventWindowRef.current;
       const next = boundBrowserSessionEventWindow([...current.events, ...batch]);
       const retained = {
@@ -293,7 +296,7 @@ export function useSessionEvents(
       eventWindowRef.current = retained;
       setEventWindow(retained);
       oldestSequenceRef.current = retained.events[0]?.sequence ?? null;
-      newestSequenceRef.current = retained.events.at(-1)?.sequence ?? null;
+      newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
       if (retained.truncated) {
         hasOlderRef.current = true;
         setHasOlder(true);
@@ -321,17 +324,21 @@ export function useSessionEvents(
           if (!isCurrent()) {
             return;
           }
-          observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
+          const status = observeSessionStatus(window.events, sessionStatusRef);
           const retained = boundBrowserSessionEventWindow(window.events);
           eventWindowRef.current = retained;
-          setEventWindow(retained);
           oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
-          newestSequenceRef.current = retained.events.at(-1)?.sequence ?? window.newestSequence;
+          newestSequenceRef.current =
+            maxResumeSequenceOrNull(retained.events) ?? window.newestSequence;
           hasOlderRef.current = window.hasOlder || retained.truncated;
           hasNewerRef.current = false;
           lastSequenceRef.current = window.newestSequence;
           streamResumeSequenceRef.current = window.newestSequence;
           initialWindowLoadedRef.current = true;
+          if (status !== undefined) {
+            setSessionStatusProjection(status);
+          }
+          setEventWindow(retained);
           setHasOlder(window.hasOlder || retained.truncated);
           setHasNewer(false);
           setInitialLoading(false);
@@ -393,6 +400,10 @@ export function useSessionEvents(
           flush();
           setError(cause instanceof Error ? cause : new Error(String(cause)));
           setConnectionState("error");
+          // A failed first compact-tail request has no later success path in
+          // this effect instance. End the loading gate so hosts can render the
+          // retryable error instead of an infinite initial spinner.
+          setInitialLoading(false);
         }
       }
     })();
@@ -444,6 +455,7 @@ export function useSessionEvents(
         const generation = generationRef.current;
         loadingOlderRef.current = true;
         setLoadingOlder(true);
+        let published = false;
         try {
           const window = await loadEventWindow(client, workspaceId, sessionId, {
             before,
@@ -466,7 +478,7 @@ export function useSessionEvents(
           // pending in the aborted iterator were never cursor-committed and will
           // be replayed from the retained high-water mark below.
           streamAbortRef.current?.abort();
-          observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
+          const status = observeSessionStatus(window.events, sessionStatusRef);
           const next = boundBrowserSessionEventWindow([...window.events, ...current.events], {
             direction: "oldest",
           });
@@ -478,10 +490,10 @@ export function useSessionEvents(
           if (retainedOldest === null || retainedOldest >= before) {
             throw new Error("@opengeni/react: loadOlder made no durable sequence progress");
           }
-          const retainedNewest = retained.events.at(-1)?.sequence ?? null;
+          const retainedNewest = maxResumeSequenceOrNull(retained.events);
+          const previousNewest = maxResumeSequenceOrNull(current.events);
           eventWindowRef.current = retained;
           markCommitted();
-          setEventWindow(retained);
           oldestSequenceRef.current = retainedOldest;
           newestSequenceRef.current = retainedNewest;
           streamResumeSequenceRef.current = maxResumeSequence(retained.events);
@@ -490,22 +502,52 @@ export function useSessionEvents(
           // exist; only the backward DB page can answer hasOlder truthfully.
           const olderStillAvailable = window.hasOlder;
           hasOlderRef.current = olderStillAvailable;
-          setHasOlder(olderStillAvailable);
-          if (viewModeRef.current === "history") {
+          const evictedLiveTail =
+            previousNewest !== null && retainedNewest !== null && retainedNewest < previousNewest;
+          let newer: boolean | null = null;
+          let enterHistory = false;
+          let reconnectLive = false;
+          if (viewModeRef.current === "history" || evictedLiveTail) {
             const highWater = lastSequenceRef.current;
-            const newer =
-              retainedNewest !== null && (retainedNewest < highWater || retained.truncated);
+            newer = retainedNewest !== null && (retainedNewest < highWater || retained.truncated);
             hasNewerRef.current = newer;
-            setHasNewer(newer);
+            if (evictedLiveTail) {
+              // A full oldest-directed browser window cannot also retain the
+              // live suffix. Keep the newly loaded history and page forward;
+              // reconnecting SSE here immediately newest-bounds the window and
+              // evicts every row the reader just requested.
+              viewModeRef.current = "history";
+              enterHistory = true;
+            }
           } else {
-            // Live mode keeps the historical contract: reconnect and replay the
-            // evicted tip through SSE so the window stays one contiguous suffix.
-            setStreamEpoch((epoch) => epoch + 1);
+            // The retained merge is still one contiguous live suffix. Restart
+            // SSE from its cursor so events queued during the fetch are replayed.
+            reconnectLive = true;
           }
+          loadingOlderRef.current = false;
+          startTransition(() => {
+            if (status !== undefined) {
+              setSessionStatusProjection(status);
+            }
+            setEventWindow(retained);
+            setHasOlder(olderStillAvailable);
+            if (newer !== null) {
+              setHasNewer(newer);
+            }
+            if (enterHistory) {
+              setViewMode("history");
+            } else if (reconnectLive) {
+              setStreamEpoch((epoch) => epoch + 1);
+            }
+            setLoadingOlder(false);
+          });
+          published = true;
           return olderStillAvailable;
         } finally {
-          loadingOlderRef.current = false;
-          setLoadingOlder(false);
+          if (!published) {
+            loadingOlderRef.current = false;
+            setLoadingOlder(false);
+          }
         }
       }),
     [client, workspaceId, sessionId],
@@ -518,6 +560,7 @@ export function useSessionEvents(
     const generation = generationRef.current;
     loadingOldestRef.current = true;
     setLoadingOldest(true);
+    let published = false;
     try {
       const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
         after: 0,
@@ -534,17 +577,15 @@ export function useSessionEvents(
         return false;
       }
       streamAbortRef.current?.abort();
-      observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
+      const status = observeSessionStatus(window.events, sessionStatusRef);
       // Keep the oldest prefix — never the middle or tip.
       const retained = boundBrowserSessionEventWindow(window.events, { direction: "oldest" });
       const retainedOldest = retained.events[0]?.sequence ?? null;
-      const retainedNewest = retained.events.at(-1)?.sequence ?? null;
+      const retainedNewest = maxResumeSequenceOrNull(retained.events);
       eventWindowRef.current = retained;
-      setEventWindow(retained);
       oldestSequenceRef.current = retainedOldest;
       newestSequenceRef.current = retainedNewest;
       hasOlderRef.current = false;
-      setHasOlder(false);
       const highWater = Math.max(lastSequenceRef.current, retainedNewest ?? 0);
       lastSequenceRef.current = highWater;
       const newer =
@@ -552,14 +593,26 @@ export function useSessionEvents(
         retained.truncated ||
         (retainedNewest !== null && retainedNewest < highWater);
       hasNewerRef.current = newer;
-      setHasNewer(newer);
       initialWindowLoadedRef.current = true;
       viewModeRef.current = "history";
-      setViewMode("history");
+      loadingOldestRef.current = false;
+      startTransition(() => {
+        if (status !== undefined) {
+          setSessionStatusProjection(status);
+        }
+        setEventWindow(retained);
+        setHasOlder(false);
+        setHasNewer(newer);
+        setViewMode("history");
+        setLoadingOldest(false);
+      });
+      published = true;
       return newer;
     } finally {
-      loadingOldestRef.current = false;
-      setLoadingOldest(false);
+      if (!published) {
+        loadingOldestRef.current = false;
+        setLoadingOldest(false);
+      }
     }
   }, [client, workspaceId, sessionId]);
 
@@ -576,6 +629,7 @@ export function useSessionEvents(
     const generation = generationRef.current;
     loadingNewerRef.current = true;
     setLoadingNewer(true);
+    let published = false;
     try {
       const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
         after: afterSequence,
@@ -598,7 +652,7 @@ export function useSessionEvents(
       }
       const current = eventWindowRef.current;
       assertAppendOrder(current.events, window.events);
-      observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
+      const status = observeSessionStatus(window.events, sessionStatusRef);
       const previousOldest = current.events[0]?.sequence ?? null;
       // Moving forward through history: keep the newest suffix of the merge.
       const next = boundBrowserSessionEventWindow([...current.events, ...window.events], {
@@ -609,12 +663,11 @@ export function useSessionEvents(
         truncated: current.truncated || next.truncated || window.hasNewer,
       };
       const retainedOldest = retained.events[0]?.sequence ?? null;
-      const retainedNewest = retained.events.at(-1)?.sequence ?? null;
+      const retainedNewest = maxResumeSequenceOrNull(retained.events);
       if (retainedNewest === null || retainedNewest <= afterSequence) {
         throw new Error("@opengeni/react: loadNewer made no durable sequence progress");
       }
       eventWindowRef.current = retained;
-      setEventWindow(retained);
       oldestSequenceRef.current = retainedOldest;
       newestSequenceRef.current = retainedNewest;
       // Evicting the start while paging forward re-arms hasOlder.
@@ -627,23 +680,39 @@ export function useSessionEvents(
             retainedOldest > 1))
       ) {
         hasOlderRef.current = true;
-        setHasOlder(true);
       }
+      const rearmedOlder = hasOlderRef.current;
       const highWater = Math.max(lastSequenceRef.current, retainedNewest);
       lastSequenceRef.current = highWater;
       const newer = window.hasNewer || retainedNewest < highWater;
       hasNewerRef.current = newer;
-      setHasNewer(newer);
+      let resumeLive = false;
       if (!newer) {
         streamResumeSequenceRef.current = retainedNewest;
         viewModeRef.current = "live";
-        setViewMode("live");
-        setStreamEpoch((epoch) => epoch + 1);
+        resumeLive = true;
       }
+      loadingNewerRef.current = false;
+      startTransition(() => {
+        if (status !== undefined) {
+          setSessionStatusProjection(status);
+        }
+        setEventWindow(retained);
+        setHasOlder(rearmedOlder);
+        setHasNewer(newer);
+        if (resumeLive) {
+          setViewMode("live");
+          setStreamEpoch((epoch) => epoch + 1);
+        }
+        setLoadingNewer(false);
+      });
+      published = true;
       return newer;
     } finally {
-      loadingNewerRef.current = false;
-      setLoadingNewer(false);
+      if (!published) {
+        loadingNewerRef.current = false;
+        setLoadingNewer(false);
+      }
     }
   }, [client, workspaceId, sessionId]);
 
@@ -653,27 +722,35 @@ export function useSessionEvents(
     }
     loadingLatestRef.current = true;
     setLoadingLatest(true);
+    let published = false;
     try {
       streamAbortRef.current?.abort();
       hasNewerRef.current = false;
-      setHasNewer(false);
       hasOlderRef.current = false;
-      setHasOlder(false);
       newestSequenceRef.current = null;
       oldestSequenceRef.current = null;
       eventWindowRef.current = EMPTY_EVENT_WINDOW;
-      setEventWindow(EMPTY_EVENT_WINDOW);
       initialWindowLoadedRef.current = false;
       streamResumeSequenceRef.current = after;
-      setInitialLoading(true);
       viewModeRef.current = "live";
-      setViewMode("live");
-      setStreamEpoch((epoch) => epoch + 1);
+      loadingLatestRef.current = false;
+      startTransition(() => {
+        setHasNewer(false);
+        setHasOlder(false);
+        setEventWindow(EMPTY_EVENT_WINDOW);
+        setInitialLoading(true);
+        setViewMode("live");
+        setStreamEpoch((epoch) => epoch + 1);
+        setLoadingLatest(false);
+      });
+      published = true;
       // Effect reloads the tip. The tip fetch itself is owned by the effect.
       await Promise.resolve();
     } finally {
-      loadingLatestRef.current = false;
-      setLoadingLatest(false);
+      if (!published) {
+        loadingLatestRef.current = false;
+        setLoadingLatest(false);
+      }
     }
   }, [after, sessionId]);
 
@@ -709,9 +786,9 @@ export function useSessionEvents(
  * accumulation retains the newest suffix; backward paging retains the oldest
  * prefix so newly fetched history cannot be immediately evicted. This is
  * deliberately separate from durable history and transport paging: when a
- * backward page evicts the live tail, the hook reconnects from the retained
- * high-water mark while preserving the highest-ever-observed sequence
- * separately. The source event remains durable in PostgreSQL throughout.
+ * backward page evicts the live tail, the hook enters bounded history mode and
+ * preserves the highest-ever-observed sequence separately for forward paging.
+ * The source event remains durable in PostgreSQL throughout.
  */
 export function boundBrowserSessionEventWindow(
   events: readonly SessionEvent[],
@@ -993,8 +1070,7 @@ function isBrowserUtf8Continuation(value: number): boolean {
 function observeSessionStatus(
   events: readonly SessionEvent[],
   ref: { current: { sequence: number; status: SessionStatus | null } },
-  setStatus: (status: SessionStatus | null) => void,
-): void {
+): SessionStatus | undefined {
   let latest: { sequence: number; status: SessionStatus } | null = null;
   for (const event of events) {
     const status = sessionStatusFromEvents([event]);
@@ -1002,9 +1078,9 @@ function observeSessionStatus(
       latest = { sequence: event.sequence, status };
     }
   }
-  if (!latest || latest.sequence < ref.current.sequence) return;
+  if (!latest || latest.sequence < ref.current.sequence) return undefined;
   ref.current = latest;
-  setStatus(latest.status);
+  return latest.status;
 }
 
 type LoadedEventWindow = {
@@ -1097,6 +1173,8 @@ async function loadEventWindow(
       buffer = buffer.slice(boundary);
     }
   }
+  const densityWindow = trimBackwardToGroupTarget(buffer, options.targetGroups);
+  buffer = densityWindow.events;
 
   const oldest = buffer[0] ?? null;
   const newest = buffer[buffer.length - 1] ?? null;
@@ -1104,19 +1182,24 @@ async function loadEventWindow(
     events: buffer,
     oldestSequence: oldest?.sequence ?? null,
     newestSequence: newest ? maxResumeSequence(buffer) : 0,
-    hasOlder: buffer.length > 0 && !reachedStart && oldest?.type !== "session.created",
+    hasOlder:
+      buffer.length > 0 &&
+      (densityWindow.trimmed || (!reachedStart && oldest?.type !== "session.created")),
   };
 }
 
 /** Index of the oldest clean turn start in the buffer, or -1. */
 function findBoundaryIndex(events: SessionEvent[]): number {
   for (let index = 0; index < events.length; index += 1) {
-    const type = events[index]!.type;
-    if (type === "session.created" || type === "user.message") {
+    if (isTurnBoundary(events[index]!)) {
       return index;
     }
   }
   return -1;
+}
+
+function isTurnBoundary(event: SessionEvent): boolean {
+  return event.type === "session.created" || event.type === "user.message";
 }
 
 /**
@@ -1155,12 +1238,15 @@ async function loadForwardEventWindow(
     }
     assertAscending(page);
     buffer = [...buffer, ...page];
-    cursor = page[page.length - 1]!.sequence;
-    if (page.length < options.pageSize) {
-      reachedEnd = true;
-      break;
-    }
+    // Compact events retain their first raw sequence in `sequence` and expose
+    // the covered high-water mark through `coalescedUntil`. Advancing by the
+    // first sequence duplicates compacted text on the next page. A compact
+    // response length is not an end-of-history signal either: thousands of raw
+    // events may legitimately collapse into one returned event.
+    cursor = maxResumeSequence(page);
   }
+  const densityWindow = trimForwardToGroupTarget(buffer, options.targetGroups);
+  buffer = densityWindow.events;
 
   const oldest = buffer[0] ?? null;
   const newest = buffer[buffer.length - 1] ?? null;
@@ -1168,8 +1254,43 @@ async function loadForwardEventWindow(
     events: buffer,
     oldestSequence: oldest?.sequence ?? null,
     newestSequence: newest ? maxResumeSequence(buffer) : 0,
-    hasNewer: buffer.length > 0 && !reachedEnd,
+    hasNewer: buffer.length > 0 && (densityWindow.trimmed || !reachedEnd),
   };
+}
+
+type DensityWindow = {
+  events: SessionEvent[];
+  trimmed: boolean;
+};
+
+/** Keep the newest complete turn groups near an older-history seam. */
+function trimBackwardToGroupTarget(events: SessionEvent[], targetGroups: number): DensityWindow {
+  if (!Number.isFinite(targetGroups) || targetGroups <= 0 || events.length === 0) {
+    return { events, trimmed: false };
+  }
+  for (let index = events.length - 1; index > 0; index -= 1) {
+    if (!isTurnBoundary(events[index]!)) continue;
+    const candidate = events.slice(index);
+    if (groupCount(candidate) >= targetGroups) {
+      return { events: candidate, trimmed: true };
+    }
+  }
+  return { events, trimmed: false };
+}
+
+/** Keep the oldest complete turn groups near a forward-history seam. */
+function trimForwardToGroupTarget(events: SessionEvent[], targetGroups: number): DensityWindow {
+  if (!Number.isFinite(targetGroups) || targetGroups <= 0 || events.length === 0) {
+    return { events, trimmed: false };
+  }
+  for (let index = 1; index < events.length; index += 1) {
+    if (!isTurnBoundary(events[index]!)) continue;
+    const candidate = events.slice(0, index);
+    if (groupCount(candidate) >= targetGroups) {
+      return { events: candidate, trimmed: true };
+    }
+  }
+  return { events, trimmed: false };
 }
 
 type PreviousPage = SessionEvent[] & { requested: number };
@@ -1248,8 +1369,12 @@ function isLogStart(event: SessionEvent): boolean {
   return event.type === "session.created" || event.sequence <= 1;
 }
 
-function maxResumeSequence(events: SessionEvent[]): number {
+function maxResumeSequence(events: readonly SessionEvent[]): number {
   return events.reduce((max, event) => Math.max(max, eventResumeSequence(event)), 0);
+}
+
+function maxResumeSequenceOrNull(events: readonly SessionEvent[]): number | null {
+  return events.length > 0 ? maxResumeSequence(events) : null;
 }
 
 function eventResumeSequence(event: SessionEvent): number {

@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import { canonicalPublicOrigin, type Settings } from "@opengeni/config";
 import {
   type ManagedAuth,
   type ManagedEmailMessage,
@@ -20,7 +20,9 @@ import { Pool } from "pg";
 
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
 import {
+  currentManagedAuthProviderId,
   currentManagedAuthAttemptId,
+  recordCurrentManagedAuthSession,
   shouldDiscardCurrentManagedAuthProviderSession,
 } from "./managed-auth-attempt-context";
 
@@ -42,6 +44,21 @@ export function managedAuthUserCreateOverride(
 ): { data: typeof user } | undefined {
   if (managedAuthRequiresEmailVerification(settings)) return undefined;
   return { data: { ...user, emailVerified: true } };
+}
+
+export function managedAuthUserCreateAdmission(
+  settings: Pick<Settings, "environment">,
+  user: { emailVerified: boolean } & Record<string, unknown>,
+  providerId: string,
+): { data: typeof user } | false | undefined {
+  if (
+    managedAuthRequiresEmailVerification(settings) &&
+    providerId !== "credential" &&
+    !user.emailVerified
+  ) {
+    return false;
+  }
+  return managedAuthUserCreateOverride(settings, user);
 }
 
 /** Keep Better Auth password policy and storage format behind this boundary. */
@@ -165,6 +182,27 @@ export function createManagedAuth(
       accountLinking: {
         enabled: false,
       },
+      encryptOAuthTokens: true,
+      storeStateStrategy: "database",
+    },
+    socialProviders: {
+      ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
+        ? {
+            google: {
+              clientId: settings.managedAuthGoogleClientId,
+              clientSecret: settings.managedAuthGoogleClientSecret,
+              prompt: "select_account" as const,
+            },
+          }
+        : {}),
+      ...(settings.managedAuthGithubClientId && settings.managedAuthGithubClientSecret
+        ? {
+            github: {
+              clientId: settings.managedAuthGithubClientId,
+              clientSecret: settings.managedAuthGithubClientSecret,
+            },
+          }
+        : {}),
     },
     verification: {
       modelName: "auth_verifications",
@@ -229,6 +267,7 @@ export function createManagedAuth(
       session: {
         create: {
           before: async (session) => {
+            const providerId = currentManagedAuthProviderId();
             await ensureCanonicalHumanIdentityForAuthUser(db, session.userId);
             const preflightProjection = await getCanonicalHumanIdentityProjection(
               db,
@@ -242,7 +281,7 @@ export function createManagedAuth(
             if (!preflight.allowed) {
               const exactRecoveryBinding = await getCanonicalHumanExactLoginBindingForAuthUser(db, {
                 authUserId: session.userId,
-                providerId: "credential",
+                providerId,
               });
               const recoveryBinding = preflightProjection.loginBindings.find(
                 (binding) =>
@@ -282,7 +321,7 @@ export function createManagedAuth(
             const projection = await getCanonicalHumanIdentityProjection(db, session.userId);
             const exactBinding = await getCanonicalHumanExactLoginBindingForAuthUser(db, {
               authUserId: session.userId,
-              providerId: "credential",
+              providerId,
             });
             const activeBinding = projection.loginBindings.find(
               (binding) => binding.id === exactBinding.id,
@@ -318,6 +357,7 @@ export function createManagedAuth(
             };
           },
           after: async (session) => {
+            recordCurrentManagedAuthSession(session.id);
             if (!shouldDiscardCurrentManagedAuthProviderSession()) return;
             await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
           },
@@ -325,7 +365,8 @@ export function createManagedAuth(
       },
       user: {
         create: {
-          before: async (user) => managedAuthUserCreateOverride(settings, user),
+          before: async (user) =>
+            managedAuthUserCreateAdmission(settings, user, currentManagedAuthProviderId()),
           after: async (user) => {
             if (!user.emailVerified) return;
             await ensureManagedAccessForUser(db, {
@@ -340,6 +381,125 @@ export function createManagedAuth(
       },
     },
   }) as ManagedAuth;
+}
+
+export type ManagedAuthOAuthAttempt = {
+  transactionId: string;
+  provider: "google" | "github";
+  authorityHash: string;
+  transactionSecretHash: string;
+  expectedGeneration: string;
+  expectedActorEpoch: string;
+};
+
+/**
+ * Resolve OpenGeni's server-only login transaction proof from Better Auth's
+ * database-backed OAuth state before the provider callback consumes it.
+ */
+export async function resolveManagedAuthOAuthAttempt(
+  auth: ManagedAuth,
+  request: Request,
+  provider: "google" | "github",
+  publicBaseUrl: string,
+): Promise<ManagedAuthOAuthAttempt | null> {
+  const expectedOrigin = canonicalPublicOrigin(publicBaseUrl);
+  if (!expectedOrigin) return null;
+  const state = new URL(request.url).searchParams.get("state");
+  if (!state) return null;
+  const verification = await (await auth.$context).internalAdapter.findVerificationValue(state);
+  if (!verification?.value) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(verification.value);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const stateData = parsed as Record<string, unknown>;
+  const proof = stateData.opengeniManagedAuth;
+  if (!proof || typeof proof !== "object") return null;
+  const value = proof as Record<string, unknown>;
+  if (
+    value.version !== 1 ||
+    value.provider !== provider ||
+    typeof value.transactionId !== "string" ||
+    typeof value.authorityHash !== "string" ||
+    typeof value.transactionSecretHash !== "string" ||
+    typeof value.expectedGeneration !== "string" ||
+    typeof value.expectedActorEpoch !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      value.transactionId,
+    ) ||
+    !/^[0-9a-f]{64}$/u.test(value.authorityHash) ||
+    !/^[0-9a-f]{64}$/u.test(value.transactionSecretHash) ||
+    !/^[1-9][0-9]*$/u.test(value.expectedGeneration) ||
+    !/^[1-9][0-9]*$/u.test(value.expectedActorEpoch)
+  ) {
+    return null;
+  }
+  const callbackURL = typeof stateData.callbackURL === "string" ? stateData.callbackURL : null;
+  const errorURL = typeof stateData.errorURL === "string" ? stateData.errorURL : null;
+  if (
+    !callbackURL ||
+    !errorURL ||
+    !managedAuthOAuthReturnMatches(callbackURL, expectedOrigin, value.transactionId, "complete") ||
+    !managedAuthOAuthReturnMatches(errorURL, expectedOrigin, value.transactionId, "error")
+  ) {
+    return null;
+  }
+  return {
+    transactionId: value.transactionId,
+    provider,
+    authorityHash: value.authorityHash,
+    transactionSecretHash: value.transactionSecretHash,
+    expectedGeneration: value.expectedGeneration,
+    expectedActorEpoch: value.expectedActorEpoch,
+  };
+}
+
+export async function isolatedManagedAuthOAuthCallbackRequest(
+  auth: ManagedAuth,
+  request: Request,
+): Promise<{ request: Request; stateCookieName: string }> {
+  const context = await auth.$context;
+  const stateCookieName = context.createAuthCookie("state").name;
+  const headers = new Headers(request.headers);
+  const stateCookie = cookiePair(headers.get("cookie"), stateCookieName);
+  if (stateCookie) headers.set("cookie", stateCookie);
+  else headers.delete("cookie");
+  headers.delete("authorization");
+  headers.delete("x-forwarded-user");
+  return { request: new Request(request, { headers }), stateCookieName };
+}
+
+export function managedAuthOAuthReturnMatches(
+  raw: string,
+  expectedOrigin: string,
+  transactionId: string,
+  outcome: "complete" | "error",
+): boolean {
+  try {
+    const url = new URL(raw);
+    return (
+      url.origin === expectedOrigin &&
+      url.pathname === "/account-auth" &&
+      url.searchParams.size === 2 &&
+      url.searchParams.get("transaction") === transactionId &&
+      url.searchParams.get("social") === outcome &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
+function cookiePair(header: string | null, name: string): string | null {
+  for (const part of header?.split(";") ?? []) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    return `${name}=${part.slice(separator + 1).trim()}`;
+  }
+  return null;
 }
 
 function betterAuthBaseUrl(settings: Settings) {

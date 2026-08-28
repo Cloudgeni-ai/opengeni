@@ -115,7 +115,11 @@ import {
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
 } from "./model-usage";
-import { waitForTurnStreamCleanup } from "./quiescence";
+import {
+  assertAgentStreamNotCancelled,
+  assertSuccessfulAgentStreamCompletion,
+  requireAgentStreamFinalOutput,
+} from "./quiescence";
 import { waitForTurnOperation } from "./sandbox-provision";
 
 import type { CompactionSummarizer } from "../context-compaction";
@@ -215,6 +219,7 @@ export type TurnStreamAttemptDeps = {
   runSettings: Settings;
   turnTools: ReturnType<typeof withFirstPartyTools>;
   compactSummarizer: CompactionSummarizer;
+  settleDeferredSteerAfterCompaction: () => Promise<RunAgentTurnResult | null>;
   compactionModelHistoryProjector: (
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
@@ -295,6 +300,7 @@ export async function runTurnStreamAttempt(
     runSettings,
     turnTools,
     compactSummarizer,
+    settleDeferredSteerAfterCompaction,
     compactionModelHistoryProjector,
     generatedImageHistoryProjector,
     modelHistoryProjector,
@@ -1227,11 +1233,12 @@ export async function runTurnStreamAttempt(
         void iterator.return?.().catch(() => undefined);
       }
     }
-    await waitForTurnStreamCleanup(
-      eventing.batcher.flush(),
-      eventing.stream.completed.catch(() => undefined),
-      cancellationSignal,
-    );
+    await assertSuccessfulAgentStreamCompletion({
+      batcherFlush: eventing.batcher.flush(),
+      stream: eventing.stream,
+      temporalCancellationSignal: cancellationSignal,
+      runtimeCancellationSignal,
+    });
     if (
       options.requireTerminalModelResponse &&
       eventing.stream.interruptions.length === 0 &&
@@ -1247,6 +1254,7 @@ export async function runTurnStreamAttempt(
       throwIfTurnCancelled();
       throw new PostCompactionContinuationEmptyError();
     }
+    assertAgentStreamNotCancelled(eventing.stream.cancelled);
     if (!streamSawPerResponseUsage) {
       const aggregateUsage = eventing.stream.state.usage;
       const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
@@ -1479,7 +1487,7 @@ export async function runTurnStreamAttempt(
       return claimedResult({ status: "requires_action" });
     }
 
-    const finalOutput = String(eventing.stream.finalOutput ?? "");
+    const finalOutput = String(requireAgentStreamFinalOutput(eventing.stream.finalOutput));
     await historySink.reconcileConversationTruth({ requireDurable: true });
     // Op-stream durability fence: the tool outputs are now durably in the
     // history store (a redispatch would NOT re-execute them), so this
@@ -1624,6 +1632,8 @@ export async function runTurnStreamAttempt(
         );
         compactionRequestCleared = landmark.requestConsumed;
         if (!isCompactionSummaryFailure(compactError)) throw compactError;
+        const deferredSteer = await settleDeferredSteerAfterCompaction();
+        if (deferredSteer) return deferredSteer;
         compactionFailureMessage = String(compactionFailureReasonFromError(compactError));
         observability.warn("context compaction recovery compaction failed", {
           sessionId: input.sessionId,
@@ -1676,6 +1686,8 @@ export async function runTurnStreamAttempt(
         // machine updates stay pending for that actionable wake.
         return claimedResult({ status: "idle", deferredUntilWake: true });
       }
+      const deferredSteer = await settleDeferredSteerAfterCompaction();
+      if (deferredSteer) return deferredSteer;
       // Codex parity: compaction remains inside the same logical turn and
       // the same activity. Rebuild the model-visible history from the
       // durable replacement and continue the sampling loop; do not create

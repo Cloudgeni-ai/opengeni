@@ -331,6 +331,21 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("consumer-owned cyclic payloads fail closed during settled-group comparison", async () => {
+    const firstRaw: Record<string, unknown> = {};
+    firstRaw.self = firstRaw;
+    const first = { ...userItem("cyclic", "first value"), raw: firstRaw } as TimelineItem;
+    const nextRaw: Record<string, unknown> = {};
+    nextRaw.self = nextRaw;
+    const next = { ...userItem("cyclic", "next value"), raw: nextRaw } as TimelineItem;
+
+    const r = await renderComponent(<MessageTimeline items={[first]} />);
+    await r.rerender(<MessageTimeline items={[next]} />);
+
+    expect(r.container.textContent).toContain("next value");
+    await r.unmount();
+  });
+
   test("streaming updates keep the full history mounted", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
@@ -394,9 +409,11 @@ describe("MessageTimeline pagination affordances", () => {
         userItem(`u${index + 1}`, `message U${index + 1}`),
       ),
     ];
-    const renderMessageText = (text: string, item: TimelineItem) => (
-      <span data-message-id={item.id}>{text}</span>
-    );
+    const renderCounts = new Map<string, number>();
+    const renderMessageText = (text: string, item: TimelineItem) => {
+      renderCounts.set(item.id, (renderCounts.get(item.id) ?? 0) + 1);
+      return <span data-message-id={item.id}>{text}</span>;
+    };
     const r = await renderComponent(
       <MessageTimeline items={initial} renderMessageText={renderMessageText} />,
     );
@@ -404,6 +421,7 @@ describe("MessageTimeline pagination affordances", () => {
     await drainFrames(frames);
     const u1Before = r.container.querySelector('[data-message-id="u1"]');
     expect(u1Before).not.toBeNull();
+    const retainedRenderCounts = new Map(renderCounts);
 
     await r.rerender(
       <MessageTimeline
@@ -414,6 +432,10 @@ describe("MessageTimeline pagination affordances", () => {
 
     expect(r.container.querySelector('[data-message-id="u1"]')).toBe(u1Before);
     expect(r.container.querySelector('[data-message-id="u14"]')).not.toBeNull();
+    for (let sequence = 1; sequence <= 14; sequence += 1) {
+      const id = `u${sequence}`;
+      expect(renderCounts.get(id)).toBe(retainedRenderCounts.get(id));
+    }
     await drainFrames(frames);
     await r.unmount();
   });
@@ -431,9 +453,11 @@ describe("MessageTimeline pagination affordances", () => {
       event(3),
       ...Array.from({ length: 12 }, (_, index) => event(index + 4)),
     ];
-    const renderMessageText = (text: string, item: TimelineItem) => (
-      <span data-message-id={item.id}>{text}</span>
-    );
+    const renderCounts = new Map<string, number>();
+    const renderMessageText = (text: string, item: TimelineItem) => {
+      renderCounts.set(item.id, (renderCounts.get(item.id) ?? 0) + 1);
+      return <span data-message-id={item.id}>{text}</span>;
+    };
     const r = await renderComponent(
       <MessageTimeline events={initial} renderMessageText={renderMessageText} />,
     );
@@ -441,6 +465,7 @@ describe("MessageTimeline pagination affordances", () => {
     await drainFrames(frames);
     const message3Before = r.container.querySelector('[data-message-id="evt-3"]');
     expect(message3Before).not.toBeNull();
+    const retainedRenderCounts = new Map(renderCounts);
 
     await r.rerender(
       <MessageTimeline
@@ -451,6 +476,10 @@ describe("MessageTimeline pagination affordances", () => {
 
     expect(r.container.querySelector('[data-message-id="evt-3"]')).toBe(message3Before);
     expect(r.container.querySelector('[data-message-id="evt-15"]')).not.toBeNull();
+    for (let sequence = 3; sequence <= 15; sequence += 1) {
+      const id = `evt-${sequence}`;
+      expect(renderCounts.get(id)).toBe(retainedRenderCounts.get(id));
+    }
     await drainFrames(frames);
     await r.unmount();
   });

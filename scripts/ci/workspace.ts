@@ -78,7 +78,7 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
   "test/e2e/timeline-scroll.browser.e2e.ts":
     "requires dedicated timeline interaction acceptance and is owned by the curated browser-acceptance gate",
   "test/e2e/timeline-tip-follow.browser.e2e.ts":
-    "is retained for dedicated timeline-tip acceptance outside default CI",
+    "requires dedicated timeline-tip interaction acceptance and is owned by the curated browser-acceptance gate",
   "test/e2e/transcription.browser.e2e.ts":
     "requires dedicated transcription evidence outside default CI",
   "test/e2e/user-message-disclosure.browser.e2e.ts":

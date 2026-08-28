@@ -112,6 +112,10 @@ import {
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
 import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import {
+  personalGitHubOAuthFailureMessage,
+  personalGitHubOAuthReturn,
+} from "@/lib/personal-github-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { request } from "@/api";
@@ -145,7 +149,7 @@ export function canManageApiIntegrations(
   accessContext: AccessContext | null,
   workspaceId: string,
 ): boolean {
-  return hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
+  return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
 
 /**
@@ -332,7 +336,7 @@ export function CapabilitiesRoute({
   const canManageSkills = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
-    "workspace:admin",
+    "capabilities:manage",
   );
 
   // One adapter per integration maps its own data onto the shared view-model.
@@ -1178,6 +1182,29 @@ export function CapabilitiesRoute({
     }
   }
 
+  const personalGitHubOAuthHandled = useRef(false);
+  useEffect(() => {
+    if (personalGitHubOAuthHandled.current) return;
+    const result = personalGitHubOAuthReturn(window.location.search);
+    if (!result) return;
+    personalGitHubOAuthHandled.current = true;
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${result.cleanedSearch}${window.location.hash}`,
+    );
+    setOpenIntegration("github");
+    if (result.outcome === "success") {
+      void context.refreshPersonalGitHub(workspaceId).then(() => {
+        toast.success("Your GitHub identity is connected");
+      });
+      return;
+    }
+    toast.error("Couldn't connect your GitHub identity", {
+      description: personalGitHubOAuthFailureMessage(result.reason),
+    });
+  }, [context, workspaceId]);
+
   const socialOAuthHandled = useRef(false);
   useEffect(() => {
     if (socialOAuthHandled.current || loading) return;
@@ -1676,14 +1703,14 @@ export function CapabilitiesRoute({
         <section className="mt-8 space-y-3" aria-labelledby="integrations-heading">
           <div>
             <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-              Built by OpenGeni
+              First-party integrations
             </p>
             <h2 id="integrations-heading" className="mt-1 text-base font-semibold text-fg">
               Apps
             </h2>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
-              These do more than call tools. They receive events, post as OpenGeni, and hold their
-              own identity in the other product.
+              Purpose-built connections with OpenGeni-managed accounts, sync, events, or provider
+              actions - not generic catalog connectors.
             </p>
           </div>
           <div className="grid gap-2" data-integration-list>

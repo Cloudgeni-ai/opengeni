@@ -66,7 +66,14 @@ Settlement is first-writer-wins under a database lock and compare-and-set:
 - Steer, cancellation, supersession, terminal failure, and completion close
   any still-pending request as `cancelled` and append its canonical terminal
   response event. If an older/event-drifted cancelled row lacks that event, the
-  first terminal replay repairs it once without waking terminal work;
+  first terminal replay repairs it once without waking terminal work. A normal
+  human Send received while the active branch is waiting in `requires_action`
+  is promoted to the same replacement path: the pending request is cancelled
+  and the conversational message runs next instead of entering the visible
+  queue;
+- resubmitting a checked-out queue Edit is existing accepted work, not a new
+  conversational answer, so it preserves the active request and its queue
+  placement;
 - Pause preserves an unexecuted request, just as it preserves an ordinary
   pending approval. Resume admits that same frozen turn;
 - expiry is enforced by a replay-safe Temporal timer and remains correct across
@@ -176,7 +183,10 @@ silently consumes it.
   an `N of M` progress label. Send answers/Skip settles the active request; the
   next remaining set advances when the authoritative pending list updates. The
   follow-up composer stays fully available — structured input is not a modal
-  that owns the page.
+  that owns the page. Sending from that composer while the session is actively
+  waiting cancels the frozen request and routes the message immediately with
+  Steer-equivalent priority. An explicitly paused session remains paused, so a
+  normal Send there still queues until Resume.
 
 Each single- and multi-select control includes an inline Other option and text
 field. Hosts submit that exact value in `answer.other`; they should not create a

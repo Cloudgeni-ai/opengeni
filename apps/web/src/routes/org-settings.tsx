@@ -4,7 +4,13 @@
 // moved to Workspace settings; this surface is the tenant-level console.
 import { useBillingUsage } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
-import { ActivityIcon, GaugeIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
+import {
+  ActivityIcon,
+  ArrowUpRightIcon,
+  GaugeIcon,
+  Loader2Icon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -67,7 +73,7 @@ function OrganizationKnowledgeSummary({
 
   if (inventory.loading && !inventory.response) {
     return (
-      <div className="flex items-center gap-2 rounded-lg border border-border bg-surface p-4 text-xs text-fg-muted">
+      <div className="flex items-center gap-2 border-b border-border py-5 text-xs text-fg-muted">
         <Loader2Icon className="size-3.5 animate-spin" />
         Loading organization identity…
       </div>
@@ -103,7 +109,7 @@ function OrganizationKnowledgeSummary({
   }
 
   return (
-    <section className="rounded-lg border border-border bg-surface p-4">
+    <section className="border-b border-border pb-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-medium text-fg">Current organization identity</h3>
@@ -416,7 +422,7 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "knowledge" ? (
-          <section className="grid gap-3">
+          <section className="grid gap-6">
             <div>
               <h2 className="text-sm font-medium">Organization identity</h2>
               <p className="mt-1 text-xs leading-5 text-fg-muted">
@@ -431,24 +437,26 @@ export function OrgSettingsRoute({
             {canManageOrganizationKnowledge ? (
               <OrganizationKnowledgePrompt workspaceId={workspaceId} />
             ) : (
-              <p className="rounded-lg border border-border bg-surface p-4 text-xs leading-5 text-fg-muted">
+              <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
                 Organization identity is read-only for you. An organization owner can update it.
               </p>
             )}
-            <section className="rounded-lg border border-border bg-surface p-4">
-              <h3 className="text-sm font-medium text-fg">Organization knowledge</h3>
-              <p className="mt-1 text-xs leading-5 text-fg-muted">
-                Products, customers, goals, constraints, strategy, and changing facts belong in
-                organization-scoped Documents. Agents search that knowledge when it is relevant
-                instead of receiving it in every prompt.
-              </p>
+            <section className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-6">
+              <div className="max-w-2xl">
+                <h3 className="text-sm font-medium text-fg">Organization documents</h3>
+                <p className="mt-1 text-xs leading-5 text-fg-muted">
+                  Products, customers, goals, constraints, strategy, and changing facts belong in
+                  organization-scoped Documents. Agents retrieve them only when relevant.
+                </p>
+              </div>
               <Link
                 to="/workspaces/$workspaceId/documents"
                 params={{ workspaceId }}
                 search={{ authority: "organization" }}
-                className="mt-3 inline-flex text-xs font-medium text-brand hover:underline"
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-brand hover:underline"
               >
-                Explore organization knowledge
+                Open documents
+                <ArrowUpRightIcon className="size-3.5" />
               </Link>
             </section>
           </section>
@@ -474,11 +482,19 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "billing" ? (
-          <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+          <section className="grid gap-4 border-b border-border pb-6">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <h2 className="text-sm font-medium">Credits</h2>
-                <p className="mt-1 flex items-center gap-1.5 text-xs text-fg-muted">
+                <h2 className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+                  Available credits
+                </h2>
+                <p
+                  className={
+                    visibleBilling
+                      ? "mt-1 text-2xl font-semibold tracking-tight text-fg"
+                      : "mt-2 flex items-center gap-1.5 text-xs text-fg-muted"
+                  }
+                >
                   {visibleBilling ? (
                     `${formatMoneyMicros(visibleBilling.balance.balanceMicros, visibleBilling.balance.currency)} available`
                   ) : !canReadBilling || !accountId ? (
@@ -493,6 +509,9 @@ export function OrgSettingsRoute({
                   ) : (
                     "Billing balance unavailable"
                   )}
+                </p>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Used for organization-funded model and platform usage.
                 </p>
               </div>
               <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
@@ -512,7 +531,10 @@ export function OrgSettingsRoute({
                   <label className="grid gap-1">
                     <span className="sr-only">Credit amount</span>
                     <input
-                      className="h-9 rounded-md border border-border bg-bg px-3 text-sm outline-none focus:border-fg-muted"
+                      className="h-9 rounded-md border border-border bg-bg px-3 text-sm outline-none transition-colors focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/15"
+                      type="number"
+                      name="credit-amount"
+                      autoComplete="off"
                       inputMode="decimal"
                       min="5"
                       max="10000"
@@ -625,7 +647,7 @@ function EntitlementsSection(props: {
 }) {
   const rows = props.entitlements ? entitlementEntries(props.entitlements.entitlements) : [];
   return (
-    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+    <section className="grid gap-4 border-b border-border pb-6">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-1.5 text-sm font-medium">
@@ -684,7 +706,7 @@ function UsageSection(props: {
 }) {
   const summary = useMemo(() => aggregateUsage(props.usage), [props.usage]);
   return (
-    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+    <section className="grid gap-4 border-b border-border pb-6">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-1.5 text-sm font-medium">

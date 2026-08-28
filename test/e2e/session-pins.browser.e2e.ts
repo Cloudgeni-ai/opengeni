@@ -143,6 +143,34 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await shared?.release();
   }, 60_000);
 
+  test("keeps the selected session grouping after a page refresh", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Grouping preference proof");
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
+
+      await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("menuitemradio", { name: "Creator" }).click();
+      await page.getByRole("button", { name: "Session filters, active" }).waitFor();
+
+      await page.reload();
+      await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
+      await page.getByRole("button", { name: "Session filters, active" }).click();
+      expect(
+        await page.getByRole("menuitemradio", { name: "Creator" }).getAttribute("aria-checked"),
+      ).toBe("true");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("acknowledges later output without leaving and reopening the active chat", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -577,7 +605,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await route.continue();
       });
 
-      await page.keyboard.press("Enter");
+      // Route registration yields to background refreshes. Address the menu
+      // item directly so a refresh cannot move focus before keyboard activation.
+      await unpin.press("Enter");
       await page.getByText("Couldn't unpin session", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Unpin session" }).waitFor();
       await page.waitForFunction(

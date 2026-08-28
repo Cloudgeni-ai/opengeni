@@ -294,7 +294,9 @@ END $$;
 }
 
 async function ensureLoginRole(sql: postgres.Sql, role: string, password: string): Promise<void> {
-  await sql.unsafe(`
+  await executeRoleConvergence(
+    sql,
+    `
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${literal(role)}) THEN
@@ -303,7 +305,8 @@ BEGIN
     EXECUTE format('ALTER ROLE %I LOGIN PASSWORD %L', ${literal(role)}, ${literal(password)});
   END IF;
 END $$;
-`);
+`,
+  );
 }
 
 async function ensureRestrictedAppLoginRole(
@@ -311,7 +314,9 @@ async function ensureRestrictedAppLoginRole(
   role: string,
   password: string,
 ): Promise<void> {
-  await sql.unsafe(`
+  await executeRoleConvergence(
+    sql,
+    `
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${literal(role)}) THEN
@@ -339,7 +344,41 @@ BEGIN
     );
   END IF;
 END $$;
-`);
+`,
+  );
+}
+
+const ROLE_CONVERGENCE_MAX_ATTEMPTS = 20;
+
+function isRetryableConcurrentRoleMutation(error: unknown): boolean {
+  const details = error as { code?: unknown; message?: unknown; routine?: unknown };
+  return (
+    (details.code === "XX000" &&
+      details.message === "tuple concurrently updated" &&
+      details.routine === "simple_heap_update") ||
+    (details.code === "42710" &&
+      typeof details.message === "string" &&
+      /^role ".+" already exists$/u.test(details.message))
+  );
+}
+
+async function executeRoleConvergence(sql: postgres.Sql, statement: string): Promise<void> {
+  // Roles live in a cluster-global catalog. Two otherwise independent
+  // databases can therefore race an identical CREATE/ALTER during parallel
+  // deployment or test setup. PostgreSQL exposes no cross-database advisory
+  // lock, so retry only its exact concurrent-catalog outcomes and keep every
+  // other provisioning failure immediate.
+  for (let attempt = 1; attempt <= ROLE_CONVERGENCE_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await sql.unsafe(statement);
+      return;
+    } catch (error) {
+      if (!isRetryableConcurrentRoleMutation(error) || attempt === ROLE_CONVERGENCE_MAX_ATTEMPTS) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(25 * attempt, 250)));
+    }
+  }
 }
 
 /**
@@ -1660,6 +1699,11 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.revoke_self_user_resource_grant(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(format('%I.issue_self_local_connection_use_grant(uuid,uuid,uuid,text,boolean)', ${literal(schema)}))
+      IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(format('%I.resolve_connection_use_authority(uuid,uuid,uuid,jsonb)', ${literal(schema)}))
       IS NOT NULL THEN

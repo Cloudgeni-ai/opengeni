@@ -212,6 +212,7 @@ const USER_RESOURCE_LIFECYCLE_ROUTINES = [
   "accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer)",
   "list_self_user_resource_authorities(uuid, uuid, text, uuid, integer)",
   "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, integer, boolean)",
+  "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
   "revoke_self_user_resource_grant(uuid, uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;

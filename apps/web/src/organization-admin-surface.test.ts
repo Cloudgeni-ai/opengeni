@@ -12,6 +12,9 @@ const normalizedRecoverySource = recoverySource.replace(/\s+/gu, " ");
 const workspaceSettingsSource = await Bun.file(
   `${import.meta.dir}/routes/workspace-settings.tsx`,
 ).text();
+const workspaceMembersSource = await Bun.file(
+  `${import.meta.dir}/routes/workspace-members-section.tsx`,
+).text();
 const tenancyDocs = await Bun.file(
   `${import.meta.dir}/../../../docs/organization-tenancy.md`,
 ).text();
@@ -38,9 +41,10 @@ describe("organization administration surface", () => {
     expect(normalizedRecoverySource).toContain("No Personal content, workspace ownership");
     expect(normalizedRecoverySource).toContain("Recovery unavailable");
     expect(normalizedRecoverySource).toContain("A current owner must rotate the policy");
-    expect(workspaceSettingsSource).toContain("permanently owned by its organization");
-    expect(workspaceSettingsSource).toContain("Cross-organization transfer");
-    expect(workspaceSettingsSource).toContain("granting or revoking named workspace roles");
+    expect(workspaceSettingsSource).toContain('import("./workspace-members-section")');
+    expect(workspaceMembersSource).toContain("client.listWorkspaceMemberCandidates");
+    expect(workspaceMembersSource).toContain("Search by name or email");
+    expect(workspaceMembersSource).toContain("Add to workspace");
   });
 
   test("uses only lifecycle APIs and never links a member personal workspace", () => {
@@ -70,8 +74,14 @@ describe("organization administration surface", () => {
     expect(adminSource).toContain("member.name?.trim()");
     expect(adminSource).toContain("member.email");
     expect(adminSource).toContain("Add organization member");
-    expect(adminSource).toContain("Custom permissions…");
-    expect(adminSource).toContain("Personal content stays personal");
+    expect(adminSource).toContain("Fine-tune workspace access");
+    expect(adminSource).toContain("<details");
+    expect(adminSource).toContain("Workspace access");
+    expect(adminSource).toContain(
+      "Workspace membership and basic visibility are included automatically",
+    );
+    expect(adminSource).toContain("Personal workspaces and private");
+    expect(adminSource).toContain("resources are never shared here.");
     expect(adminSource).not.toContain(".addWorkspaceMember(");
     expect(adminSource).not.toContain(".removeWorkspaceMember(");
     expect(adminSource).toContain("props.onAuthorityChanged()");
@@ -95,7 +105,7 @@ describe("organization administration surface", () => {
       "The authoritative policy was refreshed. Review it and submit a new action.",
     );
     expect(adminSource).toContain("async function retryInvitationDelivery");
-    expect(adminSource).toContain("onClick={() => void retryInvitationDelivery(invite)}");
+    expect(adminSource).toContain("onSelect={() => void retryInvitationDelivery(invite)}");
     expect(adminSource.match(/retryOrganizationUserSetupDelivery\(/g)?.length).toBe(1);
   });
 

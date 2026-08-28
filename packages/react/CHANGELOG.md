@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 3.1.1
+
+### Patch Changes
+
+- ff4af61: Promote a normal human Send to Steer-equivalent replacement when an active session is waiting for human action, cancelling the stale decision surface and placing the conversational message directly in chat.
+- 0bbaee2: Harden live and historical session timelines: preserve reader ownership through cumulative pointer movement and animated layout shrink, keep bidirectional history windows density-bounded and compact-cursor correct, schedule large window swaps without blocking the browser, and prevent unmatched tool outputs from settling unrelated calls.
+- Updated dependencies [17d253b]
+- Updated dependencies [c116379]
+  - @opengeni/sdk@3.1.1
+
 ## 3.1.0
 
 ### Patch Changes

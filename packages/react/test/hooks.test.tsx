@@ -2174,6 +2174,122 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
+  test("moves a normal Send into chat when the server promotes a human wait to Steer", async () => {
+    let serverDraft: ComposerDraft = {
+      revision: 0,
+      text: "",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => serverDraft,
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        serverDraft = {
+          ...serverDraft,
+          ...request,
+          revision: request.expectedRevision + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        return serverDraft;
+      },
+      submitComposerDraft: async (_workspaceId, _sessionId, request) => {
+        const turn = fakeTurn({
+          prompt: request.text,
+          metadata: { delivery: "steer" },
+        });
+        const accepted = {
+          ...makeEvent(2, "user.message", {
+            text: request.text,
+            delivery: "steer",
+            routing: "accepted_for_steering",
+          }),
+          clientEventId: request.clientEventId,
+        };
+        serverDraft = {
+          ...serverDraft,
+          revision: request.expectedDraftRevision + 1,
+          text: "",
+          resources: [],
+        };
+        return {
+          accepted,
+          turn,
+          draft: serverDraft,
+          receipt: promptReceipt(turn.id),
+          routing: "accepted_for_steering" as const,
+          interruptionCount: 0,
+          replay: false,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          sendDestination: () => "queue",
+        }),
+      undefined,
+    );
+    await flush();
+    await flushing(() => hook.result.current.setValue("answer conversationally"));
+    await flush(600);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    await flush();
+
+    expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({
+      delivery: "send",
+      destination: "chat",
+      state: "queued",
+      text: "answer conversationally",
+    });
+    await hook.unmount();
+  });
+
+  test("moves a non-durable Send into chat when the accepted event reports promoted Steer", async () => {
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => ({
+        ...makeEvent(2, "user.message", {
+          text: typeof input === "string" ? input : input.text,
+          delivery: "steer",
+          routing: "accepted_for_steering",
+        }),
+        clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          sendDestination: () => "queue",
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+        }),
+      undefined,
+    );
+
+    await flushing(async () =>
+      expect(await hook.result.current.send("answer without durable drafts")).toBe(true),
+    );
+    await flush();
+
+    expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({
+      delivery: "send",
+      destination: "chat",
+      state: "queued",
+      text: "answer without durable drafts",
+    });
+    await hook.unmount();
+  });
+
   test("keeps rapid first and second Sends on stable chat and queue surfaces", async () => {
     const resolvers: Array<(event: SessionEvent) => void> = [];
     const inputs: SendMessageInput[] = [];
@@ -2240,7 +2356,7 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
-  test("keeps an admitted chat bubble until execution starts even when the HTTP response is lost", async () => {
+  test("moves an SSE-confirmed promoted Send into chat even when the HTTP response is lost", async () => {
     let rejectSend!: (cause: unknown) => void;
     const pendingSend = new Promise<SessionEvent>((_resolve, reject) => {
       rejectSend = reject;
@@ -2261,7 +2377,7 @@ describe("useComposer queue-vs-steer", () => {
           draftPersistence: "disabled",
           initialPolicy: INITIAL_COMPOSER_POLICY,
           events: props.events,
-          sendDestination: () => "chat",
+          sendDestination: () => "queue",
         }),
       { events: [] as SessionEvent[] },
     );
@@ -2272,7 +2388,10 @@ describe("useComposer queue-vs-steer", () => {
     expect(clientEventId).toBeString();
     const turn = fakeTurn({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
     const accepted = {
-      ...makeEvent(20, "user.message"),
+      ...makeEvent(20, "user.message", {
+        delivery: "steer",
+        routing: "accepted_for_steering",
+      }),
       clientEventId,
     };
     const queued = {
@@ -2307,6 +2426,67 @@ describe("useComposer queue-vs-steer", () => {
     });
     expect(hook.result.current.optimisticMessages).toEqual([]);
     await hook.unmount();
+  });
+
+  test("reconciles a promoted Send into chat after an outcome-unknown remount", async () => {
+    const sent = { input: null as SendMessageInput | null };
+    let reconciliationEvents: SessionEvent[] = [];
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        sent.input = typeof input === "string" ? { text: input } : input;
+        throw gatewayError(503);
+      },
+      listEvents: async () => reconciliationEvents,
+    });
+    const composerOptions = {
+      client,
+      workspaceId: WORKSPACE_ID,
+      draftPersistence: "disabled" as const,
+      initialPolicy: INITIAL_COMPOSER_POLICY,
+      events: [] as SessionEvent[],
+      sendDestination: () => "queue" as const,
+    };
+    const first = await renderHook(() => useComposer(SESSION_ID, composerOptions), undefined);
+
+    await flushing(async () =>
+      expect(await first.result.current.send("answer after reload")).toBe(true),
+    );
+    await flush();
+    const failed = first.result.current.optimisticMessages?.[0];
+    expect(failed).toMatchObject({ destination: "queue", state: "failed", outcomeUnknown: true });
+    const clientEventId = sent.input?.clientEventId;
+    expect(clientEventId).toBeString();
+    await first.unmount();
+
+    const turn = fakeTurn({ id: "abababab-abab-4bab-8bab-abababababab" });
+    const accepted = {
+      ...makeEvent(23, "user.message", {
+        delivery: "steer",
+        routing: "accepted_for_steering",
+      }),
+      clientEventId,
+    };
+    reconciliationEvents = [
+      accepted,
+      {
+        ...makeEvent(24, "turn.queued", { triggerEventId: accepted.id, turnId: turn.id }),
+        turnId: turn.id,
+      },
+    ];
+
+    const second = await renderHook(() => useComposer(SESSION_ID, composerOptions), undefined);
+    const restored = second.result.current.optimisticMessages?.[0];
+    expect(restored).toMatchObject({ destination: "queue", state: "failed", outcomeUnknown: true });
+    await flushing(() => second.result.current.retryOptimisticMessage?.(restored!.clientEventId));
+    await flush();
+
+    expect(second.result.current.optimisticMessages?.[0]).toMatchObject({
+      destination: "chat",
+      state: "queued",
+      outcomeUnknown: false,
+      turnId: turn.id,
+    });
+    await second.unmount();
   });
 
   test("reconciles a lost queued Send as admitted, then retires it if withdrawn before start", async () => {

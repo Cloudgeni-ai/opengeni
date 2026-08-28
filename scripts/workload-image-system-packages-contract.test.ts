@@ -43,15 +43,17 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
     ) &&
     aptTransactions(api) === 1 &&
     api.includes(
-      "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client",
+      "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client tesseract-ocr-eng",
     ) &&
+    api.includes("TESSDATA_PREFIX=/opt/opengeni/tessdata") &&
     api.includes("apt-get install -y --no-install-recommends docker-ce-cli") &&
     api.includes("docker --version") &&
     worker.startsWith("FROM source-base AS worker") &&
     aptTransactions(worker) === 1 &&
     worker.includes(
-      "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client python3",
+      "apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client python3 tesseract-ocr-eng",
     ) &&
+    worker.includes("TESSDATA_PREFIX=/opt/opengeni/tessdata") &&
     worker.includes("apt-get install -y --no-install-recommends docker-ce-cli") &&
     worker.includes("/usr/bin/python3 -c 'import pty'") &&
     aptTransactions(materializer) === 1 &&
@@ -74,7 +76,7 @@ describe("workload image system package contract", () => {
     expect(keepsSpecializedWorkloadPackagesCoalesced(inheritedCommonInstall)).toBe(false);
 
     const missingApiRuntimeTools = dockerfile.replace(
-      "ca-certificates curl ffmpeg git gnupg openssh-client",
+      "ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client tesseract-ocr-eng",
       "ffmpeg",
     );
     expect(keepsSpecializedWorkloadPackagesCoalesced(missingApiRuntimeTools)).toBe(false);
@@ -98,7 +100,7 @@ describe("workload image system package contract", () => {
     expect(keepsSpecializedWorkloadPackagesCoalesced(inheritedWorkerCommonInstall)).toBe(false);
 
     const missingWorkerSourceControlTools = dockerfile.replace(
-      "ca-certificates curl ffmpeg git gnupg openssh-client python3",
+      "ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client python3 tesseract-ocr-eng",
       "ca-certificates curl ffmpeg gnupg python3",
     );
     expect(keepsSpecializedWorkloadPackagesCoalesced(missingWorkerSourceControlTools)).toBe(false);

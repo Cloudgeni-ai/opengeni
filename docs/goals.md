@@ -250,6 +250,14 @@ The locked decision applies these rules:
    That conversation comes from `session_history_items`, the one SDK-native
    model-memory store (see `docs/run-lifecycle.md`).
 
+The canonical continuation prompt treats every continuation as re-entry into
+the full objective, not as a request to perform one more step. It first
+reconciles authoritative current state, treats prior assistant claims only as
+pointers to evidence, continues through the full requested end state within the
+turn, and avoids repeating a state-setting action whose desired state already
+holds. It calls `goal_complete` only after authoritative evidence proves the
+whole objective.
+
 The resulting internal-update inference is an ordinary billed run: it meters
 `agent_run.created` with source `session_system_update` and streams like a
 user-triggered inference without appearing in the prompt queue. If billing or
