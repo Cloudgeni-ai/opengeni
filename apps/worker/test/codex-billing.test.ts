@@ -74,6 +74,7 @@ describe("worker ensureRunAllowed — codex bypass", () => {
           false,
           undefined,
           false,
+          true,
         ),
       ).rejects.toThrow("monthly token limit reached (100)");
       expect(balanceSpy).not.toHaveBeenCalled();
@@ -109,24 +110,32 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
       },
     );
     try {
-      const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
-        accountId: ACCOUNT,
-        workspaceId: WORKSPACE,
-        sessionId: "sess-gateway",
-        turnId: "turn-gateway",
-        turnAttemptId: "attempt-gateway",
-        model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
-        externallyBilled: false,
-        gatewayManaged: true,
-        gatewayBilling: { finalProvider: "baseten", inferenceCostUsd: "0.00000325" },
-        usage: {
-          inputTokens: 9,
-          outputTokens: 8,
-          totalTokens: 17,
-          inputTokensDetails: { cached_tokens: 3 },
+      const billing = await recordModelUsageAndDebitCredits(
+        testSettings({
+          billingMode: "stripe",
+          usageLimitsMode: "managed",
+          vercelAiGatewayApiKey: "vck_test",
+        }),
+        db,
+        {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "sess-gateway",
+          turnId: "turn-gateway",
+          turnAttemptId: "attempt-gateway",
+          model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
+          externallyBilled: false,
+          gatewayManaged: true,
+          gatewayBilling: { finalProvider: "baseten", inferenceCostUsd: "0.00000325" },
+          usage: {
+            inputTokens: 9,
+            outputTokens: 8,
+            totalTokens: 17,
+            inputTokensDetails: { cached_tokens: 3 },
+          },
+          sourceKey: "response-gateway",
         },
-        sourceKey: "response-gateway",
-      });
+      );
 
       expect(recorded).toContainEqual({ eventType: "model.cost", quantity: 5 });
       expect(debitInputs).toHaveLength(1);
@@ -148,22 +157,90 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
     );
     try {
       await expect(
-        recordModelUsageAndDebitCredits(billedSettings(), db, {
-          accountId: ACCOUNT,
-          workspaceId: WORKSPACE,
-          sessionId: "sess-gateway",
-          turnId: "turn-gateway-rejected",
-          turnAttemptId: "attempt-gateway-rejected",
-          model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
-          externallyBilled: false,
-          gatewayManaged: true,
-          gatewayBilling: { finalProvider: "unapproved", inferenceCostUsd: "0.01" },
-          usage: { inputTokens: 9, outputTokens: 8, totalTokens: 17 },
-          sourceKey: "response-gateway-rejected",
-        }),
+        recordModelUsageAndDebitCredits(
+          testSettings({
+            billingMode: "stripe",
+            usageLimitsMode: "managed",
+            vercelAiGatewayApiKey: "vck_test",
+          }),
+          db,
+          {
+            accountId: ACCOUNT,
+            workspaceId: WORKSPACE,
+            sessionId: "sess-gateway",
+            turnId: "turn-gateway-rejected",
+            turnAttemptId: "attempt-gateway-rejected",
+            model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
+            externallyBilled: false,
+            gatewayManaged: true,
+            gatewayBilling: { finalProvider: "unapproved", inferenceCostUsd: "0.01" },
+            usage: { inputTokens: 9, outputTokens: 8, totalTokens: 17 },
+            sourceKey: "response-gateway-rejected",
+          },
+        ),
       ).rejects.toThrow("AI Gateway reported unapproved provider");
       expect(recordSpy).not.toHaveBeenCalled();
       expect(debitSpy).not.toHaveBeenCalled();
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
+  test("uses a database-resolved Gateway model's route policy and pricing", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined);
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue({
+      balance: {
+        accountId: ACCOUNT,
+        balanceMicros: 1_000_000,
+        currency: "usd",
+        updatedAt: new Date().toISOString(),
+      },
+      debitedMicros: 2,
+    });
+    try {
+      const productId = "catalog-gateway/custom-model";
+      const billing = await recordModelUsageAndDebitCredits(
+        testSettings({
+          billingMode: "stripe",
+          usageLimitsMode: "managed",
+          vercelAiGatewayApiKey: "vck_test",
+          resolvedGatewayModelsJson: JSON.stringify([
+            {
+              productId,
+              workspaceProductId: "workspace-gateway/catalog-custom-model",
+              upstreamModelId: "provider/custom-model",
+              label: "Catalog custom model",
+              providers: ["fireworks"],
+              pricing: {
+                inputMicrosPerMillionTokens: 100_000,
+                outputMicrosPerMillionTokens: 200_000,
+                marginBps: 2_500,
+              },
+            },
+          ]),
+        }),
+        db,
+        {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "sess-catalog-gateway",
+          turnId: "turn-catalog-gateway",
+          turnAttemptId: "attempt-catalog-gateway",
+          model: productId,
+          externallyBilled: false,
+          gatewayManaged: true,
+          gatewayBilling: { finalProvider: "fireworks", inferenceCostUsd: "0.000001" },
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+          sourceKey: "response-catalog-gateway",
+        },
+      );
+      expect(billing).toMatchObject({
+        pricedCostMicros: 2,
+        pricingSource: "gateway_reported",
+        upstreamProvider: "fireworks",
+      });
+      expect(debitSpy).toHaveBeenCalledTimes(1);
     } finally {
       recordSpy.mockRestore();
       debitSpy.mockRestore();
@@ -259,8 +336,9 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         turnId: "turn-free",
         turnAttemptId: "attempt-free",
         model: "scripted-model",
-        externallyBilled: false,
+        externallyBilled: true,
         chargesOpenGeniCredits: false,
+        countsTowardTokenCap: true,
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
       });

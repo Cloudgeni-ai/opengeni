@@ -124,6 +124,7 @@ describe("workspace Gateway custom model API", () => {
 
     for (const body of [
       { upstreamModelId: "" },
+      { upstreamModelId: "a".repeat(239) },
       { upstreamModelId: "a".repeat(257) },
       { upstreamModelId: "anthropic|claude" },
       { upstreamModelId: "anthropic/claude-sonnet-4.6", label: "é".repeat(65) },
@@ -137,11 +138,17 @@ describe("workspace Gateway custom model API", () => {
       expect(invalid.status).toBe(422);
     }
 
-    const collision = await request("/gateway-custom-models", {
-      method: "POST",
-      body: { upstreamModelId: "deepseek/deepseek-v4-flash-0731" },
-    });
-    expect(collision.status).toBe(422);
+    for (const upstreamModelId of [
+      "deepseek/deepseek-v4-flash-0731",
+      "deepseek-v4-flash-0731",
+      "kimi-k3",
+    ]) {
+      const collision = await request("/gateway-custom-models", {
+        method: "POST",
+        body: { upstreamModelId },
+      });
+      expect(collision.status).toBe(422);
+    }
   });
 
   test("creates one exact slug, exposes it only to the workspace catalog, and deletes it", async () => {

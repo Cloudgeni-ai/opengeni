@@ -12,6 +12,7 @@ import {
   type SessionTurn,
   type ToolAuthNeededPayload,
   type TurnExecutionPolicyV1,
+  type XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { startOfUtcMonth } from "./model-usage";
@@ -36,6 +37,22 @@ export function credentialSubjectIdForTurnInitiator(
   turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
 ): string | undefined {
   return directPersonalConnectionSubjectId(turn);
+}
+
+export function xaiCatalogReadinessAuthority(
+  turn: {
+    initiatingHumanSubjectId: string | null;
+    xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+  },
+  directCredentialSubjectId: string | undefined,
+): {
+  subjectId: string;
+  authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+} | null {
+  const subjectId = turn.initiatingHumanSubjectId ?? directCredentialSubjectId;
+  return subjectId
+    ? { subjectId, authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot }
+    : null;
 }
 
 /**
@@ -84,11 +101,13 @@ export function shouldPublishToolAuthNeededForTurn(
 
 export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
   externallyBilled: boolean;
+  countsTowardTokenCap: boolean;
   codexSubscription: boolean;
   xaiSubscription: boolean;
 } {
   return {
     externallyBilled: policy.billing.metering === "external",
+    countsTowardTokenCap: policy.billing.upstreamPayer === "deployment",
     codexSubscription:
       policy.providerId === "codex-subscription" &&
       policy.credentialSource.kind === "connected_subscription" &&
@@ -223,6 +242,7 @@ export async function ensureRunAllowed(
   isExternallyBilledTurn: boolean,
   entitlements?: ActivityServices["entitlements"],
   chargesOpenGeniCredits = !isExternallyBilledTurn,
+  countsTowardTokenCap = !isExternallyBilledTurn,
 ): Promise<void> {
   // Upstream settlement and workspace-facing cost are independent. External
   // metering skips the token cap; free/subscription/workspace cost skips the
@@ -280,7 +300,7 @@ export async function ensureRunAllowed(
         );
       }
     }
-    if (!isExternallyBilledTurn && limits.maxMonthlyTokensPerWorkspace) {
+    if (countsTowardTokenCap && limits.maxMonthlyTokensPerWorkspace) {
       const used = await sumUsageQuantity(db, {
         workspaceId,
         eventType: "model.tokens",

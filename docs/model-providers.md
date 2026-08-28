@@ -138,11 +138,12 @@ cost remain separate inputs.
 For an authenticated `registryProviders` entry in database mode, predeclare the
 same provider ID in `OPENGENI_MODEL_PROVIDERS_JSON` with its deployment-owned
 `apiKey` or `apiKeyEnv`. The database entry must exactly match the host-approved
-transport identity: provider kind, base URL, wire API/profile, public names,
-default headers, and default query. The host declaration authorizes that
-transport and supplies its credential; the database document controls reviewed
-model membership and labels only. A mismatch fails closed, preventing a
-database document from redirecting a host credential to another endpoint.
+transport identity: provider kind, base URL, and wire API/profile. Database
+documents cannot contain default headers/query or their public-name
+classifications; the executable provider inherits those complete maps and its
+credential only from the host declaration. The database document controls
+reviewed model membership and labels only. A mismatch fails closed, preventing
+a database document from redirecting a host credential to another endpoint.
 
 ## Registry configuration
 

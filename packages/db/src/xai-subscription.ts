@@ -472,20 +472,72 @@ export async function workspaceXaiSubscriptionActive(
     workspaceId,
     subjectId,
   });
-  const [accounts, rotation] = await Promise.all([
-    listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
-    getXaiRotationSettings(db, { workspaceId, subjectId, authoritySnapshot }),
-  ]);
-  const activeCredentialId = rotation?.activeCredentialId ?? null;
-  const now = new Date();
-  const eligible = (account: XaiSubscriptionAccountMetadata) =>
-    account.status === "active" &&
-    account.allocatorEnabled &&
-    (!account.exhaustedUntil || account.exhaustedUntil <= now);
-  if (rotation?.rotationEnabled !== false) {
-    return accounts.some(eligible);
-  }
-  return accounts.some((account) => account.id === activeCredentialId && eligible(account));
+  return await workspaceXaiSubscriptionActiveForAuthority(db, settings, {
+    workspaceId,
+    subjectId,
+    authoritySnapshot,
+  });
+}
+
+/** Metadata-only readiness for the exact provider-account authority frozen on a turn. */
+export async function workspaceXaiSubscriptionActiveForAuthority(
+  db: Database,
+  settings: { readonly supergrokSubscriptionEnabled: boolean },
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    authoritySnapshot: XaiAuthoritySnapshot;
+  },
+): Promise<boolean> {
+  if (!settings.supergrokSubscriptionEnabled) return false;
+  const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(input.authoritySnapshot);
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const ownerMembershipId = await resolveXaiPoolOwnerMembershipId(scopedDb, {
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authoritySnapshot: snapshot,
+    });
+    const ownerPredicate =
+      ownerMembershipId === null
+        ? isNull(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId)
+        : eq(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId, ownerMembershipId);
+    const [accounts, rotation] = await Promise.all([
+      scopedDb
+        .select(xaiCredentialMetadataColumns)
+        .from(schema.xaiSubscriptionCredentials)
+        .where(
+          and(
+            eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+            eq(schema.xaiSubscriptionCredentials.authorityScope, snapshot.scope),
+            ownerPredicate,
+          ),
+        ),
+      scopedDb
+        .select()
+        .from(schema.xaiRotationSettings)
+        .where(
+          and(
+            eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+            eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
+            ownerMembershipId === null
+              ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
+              : eq(schema.xaiRotationSettings.ownerOrganizationMembershipId, ownerMembershipId),
+          ),
+        )
+        .limit(1)
+        .then((rows) => rows[0] ?? null),
+    ]);
+    const activeCredentialId = rotation?.activeCredentialId ?? null;
+    const now = new Date();
+    const eligible = (account: XaiCredentialMetadataRow) =>
+      account.status === "active" &&
+      account.allocatorEnabled &&
+      (!account.exhaustedUntil || account.exhaustedUntil <= now);
+    if (rotation?.rotationEnabled !== false) {
+      return accounts.some(eligible);
+    }
+    return accounts.some((account) => account.id === activeCredentialId && eligible(account));
+  });
 }
 
 export async function getXaiSubscriptionAccountMetadata(

@@ -274,6 +274,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
   billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
+  billingState.countsTowardTokenCap = billingIdentity.countsTowardTokenCap;
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
   const trigger = await getSessionEvent(db, input.workspaceId, attempt.triggerEventId);
@@ -313,13 +314,14 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // the local credit read). Unset port → today's local-ledger path.
   await waitForTurnOperation(
     ensureRunAllowed(
-      settings,
+      capabilitySettings,
       db,
       input.accountId,
       input.workspaceId,
       billingState.isExternallyBilledTurn,
       entitlements,
       billingState.chargesOpenGeniCredits,
+      billingState.countsTowardTokenCap,
     ),
     cancellationSignal,
     undefined,

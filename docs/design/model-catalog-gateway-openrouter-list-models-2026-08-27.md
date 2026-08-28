@@ -131,7 +131,9 @@ Environment variables:
 
 The deployment document contains the built-in allow-list, registry providers, curated Gateway
 table, curated OpenRouter `:free` slugs, and `modelNotes: { [productId]: string }`. It contains no
-keys, billing, enabled flags, or band objects.
+keys, default request headers/query, billing, enabled flags, or band objects. Authenticated
+registry transports inherit their complete request metadata and credentials from the matching
+host declaration after the database provider's kind, base URL, and wire API/profile match.
 
 The deployment's workspace-facing model-cost policy is a separate billing input. It determines
 which deployment-catalog product IDs render as `free` versus `credits` independently of provider
@@ -452,7 +454,9 @@ Connect Gateway, add a known slug, select it under Your Gateway, and perform one
 ## 18. Hardening
 
 - Log catalog source and document version at boot, never the document body.
-- Bound `upstream_model_id` to 256 printable, non-whitespace characters.
+- Bound `upstream_model_id` to 238 printable, non-whitespace characters so the
+  generated `workspace-gateway/` product ID remains within the 256-character
+  model-policy contract.
 - Do not log keys.
 
 ## 19. Risks

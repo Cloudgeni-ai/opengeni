@@ -63,8 +63,8 @@ export async function checkLimit(
     : null;
   const fundedWithoutCredits =
     codexBilled || (resolvedModel != null && resolvedModel.cost !== "credits");
-  const externallyMetered =
-    codexBilled || (resolvedModel != null && resolvedModel.billing.metering === "external");
+  const countsTowardTokenCap =
+    !codexBilled && resolvedModel != null && resolvedModel.billing.upstreamPayer === "deployment";
   const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits);
   if (!creditDecision.allowed) {
     return creditDecision;
@@ -74,7 +74,7 @@ export async function checkLimit(
   }
   return await checkStaticCaps(deps, input, {
     fundedWithoutCredits,
-    externallyMetered,
+    countsTowardTokenCap,
   });
 }
 
@@ -99,7 +99,7 @@ async function checkCreditBalance(
 async function checkStaticCaps(
   deps: LimitDependencies,
   input: LimitCheckInput,
-  funding: { fundedWithoutCredits: boolean; externallyMetered: boolean },
+  funding: { fundedWithoutCredits: boolean; countsTowardTokenCap: boolean },
 ): Promise<LimitDecision> {
   const limits = configuredStaticUsageLimits(deps.settings);
   if (
@@ -187,7 +187,11 @@ async function checkStaticCaps(
           );
     }
     case "tokens:consume": {
-      if (funding.externallyMetered || !limits.maxMonthlyTokensPerWorkspace || !input.workspaceId) {
+      if (
+        !funding.countsTowardTokenCap ||
+        !limits.maxMonthlyTokensPerWorkspace ||
+        !input.workspaceId
+      ) {
         return { allowed: true };
       }
       const used = await sumUsageQuantity(deps.db, {

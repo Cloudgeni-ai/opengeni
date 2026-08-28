@@ -2300,9 +2300,14 @@ export const UpdateWorkspaceModelPolicyRequest = z.object({
 });
 export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
 
+export const WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH = 238;
+
 export const CreateWorkspaceGatewayCustomModelRequest = z
   .object({
-    upstreamModelId: z.string().regex(/^[!-{}-~]{1,256}$/),
+    upstreamModelId: z
+      .string()
+      .max(WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH)
+      .regex(/^[!-{}-~]+$/),
     label: z
       .string()
       .min(1)

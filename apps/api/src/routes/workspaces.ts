@@ -92,6 +92,9 @@ import {
   canonicalizeConfiguredModelId,
   configuredStaticUsageLimits,
   configuredGatewayUpstreamModelIds,
+  configuredGatewayWorkspaceProductModelIds,
+  configuredModelInputIdentities,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 
@@ -402,6 +405,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (configuredGatewayUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)) {
       throw new HTTPException(422, {
         message: "Gateway model is already included in the deployment catalog",
+      });
+    }
+    const customProductId = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${parsed.data.upstreamModelId}`;
+    const deploymentProductIds = new Set([
+      ...configuredModelInputIdentities(catalog.settings),
+      ...configuredGatewayWorkspaceProductModelIds(catalog.settings),
+    ]);
+    if (deploymentProductIds.has(customProductId)) {
+      throw new HTTPException(422, {
+        message: "Gateway model product id conflicts with the deployment catalog",
       });
     }
     try {

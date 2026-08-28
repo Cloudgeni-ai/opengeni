@@ -2061,6 +2061,10 @@ export type OpenRouterCatalogModel = z.infer<typeof OpenRouterCatalogModel>;
 const DeploymentRegistryProviderSchema = RegistryProviderSchema.safeExtend({
   apiKey: z.never().optional(),
   apiKeyEnv: z.never().optional(),
+  defaultHeaders: z.never().optional(),
+  defaultQuery: z.never().optional(),
+  publicDefaultHeaderNames: z.never().optional(),
+  publicDefaultQueryNames: z.never().optional(),
 }).strict();
 
 export const ModelCatalogDocument = z
@@ -2170,10 +2174,6 @@ function deploymentRegistryProvidersWithHostCredentials(
       baseUrl: candidate.baseUrl,
       api: candidate.api,
       wireProfile: candidate.wireProfile,
-      defaultHeaders: candidate.defaultHeaders ?? {},
-      defaultQuery: candidate.defaultQuery ?? {},
-      publicDefaultHeaderNames: candidate.publicDefaultHeaderNames ?? [],
-      publicDefaultQueryNames: candidate.publicDefaultQueryNames ?? [],
     });
     if (canonicalJson(transportIdentity(provider)) !== canonicalJson(transportIdentity(host))) {
       throw new Error(
@@ -2182,6 +2182,14 @@ function deploymentRegistryProvidersWithHostCredentials(
     }
     return {
       ...provider,
+      ...(host.defaultHeaders === undefined ? {} : { defaultHeaders: host.defaultHeaders }),
+      ...(host.defaultQuery === undefined ? {} : { defaultQuery: host.defaultQuery }),
+      ...(host.publicDefaultHeaderNames === undefined
+        ? {}
+        : { publicDefaultHeaderNames: host.publicDefaultHeaderNames }),
+      ...(host.publicDefaultQueryNames === undefined
+        ? {}
+        : { publicDefaultQueryNames: host.publicDefaultQueryNames }),
       ...(host.apiKey === undefined ? {} : { apiKey: host.apiKey }),
       ...(host.apiKeyEnv === undefined ? {} : { apiKeyEnv: host.apiKeyEnv }),
     };
@@ -2420,6 +2428,14 @@ function configuredGatewayCatalogModels(settings: Settings): GatewayCatalogModel
 
 export function configuredGatewayUpstreamModelIds(settings: Settings): string[] {
   return configuredGatewayCatalogModels(settings).map((model) => model.upstreamModelId);
+}
+
+export function configuredGatewayWorkspaceProductModelIds(settings: Settings): string[] {
+  return configuredGatewayCatalogModels(settings).map((model) => model.workspaceProductId);
+}
+
+export function configuredModelInputIdentities(settings: Settings): string[] {
+  return configuredModels(settings).flatMap((model) => [model.id, ...model.aliases]);
 }
 
 function configuredOpenRouterCatalogModels(settings: Settings): OpenRouterCatalogModel[] {
@@ -3556,7 +3572,15 @@ function gatewayRegistryProvider(
   const workspace = input.kind === "vercel-gateway-workspace";
   const curated = configuredGatewayCatalogModels(settings);
   const upstreamIds = new Set(curated.map((model) => model.upstreamModelId));
+  const productIds = new Set(
+    parseModelProvidersJson(settings.modelProvidersJson)
+      .filter((provider) => provider.id !== WORKSPACE_GATEWAY_PROVIDER_ID)
+      .flatMap((provider) =>
+        provider.models.flatMap((model) => [model.id, ...(model.aliases ?? [])]),
+      ),
+  );
   const models = curated.map((model) => {
+    productIds.add(workspace ? model.workspaceProductId : model.productId);
     return {
       id: workspace ? model.workspaceProductId : model.productId,
       upstreamModelId: model.upstreamModelId,
@@ -3571,18 +3595,21 @@ function gatewayRegistryProvider(
       effectiveContextWindowTokens: model.effectiveContextWindowTokens,
       autoCompactTokenLimit: model.autoCompactTokenLimit,
       toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
     };
   });
   if (workspace) {
     for (const custom of input.customModels ?? []) {
+      const productId = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
       // Deployment membership wins over an older or concurrently-created
-      // workspace row with the same upstream identity. This keeps runtime
-      // routing deterministic while leaving the row available for an admin to
-      // remove after the deployment catalog change.
-      if (upstreamIds.has(custom.upstreamModelId)) continue;
+      // workspace row with the same upstream identity or generated product id.
+      // This keeps runtime routing deterministic and prevents a legacy/admin
+      // row from making the entire workspace catalog fail uniqueness checks.
+      if (upstreamIds.has(custom.upstreamModelId) || productIds.has(productId)) continue;
       upstreamIds.add(custom.upstreamModelId);
+      productIds.add(productId);
       models.push({
-        id: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${custom.upstreamModelId}`,
+        id: productId,
         upstreamModelId: custom.upstreamModelId,
         label: custom.label?.trim() || custom.upstreamModelId,
         capabilities: gatewayModelCapabilities(settings, {

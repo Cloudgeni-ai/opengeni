@@ -3,6 +3,8 @@ import {
   configuredStaticUsageLimits,
   policyProviderIdForModel,
   resolveModelProvider,
+  withCodexCatalogProvider,
+  withXaiSubscriptionCatalogProvider,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
@@ -72,34 +74,31 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       input.workspaceId,
       input.sessionId,
     );
-    let continuationModel = latestStartedTurn?.model ?? session.model;
+    const inheritedContinuationModel = latestStartedTurn?.model ?? session.model;
+    let continuationModel = inheritedContinuationModel;
     const continuationReasoningEffort =
       latestStartedTurn?.reasoningEffort ?? session.reasoningEffort;
     const continuationLatencyMode = latestStartedTurn?.latencyMode ?? session.latencyMode;
-    // Workspace model policy: a continuation inherits the last STARTED turn's
-    // model, so a single policy-violating turn would otherwise re-arm itself on
-    // every continuation (exactly how one bare-model turn kept a goal loop on
-    // the paid built-in provider all night). If the inherited model is blocked
-    // but the session's own default is allowed, recover to the default; if
-    // both are blocked, pause the goal visibly (the budget-pause channel, with
-    // a truthful rationale) instead of synthesizing a turn the worker's hard
-    // gate would fail over and over.
-    let modelPolicyBlocked: string | null = null;
     const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
-    if (workspaceModelPolicy) {
-      const policyBlocks = (modelId: string): boolean =>
-        !evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
-          providerId: policyProviderIdForModel(settings, modelId),
-          modelId,
-        }).allowed;
-      if (policyBlocks(continuationModel)) {
-        if (continuationModel !== session.model && !policyBlocks(session.model)) {
-          continuationModel = session.model;
-        } else {
-          modelPolicyBlocked = `workspace model policy blocks model "${continuationModel}"; pick an allowed model or change the workspace model policy`;
-        }
-      }
+    if (
+      inheritedContinuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
+      session.model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
+    ) {
+      settings = (
+        await resolveWorkspaceCatalogSettings(db, catalogSourceSettings, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+        })
+      ).settings;
     }
+    const modelDecision = goalContinuationModelDecision({
+      settings,
+      workspaceModelPolicy,
+      inheritedModel: inheritedContinuationModel,
+      sessionModel: session.model,
+    });
+    continuationModel = modelDecision.model;
+    let modelPolicyBlocked = modelDecision.blocked;
     // remote_v2 sessions may only continue on Codex models — refuse synthesis
     // that would leave the portable/non-Codex path (and mixed history shapes).
     if (
@@ -108,14 +107,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       !isCodexBilledModel(continuationModel)
     ) {
       modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
-    }
-    if (continuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
-      settings = (
-        await resolveWorkspaceCatalogSettings(db, catalogSourceSettings, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-        })
-      ).settings;
     }
     // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
     // so it must not be budget-paused for zero OpenGeni credits. This file uses
@@ -188,6 +179,45 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
   return {
     enqueueGoalRetryWake,
     maybeContinueGoal,
+  };
+}
+
+export function goalContinuationModelDecision(input: {
+  settings: Settings;
+  workspaceModelPolicy: Awaited<ReturnType<typeof getWorkspaceModelPolicy>>;
+  inheritedModel: string;
+  sessionModel: string;
+}): { model: string; blocked: string | null } {
+  const catalogSettings = input.settings.supergrokSubscriptionEnabled
+    ? withXaiSubscriptionCatalogProvider(
+        input.settings.codexSubscriptionEnabled
+          ? withCodexCatalogProvider(input.settings)
+          : input.settings,
+      )
+    : input.settings.codexSubscriptionEnabled
+      ? withCodexCatalogProvider(input.settings)
+      : input.settings;
+  const policyBlocks = (modelId: string): boolean =>
+    input.workspaceModelPolicy !== null &&
+    !evaluateWorkspaceModelPolicy(input.workspaceModelPolicy, {
+      providerId: policyProviderIdForModel(catalogSettings, modelId),
+      modelId,
+    }).allowed;
+  const candidates = [...new Set([input.inheritedModel, input.sessionModel])];
+  for (const model of candidates) {
+    if (resolveModelProvider(catalogSettings, model) && !policyBlocks(model)) {
+      return { model, blocked: null };
+    }
+  }
+  if (!resolveModelProvider(catalogSettings, input.inheritedModel)) {
+    return {
+      model: input.inheritedModel,
+      blocked: `model "${input.inheritedModel}" is no longer in the deployment or workspace catalog; choose an available model before resuming the goal`,
+    };
+  }
+  return {
+    model: input.inheritedModel,
+    blocked: `workspace model policy blocks model "${input.inheritedModel}"; pick an allowed model or change the workspace model policy`,
   };
 }
 

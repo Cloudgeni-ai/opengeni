@@ -57,6 +57,7 @@ import {
   classifySandboxLogicalProvisionFailure,
   classifyXaiCredentialFailure,
   credentialSubjectIdForTurnInitiator,
+  xaiCatalogReadinessAuthority,
   classifyMcpTransportTimeoutError,
   clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
@@ -845,6 +846,7 @@ describe("accepted turn execution identity", () => {
     });
     expect(turnExecutionPolicyBillingIdentity(base)).toEqual({
       externallyBilled: true,
+      countsTowardTokenCap: false,
       codexSubscription: false,
       xaiSubscription: false,
     });
@@ -859,6 +861,7 @@ describe("accepted turn execution identity", () => {
       }),
     ).toEqual({
       externallyBilled: true,
+      countsTowardTokenCap: false,
       codexSubscription: true,
       xaiSubscription: false,
     });
@@ -873,6 +876,7 @@ describe("accepted turn execution identity", () => {
       }),
     ).toEqual({
       externallyBilled: true,
+      countsTowardTokenCap: false,
       codexSubscription: false,
       xaiSubscription: true,
     });
@@ -884,6 +888,7 @@ describe("accepted turn execution identity", () => {
       }),
     ).toEqual({
       externallyBilled: false,
+      countsTowardTokenCap: true,
       codexSubscription: false,
       xaiSubscription: false,
     });
@@ -922,6 +927,32 @@ describe("accepted turn execution identity", () => {
         latencyModeSource: "continuation",
       });
     }
+  });
+
+  test("uses frozen initiating-human xAI authority for service-originated catalog reads", () => {
+    const authoritySnapshot = {
+      version: 1 as const,
+      scope: "user" as const,
+      authorityGeneration: 7,
+    };
+    expect(
+      xaiCatalogReadinessAuthority(
+        {
+          initiatingHumanSubjectId: "human-subject",
+          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
+        },
+        undefined,
+      ),
+    ).toEqual({ subjectId: "human-subject", authoritySnapshot });
+    expect(
+      xaiCatalogReadinessAuthority(
+        {
+          initiatingHumanSubjectId: null,
+          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
+        },
+        "direct-subject",
+      ),
+    ).toEqual({ subjectId: "direct-subject", authoritySnapshot });
   });
 });
 

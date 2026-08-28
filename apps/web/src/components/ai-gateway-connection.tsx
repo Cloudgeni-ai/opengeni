@@ -3,6 +3,7 @@ import type {
   WorkspaceGatewayCustomModel,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
+import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ChevronDownIcon, Loader2Icon, PlusIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type SVGProps } from "react";
@@ -88,8 +89,26 @@ export function AiGatewayConnectionCardWithClient(
     );
   }, [connections]);
   const connected = props.canManage ? connection?.status === "active" : readOnlyConnected;
-  const modelSlugValid = /^[!-{}-~]{1,256}$/.test(modelSlug);
+  const modelSlugValid =
+    modelSlug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
+    /^[!-{}-~]+$/.test(modelSlug);
   const modelSlugExists = customModels.some((model) => model.upstreamModelId === modelSlug);
+
+  const refreshCustomModels = useCallback(async (): Promise<boolean> => {
+    try {
+      const result = await client.listWorkspaceGatewayCustomModels(props.workspaceId);
+      if (!activeRef.current) return false;
+      setCustomModels(result.models);
+      setCustomModelsError(null);
+      setCustomModelsLoaded(true);
+      return true;
+    } catch (caught) {
+      if (!activeRef.current) return false;
+      setCustomModelsError(caught instanceof Error ? caught.message : String(caught));
+      setCustomModelsLoaded(true);
+      return false;
+    }
+  }, [client, props.workspaceId]);
 
   const refresh = useCallback(async () => {
     const [connectionResult, modelsResult] = await Promise.allSettled([
@@ -200,16 +219,17 @@ export function AiGatewayConnectionCardWithClient(
   }
 
   async function addCustomModel() {
-    if (!modelSlugValid || modelSlugExists) return;
+    if (modelBusy || !modelSlugValid || modelSlugExists) return;
+    const submittedSlug = modelSlug;
     setModelBusy(true);
     try {
-      const created = await client.createWorkspaceGatewayCustomModel(props.workspaceId, {
-        upstreamModelId: modelSlug,
+      await client.createWorkspaceGatewayCustomModel(props.workspaceId, {
+        upstreamModelId: submittedSlug,
       });
       if (!activeRef.current) return;
-      setCustomModels((current) => [...current, created]);
-      setModelSlug("");
-      setCustomModelsError(null);
+      await refreshCustomModels();
+      if (!activeRef.current) return;
+      setModelSlug((current) => (current === submittedSlug ? "" : current));
       props.onConnectionChange?.();
       toast.success("Gateway model added", {
         description: connected
@@ -234,7 +254,8 @@ export function AiGatewayConnectionCardWithClient(
     try {
       await client.deleteWorkspaceGatewayCustomModel(props.workspaceId, model.id);
       if (!activeRef.current) return;
-      setCustomModels((current) => current.filter((candidate) => candidate.id !== model.id));
+      await refreshCustomModels();
+      if (!activeRef.current) return;
       queueMicrotask(() => {
         if (!activeRef.current) return;
         if (focusModelId) removeButtonRefs.current.get(focusModelId)?.focus();
@@ -362,11 +383,12 @@ export function AiGatewayConnectionCardWithClient(
                   value={modelSlug}
                   onChange={(event) => setModelSlug(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") {
+                    if (event.key === "Enter" && !modelBusy) {
                       event.preventDefault();
                       void addCustomModel();
                     }
                   }}
+                  disabled={modelBusy}
                   className="h-9 font-mono text-xs"
                   placeholder="anthropic/claude-sonnet-4.6"
                   aria-label="Vercel AI Gateway model slug"
@@ -412,7 +434,7 @@ export function AiGatewayConnectionCardWithClient(
             </div>
           ) : null}
 
-          {customModels.length > 0 ? (
+          {customModelsLoaded && !customModelsError && customModels.length > 0 ? (
             <ul className="divide-y divide-border/70 rounded-md bg-surface-2/55 px-3">
               {customModels.map((model) => (
                 <li key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">

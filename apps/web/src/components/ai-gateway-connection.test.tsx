@@ -114,6 +114,20 @@ async function setInputValue(input: HTMLInputElement, value: string): Promise<vo
   });
 }
 
+async function pressEnter(input: HTMLInputElement): Promise<void> {
+  await act(async () => {
+    const reactPropsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"));
+    const onKeyDown = (
+      input as unknown as Record<
+        string,
+        { onKeyDown?: (event: { key: string; preventDefault: () => void }) => void }
+      >
+    )[reactPropsKey!]!.onKeyDown;
+    onKeyDown!({ key: "Enter", preventDefault: () => {} });
+    await flush();
+  });
+}
+
 beforeAll(() => {
   GlobalRegistrator.register();
   (
@@ -145,6 +159,11 @@ beforeEach(() => {
 
 describe("AiGatewayConnectionCard custom models", () => {
   test("lets an admin preconfigure one exact Gateway slug before connecting", async () => {
+    const created = customModel("anthropic/claude-sonnet-4.6");
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
+      models: createWorkspaceGatewayCustomModel.mock.calls.length > 0 ? [created] : [],
+    }));
+    createWorkspaceGatewayCustomModel.mockImplementation(async () => created);
     const onConnectionChange = mock(() => {});
     const { container, root } = await renderCard(true, onConnectionChange);
 
@@ -350,7 +369,9 @@ describe("AiGatewayConnectionCard custom models", () => {
 
   test("removes a custom slug by its stable row id", async () => {
     const model = customModel("xai/grok-4.1-fast");
-    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({ models: [model] }));
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
+      models: deleteWorkspaceGatewayCustomModel.mock.calls.length > 0 ? [] : [model],
+    }));
     const onConnectionChange = mock(() => {});
     const { container, root } = await renderCard(true, onConnectionChange);
 
@@ -387,6 +408,83 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(container.textContent).toContain("catalog unavailable");
       expect(container.textContent).toContain("Unavailable");
       expect(container.textContent).not.toContain("No custom model slugs yet");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("refetches the complete list after adding from an unavailable initial state", async () => {
+    const existing = customModel("existing/provider-model");
+    const created = customModel("anthropic/claude-sonnet-4.6");
+    let reads = 0;
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 1) throw new Error("catalog unavailable");
+      return { models: [existing, created] };
+    });
+    createWorkspaceGatewayCustomModel.mockImplementation(async () => created);
+    const { container, root } = await renderCard();
+
+    try {
+      expect(container.textContent).toContain("catalog unavailable");
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway model slug"]',
+      )!;
+      await setInputValue(input, created.upstreamModelId);
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+
+      expect(container.textContent).toContain(existing.upstreamModelId);
+      expect(container.textContent).toContain(created.upstreamModelId);
+      expect(container.textContent).toContain("2 models");
+      expect(container.textContent).not.toContain("catalog unavailable");
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("blocks Enter and disables the slug input while an add is pending", async () => {
+    const created = customModel("anthropic/claude-sonnet-4.6");
+    let resolveCreate: ((model: WorkspaceGatewayCustomModel) => void) | undefined;
+    createWorkspaceGatewayCustomModel.mockImplementation(
+      async () =>
+        await new Promise<WorkspaceGatewayCustomModel>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
+      models: createWorkspaceGatewayCustomModel.mock.calls.length > 0 ? [created] : [],
+    }));
+    const { container, root } = await renderCard();
+
+    try {
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway model slug"]',
+      )!;
+      await setInputValue(input, created.upstreamModelId);
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+      expect(input.disabled).toBe(true);
+      await pressEnter(input);
+      expect(createWorkspaceGatewayCustomModel).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        resolveCreate?.(created);
+        await flush();
+      });
+      expect(input.disabled).toBe(false);
+      expect(input.value).toBe("");
     } finally {
       await act(async () => root.unmount());
       container.remove();

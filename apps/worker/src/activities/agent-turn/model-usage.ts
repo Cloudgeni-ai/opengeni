@@ -17,8 +17,8 @@ import {
   calculateGatewayReportedCostBreakdown,
   calculateModelUsageCostBreakdown,
   configuredModelPricingSchedules,
+  resolveModelProvider,
   responseSatisfiesLatencyMode,
-  OPENGENI_GATEWAY_MODELS,
   OPENGENI_GATEWAY_PROVIDER_ID,
   type ModelUsageInput,
   type ModelProviderApi,
@@ -192,6 +192,7 @@ export async function processModelResponseTerminalEvent(input: {
   metricProvider: string;
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
+  countsTowardTokenCap?: boolean;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   emittedSourceKeys: Set<string>;
@@ -254,6 +255,9 @@ export async function processModelResponseTerminalEvent(input: {
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
+          : {}),
+        ...(input.countsTowardTokenCap !== undefined
+          ? { countsTowardTokenCap: input.countsTowardTokenCap }
           : {}),
         usage: responseUsage.usage,
         normalizedUsage,
@@ -350,6 +354,7 @@ export async function processCompactionModelUsageEvent(input: {
   model: string;
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
+  countsTowardTokenCap?: boolean;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   emittedSourceKeys: Set<string>;
@@ -395,6 +400,9 @@ export async function processCompactionModelUsageEvent(input: {
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
+          : {}),
+        ...(input.countsTowardTokenCap !== undefined
+          ? { countsTowardTokenCap: input.countsTowardTokenCap }
           : {}),
         usage: input.usage.usage,
         normalizedUsage,
@@ -581,6 +589,7 @@ export async function recordModelUsageAndDebitCredits(
     model: string;
     externallyBilled: boolean;
     chargesOpenGeniCredits?: boolean;
+    countsTowardTokenCap?: boolean;
     gatewayManaged?: boolean;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
     usage?: ModelUsageInput | ModelCallUsageInput | null;
@@ -599,14 +608,14 @@ export async function recordModelUsageAndDebitCredits(
   const outputTokens = sanitizedUsage.outputTokens ?? 0;
   const totalTokens = sanitizedUsage.totalTokens ?? 0;
   const chargesOpenGeniCredits = input.chargesOpenGeniCredits ?? !input.externallyBilled;
+  const countsTowardTokenCap = input.countsTowardTokenCap ?? !input.externallyBilled;
   const gatewayBilling = input.gatewayManaged ? input.gatewayBilling : undefined;
   if (gatewayBilling) {
-    const gatewayModel = Object.values(OPENGENI_GATEWAY_MODELS).find(
-      (candidate) => candidate.productId === input.model,
-    );
+    const allowedProviders = resolveModelProvider(settings, input.model)?.model.requestPolicy
+      ?.gateway.only;
     if (
-      !gatewayModel ||
-      !(gatewayModel.providers as readonly string[]).includes(gatewayBilling.finalProvider)
+      !allowedProviders ||
+      !(allowedProviders as readonly string[]).includes(gatewayBilling.finalProvider)
     ) {
       throw new Error(
         `AI Gateway reported unapproved provider ${gatewayBilling.finalProvider} for ${input.model}`,
@@ -649,7 +658,7 @@ export async function recordModelUsageAndDebitCredits(
   // cap, while a deployment-funded free model still records model.tokens. Every
   // non-credit path records a zero-cost marker and never consults pricing for a
   // debit.
-  if (!input.externallyBilled && totalTokens > 0) {
+  if (countsTowardTokenCap && totalTokens > 0) {
     await recordUsageEvent(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

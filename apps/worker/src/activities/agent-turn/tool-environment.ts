@@ -8,7 +8,7 @@ import {
   withCodexAppsRequestAuthorization,
   workspaceCodexSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
-  workspaceXaiSubscriptionActive,
+  workspaceXaiSubscriptionActiveForAuthority,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -51,7 +51,7 @@ import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { type ToolAuthNeededPayload } from "@opengeni/contracts";
 
-import { shouldPublishToolAuthNeededForTurn } from "./admission";
+import { shouldPublishToolAuthNeededForTurn, xaiCatalogReadinessAuthority } from "./admission";
 import { unavailableMcpOperationalContext } from "./errors";
 import { runtimeResourcesForTurn } from "./file-resources";
 import { waitForTurnOperation } from "./sandbox-provision";
@@ -525,6 +525,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       load: async () => {
         const currentCatalog = await resolveCatalogSettings(db, catalogSourceSettings);
         const currentSettings = currentCatalog.settings;
+        const xaiReadinessAuthority = xaiCatalogReadinessAuthority(turn, credentialSubjectId);
         const [
           policy,
           codexSubscriptionActive,
@@ -534,13 +535,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ] = await Promise.all([
           getWorkspaceModelPolicy(db, input.workspaceId),
           workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
-          credentialSubjectId && currentSettings.supergrokSubscriptionEnabled
-            ? workspaceXaiSubscriptionActive(
-                db,
-                currentSettings,
-                input.workspaceId,
-                credentialSubjectId,
-              )
+          xaiReadinessAuthority && currentSettings.supergrokSubscriptionEnabled
+            ? workspaceXaiSubscriptionActiveForAuthority(db, currentSettings, {
+                workspaceId: input.workspaceId,
+                ...xaiReadinessAuthority,
+              })
             : false,
           workspaceVercelAiGatewayConnectionActive(db, input.workspaceId),
           listWorkspaceGatewayCustomModels(db, {

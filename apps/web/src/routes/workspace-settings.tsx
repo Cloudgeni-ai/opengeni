@@ -520,11 +520,15 @@ export function WorkspaceSettingsRoute({
                 </p>
               </div>
               <div className="rounded-lg border border-border px-3">
-                <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <DefaultSessionModelPreferenceRow
+                  key={`default-model:${workspaceId}:${gatewayRevision}`}
+                  workspaceId={workspaceId}
+                  canManage={canRename}
+                />
               </div>
             </section>
             <ModelAccessPolicySection
-              key={`model-access:${workspaceId}`}
+              key={`model-access:${workspaceId}:${gatewayRevision}`}
               workspaceId={workspaceId}
               canManage={canDeleteWorkspace}
             />

@@ -34,7 +34,7 @@ CREATE TABLE workspace_gateway_custom_models (
     FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT workspace_gateway_custom_models_upstream_chk CHECK (
-    octet_length(upstream_model_id) BETWEEN 1 AND 256
+    octet_length(upstream_model_id) BETWEEN 1 AND 238
     AND upstream_model_id ~ '^[!-~]+$'
     AND upstream_model_id !~ '[|]'
   ),

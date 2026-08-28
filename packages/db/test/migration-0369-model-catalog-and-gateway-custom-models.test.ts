@@ -51,7 +51,7 @@ describe("migration 0369 model catalog and Gateway custom models", () => {
     expect(migration).toContain(
       "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.workspace_gateway_custom_models",
     );
-    expect(migration).toContain("octet_length(upstream_model_id) BETWEEN 1 AND 256");
+    expect(migration).toContain("octet_length(upstream_model_id) BETWEEN 1 AND 238");
     expect(migration).toContain("upstream_model_id ~ '^[!-~]+$'");
     expect(migration).toContain("upstream_model_id !~ '[|]'");
     expect(migration).not.toContain("{1,256}");

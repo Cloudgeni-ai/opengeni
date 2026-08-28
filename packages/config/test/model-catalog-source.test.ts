@@ -215,6 +215,27 @@ describe("deployment model catalog source", () => {
         ],
       }),
     ).toThrow();
+    for (const forbidden of [
+      "defaultHeaders",
+      "defaultQuery",
+      "publicDefaultHeaderNames",
+      "publicDefaultQueryNames",
+    ] as const) {
+      expect(() =>
+        parseModelCatalogDocument({
+          schemaVersion: 1,
+          builtInModels: ["gpt-5.6-luna"],
+          registryProviders: [
+            {
+              id: "database-provider",
+              baseUrl: "https://provider.example.test/v1",
+              models: [{ id: "database/model" }],
+              [forbidden]: forbidden.endsWith("Names") ? ["version"] : { version: "v1" },
+            },
+          ],
+        }),
+      ).toThrow();
+    }
     for (const productId of ["bad\nmodel", "bad|model"]) {
       expect(() =>
         parseModelCatalogDocument({
@@ -302,6 +323,13 @@ describe("deployment model catalog source", () => {
             id: "fireworks",
             baseUrl: "https://api.fireworks.ai/inference/v1",
             apiKeyEnv: "FIREWORKS_DATABASE_KEY",
+            defaultHeaders: {
+              "x-api-key": "header-secret",
+              "x-public-version": "2026-08-28",
+            },
+            publicDefaultHeaderNames: ["x-public-version"],
+            defaultQuery: { access_token: "query-secret", version: "v1" },
+            publicDefaultQueryNames: ["version"],
             models: [{ id: "host/placeholder" }],
           },
         ]),
@@ -327,11 +355,18 @@ describe("deployment model catalog source", () => {
     const [provider] = JSON.parse(settings.modelProvidersJson) as Array<{
       baseUrl: string;
       apiKeyEnv?: string;
+      defaultHeaders?: Record<string, string>;
+      defaultQuery?: Record<string, string>;
       models: Array<{ id: string }>;
     }>;
     expect(provider).toMatchObject({
       baseUrl: "https://api.fireworks.ai/inference/v1",
       apiKeyEnv: "FIREWORKS_DATABASE_KEY",
+      defaultHeaders: {
+        "x-api-key": "header-secret",
+        "x-public-version": "2026-08-28",
+      },
+      defaultQuery: { access_token: "query-secret", version: "v1" },
       models: [{ id: "fireworks/database-model" }],
     });
     expect(models).toBeArray();

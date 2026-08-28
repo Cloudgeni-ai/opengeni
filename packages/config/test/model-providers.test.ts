@@ -35,6 +35,7 @@ import {
   withWorkspaceGatewayCredential,
   OPENGENI_GATEWAY_MODELS,
   OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_GATEWAY_PROVIDER_ID,
 } from "../src";
 
@@ -184,6 +185,61 @@ describe("curated AI Gateway catalogue", () => {
         (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
       )?.apiKey,
     ).toBe("vck_workspace");
+  });
+
+  test("workspace overlay ignores custom rows whose generated product id is already configured", () => {
+    const base = withEnv(
+      {
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          {
+            id: "acme",
+            api: "chat",
+            baseUrl: "https://api.acme.test/v1",
+            apiKey: "acme-test-key",
+            models: [
+              {
+                id: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}acme`,
+                upstreamModelId: "safe",
+                aliases: [`${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}alias`],
+              },
+            ],
+          },
+        ]),
+      },
+      () => getSettings(),
+    );
+    const catalog = withWorkspaceGatewayCatalogProvider(base, [
+      { upstreamModelId: "deepseek-v4-flash-0731" },
+      { upstreamModelId: "acme" },
+      { upstreamModelId: "alias" },
+      { upstreamModelId: "anthropic/claude-sonnet-4.6", label: "Claude Sonnet 4.6" },
+    ]);
+    const models = configuredModels(catalog);
+
+    expect(
+      models.filter(
+        (model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}deepseek-v4-flash-0731`,
+      ),
+    ).toHaveLength(1);
+    expect(
+      models.find(
+        (model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}deepseek-v4-flash-0731`,
+      )?.upstreamModelId,
+    ).toBe("deepseek/deepseek-v4-flash-0731");
+    expect(
+      models.filter((model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}acme`),
+    ).toHaveLength(1);
+    expect(
+      models.filter((model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}alias`),
+    ).toHaveLength(0);
+    expect(
+      models.find(
+        (model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}anthropic/claude-sonnet-4.6`,
+      ),
+    ).toMatchObject({
+      upstreamModelId: "anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6",
+    });
   });
 
   test("managed debit fallback uses the highest approved DeepSeek route", () => {

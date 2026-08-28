@@ -798,7 +798,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
       const compactionPrep = await prepareCompaction({
         input,
-        settings,
+        settings: capabilitySettings,
         db,
         bus,
         observability,
@@ -1246,7 +1246,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
       const postAgentCompaction = await runPostAgentCompaction({
         input,
-        settings,
+        settings: capabilitySettings,
         db,
         bus,
         observability,
@@ -1411,7 +1411,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       return await runTurnStreamAttempt({
         input,
-        settings,
+        settings: capabilitySettings,
         db,
         runtime,
         objectStorage,

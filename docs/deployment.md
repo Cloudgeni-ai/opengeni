@@ -1810,6 +1810,12 @@ membership:
 
 1. Apply migration `0369_model_catalog_and_gateway_custom_models.sql` while
    API and workers still use `OPENGENI_MODEL_CATALOG_SOURCE=code`.
+   This additive migration can coexist with already-running pre-0369 processes,
+   but it advances the exact runtime-posture table/grant contract. After it
+   commits, a pre-0369 API or worker cannot pass startup/readiness posture and
+   must not be restarted or used as an image rollback target. Keep the old
+   fleet healthy until the catalog-aware rollout finishes; if replacement fails,
+   remain on the new schema and fix forward.
 2. Deploy the catalog-aware binary to every API, control worker, and turn worker
    while all of them still use `code`.
 3. Prepare a strict, secret-free schema-v1 JSON document that is semantically
@@ -1841,11 +1847,14 @@ membership:
    equivalent to code mode.
 6. Verify `/v1/config/client`, one authenticated workspace model catalog, a
    model picker, and the `list_models` tool after the whole fleet converges.
-7. Only then add database-only membership. Before removing membership or
-   changing an executable model definition, drain or fence queued and active
-   accepted turns that still name the old definition. Those turns fail closed
-   on definition drift rather than switching providers. A full maintenance
-   window that stops catalog consumers is the simpler alternative.
+7. Only then add database-only membership. Before removing membership, changing
+   an executable model definition, or changing a product's `free`/`credits`
+   classification, drain or fence queued and active accepted turns that still
+   name the affected product. Executable-definition drift fails closed rather
+   than switching providers; workspace-facing cost is a separate live
+   deployment policy and therefore must not change underneath accepted turns.
+   A full maintenance window that stops catalog consumers is the simpler
+   alternative.
 
 Database mode fails closed when the singleton is missing or invalid and never
 falls back to code. Rollback is the source flag: restoring `code` makes the
@@ -1858,10 +1867,11 @@ to the singleton; code mode continues to reject unknown cost-policy IDs.
 
 An authenticated database `registryProviders` entry must name a provider that
 is also declared in host `OPENGENI_MODEL_PROVIDERS_JSON`. Its provider kind,
-base URL, wire API/profile, public names, default headers, and default query
-must exactly match the host declaration. The host authorizes the transport and
-supplies the credential; the database document controls model membership and
-labels. Any mismatch fails closed instead of forwarding a host credential to a
+base URL, and wire API/profile must exactly match the host declaration. Default
+headers/query and their public-name classifications are forbidden in the
+database document and inherited only from the host declaration, alongside the
+credential. The database document controls model membership and labels. Any
+transport mismatch fails closed instead of forwarding a host credential to a
 database-selected endpoint.
 
 Workspace custom Vercel AI Gateway slugs are not part of this singleton. They
