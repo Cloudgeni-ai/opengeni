@@ -62,6 +62,7 @@
     "test:worker-restart-control": "OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 300000 ./test/integration/worker-restart.integration.ts",
     "test:ui-session-control": "bun test packages/react/test/chat-composer-controls.test.tsx packages/react/test/hooks.test.tsx packages/react/test/queue-surface.test.tsx apps/web/src/App.test.ts && bun scripts/run-browser-e2e.ts ./test/e2e/session-pins.browser.e2e.ts",
     "bench:session-control": "bun scripts/bench-session-control.ts",
+    "bench:session-event-append": "bun scripts/bench-session-event-append.ts",
     "bench:agent-session-authorization": "bun scripts/bench-agent-session-authorization.ts",
     "bench:model-input-memory": "bun scripts/bench-model-input-memory.ts",
     "bench:long-turn-memory": "bun scripts/bench-long-turn-memory.ts",
