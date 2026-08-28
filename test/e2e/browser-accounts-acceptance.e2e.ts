@@ -427,7 +427,9 @@ function isExpectedBoundedHttp1NativeSeam(input: {
   const isStream = url.pathname.endsWith("/stream") || url.pathname.includes("/live-events/stream");
   const isCancellation =
     /ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|cancelled|canceled/iu.test(input.failure) &&
-    !/NET_RESET|CONNECTION_RESET/iu.test(input.failure);
+    !/(?:NET_RESET|CONNECTION_RESET|connection[\s_-]+reset|transport[\s_-]+(?:failure|failed|error|reset))/iu.test(
+      input.failure,
+    );
   const elapsedMs = input.failedAt - input.startedAt;
   // The browser-owned seam fires at nine seconds. Allow only the request-start
   // offset plus bounded scheduling jitter; the two-second logical reconnect
@@ -2716,6 +2718,12 @@ describe("provider-neutral browser account acceptance", () => {
     expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 13_101 })).toBe(false);
     expect(
       isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "net::ERR_CONNECTION_RESET" }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "cancelled: connection reset" }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "canceled: transport failure" }),
     ).toBe(false);
     expect(
       isExpectedBoundedHttp1NativeSeam({
