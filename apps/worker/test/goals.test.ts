@@ -12,7 +12,9 @@ describe("goalContinuationPrompt", () => {
       null,
     );
 
-    expect(prompt).toContain("Continue working toward the active session goal");
+    expect(prompt).toContain(
+      "Reconcile the active session goal against authoritative current state",
+    );
     expect(prompt).toContain("Completion audit:");
     expect(prompt).toContain("Blocked audit:");
     expect(prompt).toContain("opengeni__goal_complete");
@@ -24,6 +26,30 @@ describe("goalContinuationPrompt", () => {
     // Without the tool in the session's effective first-party selection the
     // prompt must not instruct a tool the agent cannot call.
     expect(prompt).not.toContain("goal_wait");
+  });
+
+  test("re-enters the full objective through authoritative reconciliation", () => {
+    const prompt = goalContinuationPrompt(
+      { text: "Ship the fix" } as Parameters<typeof goalContinuationPrompt>[0],
+      1,
+      null,
+    );
+
+    expect(prompt).toStartWith(
+      "Reconcile the active session goal against authoritative current state, then carry the work through to the full requested end state and verify it.",
+    );
+    expect(prompt).toContain(
+      "re-entry into the full objective, not as a request to perform one step and stop",
+    );
+    expect(prompt).toContain("Do not rely on previous assistant claims of progress or completion");
+    expect(prompt).toContain(
+      "Keep working until the requested end state is true and verified. Do not end the turn merely because one useful action completed",
+    );
+    expect(prompt).toContain(
+      "Before repeating a state-setting action, verify whether its desired state already holds",
+    );
+    expect(prompt).not.toContain("make concrete progress toward the real requested end state");
+    expect(prompt).not.toContain("take the next useful action");
   });
 
   test("teaches goal_wait only when the tool is in the session's selection", () => {
