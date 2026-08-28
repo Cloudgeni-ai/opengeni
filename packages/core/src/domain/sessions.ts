@@ -2038,6 +2038,12 @@ export async function createSessionForRequestWithOutcome(
     payload.sandbox ?? (payload.targetSandboxId ? "new" : parentSessionId ? "shared" : "new");
   let sandboxGroupId: string | null = null;
   let inheritedBackend: Session["sandboxBackend"] | undefined;
+  let inheritedMachineTarget:
+    | {
+        sandboxId: string;
+        workingDir: string | null;
+      }
+    | undefined;
   // ENV-AWARE GROUPING: under the CURRENT mechanics the workspace VariableSet is
   // creation-time box state — the box's manifest env is fixed when it is cold-
   // created, and the SDK's provided-session guard rejects any manifest-env delta
@@ -2112,6 +2118,16 @@ export async function createSessionForRequestWithOutcome(
     } else {
       sandboxGroupId = parent.sandboxGroupId;
       inheritedBackend = parent.sandboxBackend;
+      // Connected Machines use a per-session route pointer rather than the
+      // shared group's id. Copy the trusted parent route so the child is bound
+      // to an enrollment before its first turn; the seed path below rechecks
+      // ownership, liveness, and the working directory.
+      if (parent.sandboxBackend === "selfhosted" && parent.activeSandboxId) {
+        inheritedMachineTarget = {
+          sandboxId: parent.activeSandboxId,
+          workingDir: parent.workingDir ?? null,
+        };
+      }
     }
   } else if (typeof sandboxChoice === "object") {
     const member = await getAnySessionInGroup(db, workspaceId, sandboxChoice.groupId);
@@ -2173,13 +2189,12 @@ export async function createSessionForRequestWithOutcome(
     });
   }
   // A registry-built selfhosted client is deliberately inert: it has no live
-  // agent identity until a concrete Connected Machine is named. Reject an own
+  // agent identity until a concrete Connected Machine is named. Reject any
   // targetless home before persisting a session whose first turn can only fail.
-  // Shared children retain their already-bound group through inheritedBackend.
   if (
-    inheritedBackend === undefined &&
     !payload.targetSandboxId &&
-    (payload.sandboxBackend ?? settings.sandboxBackend) === "selfhosted"
+    !inheritedMachineTarget &&
+    (inheritedBackend ?? payload.sandboxBackend ?? settings.sandboxBackend) === "selfhosted"
   ) {
     throw new HTTPException(422, {
       message: "selfhosted sessions require targetSandboxId; select an online Connected Machine",
@@ -2327,7 +2342,14 @@ export async function createSessionForRequestWithOutcome(
             workingDir: payload.workingDir ?? null,
             resourceSubjectId: personalResourceSubjectId,
           }
-        : null,
+        : inheritedMachineTarget
+          ? {
+              sandboxId: inheritedMachineTarget.sandboxId,
+              settings,
+              workingDir: inheritedMachineTarget.workingDir,
+              resourceSubjectId: personalResourceSubjectId,
+            }
+          : null,
       consumeNewSessionDraft:
         payload.expectedNewSessionDraftRevision !== undefined && payload.startMode !== "realtime"
           ? {

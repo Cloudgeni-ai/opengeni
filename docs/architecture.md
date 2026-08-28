@@ -278,8 +278,14 @@ outcome; text-only reasoning can still begin without contacting it. OpenGeni
 never interprets an offline machine as permission to cold-create a rival box,
 snapshot it, or provider-terminate the user's computer.
 
+A default shared child of a machine-primary session inherits the parent's
+trusted active-machine route and normalized working directory before its first
+turn. A `selfhosted` child is never persisted with only a backend label and no
+concrete machine binding.
+
 Canonical: `packages/runtime/src/sandbox/selfhosted/`,
 `apps/worker/src/activities/agent-turn/sandbox-establish.ts`,
+`packages/core/src/domain/sessions.ts`,
 `agent/proto/opengeni_agent.proto`, [`connected-machines.md`](connected-machines.md),
 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 

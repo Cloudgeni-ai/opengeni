@@ -16,6 +16,8 @@
 //   - a child of backend:'none' or a boxed (modal) parent, with only
 //     targetSandboxId (sandbox + sandboxBackend omitted) ⇒ own selfhosted home,
 //     own group, pointer seeded — honest-label, not caller sandboxBackend.
+//   - a default shared child of a machine-primary parent inherits the same
+//     trusted machine pointer and working directory before its first turn.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
@@ -457,6 +459,36 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(child.sandboxGroupId).toBe(child.id);
     expect(child.sandboxGroupId).not.toBe(parent.sandboxGroupId);
     expect(child.activeSandboxId).toBe(sandboxId);
+    const [turnRow] = await admin<{ sandbox_backend: string }[]>`
+      select sandbox_backend from session_turns where session_id = ${child.id} limit 1`;
+    expect(turnRow?.sandbox_backend).toBe("selfhosted");
+  }, 60_000);
+
+  test("a default shared child of a machine-primary parent inherits the connected-machine route", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager on the connected machine",
+        targetSandboxId: sandboxId,
+        workingDir: "/srv/project/manager",
+      },
+    );
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "worker with default placement" },
+    );
+
+    expect(child.parentSessionId).toBe(parent.id);
+    expect(child.sandboxBackend).toBe("selfhosted");
+    expect(child.sandboxGroupId).toBe(parent.sandboxGroupId);
+    expect(child.activeSandboxId).toBe(sandboxId);
+    expect(child.workingDir).toBe("/srv/project/manager");
     const [turnRow] = await admin<{ sandbox_backend: string }[]>`
       select sandbox_backend from session_turns where session_id = ${child.id} limit 1`;
     expect(turnRow?.sandbox_backend).toBe("selfhosted");
