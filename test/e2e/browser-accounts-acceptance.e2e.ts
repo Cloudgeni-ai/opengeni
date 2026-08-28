@@ -734,17 +734,20 @@ function observeBrowser(page: Page): BrowserProblems {
   page.on("requestfinished", (request) => {
     const finishedAt = performance.now();
     const finishedUrl = new URL(request.url());
+    const finishedFiniteRead = problems.pendingFiniteReads.get(request);
     problems.activeStreams.delete(request);
     problems.pendingFiniteReads.delete(request);
     if (
       problems.phase === "slot-revocation-reauthentication" &&
-      isBoundedHttp1StreamRequest(request.method(), request.url())
+      (finishedFiniteRead !== undefined ||
+        isBoundedHttp1StreamRequest(request.method(), request.url()))
     ) {
       // After its finite bytes are detached, WebKit may report the explicit
-      // native-fetch retirement as a renderer access-control error while
-      // Playwright has already classified the same request as finished. Keep
-      // exact terminal evidence for the same bijective page-error fence used
-      // by requestfailed; unrelated successful requests cannot authorize it.
+      // native-fetch retirement—or an old-document finite-read cancellation—
+      // as a renderer access-control error while Playwright has already
+      // classified the same request as finished. Keep exact terminal evidence
+      // for the same bijective page-error fence used by requestfailed;
+      // unrelated successful requests cannot authorize it.
       problems.acceptedRequestTerminals.push({
         observedAt: finishedAt,
         pathnameAndSearch: `${finishedUrl.pathname}${finishedUrl.search}`,
@@ -1112,7 +1115,11 @@ function optionalWebKitReauthenticationReloadError(
     .slice(0, 1);
 }
 
-const WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS = 1_000;
+// One finite batch plus its reconnect grace separates identical bounded polls.
+// Keep the terminal/page-error fence inside that four-second grace so a loaded
+// WebKit renderer may deliver its callbacks in either order, while the next
+// request to the same URL cannot authorize stale evidence from the prior one.
+const WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS = 4_000;
 
 function correlatedWebKitReauthenticationTerminalIndex(
   pageError: BrowserProblems["pageErrorEvidence"][number],
