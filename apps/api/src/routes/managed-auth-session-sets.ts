@@ -327,7 +327,9 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
     const transactionSecret = requireTransactionSecret(context, body.transactionId);
     const publicBaseUrl = deps.settings.publicBaseUrl;
     if (!publicBaseUrl) {
-      throw managedAuthApiError(503, "managed_authentication_unavailable", { retryable: true });
+      throw managedAuthApiError(503, "managed_authentication_unavailable", {
+        retryable: true,
+      });
     }
     const callbackURL = new URL("/account-auth", publicBaseUrl);
     callbackURL.searchParams.set("transaction", body.transactionId);
@@ -335,8 +337,16 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
     const errorCallbackURL = new URL(callbackURL);
     errorCallbackURL.searchParams.set("social", "error");
     try {
-      const requestDigest = digest(deps, body);
-      const receiptIdentifier = `opengeni-managed-social-start:${body.operationId}`;
+      const authorityHash = managedAuthSha256(authority);
+      const transactionSecretHash = managedAuthSha256(transactionSecret);
+      const requestDigest = digest(deps, {
+        operation: "social_start",
+        authorityHash,
+        actorEpoch,
+        transactionSecretHash,
+        request: body,
+      });
+      const receiptIdentifier = `opengeni-managed-social-start:${authorityHash}:${body.operationId}`;
       const receipt = await deps.db.transaction(async (transaction) => {
         await transaction.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${receiptIdentifier}, 0))`,
@@ -348,10 +358,14 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
           try {
             parsed = ManagedAuthSocialStartReceipt.safeParse(JSON.parse(stored.value));
           } catch (error) {
-            throw new ManagedAuthCompletionOutcomeUnknownError({ cause: error });
+            throw new ManagedAuthCompletionOutcomeUnknownError({
+              cause: error,
+            });
           }
           if (!parsed.success) {
-            throw new ManagedAuthCompletionOutcomeUnknownError({ cause: parsed.error });
+            throw new ManagedAuthCompletionOutcomeUnknownError({
+              cause: parsed.error,
+            });
           }
           if (parsed.data.requestDigest !== requestDigest) {
             throw new ManagedAuthSessionSetOperationReuseError();
@@ -373,8 +387,8 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
                 operationId: body.operationId,
                 provider: body.provider,
                 transactionId: body.transactionId,
-                authorityHash: managedAuthSha256(authority),
-                transactionSecretHash: managedAuthSha256(transactionSecret),
+                authorityHash,
+                transactionSecretHash,
                 expectedGeneration: body.expectedGeneration,
                 expectedActorEpoch: actorEpoch,
               },
@@ -383,7 +397,18 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
           headers: isolatedManagedAuthHeaders(context.req.raw),
           returnHeaders: true,
         });
-        const url = result.response?.url;
+        const url = validatedManagedAuthSocialAuthorizationUrl({
+          provider: body.provider,
+          rawUrl: result.response?.url,
+          expectedClientId:
+            body.provider === "google"
+              ? deps.settings.managedAuthGoogleClientId!
+              : deps.settings.managedAuthGithubClientId!,
+          expectedCallbackUrl: new URL(
+            `/v1/auth/callback/${body.provider}`,
+            publicBaseUrl,
+          ).toString(),
+        });
         const stateCookieName = authContext.createAuthCookie("state").name;
         const stateCookie = setCookieHeaders(result.headers).find((cookie) =>
           cookie.startsWith(`${stateCookieName}=`),
@@ -558,6 +583,46 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
       await resolveCanonicalDeepLink(deps, authority, body.path, snapshot.projection.actorEpoch),
     );
   });
+}
+
+export function validatedManagedAuthSocialAuthorizationUrl(input: {
+  provider: "google" | "github";
+  rawUrl: unknown;
+  expectedClientId: string;
+  expectedCallbackUrl: string;
+}): string {
+  if (typeof input.rawUrl !== "string") {
+    throw new ManagedAuthCompletionOutcomeUnknownError();
+  }
+  let url: URL;
+  try {
+    url = new URL(input.rawUrl);
+  } catch (error) {
+    throw new ManagedAuthCompletionOutcomeUnknownError({ cause: error });
+  }
+  const expectedEndpoint =
+    input.provider === "google"
+      ? { origin: "https://accounts.google.com", pathname: "/o/oauth2/v2/auth" }
+      : { origin: "https://github.com", pathname: "/login/oauth/authorize" };
+  const exactlyOne = (name: string, expected?: string): boolean => {
+    const values = url.searchParams.getAll(name);
+    return (
+      values.length === 1 && values[0] !== "" && (expected === undefined || values[0] === expected)
+    );
+  };
+  if (
+    url.origin !== expectedEndpoint.origin ||
+    url.pathname !== expectedEndpoint.pathname ||
+    url.username ||
+    url.password ||
+    url.hash ||
+    !exactlyOne("client_id", input.expectedClientId) ||
+    !exactlyOne("redirect_uri", input.expectedCallbackUrl) ||
+    !exactlyOne("state")
+  ) {
+    throw new ManagedAuthCompletionOutcomeUnknownError();
+  }
+  return input.rawUrl;
 }
 
 /**

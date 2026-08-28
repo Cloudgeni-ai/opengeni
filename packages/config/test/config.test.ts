@@ -465,6 +465,11 @@ describe("managed auth social providers", () => {
     expect(
       withEnv(
         {
+          OPENGENI_ENVIRONMENT: "test",
+          OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+          OPENGENI_PUBLIC_BASE_URL: "https://app.opengeni.test",
+          OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret",
+          OPENGENI_DELEGATION_SECRET: "delegation-secret",
           OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID: "google-login.apps.googleusercontent.com",
           OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET: "google-login-secret",
           OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID: "github-login-client",
@@ -487,6 +492,46 @@ describe("managed auth social providers", () => {
     expect(() =>
       withEnv({ OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET: "github-secret" }, () => getSettings()),
     ).toThrow(/MANAGED_AUTH_GITHUB_CLIENT_ID.*MANAGED_AUTH_GITHUB_CLIENT_SECRET/);
+  });
+
+  test("requires managed mode and an exact environment origin", () => {
+    const credentials = {
+      OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID: "google-login.apps.googleusercontent.com",
+      OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET: "google-login-secret",
+    };
+    expect(() => withEnv(credentials, () => getSettings())).toThrow(/PRODUCT_ACCESS_MODE=managed/);
+    expect(() =>
+      withEnv(
+        {
+          ...credentials,
+          OPENGENI_ENVIRONMENT: "test",
+          OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+          OPENGENI_PUBLIC_BASE_URL: "https://app.opengeni.test/a-path",
+          OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret",
+          OPENGENI_DELEGATION_SECRET: "delegation-secret",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/credential-free HTTP\(S\) origin/);
+  });
+
+  test("requires HTTPS for social login outside local and test", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+          OPENGENI_PUBLIC_BASE_URL: "http://app.opengeni.test",
+          OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret",
+          OPENGENI_DELEGATION_SECRET: "delegation-secret",
+          OPENGENI_RESEND_API_KEY: "re_test",
+          OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 1).toString("base64"),
+          OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID: "google-login.apps.googleusercontent.com",
+          OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET: "google-login-secret",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/must use https when managed social authentication is configured/);
   });
 });
 

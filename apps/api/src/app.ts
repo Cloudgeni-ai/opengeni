@@ -73,6 +73,7 @@ import {
 import {
   createManagedAuth,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
 } from "./auth/managed-auth";
 import {
@@ -614,6 +615,7 @@ export function createAppComposition(deps: AppDependencies): {
           managedAuth,
           c.req.raw,
           oauthCallbackProvider,
+          deps.settings.publicBaseUrl!,
         );
         if (!attempt || !authority || attempt.authorityHash !== managedAuthSha256(authority)) {
           throw new HTTPException(409, { message: "provider_route_blocked" });
@@ -625,11 +627,27 @@ export function createAppComposition(deps: AppDependencies): {
           oauthCallbackProvider,
           async () => {
             const response = await managedAuth.handler(isolated.request);
-            return { response, authSessionId: currentManagedAuthCreatedSessionId() };
+            return {
+              response,
+              authSessionId: currentManagedAuthCreatedSessionId(),
+            };
           },
         );
         providerResponse = handled.response;
-        if (handled.authSessionId) {
+        if (
+          !handled.authSessionId &&
+          managedAuthOAuthReturnMatches(
+            providerResponse.headers.get("location") ?? "",
+            new URL(deps.settings.publicBaseUrl!).origin,
+            attempt.transactionId,
+            "complete",
+          )
+        ) {
+          const location = new URL("/account-auth", deps.settings.publicBaseUrl!);
+          location.searchParams.set("transaction", attempt.transactionId);
+          location.searchParams.set("social", "error");
+          providerResponse = Response.redirect(location, 302);
+        } else if (handled.authSessionId) {
           try {
             await adoptManagedAuthSession({
               db: deps.db,

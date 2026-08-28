@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import { canonicalPublicOrigin, type Settings } from "@opengeni/config";
 import {
   type ManagedAuth,
   type ManagedEmailMessage,
@@ -44,6 +44,21 @@ export function managedAuthUserCreateOverride(
 ): { data: typeof user } | undefined {
   if (managedAuthRequiresEmailVerification(settings)) return undefined;
   return { data: { ...user, emailVerified: true } };
+}
+
+export function managedAuthUserCreateAdmission(
+  settings: Pick<Settings, "environment">,
+  user: { emailVerified: boolean } & Record<string, unknown>,
+  providerId: string,
+): { data: typeof user } | false | undefined {
+  if (
+    managedAuthRequiresEmailVerification(settings) &&
+    providerId !== "credential" &&
+    !user.emailVerified
+  ) {
+    return false;
+  }
+  return managedAuthUserCreateOverride(settings, user);
 }
 
 /** Keep Better Auth password policy and storage format behind this boundary. */
@@ -350,7 +365,8 @@ export function createManagedAuth(
       },
       user: {
         create: {
-          before: async (user) => managedAuthUserCreateOverride(settings, user),
+          before: async (user) =>
+            managedAuthUserCreateAdmission(settings, user, currentManagedAuthProviderId()),
           after: async (user) => {
             if (!user.emailVerified) return;
             await ensureManagedAccessForUser(db, {
@@ -384,7 +400,10 @@ export async function resolveManagedAuthOAuthAttempt(
   auth: ManagedAuth,
   request: Request,
   provider: "google" | "github",
+  publicBaseUrl: string,
 ): Promise<ManagedAuthOAuthAttempt | null> {
+  const expectedOrigin = canonicalPublicOrigin(publicBaseUrl);
+  if (!expectedOrigin) return null;
   const state = new URL(request.url).searchParams.get("state");
   if (!state) return null;
   const verification = await (await auth.$context).internalAdapter.findVerificationValue(state);
@@ -419,9 +438,12 @@ export async function resolveManagedAuthOAuthAttempt(
     return null;
   }
   const callbackURL = typeof stateData.callbackURL === "string" ? stateData.callbackURL : null;
+  const errorURL = typeof stateData.errorURL === "string" ? stateData.errorURL : null;
   if (
     !callbackURL ||
-    !managedAuthOAuthReturnMatches(callbackURL, value.transactionId, "complete")
+    !errorURL ||
+    !managedAuthOAuthReturnMatches(callbackURL, expectedOrigin, value.transactionId, "complete") ||
+    !managedAuthOAuthReturnMatches(errorURL, expectedOrigin, value.transactionId, "error")
   ) {
     return null;
   }
@@ -450,14 +472,16 @@ export async function isolatedManagedAuthOAuthCallbackRequest(
   return { request: new Request(request, { headers }), stateCookieName };
 }
 
-function managedAuthOAuthReturnMatches(
+export function managedAuthOAuthReturnMatches(
   raw: string,
+  expectedOrigin: string,
   transactionId: string,
   outcome: "complete" | "error",
 ): boolean {
   try {
     const url = new URL(raw);
     return (
+      url.origin === expectedOrigin &&
       url.pathname === "/account-auth" &&
       url.searchParams.size === 2 &&
       url.searchParams.get("transaction") === transactionId &&

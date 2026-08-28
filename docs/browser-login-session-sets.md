@@ -106,12 +106,17 @@ slot selected. Re-auth proves the transaction's exact slot, human, login binding
 and captured revisions before replacing that slot's provider session.
 
 Configured Google and GitHub sign-in starts through the same fenced transaction.
-The OAuth state retains only a server-side transaction digest and exact generation,
-actor epoch, authority hash, provider, and safe popup return. The callback preserves
-only Better Auth's state cookie, resolves the exact provider login binding, adopts
-the newly created session before redirecting to `/account-auth`, and then removes
-the ambient provider session cookie. A callback cannot select another browser slot,
-and automatic email-match account linking remains disabled.
+The start receipt and its idempotency lock are scoped to the exact authority, actor
+epoch, transaction-secret hash, and request. The API accepts only the provider's
+exact HTTPS authorization endpoint, configured client id, environment callback,
+and one opaque state value. The OAuth state retains only a server-side transaction
+digest and exact generation, actor epoch, authority hash, provider, and safe popup
+returns on the configured environment origin. The callback preserves only Better
+Auth's state cookie, resolves the exact provider login binding, adopts the newly
+created session before redirecting to `/account-auth`, and then removes the ambient
+provider session cookie. A provider cannot create a managed social identity from
+an unverified email assertion, a callback cannot select another browser slot, and
+automatic email-match account linking remains disabled.
 
 The session-set-capable signed-out surface uses that isolated Add path for sign-in
 in both `dual` and `broker`. Account creation and verification resend remain

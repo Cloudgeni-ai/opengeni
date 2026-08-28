@@ -5357,6 +5357,27 @@ function validateSettings(settings: Settings): void {
       "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID and OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET must be configured together",
     );
   }
+  const managedSocialAuthConfigured = Boolean(
+    settings.managedAuthGoogleClientId || settings.managedAuthGithubClientId,
+  );
+  if (managedSocialAuthConfigured) {
+    if (settings.productAccessMode !== "managed") {
+      throw new Error(
+        "Managed Google/GitHub authentication requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
+      );
+    }
+    const publicOrigin = canonicalPublicOrigin(settings.publicBaseUrl);
+    if (!publicOrigin) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free HTTP(S) origin when managed social authentication is configured",
+      );
+    }
+    if (!publicOrigin.startsWith("https://") && !["local", "test"].includes(settings.environment)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when managed social authentication is configured outside local/test",
+      );
+    }
+  }
   environmentsEncryptionKeyBytes(settings);
   if (settings.integrationsEnabled) {
     if (settings.productAccessMode === "managed" && !settings.publicBaseUrl) {
