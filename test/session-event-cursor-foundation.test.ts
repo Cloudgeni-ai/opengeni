@@ -48,6 +48,20 @@ describe("session event cursor foundation", () => {
     expect(migration).not.toContain("UPDATE sessions\n    SET last_sequence");
   });
 
+  test("starts newly inserted sessions before their first durable event", async () => {
+    const migration = await readFile(
+      join(repo, "packages/db/drizzle/0373_session_event_cursors.sql"),
+      "utf8",
+    );
+    const initializer = migration.slice(
+      migration.indexOf("CREATE FUNCTION initialize_session_event_cursors_for_inserted_sessions"),
+      migration.indexOf("CREATE TRIGGER sessions_initialize_event_cursors"),
+    );
+
+    expect(initializer).toContain("SELECT id, account_id, workspace_id, 0");
+    expect(initializer).not.toContain("SELECT id, account_id, workspace_id, last_sequence");
+  });
+
   test("keeps the cursor protected and available to rolling runtime writers", async () => {
     const [migration, posture] = await Promise.all([
       readFile(join(repo, "packages/db/drizzle/0374_session_event_cursors.sql"), "utf8"),
