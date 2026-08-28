@@ -301,6 +301,62 @@ export async function issueSelfUserResourceGrant(
   });
 }
 
+export async function issueSelfLocalConnectionUseGrant(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    authorityId: string;
+    context: "user_private" | "workspace_shared";
+    workspaceSharedAcknowledged: boolean;
+  },
+): Promise<UserResourceAuthorityGrant> {
+  return await withOwnerContext(db, input, async (scopedDb) => {
+    const [row] = await rawRows<
+      Omit<UserResourceAuthorityGrant, "delegation"> & {
+        organizationId: string;
+        authorityGeneration: number;
+      }
+    >(
+      scopedDb,
+      sql`
+        select grant_id as "grantId", organization_id as "organizationId",
+          authority_generation::int as "authorityGeneration",
+          target_workspace_id as "targetWorkspaceId",
+          target_session_id as "targetSessionId", action, grant_mode as mode,
+          grant_context as context, authority_epoch::int as "authorityEpoch",
+          grant_generation::int as generation, grant_status as status,
+          expires_at::text as "expiresAt"
+        from issue_self_local_connection_use_grant(
+          ${input.accountId}::uuid, ${input.authorityId}::uuid,
+          ${input.workspaceId}::uuid, ${input.context},
+          ${input.workspaceSharedAcknowledged}
+        )
+      `,
+    );
+    if (!row) throw new Error("local connection grant was not returned");
+    const { organizationId, authorityGeneration, ...grant } = row;
+    return {
+      ...grant,
+      expiresAt: rfc3339(grant.expiresAt),
+      delegation: {
+        authorityId: input.authorityId,
+        grantId: grant.grantId,
+        organizationId,
+        workspaceId: grant.targetWorkspaceId,
+        sessionId: grant.targetSessionId,
+        action: grant.action,
+        mode: grant.mode,
+        context: grant.context,
+        authorityEpoch: grant.authorityEpoch,
+        authorityGeneration,
+        grantGeneration: grant.generation,
+      },
+    };
+  });
+}
+
 export async function revokeSelfUserResourceGrant(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string; grantId: string },

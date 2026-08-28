@@ -2302,6 +2302,8 @@ describe("GitHub repository resources", () => {
       manualRepos: [{ id: 1, url: manualResource.uri, ref: "main" }],
       selectedRepoIds: new Set([privateRepo.id]),
       selectedRepoRefs: { [privateRepo.id]: "develop" },
+      selectedPersonalRepoIds: new Set(),
+      selectedPersonalRepoRefs: {},
     });
   });
 });

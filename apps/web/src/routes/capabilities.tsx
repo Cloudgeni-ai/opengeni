@@ -112,6 +112,10 @@ import {
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
 import { mcpOAuthCallbackFailureMessage, startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+import {
+  personalGitHubOAuthFailureMessage,
+  personalGitHubOAuthReturn,
+} from "@/lib/personal-github-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { request } from "@/api";
@@ -1177,6 +1181,29 @@ export function CapabilitiesRoute({
       setBusyId(null);
     }
   }
+
+  const personalGitHubOAuthHandled = useRef(false);
+  useEffect(() => {
+    if (personalGitHubOAuthHandled.current) return;
+    const result = personalGitHubOAuthReturn(window.location.search);
+    if (!result) return;
+    personalGitHubOAuthHandled.current = true;
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${result.cleanedSearch}${window.location.hash}`,
+    );
+    setOpenIntegration("github");
+    if (result.outcome === "success") {
+      void context.refreshPersonalGitHub(workspaceId).then(() => {
+        toast.success("Your GitHub identity is connected");
+      });
+      return;
+    }
+    toast.error("Couldn't connect your GitHub identity", {
+      description: personalGitHubOAuthFailureMessage(result.reason),
+    });
+  }, [context, workspaceId]);
 
   const socialOAuthHandled = useRef(false);
   useEffect(() => {

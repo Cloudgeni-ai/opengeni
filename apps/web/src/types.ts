@@ -108,6 +108,11 @@ export type {
   Permission as SdkPermission,
   LatencyMode,
   ManagedOrganizationMembership,
+  McpConnectionAuthoritySelection,
+  PersonalGitHubConnectionMetadata,
+  PersonalGitHubConnectionStatusResponse,
+  PersonalGitHubRepositoryCatalogItem,
+  PersonalGitHubRepositorySelectionState,
   ReasoningEffort,
   ResourceAuthorityScope,
   ResourceRef,
@@ -204,6 +209,7 @@ export type TurnSubmission = {
   firstPartyMcpPermissions?: string[];
   firstPartyMcpTools?: import("@opengeni/sdk").FirstPartyMcpToolName[];
   personalResourceAttachment?: import("@opengeni/sdk").PersonalResourceAttachmentIntent;
+  connectionAuthorities?: import("@opengeni/sdk").McpConnectionAuthoritySelection[];
 };
 
 export type AuthSession = {

@@ -1428,6 +1428,12 @@ function SessionChatPane(props: {
     events: props.events,
     sendExtras: () => ({
       resources: [...attachments.readyResources, ...repositories.pendingResources],
+      ...(repositories.pendingResources.some(
+        (resource) =>
+          resource.kind === "repository" && resource.connectionType === "github_personal",
+      ) && context.personalGitHubAuthority
+        ? { connectionAuthorities: [context.personalGitHubAuthority] }
+        : {}),
       ...(personalAttachment.intent
         ? { personalResourceAttachment: personalAttachment.intent }
         : {}),

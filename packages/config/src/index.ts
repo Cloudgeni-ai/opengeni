@@ -5401,11 +5401,6 @@ function validateSettings(settings: Settings): void {
         "OPENGENI_INTEGRATIONS_ENABLED=true is required when personal GitHub OAuth is enabled",
       );
     }
-    if (settings.productAccessMode !== "managed") {
-      throw new Error(
-        "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
-      );
-    }
     if (!settings.githubPersonalOauthClientId || !settings.githubPersonalOauthClientSecret) {
       throw new Error(
         "personal GitHub OAuth requires OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID and OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",

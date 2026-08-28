@@ -43,6 +43,7 @@ const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null
  * the value the cookie branch produced.
  */
 const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
+const canonicalLocalHumanContexts = new WeakSet<AccessContext>();
 const resolvedAccessGrantAuthorizations = new WeakSet<object>();
 
 /**
@@ -119,6 +120,8 @@ export type AccessGrantAuthorization = {
    * principal, and for any future path that does not verify a cookie.
    */
   canonicalManagedHumanSession: boolean;
+  /** Exact in-process single-user local bootstrap, never a delegated bearer. */
+  canonicalLocalHumanSession: boolean;
 };
 
 export function accessGrantAuthorizationFromContext(
@@ -151,6 +154,7 @@ export function accessGrantAuthorizationFromContext(
     authenticatedSubjectId: context.subjectId,
     contextIntegrity,
     canonicalManagedHumanSession: isCanonicalManagedHumanSession(context, grant),
+    canonicalLocalHumanSession: isCanonicalLocalHumanSession(context, grant),
   };
   resolvedAccessGrantAuthorizations.add(authorization);
   return authorization;
@@ -262,6 +266,18 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
   );
 }
 
+function isCanonicalLocalHumanSession(context: AccessContext, grant: AccessGrant): boolean {
+  return (
+    canonicalLocalHumanContexts.has(context) &&
+    context.mode === "local" &&
+    context.subjectId === "dev" &&
+    grant.subjectId === context.subjectId &&
+    grant.principalKind === "human_session" &&
+    grant.metadata?.delegated !== true &&
+    !grant.serviceInitiator
+  );
+}
+
 function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session" | undefined {
   if (context.mode !== "managed" || context.workspaceGrants.length === 0) {
     return undefined;
@@ -330,7 +346,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
     if (delegated) {
       return delegated;
     }
-    return await bootstrapWorkspace(deps.db, {
+    const context = await bootstrapWorkspace(deps.db, {
       accountExternalSource: "opengeni:local",
       accountExternalId: "default",
       accountName: "Local",
@@ -340,6 +356,8 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
       subjectId: "dev",
       subjectLabel: "Local dev",
     });
+    canonicalLocalHumanContexts.add(context);
+    return context;
   }
 
   if (deps.settings.productAccessMode === "configured") {

@@ -14,8 +14,8 @@ export function wholeKibEnvelope(
   return Math.ceil((measuredBytes + minimumHeadroomBytes) / KIB) * KIB;
 }
 
-/** Exact embedded-client plus attachment-preview Linux/x64 Bun 1.3.14 direct-session measurement. */
-export const DIRECT_SESSION_RAW_MEASUREMENT = 2_200_819;
+/** Exact personal-GitHub plus current-main Linux/x64 Bun 1.4 measurement. */
+export const DIRECT_SESSION_RAW_MEASUREMENT = 2_219_469;
 export const DIRECT_SESSION_RAW_BUDGET = wholeKibEnvelope(DIRECT_SESSION_RAW_MEASUREMENT);
 
 /** Exact version-frozen release-source Linux/x64 Bun 1.4 workload measurement. */
@@ -35,9 +35,16 @@ export const WORKSPACE_MEMBER_ADMINISTRATION_RAW_MEASUREMENT = 2_210_226;
 export const WORKSPACE_MEMBER_ADMINISTRATION_RAW_BUDGET = wholeKibEnvelope(
   WORKSPACE_MEMBER_ADMINISTRATION_RAW_MEASUREMENT,
 );
+
+/** Exact workspace-member administration plus current-main Linux/x64 Bun 1.4 measurement. */
+export const WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT = 2_220_970;
+export const WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_BUDGET = wholeKibEnvelope(
+  WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT,
+);
 export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   DIRECT_SESSION_RAW_BUDGET,
   VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET,
   WORK_DISCOVERY_MERGE_TREE_RAW_BUDGET,
   WORKSPACE_MEMBER_ADMINISTRATION_RAW_BUDGET,
+  WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_BUDGET,
 );

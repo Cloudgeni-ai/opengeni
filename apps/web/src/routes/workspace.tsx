@@ -79,6 +79,7 @@ export function WorkspaceShellRouteContent({
     setSelectedRepoIds,
     setSelectedRepoRefs,
     refreshGitHub,
+    refreshPersonalGitHub,
     refreshWorkspaceMcpServers,
   } = context;
   const [ownedSlackAccess, setOwnedSlackAccess] = useState<WorkspaceOwnedState<SlackAccessState>>(
@@ -320,6 +321,7 @@ export function WorkspaceShellRouteContent({
     setSelectedRepoIds(new Set());
     setSelectedRepoRefs({});
     void refreshGitHub(workspaceId, abortController.signal);
+    void refreshPersonalGitHub(workspaceId, abortController.signal);
     void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
       if (!abortController.signal.aborted && !isAbortError(error)) {
         toast.error("Failed to load workspace MCP tools", {
@@ -332,6 +334,7 @@ export function WorkspaceShellRouteContent({
     accessKeyVersion,
     activeWorkspaceId,
     refreshGitHub,
+    refreshPersonalGitHub,
     refreshWorkspaceMcpServers,
     resetWorkspaceIntegrations,
     setSelectedRepoIds,
