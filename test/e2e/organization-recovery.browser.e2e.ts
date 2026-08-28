@@ -920,6 +920,9 @@ describe("organization recovery same-origin Chromium acceptance", () => {
           !("accountId" in body),
       ),
     ).toBe(true);
+    custodianTwoPage.removeAllListeners();
+    await custodianTwoPage.context().close();
+    actorBrowsers.delete("custodian-2");
     expect(browserProblems).toEqual([]);
   }, 300_000);
 
