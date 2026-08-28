@@ -520,16 +520,33 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     // fails with `role opengeni_app does not exist`.
     const admin = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
     try {
-      await admin.unsafe(`
-          DO $$ BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
-              CREATE ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
-                NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
-            ELSE
-              ALTER ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
-                NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
-            END IF;
-          END $$;`);
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await admin.unsafe(`
+            DO $$ BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
+                CREATE ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
+                  NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
+              ELSE
+                ALTER ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
+                  NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
+              END IF;
+            END $$;`);
+          break;
+        } catch (error) {
+          const details = error as { code?: unknown; message?: unknown; routine?: unknown };
+          const concurrentCatalogUpdate =
+            details.code === "XX000" &&
+            details.message === "tuple concurrently updated" &&
+            details.routine === "simple_heap_update";
+          const concurrentRoleCreate =
+            details.code === "42710" &&
+            typeof details.message === "string" &&
+            /^role ".+" already exists$/u.test(details.message);
+          if ((!concurrentCatalogUpdate && !concurrentRoleCreate) || attempt === 20) throw error;
+          await Bun.sleep(Math.min(25 * attempt, 250));
+        }
+      }
     } finally {
       await admin.end().catch(() => undefined);
     }
