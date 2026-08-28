@@ -425,10 +425,12 @@ function isExpectedBoundedHttp1NativeSeam(input: {
   }
   const url = new URL(input.url);
   const isStream = url.pathname.endsWith("/stream") || url.pathname.includes("/live-events/stream");
+  // Chromium and Firefox expose concrete abort codes; WebKit reports a bare
+  // cancellation word. Exact matching prevents an abort-shaped prefix from
+  // hiding a reset, timeout, DNS, or other transport failure.
   const isCancellation =
-    /ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|cancelled|canceled/iu.test(input.failure) &&
-    !/(?:NET_RESET|CONNECTION_RESET|connection[\s_-]+reset|transport[\s_-]+(?:failure|failed|error|reset))/iu.test(
-      input.failure,
+    /^(?:(?:net::)?ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|(?:request (?:was )?)?(?:cancelled|canceled))$/iu.test(
+      input.failure.trim(),
     );
   const elapsedMs = input.failedAt - input.startedAt;
   // The browser-owned seam fires at nine seconds. Allow only the request-start
