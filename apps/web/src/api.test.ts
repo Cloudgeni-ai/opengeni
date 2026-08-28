@@ -687,10 +687,10 @@ describe("web API auth helpers", () => {
 
     try {
       configureManagedActorEpoch("finite-sse");
-      for (const contentType of [
-        "application/vnd.opengeni.sse-batch; charset=utf-8",
-        "text/event-stream; charset=utf-8",
-      ]) {
+      for (const [contentType, retiresNativeFetch] of [
+        ["application/vnd.opengeni.sse-batch; charset=utf-8", false],
+        ["text/event-stream; charset=utf-8", true],
+      ] as const) {
         const observed: {
           accept?: string | null;
           input?: string;
@@ -731,8 +731,10 @@ describe("web API auth helpers", () => {
         expect(observed.signal?.aborted).toBe(false);
         bodyController.close();
         const response = await pending;
-        expect(observed.signal?.aborted).toBe(true);
-        expect(observed.signal?.reason).toMatchObject({ name: "AbortError" });
+        expect(observed.signal?.aborted).toBe(retiresNativeFetch);
+        if (retiresNativeFetch) {
+          expect(observed.signal?.reason).toMatchObject({ name: "AbortError" });
+        }
         expect(source.locked).toBe(false);
         const reader = response.body!.getReader();
         const payload = await reader.read();

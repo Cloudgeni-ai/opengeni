@@ -298,8 +298,8 @@ export async function managedActorFetch(
     // EOF. Draining here also guarantees the native body already has a
     // rejection consumer before any post-header actor abort.
     let actorResponse = response;
-    const finiteSseBatch = isFiniteSseBatchResponse(response, boundedHttp1Sse);
-    const detachedResponse = isFiniteJsonResponse(response) || finiteSseBatch;
+    const finiteSseBatch = finiteSseBatchKind(response, boundedHttp1Sse);
+    const detachedResponse = isFiniteJsonResponse(response) || finiteSseBatch !== null;
     if (detachedResponse) {
       const bytes = await readFiniteResponseBytes(response);
       if (responseIsStale()) {
@@ -313,10 +313,12 @@ export async function managedActorFetch(
         statusText: response.statusText,
         headers: response.headers,
       });
-      if (finiteSseBatch) {
-        // The caller now owns a complete byte copy. Abort is harmless for the
-        // settled snapshot and remains a defensive retirement seam for older
-        // APIs during a rolling deployment.
+      if (finiteSseBatch === "legacy") {
+        // An older API can expose EOF for its finite text/event-stream body
+        // while Chromium still accounts the native request as a live SSE
+        // transport. Retire only that rolling-deployment seam. The current
+        // vendor-typed response is an ordinary completed HTTP response whose
+        // connection must remain reusable.
         controller.abort(
           new DOMException("The finite HTTP/1 stream body was fully detached", "AbortError"),
         );
@@ -352,7 +354,7 @@ export async function managedActorFetch(
       actorBodyController.signal,
       cleanup,
       abortNativeTransport,
-      finiteSseBatch ? cleanCloseDelayMs : 0,
+      finiteSseBatch !== null ? cleanCloseDelayMs : 0,
       detachedResponse ? 0 : nativeLifetimeMs,
     );
   } finally {
@@ -441,22 +443,28 @@ function isFiniteJsonResponse(response: Response): boolean {
   return contentType === "application/json" || contentType?.endsWith("+json") === true;
 }
 
-function isFiniteSseBatchResponse(response: Response, boundedHttp1Sse: boolean): boolean {
+function finiteSseBatchKind(
+  response: Response,
+  boundedHttp1Sse: boolean,
+): "current" | "legacy" | null {
   // The explicit request transform is the authority boundary. Accept the
   // legacy SSE media type only inside that boundary so a new web bundle can
   // safely overlap an older API during a rolling deployment without turning
   // unrelated finite SSE responses into browser-batch transports.
-  if (!boundedHttp1Sse) return false;
+  if (!boundedHttp1Sse) return null;
   const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   const contentLength = response.headers.get("content-length");
   const parsedContentLength = contentLength === null ? Number.NaN : Number(contentLength);
-  return (
-    (contentType === boundedHttp1SseBatchContentType || contentType === "text/event-stream") &&
-    contentLength !== null &&
-    /^\d+$/.test(contentLength) &&
-    Number.isSafeInteger(parsedContentLength) &&
-    parsedContentLength <= HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
-  );
+  if (
+    contentLength === null ||
+    !/^\d+$/.test(contentLength) ||
+    !Number.isSafeInteger(parsedContentLength) ||
+    parsedContentLength > HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
+  ) {
+    return null;
+  }
+  if (contentType === boundedHttp1SseBatchContentType) return "current";
+  return contentType === "text/event-stream" ? "legacy" : null;
 }
 
 async function readFiniteResponseBytes(response: Response): Promise<ArrayBuffer> {
