@@ -109,7 +109,8 @@ describe("session event cursor foundation", () => {
     expect(cursorLock).toBeGreaterThan(sessionLock);
     expect(turnLock).toBeGreaterThan(cursorLock);
     expect(attemptLock).toBeGreaterThan(turnLock);
-    expect(helper).toContain("cursor.lastSequence !== session.lastSequence");
-    expect(helper).toContain("Session event cursor parity failed");
+    expect(helper).toContain("cursor.lastSequence < session.lastSequence");
+    expect(helper).toContain("lastSequence: cursor.lastSequence");
+    expect(helper).toContain("Session event cursor is behind session projection");
   });
 });
