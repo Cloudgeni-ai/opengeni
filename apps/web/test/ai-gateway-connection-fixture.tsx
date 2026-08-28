@@ -51,17 +51,22 @@ const initialModels = [
 
 function Fixture() {
   const [receipt, setReceipt] = useState<Record<string, unknown>>({ action: "ready" });
+  const customModelsRef = useRef([...initialModels]);
   const clientRef = useRef<OpenGeniBrowserClient | null>(null);
   if (!clientRef.current) {
     clientRef.current = {
       listConnections: async () => [connectedGateway()],
-      listWorkspaceGatewayCustomModels: async () => ({ models: initialModels }),
+      listWorkspaceGatewayCustomModels: async () => ({ models: [...customModelsRef.current] }),
       createWorkspaceGatewayCustomModel: async (_workspaceId, request) => {
         const model = customModel(crypto.randomUUID(), request.upstreamModelId);
+        customModelsRef.current = [...customModelsRef.current, model];
         setReceipt({ action: "create-model", upstreamModelId: request.upstreamModelId });
         return model;
       },
       deleteWorkspaceGatewayCustomModel: async (_workspaceId, customModelId) => {
+        customModelsRef.current = customModelsRef.current.filter(
+          (model) => model.id !== customModelId,
+        );
         setReceipt({ action: "delete-model", customModelId });
       },
       createConnection: async (_workspaceId, request: CreateConnectionRequest) => {

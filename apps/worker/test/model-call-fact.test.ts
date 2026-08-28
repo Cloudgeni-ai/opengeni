@@ -17,6 +17,7 @@ function billedSettings() {
   return testSettings({
     billingMode: "stripe",
     usageLimitsMode: "managed",
+    vercelAiGatewayApiKey: "test-gateway-key",
     modelPricingJson: JSON.stringify({
       "gpt-5.6-sol": {
         inputMicrosPerMillionTokens: 5_000_000,
