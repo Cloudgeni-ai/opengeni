@@ -577,7 +577,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await route.continue();
       });
 
-      await page.keyboard.press("Enter");
+      // Route registration yields to background refreshes. Address the menu
+      // item directly so a refresh cannot move focus before keyboard activation.
+      await unpin.press("Enter");
       await page.getByText("Couldn't unpin session", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Unpin session" }).waitFor();
       await page.waitForFunction(
