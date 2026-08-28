@@ -89,6 +89,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
+      catalogSourceSettings = settings,
       db,
       bus,
       runtime,
@@ -302,6 +303,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const claimed = await claimTurnAttempt({
         input,
         settings,
+        catalogSourceSettings,
         db,
         bus,
         runtime,
@@ -1062,6 +1064,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ];
       const toolRuntime = await prepareTurnToolRuntime({
         input,
+        catalogSourceSettings,
         db,
         bus,
         runtime,

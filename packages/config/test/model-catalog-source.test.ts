@@ -75,6 +75,21 @@ describe("deployment model catalog source", () => {
     expect(explicit.modelCostPolicyJson).toBe(JSON.stringify({ "database/model": "free" }));
   });
 
+  test("allows database deployments to stage cost before future catalog membership", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_MODEL_CATALOG_SOURCE: "database",
+        OPENGENI_MODEL_COST_POLICY_JSON: JSON.stringify({ "future/database-model": "free" }),
+      },
+      () =>
+        applyModelCatalogDocument(getSettings(), {
+          schemaVersion: 1,
+          builtInModels: ["gpt-5.6-luna"],
+        }),
+    );
+    expect(() => validateModelCatalogSettings(settings)).not.toThrow();
+  });
+
   test("keeps workspace-facing free or credits independent from provider settlement", () => {
     const settings = withEnv(
       {
@@ -252,6 +267,29 @@ describe("deployment model catalog source", () => {
         ],
       }),
     ).toThrow("duplicate provider id database-provider");
+
+    expect(() =>
+      parseModelCatalogDocument({
+        schemaVersion: 1,
+        builtInModels: ["gpt-5.6-luna"],
+        gatewayModels: [
+          {
+            productId: "gateway/one",
+            workspaceProductId: "workspace-gateway/one",
+            upstreamModelId: "provider/shared",
+            label: "One",
+            providers: ["provider-a"],
+          },
+          {
+            productId: "gateway/two",
+            workspaceProductId: "workspace-gateway/two",
+            upstreamModelId: "provider/shared",
+            label: "Two",
+            providers: ["provider-b"],
+          },
+        ],
+      }),
+    ).toThrow("duplicate Gateway upstream model id provider/shared");
   });
 
   test("binds database-owned provider membership only to host-authorized credentials", () => {
@@ -262,7 +300,7 @@ describe("deployment model catalog source", () => {
         OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
           {
             id: "fireworks",
-            baseUrl: "https://host-placeholder.example.test/v1",
+            baseUrl: "https://api.fireworks.ai/inference/v1",
             apiKeyEnv: "FIREWORKS_DATABASE_KEY",
             models: [{ id: "host/placeholder" }],
           },
@@ -297,5 +335,36 @@ describe("deployment model catalog source", () => {
       models: [{ id: "fireworks/database-model" }],
     });
     expect(models).toBeArray();
+  });
+
+  test("rejects a database provider that redirects a host-authorized API key", () => {
+    expect(() =>
+      withEnv(
+        {
+          FIREWORKS_DATABASE_KEY: "fireworks-secret",
+          OPENGENI_MODEL_CATALOG_SOURCE: "database",
+          OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+            {
+              id: "fireworks",
+              baseUrl: "https://api.fireworks.ai/inference/v1",
+              apiKeyEnv: "FIREWORKS_DATABASE_KEY",
+              models: [{ id: "host/placeholder" }],
+            },
+          ]),
+        },
+        () =>
+          applyModelCatalogDocument(getSettings(), {
+            schemaVersion: 1,
+            builtInModels: ["gpt-5.6-luna"],
+            registryProviders: [
+              {
+                id: "fireworks",
+                baseUrl: "https://attacker.example.test/v1",
+                models: [{ id: "fireworks/database-model" }],
+              },
+            ],
+          }),
+      ),
+    ).toThrow("does not match its host-authorized transport");
   });
 });

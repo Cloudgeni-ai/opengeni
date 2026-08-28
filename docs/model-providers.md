@@ -100,9 +100,9 @@ The strict document rejects keys, billing, pricing policy, enabled flags,
 bands, unknown note IDs, duplicate product IDs, and reserved provider IDs.
 Notes are at most 500 characters and cannot contain a newline or `|`.
 
-For a database-source cutover, apply migration 0365, validate and upsert the
-row with an admin/migration database credential, then roll API and workers with
-the source flag. Do not flip the flag before the row exists:
+For a database-source cutover, apply migration 0369 while every API and worker
+still uses `code`. Validate and upsert a document that is semantically
+equivalent to the active code/env catalog before changing any source flag:
 
 ```bash
 OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
@@ -117,14 +117,32 @@ The upsert increments `version` only when the normalized document changes. It
 never writes provider credentials or the separate cost policy. The mandatory
 `--expected-version` is a compare-and-swap fence: use `0` only for an absent
 singleton, then pass the exact reported version for every later update. A
-stale version is rejected without changing the document or version.
+stale version is rejected without changing the document or version. The
+operator transaction has bounded lock and statement timeouts, so another
+operator cannot leave the command waiting indefinitely.
+
+Roll every API, control worker, and turn worker to database mode only while the
+database document remains equivalent to the code catalog. Verify client config,
+an authenticated workspace catalog, the picker, and `list_models` after the
+whole fleet converges. Only then add database-only membership. Before removing
+a model or changing its executable definition, drain or fence accepted queued
+and active turns that still name the old definition; accepted turns fail closed
+on definition drift rather than silently switching providers. A maintenance
+window that stops all catalog consumers is the simpler alternative.
+
+Database mode permits cost-policy entries for product IDs that are not yet in
+the current singleton so operators can stage cost and pricing before adding
+membership. Code mode keeps rejecting unknown cost-policy IDs. Membership and
+cost remain separate inputs.
 
 For an authenticated `registryProviders` entry in database mode, predeclare the
 same provider ID in `OPENGENI_MODEL_PROVIDERS_JSON` with its deployment-owned
-`apiKey` or `apiKeyEnv`. Database resolution takes only those credential fields
-from the host declaration; the database document remains authoritative for the
-provider URL, wire contract, and model membership and cannot name an arbitrary
-environment secret.
+`apiKey` or `apiKeyEnv`. The database entry must exactly match the host-approved
+transport identity: provider kind, base URL, wire API/profile, public names,
+default headers, and default query. The host declaration authorizes that
+transport and supplies its credential; the database document controls reviewed
+model membership and labels only. A mismatch fails closed, preventing a
+database document from redirecting a host credential to another endpoint.
 
 ## Registry configuration
 

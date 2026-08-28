@@ -57,6 +57,7 @@ import {
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
   WorkspaceExternalIdentityConflictError,
+  WorkspaceGatewayCustomModelLimitError,
   WorkspaceLimitExceededError,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
@@ -413,6 +414,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
       return c.json(projectWorkspaceGatewayCustomModel(model), 201);
     } catch (error) {
+      if (error instanceof WorkspaceGatewayCustomModelLimitError) {
+        throw new HTTPException(422, { message: error.message });
+      }
       if (nestedPostgresSqlState(error) === "23505") {
         throw new HTTPException(422, { message: "Gateway custom model already exists" });
       }

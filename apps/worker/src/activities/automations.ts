@@ -46,8 +46,10 @@ export function createAutomationActivities(
       input: DispatchAutomationRunInput,
     ): Promise<DispatchAutomationRunResult> => {
       const service = await services();
-      const deploymentCatalogSettings = (await resolveCatalogSettings(service.db, service.settings))
-        .settings;
+      const catalogSourceSettings = service.catalogSourceSettings ?? service.settings;
+      const deploymentCatalogSettings = (
+        await resolveCatalogSettings(service.db, catalogSourceSettings)
+      ).settings;
       const run = await claim(service.db, input);
       if (!run) return { action: "not_found" };
       if (run.status === "dispatched") {
@@ -80,7 +82,7 @@ export function createAutomationActivities(
       const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
       const catalogSettings = requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
         ? (
-            await resolveWorkspaceCatalogSettings(service.db, service.settings, {
+            await resolveWorkspaceCatalogSettings(service.db, catalogSourceSettings, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
             })

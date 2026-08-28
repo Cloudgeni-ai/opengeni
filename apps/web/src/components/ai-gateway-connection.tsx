@@ -1,7 +1,11 @@
-import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
+import type {
+  ConnectionMetadata,
+  WorkspaceGatewayCustomModel,
+  WorkspaceModelCatalogModel,
+} from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ChevronDownIcon, Loader2Icon, PlusIcon, Trash2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type SVGProps } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SVGProps } from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
@@ -52,6 +56,7 @@ export function AiGatewayConnectionCardWithClient(
 ) {
   const client = props.client;
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
+  const [readOnlyConnected, setReadOnlyConnected] = useState(false);
   const [customModels, setCustomModels] = useState<WorkspaceGatewayCustomModel[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [customModelsLoaded, setCustomModelsLoaded] = useState(false);
@@ -63,6 +68,16 @@ export function AiGatewayConnectionCardWithClient(
   const [modelBusy, setModelBusy] = useState(false);
   const [removingModelId, setRemovingModelId] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const activeRef = useRef(true);
+  const modelInputRef = useRef<HTMLInputElement | null>(null);
+  const removeButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+
+  useEffect(() => {
+    activeRef.current = true;
+    return () => {
+      activeRef.current = false;
+    };
+  }, []);
 
   const connection = useMemo(() => {
     const gatewayConnections = connections.filter(isGatewayConnection);
@@ -72,27 +87,37 @@ export function AiGatewayConnectionCardWithClient(
       null
     );
   }, [connections]);
-  const connected = connection?.status === "active";
-  const normalizedModelSlug = modelSlug.trim();
-  const modelSlugValid = /^[!-{}-~]{1,256}$/.test(normalizedModelSlug);
-  const modelSlugExists = customModels.some(
-    (model) => model.upstreamModelId === normalizedModelSlug,
-  );
+  const connected = props.canManage ? connection?.status === "active" : readOnlyConnected;
+  const modelSlugValid = /^[!-{}-~]{1,256}$/.test(modelSlug);
+  const modelSlugExists = customModels.some((model) => model.upstreamModelId === modelSlug);
 
   const refresh = useCallback(async () => {
-    const [connectionsResult, modelsResult] = await Promise.allSettled([
-      client.listConnections(props.workspaceId),
+    const [connectionResult, modelsResult] = await Promise.allSettled([
+      props.canManage
+        ? client.listConnections(props.workspaceId)
+        : client.getWorkspaceModelCatalog(props.workspaceId),
       client.listWorkspaceGatewayCustomModels(props.workspaceId),
     ]);
-    if (connectionsResult.status === "fulfilled") {
-      setConnections(connectionsResult.value);
+    if (!activeRef.current) return;
+    if (connectionResult.status === "fulfilled") {
+      if (props.canManage) {
+        setConnections(connectionResult.value as ConnectionMetadata[]);
+      } else {
+        setReadOnlyConnected(
+          (connectionResult.value as { models: WorkspaceModelCatalogModel[] }).models.some(
+            (model) =>
+              model.source === "workspace_gateway" && model.credentialReadiness.status === "ready",
+          ),
+        );
+      }
       setError(null);
     } else {
       setConnections([]);
+      setReadOnlyConnected(false);
       setError(
-        connectionsResult.reason instanceof Error
-          ? connectionsResult.reason.message
-          : String(connectionsResult.reason),
+        connectionResult.reason instanceof Error
+          ? connectionResult.reason.message
+          : String(connectionResult.reason),
       );
     }
     setLoaded(true);
@@ -108,7 +133,7 @@ export function AiGatewayConnectionCardWithClient(
       );
     }
     setCustomModelsLoaded(true);
-  }, [client, props.workspaceId]);
+  }, [client, props.canManage, props.workspaceId]);
 
   useEffect(() => {
     void refresh();
@@ -138,17 +163,19 @@ export function AiGatewayConnectionCardWithClient(
               grantedScopes: [],
               metadata,
             });
+      if (!activeRef.current) return;
       setConnections((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
       setApiKey("");
       setOpen(false);
       props.onConnectionChange?.();
       toast.success("Vercel AI Gateway connected");
     } catch (caught) {
+      if (!activeRef.current) return;
       toast.error("Couldn't save Vercel AI Gateway key", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
     } finally {
-      setBusy(false);
+      if (activeRef.current) setBusy(false);
     }
   }
 
@@ -157,16 +184,18 @@ export function AiGatewayConnectionCardWithClient(
     setBusy(true);
     try {
       const revoked = await client.deleteConnection(props.workspaceId, connection.id);
+      if (!activeRef.current) return;
       setConnections((current) => current.map((item) => (item.id === revoked.id ? revoked : item)));
       setOpen(false);
       props.onConnectionChange?.();
       toast.success("Vercel AI Gateway disconnected");
     } catch (caught) {
+      if (!activeRef.current) return;
       toast.error("Couldn't disconnect Vercel AI Gateway", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
     } finally {
-      setBusy(false);
+      if (activeRef.current) setBusy(false);
     }
   }
 
@@ -175,8 +204,9 @@ export function AiGatewayConnectionCardWithClient(
     setModelBusy(true);
     try {
       const created = await client.createWorkspaceGatewayCustomModel(props.workspaceId, {
-        upstreamModelId: normalizedModelSlug,
+        upstreamModelId: modelSlug,
       });
+      if (!activeRef.current) return;
       setCustomModels((current) => [...current, created]);
       setModelSlug("");
       setCustomModelsError(null);
@@ -187,33 +217,54 @@ export function AiGatewayConnectionCardWithClient(
           : "It will become selectable after the Gateway is connected.",
       });
     } catch (caught) {
+      if (!activeRef.current) return;
       toast.error("Couldn't add Gateway model", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
     } finally {
-      setModelBusy(false);
+      if (activeRef.current) setModelBusy(false);
     }
   }
 
   async function removeCustomModel(model: WorkspaceGatewayCustomModel) {
+    const modelIndex = customModels.findIndex((candidate) => candidate.id === model.id);
+    const focusModelId =
+      customModels[modelIndex + 1]?.id ?? customModels[modelIndex - 1]?.id ?? null;
     setRemovingModelId(model.id);
     try {
       await client.deleteWorkspaceGatewayCustomModel(props.workspaceId, model.id);
+      if (!activeRef.current) return;
       setCustomModels((current) => current.filter((candidate) => candidate.id !== model.id));
+      queueMicrotask(() => {
+        if (!activeRef.current) return;
+        if (focusModelId) removeButtonRefs.current.get(focusModelId)?.focus();
+        else modelInputRef.current?.focus();
+      });
       props.onConnectionChange?.();
       toast.success("Gateway model removed");
     } catch (caught) {
+      if (!activeRef.current) return;
       toast.error("Couldn't remove Gateway model", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
     } finally {
-      setRemovingModelId(null);
+      if (activeRef.current) setRemovingModelId(null);
     }
   }
 
   // This is an admin-only opt-in. Non-admins only need to see it when the
   // workspace already connected one; the model picker exposes the usable rail.
-  if (!props.canManage && !connected) return null;
+  if (
+    !props.canManage &&
+    loaded &&
+    customModelsLoaded &&
+    !error &&
+    !customModelsError &&
+    !connected &&
+    customModels.length === 0
+  ) {
+    return null;
+  }
 
   return (
     <details
@@ -297,7 +348,9 @@ export function AiGatewayConnectionCardWithClient(
             <span className="text-2xs text-fg-subtle" aria-live="polite">
               {!customModelsLoaded
                 ? "Loading…"
-                : `${customModels.length} ${customModels.length === 1 ? "model" : "models"}`}
+                : customModelsError
+                  ? "Unavailable"
+                  : `${customModels.length} ${customModels.length === 1 ? "model" : "models"}`}
             </span>
           </div>
 
@@ -305,6 +358,7 @@ export function AiGatewayConnectionCardWithClient(
             <div className="grid gap-1.5">
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                 <Input
+                  ref={modelInputRef}
                   value={modelSlug}
                   onChange={(event) => setModelSlug(event.target.value)}
                   onKeyDown={(event) => {
@@ -339,7 +393,7 @@ export function AiGatewayConnectionCardWithClient(
               <p id="gateway-model-slug-help" className="text-2xs text-fg-subtle">
                 {modelSlugExists
                   ? "That slug is already configured for this workspace."
-                  : normalizedModelSlug && !modelSlugValid
+                  : modelSlug && !modelSlugValid
                     ? "Use the exact printable slug with no spaces or |."
                     : connected
                       ? "The model becomes selectable when workspace policy allows it."
@@ -352,7 +406,7 @@ export function AiGatewayConnectionCardWithClient(
             <p className="text-xs text-destructive">{customModelsError}</p>
           ) : null}
 
-          {customModelsLoaded && customModels.length === 0 ? (
+          {customModelsLoaded && !customModelsError && customModels.length === 0 ? (
             <div className="rounded-md bg-surface-2/55 px-3 py-2.5 text-2xs text-fg-subtle">
               No custom model slugs yet. The curated Gateway models remain available separately.
             </div>
@@ -372,6 +426,10 @@ export function AiGatewayConnectionCardWithClient(
                   </div>
                   {props.canManage ? (
                     <Button
+                      ref={(node) => {
+                        if (node) removeButtonRefs.current.set(model.id, node);
+                        else removeButtonRefs.current.delete(model.id);
+                      }}
                       type="button"
                       size="icon-xs"
                       variant="ghost"

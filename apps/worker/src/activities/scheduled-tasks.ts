@@ -17,7 +17,6 @@ import {
   defaultSessionMcpServerIds,
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
-  resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
   resolveSessionToolPolicy,
   scheduledSlackBotConnectionId,
@@ -69,10 +68,7 @@ import {
   withSessionActivityRlsContext,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import {
-  resolveFirstPartyMcpToolPolicy,
-  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-} from "@opengeni/config";
+import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import {
   assertReusableSessionRevivable,
@@ -246,21 +242,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (input.triggerType !== "scheduled" && !input.initiator) {
         return { action: "blocked", reason: "malformed_manual_trigger" };
       }
-      const deploymentSettings = (
-        await resolveCatalogSettings(baseService.db, baseService.settings)
-      ).settings;
       const { db, bus, wakeSessionWorkflow } = baseService;
-      const settingsForTask = async (task: ScheduledTask) => {
-        const model = task.agentConfig.model ?? deploymentSettings.openaiModel;
-        return model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
-          ? (
-              await resolveWorkspaceCatalogSettings(db, baseService.settings, {
-                accountId: task.accountId,
-                workspaceId: task.workspaceId,
-              })
-            ).settings
-          : deploymentSettings;
-      };
+      const settingsForTask = async (task: ScheduledTask) =>
+        (
+          await resolveWorkspaceCatalogSettings(
+            db,
+            baseService.catalogSourceSettings ?? baseService.settings,
+            {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+            },
+          )
+        ).settings;
       const stableProducerKey = scheduledTaskRunProducerKey(input);
       const priorRun = await getScheduledTaskRunByProducerKey(db, {
         workspaceId: input.workspaceId,

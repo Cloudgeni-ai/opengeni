@@ -54,6 +54,35 @@ describe("worker ensureRunAllowed — codex bypass", () => {
       restore();
     }
   });
+
+  test("a deployment-funded free turn skips credits but still enforces the token cap", async () => {
+    const balanceSpy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
+      throw new Error("free turns must not read the credit balance");
+    });
+    const usageSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(100);
+    try {
+      await expect(
+        ensureRunAllowed(
+          testSettings({
+            billingMode: "stripe",
+            usageLimitsMode: "managed",
+            staticUsageLimitsJson: JSON.stringify({ maxMonthlyTokensPerWorkspace: 100 }),
+          }),
+          db,
+          ACCOUNT,
+          WORKSPACE,
+          false,
+          undefined,
+          false,
+        ),
+      ).rejects.toThrow("monthly token limit reached (100)");
+      expect(balanceSpy).not.toHaveBeenCalled();
+      expect(usageSpy).toHaveBeenCalled();
+    } finally {
+      balanceSpy.mockRestore();
+      usageSpy.mockRestore();
+    }
+  });
 });
 
 describe("worker recordModelUsageAndDebitCredits — codex usage recording", () => {
@@ -204,6 +233,43 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         true,
       );
       expect(recorded.some((r) => r.eventType === "model.cost")).toBe(true);
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
+  });
+
+  test("a deployment-funded free turn records tokens and zero cost without debiting", async () => {
+    const recorded: Array<{ eventType: string; quantity: number }> = [];
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        recorded.push({ eventType: input.eventType, quantity: input.quantity });
+      },
+    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("free turns must not debit credits");
+      },
+    );
+    try {
+      const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        sessionId: "sess-1",
+        turnId: "turn-free",
+        turnAttemptId: "attempt-free",
+        model: "scripted-model",
+        externallyBilled: false,
+        chargesOpenGeniCredits: false,
+        usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
+        sourceKey: "response-1",
+      });
+      expect(recorded).toEqual([
+        { eventType: "model.tokens", quantity: 1500 },
+        { eventType: "model.cost", quantity: 0 },
+      ]);
+      expect(billing?.billingPath).toBe("external");
+      expect(debitSpy).not.toHaveBeenCalled();
     } finally {
       recordSpy.mockRestore();
       debitSpy.mockRestore();

@@ -42,6 +42,7 @@ export function createSharedActivityServices(
       configureChildLifecycleNotices({ enabled: settings.childLifecycleNoticesEnabled });
       return {
         settings: resolvedSettings,
+        catalogSourceSettings: settings,
         db,
         bus:
           dependencies.bus ??

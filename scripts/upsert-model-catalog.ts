@@ -40,6 +40,18 @@ export function modelCatalogDatabaseSearchPath(
   return dbSearchPath({ dbSchema: env.OPENGENI_DB_SCHEMA?.trim() ?? "" });
 }
 
+function postgresErrorCode(error: unknown): string | null {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const record = current as { code?: unknown; cause?: unknown };
+    if (typeof record.code === "string") return record.code;
+    current = record.cause;
+  }
+  return null;
+}
+
 export async function runModelCatalogUpsert(
   args: string[] = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env,
@@ -65,48 +77,65 @@ export async function runModelCatalogUpsert(
     ...(searchPath ? { connection: { search_path: searchPath } } : {}),
   });
   try {
-    const result = await sql.begin(async (transaction) => {
-      await transaction`
-        select pg_advisory_xact_lock(
-          hashtextextended('deployment-model-catalog:singleton', 0)
-        )
-      `;
-      const [current] = await transaction<Array<{ version: number }>>`
-        select version::int as version
-        from deployment_model_catalog
-        where singleton = true
-        for update
-      `;
-      const currentVersion = current?.version ?? 0;
-      if (currentVersion !== expectedVersion) {
-        throw new Error(
-          `Model catalog version conflict: expected ${expectedVersion}, current ${currentVersion}. No changes were applied.`,
-        );
-      }
+    let result: { version: number; changed: boolean };
+    try {
+      result = await sql.begin(async (transaction) => {
+        await transaction`
+          select
+            set_config('lock_timeout', '5s', true),
+            set_config('statement_timeout', '30s', true)
+        `;
+        await transaction`
+          select pg_advisory_xact_lock(
+            hashtextextended('deployment-model-catalog:singleton', 0)
+          )
+        `;
+        const [current] = await transaction<Array<{ version: number }>>`
+          select version::int as version
+          from deployment_model_catalog
+          where singleton = true
+          for update
+        `;
+        const currentVersion = current?.version ?? 0;
+        if (currentVersion !== expectedVersion) {
+          throw new Error(
+            `Model catalog version conflict: expected ${expectedVersion}, current ${currentVersion}. No changes were applied.`,
+          );
+        }
 
-      if (!current) {
-        const [inserted] = await transaction<Array<{ version: number }>>`
-          insert into deployment_model_catalog (singleton, document, version, updated_at)
-          values (true, ${transaction.json(document)}, 1, clock_timestamp())
+        if (!current) {
+          const [inserted] = await transaction<Array<{ version: number }>>`
+            insert into deployment_model_catalog (singleton, document, version, updated_at)
+            values (true, ${transaction.json(document)}, 1, clock_timestamp())
+            returning version::int as version
+          `;
+          if (!inserted) throw new Error("catalog insert returned no row");
+          return { version: inserted.version, changed: true };
+        }
+
+        const [updated] = await transaction<Array<{ version: number }>>`
+          update deployment_model_catalog
+          set document = ${transaction.json(document)},
+              version = version + 1,
+              updated_at = clock_timestamp()
+          where singleton = true
+            and document is distinct from ${transaction.json(document)}
           returning version::int as version
         `;
-        if (!inserted) throw new Error("catalog insert returned no row");
-        return { version: inserted.version, changed: true };
+        return updated
+          ? { version: updated.version, changed: true }
+          : { version: current.version, changed: false };
+      });
+    } catch (error) {
+      const code = postgresErrorCode(error);
+      if (code === "55P03" || code === "57014") {
+        throw new Error(
+          "Model catalog upsert timed out waiting for the operator lock or completing the catalog transaction. No changes were applied.",
+          { cause: error },
+        );
       }
-
-      const [updated] = await transaction<Array<{ version: number }>>`
-        update deployment_model_catalog
-        set document = ${transaction.json(document)},
-            version = version + 1,
-            updated_at = clock_timestamp()
-        where singleton = true
-          and document is distinct from ${transaction.json(document)}
-        returning version::int as version
-      `;
-      return updated
-        ? { version: updated.version, changed: true }
-        : { version: current.version, changed: false };
-    });
+      throw error;
+    }
     process.stdout.write(
       `Model catalog ${result.changed ? "updated" : "unchanged"}; version ${result.version}.\n`,
     );

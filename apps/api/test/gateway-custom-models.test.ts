@@ -10,6 +10,7 @@ import {
   createConnection,
   createDb,
   createSession,
+  MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS,
   upsertWorkspaceModelPolicy,
   type DbClient,
 } from "@opengeni/db";
@@ -273,5 +274,50 @@ describe("workspace Gateway custom model API", () => {
     });
     expect(removed.status).toBe(204);
     expect((await (await request("/gateway-custom-models")).json()).models).toEqual([]);
+  });
+
+  test("enforces the transactional per-workspace custom-model bound", async () => {
+    if (!shared || !grant) return;
+    await shared.admin`
+      delete from workspace_gateway_custom_models
+      where workspace_id = ${grant.workspaceId}::uuid
+    `;
+    await shared.admin`
+      insert into workspace_gateway_custom_models (
+        id,
+        account_id,
+        workspace_id,
+        upstream_model_id,
+        label,
+        created_by_subject_id
+      )
+      select
+        gen_random_uuid(),
+        ${grant.accountId}::uuid,
+        ${grant.workspaceId}::uuid,
+        'limit/provider-model-' || ordinal::text,
+        null,
+        ${grant.subjectId}
+      from generate_series(1, ${MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS - 1}) as ordinal
+      on conflict (workspace_id, upstream_model_id) do nothing
+    `;
+
+    const results = await Promise.all(
+      ["limit/provider-model-final-a", "limit/provider-model-final-b"].map(
+        async (upstreamModelId) =>
+          await request("/gateway-custom-models", {
+            method: "POST",
+            body: { upstreamModelId },
+          }),
+      ),
+    );
+    expect(results.map((result) => result.status).sort()).toEqual([201, 422]);
+    const overflow = results.find((result) => result.status === 422)!;
+    expect(await overflow.text()).toContain(
+      `workspace Gateway custom model limit reached (${MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS})`,
+    );
+    expect((await (await request("/gateway-custom-models")).json()).models).toHaveLength(
+      MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS,
+    );
   });
 });

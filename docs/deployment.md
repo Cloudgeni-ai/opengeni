@@ -1804,14 +1804,19 @@ Do not commit real secret values.
 ### Deployment database model catalog cutover
 
 The default source remains the reviewed code/env catalog. Database mode is an
-operator-owned singleton, not a boot-time reconciliation loop:
+operator-owned singleton, not a boot-time reconciliation loop. Use a
+compatibility-first rollout; a mixed fleet must never observe database-only
+membership:
 
-1. Apply migration `0365_model_catalog_and_gateway_custom_models.sql` while
+1. Apply migration `0369_model_catalog_and_gateway_custom_models.sql` while
    API and workers still use `OPENGENI_MODEL_CATALOG_SOURCE=code`.
-2. Prepare a strict, secret-free schema-v1 JSON document. Membership and
-   optional one-line notes belong in the document; keys, enabled flags, billing,
-   cost policy, and pricing do not.
-3. Validate and upsert it with a migration/admin database credential:
+2. Deploy the catalog-aware binary to every API, control worker, and turn worker
+   while all of them still use `code`.
+3. Prepare a strict, secret-free schema-v1 JSON document that is semantically
+   equivalent to the active code/env catalog. Membership and optional one-line
+   notes belong in the document; keys, enabled flags, billing, cost policy, and
+   pricing do not.
+4. Validate and upsert it with a migration/admin database credential:
 
    ```bash
    OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
@@ -1827,25 +1832,45 @@ operator-owned singleton, not a boot-time reconciliation loop:
    `--expected-version` is mandatory compare-and-swap protection. Use `0` only
    when the singleton must not exist yet; for later changes, pass the exact
    version reported by the previous successful command. A mismatch makes no
-   database change.
+   database change. The command uses transaction-local lock and statement
+   timeouts so a competing operator cannot block it indefinitely.
 
-4. Confirm the command reports the expected version, then roll every API and
-   worker with `OPENGENI_MODEL_CATALOG_SOURCE=database`.
-5. Verify `/v1/config/client`, one authenticated workspace model catalog, a
-   model picker, and the `list_models` tool before removing the old code-mode
-   deployment configuration.
+5. Confirm the command reports the expected version, then roll every API,
+   control worker, and turn worker with
+   `OPENGENI_MODEL_CATALOG_SOURCE=database` while the document remains
+   equivalent to code mode.
+6. Verify `/v1/config/client`, one authenticated workspace model catalog, a
+   model picker, and the `list_models` tool after the whole fleet converges.
+7. Only then add database-only membership. Before removing membership or
+   changing an executable model definition, drain or fence queued and active
+   accepted turns that still name the old definition. Those turns fail closed
+   on definition drift rather than switching providers. A full maintenance
+   window that stops catalog consumers is the simpler alternative.
 
 Database mode fails closed when the singleton is missing or invalid and never
 falls back to code. Rollback is the source flag: restoring `code` makes the
 singleton inert but leaves it available for inspection or correction. Catalog
 cost remains separately controlled by `OPENGENI_MODEL_COST_POLICY_JSON`; a
 model marked `credits` needs `OPENGENI_MODEL_PRICING_JSON` under managed
-billing/limits when no built-in price exists.
+billing/limits when no built-in price exists. Database mode allows cost-policy
+and pricing entries to be staged before the corresponding product ID is added
+to the singleton; code mode continues to reject unknown cost-policy IDs.
+
+An authenticated database `registryProviders` entry must name a provider that
+is also declared in host `OPENGENI_MODEL_PROVIDERS_JSON`. Its provider kind,
+base URL, wire API/profile, public names, default headers, and default query
+must exactly match the host declaration. The host authorizes the transport and
+supplies the credential; the database document controls model membership and
+labels. Any mismatch fails closed instead of forwarding a host credential to a
+database-selected endpoint.
 
 Workspace custom Vercel AI Gateway slugs are not part of this singleton. They
 are admin-managed rows protected by FORCE RLS, overlaid only for that workspace,
 and become selectable only when the encrypted workspace Gateway connection and
-workspace policy are ready.
+workspace policy are ready. The table is bounded to 100 rows per workspace. If
+a deployment catalog later claims the same Gateway upstream slug, the reviewed
+deployment entry wins and the colliding custom row is omitted from executable
+membership.
 
 ### Optional OpenSandbox Kubernetes provider
 

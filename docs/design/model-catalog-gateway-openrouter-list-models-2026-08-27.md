@@ -2,11 +2,12 @@
 
 Status: implementation specification captured on 2026-08-27.
 
-Repository observation at capture time: this checkout already contains
-`0364_workspace_learning_policy_snapshot_lock_order.sql`. The implementation migration therefore
-starts at the next free ordinal (currently `0365`), subject to
-`bun run migration:renumber --next` against the eventual PR base. The original ordinal guidance
-below is retained as part of the supplied specification.
+Repository observation at capture time: this checkout already contained
+`0364_workspace_learning_policy_snapshot_lock_order.sql`. The migration was subsequently
+renumbered against the eventual PR base to
+`0369_model_catalog_and_gateway_custom_models.sql` with
+`bun run migration:renumber --next`. The original next-free-ordinal guidance below is retained as
+part of the supplied specification.
 
 ## 1. Goal
 
@@ -166,7 +167,11 @@ Authorization:
 The custom table uses FORCE RLS. It has no seed. It is not stored in `workspaces.settings` or
 `workspace_model_policies`.
 
-Migration mode is rolling. No backfill. Use the next free ordinal after the current head.
+Migration activation is compatibility-first. Apply the schema and deploy the new binary while all
+consumers remain in code mode, upsert a semantically equivalent database document, then converge
+every API and worker on database mode before adding database-only membership. Drain or fence
+accepted turns before removals or executable-definition changes. No backfill. Use the next free
+ordinal after the current head.
 
 ### `list_models` contract
 

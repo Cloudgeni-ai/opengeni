@@ -395,4 +395,45 @@ describe("ModelPolicyPicker", () => {
 
     expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeTruthy();
   });
+
+  test("shows each deployment model's configured workspace-facing payment", async () => {
+    const freeModel: ClientModel = {
+      ...MODELS[0]!,
+      id: "deployment/free-model",
+      label: "Deployment Free",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      source: "opengeni",
+      cost: "free",
+    };
+    const creditsModel: ClientModel = {
+      ...MODELS[1]!,
+      id: "deployment/credits-model",
+      label: "Deployment Credits",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      source: "opengeni",
+      cost: "credits",
+    };
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[freeModel, creditsModel]}
+        model="deployment/unavailable"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-testid="model-picker-choice-deployment/free-model"]')
+        ?.textContent,
+    ).toContain("Free in this deployment");
+    expect(
+      container.querySelector('[data-testid="model-picker-choice-deployment/credits-model"]')
+        ?.textContent,
+    ).toContain("OpenGeni credits");
+  });
 });

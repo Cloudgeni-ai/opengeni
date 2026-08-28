@@ -17,7 +17,7 @@ import {
 } from "../src/runtime-posture";
 
 const migrationUrl = new URL(
-  "../drizzle/0365_model_catalog_and_gateway_custom_models.sql",
+  "../drizzle/0369_model_catalog_and_gateway_custom_models.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -26,9 +26,9 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0365-model-catalog");
+  shared = await acquireSharedTestDatabase("migration-0369-model-catalog");
   if (!shared && requireRealDatabase) {
-    throw new Error("migration 0365 requires real PostgreSQL");
+    throw new Error("migration 0369 requires real PostgreSQL");
   }
   if (shared) client = createDb(shared.appUrl, { max: 8 });
 }, 180_000);
@@ -38,7 +38,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0365 model catalog and Gateway custom models", () => {
+describe("migration 0369 model catalog and Gateway custom models", () => {
   test("pins rolling posture, least privilege, and secret-free storage", async () => {
     const migration = await readFile(migrationUrl, "utf8");
     expect(migration).toContain("-- deployment-mode: rolling");
@@ -95,11 +95,11 @@ describe("migration 0365 model catalog and Gateway custom models", () => {
     });
 
     const [account] = await shared.admin<Array<{ id: string }>>`
-      insert into managed_accounts (name) values ('migration 0365 account') returning id
+      insert into managed_accounts (name) values ('migration 0369 account') returning id
     `;
     const [firstWorkspace, secondWorkspace] = await shared.admin<Array<{ id: string }>>`
       insert into workspaces (account_id, name)
-      values (${account!.id}, 'migration 0365 first'), (${account!.id}, 'migration 0365 second')
+      values (${account!.id}, 'migration 0369 first'), (${account!.id}, 'migration 0369 second')
       returning id
     `;
     await expect(
@@ -107,14 +107,14 @@ describe("migration 0365 model catalog and Gateway custom models", () => {
         accountId: account!.id,
         workspaceId: firstWorkspace!.id,
         upstreamModelId: "anthropic|claude",
-        createdBySubjectId: "user:migration-0365",
+        createdBySubjectId: "user:migration-0369",
       }),
     ).rejects.toThrow();
     const created = await createWorkspaceGatewayCustomModel(client.db, {
       accountId: account!.id,
       workspaceId: firstWorkspace!.id,
       upstreamModelId: "anthropic/claude-sonnet-4.6",
-      createdBySubjectId: "user:migration-0365",
+      createdBySubjectId: "user:migration-0369",
     });
     expect(created.upstreamModelId).toBe("anthropic/claude-sonnet-4.6");
     expect(

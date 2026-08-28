@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, count, eq, sql } from "drizzle-orm";
 
 import { withRlsContext, type Database } from "./database";
 import * as schema from "./schema";
@@ -19,6 +19,15 @@ export type WorkspaceGatewayCustomModel = {
   createdAt: Date;
   updatedAt: Date;
 };
+
+export const MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS = 100;
+
+export class WorkspaceGatewayCustomModelLimitError extends Error {
+  constructor() {
+    super(`workspace Gateway custom model limit reached (${MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS})`);
+    this.name = "WorkspaceGatewayCustomModelLimitError";
+  }
+}
 
 function mapCustomModel(
   row: typeof schema.workspaceGatewayCustomModels.$inferSelect,
@@ -68,7 +77,11 @@ export async function listWorkspaceGatewayCustomModels(
       .orderBy(
         schema.workspaceGatewayCustomModels.createdAt,
         schema.workspaceGatewayCustomModels.id,
-      );
+      )
+      .limit(MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS + 1);
+    if (rows.length > MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS) {
+      throw new WorkspaceGatewayCustomModelLimitError();
+    }
     return rows.map(mapCustomModel);
   });
 }
@@ -84,6 +97,21 @@ export async function createWorkspaceGatewayCustomModel(
   },
 ): Promise<WorkspaceGatewayCustomModel> {
   return await withRlsContext(db, input, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-gateway-custom-models:${input.workspaceId}`}, 0))`,
+    );
+    const [current] = await scopedDb
+      .select({ value: count() })
+      .from(schema.workspaceGatewayCustomModels)
+      .where(
+        and(
+          eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
+          eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+        ),
+      );
+    if ((current?.value ?? 0) >= MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS) {
+      throw new WorkspaceGatewayCustomModelLimitError();
+    }
     const [row] = await scopedDb
       .insert(schema.workspaceGatewayCustomModels)
       .values({

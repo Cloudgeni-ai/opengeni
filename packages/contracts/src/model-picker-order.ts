@@ -65,6 +65,8 @@ export function compareModelPickerOrder(
     MODEL_PICKER_BILLING_CLASS_INITIAL_ORDER.indexOf(left.billingClass[0]!) -
     MODEL_PICKER_BILLING_CLASS_INITIAL_ORDER.indexOf(right.billingClass[0]!);
   return (
-    classDelta || +right.selectable - +left.selectable || left.label.localeCompare(right.label)
+    classDelta ||
+    +right.selectable - +left.selectable ||
+    (left.label < right.label ? -1 : left.label > right.label ? 1 : 0)
   );
 }

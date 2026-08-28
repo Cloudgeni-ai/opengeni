@@ -26,6 +26,7 @@ import {
   findPickerRow,
   groupPickerRowsByBillingClass,
   labelReasoningEffort,
+  payerSummaryForModel,
   projectClientModelRows,
   runnableLatencyModesForModel,
   type PickerBillingClass,
@@ -416,7 +417,7 @@ export function ModelPolicyPickerMenu(
             <PickerNavRow
               key={`${row.billingClass}:${row.id}`}
               label={row.label}
-              hint={row.unavailableReason ?? undefined}
+              hint={row.unavailableReason ?? payerSummaryForModel(row.catalog)}
               disabled={!row.selectable}
               title={row.unavailableReason ?? undefined}
               active={row.id === props.model}

@@ -128,7 +128,9 @@ async function dispatchMaintenanceSession(
     assertModelPolicy: typeof assertWorkspaceModelPolicyAllows;
   },
 ): Promise<void> {
-  const catalogSettings = (await resolveCatalogSettings(service.db, service.settings)).settings;
+  const catalogSettings = (
+    await resolveCatalogSettings(service.db, service.catalogSourceSettings ?? service.settings)
+  ).settings;
   const catalogService = { ...service, settings: catalogSettings };
   const model = canonicalConfiguredModel(catalogSettings, catalogSettings.openaiModel);
   if (!model) throw new Error("site auth maintenance has no configured model");

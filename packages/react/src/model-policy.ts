@@ -2,7 +2,7 @@ import {
   compareModelPickerOrder,
   modelPickerBillingClassFor,
   type ModelPickerBillingClass,
-} from "@opengeni/contracts/model-picker-order";
+} from "@opengeni/sdk/model-picker-order";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 export type PickerBillingClass = ModelPickerBillingClass;

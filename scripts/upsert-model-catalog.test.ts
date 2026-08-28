@@ -211,4 +211,74 @@ describe("model catalog operator CLI", () => {
       await shared.release();
     }
   }, 180_000);
+
+  test("fails cleanly instead of waiting indefinitely on the operator lock", async () => {
+    const shared = await acquireSharedTestDatabase("model-catalog-upsert-lock-timeout");
+    if (!shared && requireRealDatabase) {
+      throw new Error("model catalog operator lock-timeout test requires real PostgreSQL");
+    }
+    if (!shared) return;
+    const directory = await mkdtemp(join(tmpdir(), "opengeni-model-catalog-lock-"));
+    const file = join(directory, "catalog.json");
+    const schema = `catalog_lock_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    try {
+      await shared.admin.unsafe(`create schema "${schema}"`);
+      await shared.admin.unsafe(`
+        create table "${schema}".deployment_model_catalog (
+          singleton boolean primary key check (singleton),
+          document jsonb not null,
+          version bigint not null,
+          updated_at timestamptz not null
+        )
+      `);
+      await writeFile(
+        file,
+        JSON.stringify({
+          schemaVersion: 1,
+          builtInModels: ["gpt-5.6-luna"],
+          registryProviders: [],
+          gatewayModels: [],
+          openrouterModels: [],
+          modelNotes: {},
+        }),
+      );
+
+      await shared.admin.begin(async (transaction) => {
+        await transaction`
+          select pg_advisory_xact_lock(
+            hashtextextended('deployment-model-catalog:singleton', 0)
+          )
+        `;
+        const result = Bun.spawnSync(
+          [
+            process.execPath,
+            "scripts/upsert-model-catalog.ts",
+            "--file",
+            file,
+            "--expected-version",
+            "0",
+          ],
+          {
+            cwd: repoRoot,
+            env: {
+              ...process.env,
+              OPENGENI_MIGRATIONS_DATABASE_URL: shared.adminUrl,
+              OPENGENI_DB_SCHEMA: schema,
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr.toString()).toContain(
+          "Model catalog upsert timed out waiting for the operator lock or completing the catalog transaction. No changes were applied.",
+        );
+        expect(result.stderr.toString()).not.toContain(" at ");
+      });
+    } finally {
+      await shared.admin.unsafe(`drop schema if exists "${schema}" cascade`).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+      await shared.release();
+    }
+  }, 180_000);
 });

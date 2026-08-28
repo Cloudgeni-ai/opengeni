@@ -73,6 +73,7 @@ import type {
 export type ClaimTurnDeps = {
   input: RunAgentTurnInput;
   settings: Settings;
+  catalogSourceSettings: Settings;
   db: ActivityServices["db"];
   bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
@@ -136,6 +137,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const {
     input,
     settings,
+    catalogSourceSettings,
     db,
     bus,
     runtime,
@@ -157,7 +159,8 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     acknowledgeLostAttemptOwnership,
   } = deps;
 
-  const deploymentCatalogSettings = (await resolveCatalogSettings(db, settings)).settings;
+  const deploymentCatalogSettings = (await resolveCatalogSettings(db, catalogSourceSettings))
+    .settings;
 
   const validatePendingSystemUpdateAuthority: NonNullable<
     ClaimSessionWorkForAttemptInput["validatePendingSystemUpdateAuthority"]
@@ -270,6 +273,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
+  billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
   const trigger = await getSessionEvent(db, input.workspaceId, attempt.triggerEventId);
@@ -315,6 +319,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       input.workspaceId,
       billingState.isExternallyBilledTurn,
       entitlements,
+      billingState.chargesOpenGeniCredits,
     ),
     cancellationSignal,
     undefined,

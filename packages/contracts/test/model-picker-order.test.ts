@@ -22,6 +22,20 @@ describe("model picker shared ordering", () => {
     ]);
   });
 
+  test("uses deterministic code-unit label ordering instead of the host locale", () => {
+    const rows = ["ä", "a", "Å", "Z"].map((label) => ({
+      billingClass: "opengeni_credits" as const,
+      selectable: true,
+      label,
+    }));
+    expect([...rows].sort(compareModelPickerOrder).map((row) => row.label)).toEqual([
+      "Z",
+      "a",
+      "Å",
+      "ä",
+    ]);
+  });
+
   test("derives the same billing rail from public model attribution", () => {
     expect(
       modelPickerBillingClassFor({

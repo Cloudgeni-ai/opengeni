@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Migration 0365: deployment-owned model catalog authority plus workspace
+-- Migration 0369: deployment-owned model catalog authority plus workspace
 -- custom Vercel AI Gateway slugs.
 
 SET LOCAL lock_timeout = '5s';

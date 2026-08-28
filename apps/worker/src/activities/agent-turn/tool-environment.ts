@@ -27,11 +27,7 @@ import { connectionTokenResolverForTurn } from "../mcp-credentials";
 import { buildApiIntegrationServersForTurn } from "../api-integrations";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
-import {
-  allowedFirstPartyMcpToolsForSession,
-  configuredModelNotes,
-  type Settings,
-} from "@opengeni/config";
+import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { buildCodexTokenResolver } from "../codex-auth";
 import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
@@ -40,6 +36,7 @@ import {
   defaultSessionMcpServerIds,
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
+  resolveCatalogSettings,
   resolveWorkspaceModelSelection,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
@@ -93,6 +90,7 @@ export type PrepareTurnToolPolicyDeps = {
 
 export type PrepareTurnToolRuntimeDeps = {
   input: RunAgentTurnInput;
+  catalogSourceSettings: Settings;
   db: ActivityServices["db"];
   bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
@@ -307,6 +305,7 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
 export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const {
     input,
+    catalogSourceSettings,
     db,
     bus,
     runtime,
@@ -321,7 +320,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     toolResultSpill,
     turn,
     session,
-    capabilitySettings,
     installedApiIntegrations,
     codexAppsCredentialId,
     turnExecutionPolicy,
@@ -525,6 +523,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     createListModelsAttemptToolDefinition({
       currentModelId: turnExecutionPolicy.productModelId,
       load: async () => {
+        const currentCatalog = await resolveCatalogSettings(db, catalogSourceSettings);
+        const currentSettings = currentCatalog.settings;
         const [
           policy,
           codexSubscriptionActive,
@@ -533,11 +533,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           workspaceGatewayCustomModels,
         ] = await Promise.all([
           getWorkspaceModelPolicy(db, input.workspaceId),
-          workspaceCodexSubscriptionActive(db, capabilitySettings, input.workspaceId),
-          credentialSubjectId && capabilitySettings.supergrokSubscriptionEnabled
+          workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
+          credentialSubjectId && currentSettings.supergrokSubscriptionEnabled
             ? workspaceXaiSubscriptionActive(
                 db,
-                capabilitySettings,
+                currentSettings,
                 input.workspaceId,
                 credentialSubjectId,
               )
@@ -550,14 +550,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]);
         return {
           selections: resolveWorkspaceModelSelection({
-            settings: capabilitySettings,
+            settings: currentSettings,
             policy,
             codexSubscriptionActive,
             xaiSubscriptionActive,
             workspaceGatewayConnectionActive,
             workspaceGatewayCustomModels,
           }),
-          modelNotes: configuredModelNotes(capabilitySettings),
+          modelNotes: currentCatalog.modelNotes,
         };
       },
     }),

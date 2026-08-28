@@ -26,11 +26,10 @@ export type LimitCheckInput = {
   workspaceId?: string;
   action: LimitAction;
   quantity?: number;
-  // The turn's model id, when the action represents an agent turn. Externally
-  // billed models consume ZERO OpenGeni credits, so the credit-balance +
-  // model-cost + token gates are skipped. Connected subscriptions still require
-  // live workspace readiness; an explicitly anonymous deployment route is
-  // statically ready by definition. Non-model infra actions leave this undefined.
+  // The turn's model id, when the action represents an agent turn. The model's
+  // deployment cost controls credit/cost gates; upstream metering independently
+  // controls the token cap. Connected subscriptions still require live workspace
+  // readiness. Non-model infra actions leave this undefined.
   model?: string | null;
 };
 
@@ -59,21 +58,24 @@ export async function checkLimit(
         model: input.model,
       })
     : false;
-  const catalogFundedWithoutCredits = input.model
-    ? (() => {
-        const resolved = resolveModelProvider(deps.settings, input.model);
-        return resolved !== undefined && resolved.model.cost !== "credits";
-      })()
-    : false;
-  const externallyBilled = codexBilled || catalogFundedWithoutCredits;
-  const creditDecision = await checkCreditBalance(deps, input, externallyBilled);
+  const resolvedModel = input.model
+    ? resolveModelProvider(deps.settings, input.model)?.model
+    : null;
+  const fundedWithoutCredits =
+    codexBilled || (resolvedModel != null && resolvedModel.cost !== "credits");
+  const externallyMetered =
+    codexBilled || (resolvedModel != null && resolvedModel.billing.metering === "external");
+  const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits);
   if (!creditDecision.allowed) {
     return creditDecision;
   }
   if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
     return { allowed: true };
   }
-  return await checkStaticCaps(deps, input, externallyBilled);
+  return await checkStaticCaps(deps, input, {
+    fundedWithoutCredits,
+    externallyMetered,
+  });
 }
 
 async function checkCreditBalance(
@@ -97,10 +99,14 @@ async function checkCreditBalance(
 async function checkStaticCaps(
   deps: LimitDependencies,
   input: LimitCheckInput,
-  externallyBilled: boolean,
+  funding: { fundedWithoutCredits: boolean; externallyMetered: boolean },
 ): Promise<LimitDecision> {
   const limits = configuredStaticUsageLimits(deps.settings);
-  if (limits.maxMonthlyCostMicrosPerAccount && isCostlyAction(input.action) && !externallyBilled) {
+  if (
+    limits.maxMonthlyCostMicrosPerAccount &&
+    isCostlyAction(input.action) &&
+    !funding.fundedWithoutCredits
+  ) {
     const used = await sumUsageQuantity(deps.db, {
       accountId: input.accountId,
       eventType: "model.cost",
@@ -181,7 +187,7 @@ async function checkStaticCaps(
           );
     }
     case "tokens:consume": {
-      if (externallyBilled || !limits.maxMonthlyTokensPerWorkspace || !input.workspaceId) {
+      if (funding.externallyMetered || !limits.maxMonthlyTokensPerWorkspace || !input.workspaceId) {
         return { allowed: true };
       }
       const used = await sumUsageQuantity(deps.db, {

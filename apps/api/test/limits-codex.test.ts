@@ -222,6 +222,31 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
+  test("deployment cost free bypasses credits without bypassing the workspace token cap", async () => {
+    const restoreBal = mockZeroBalance();
+    const usageSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(100);
+    const settings = billedSettings({
+      staticUsageLimitsJson: JSON.stringify({ maxMonthlyTokensPerWorkspace: 100 }),
+      modelCostPolicyJson: JSON.stringify({ "scripted-model": "free" }),
+    });
+    try {
+      const decision = await checkLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "tokens:consume",
+        quantity: 1,
+        model: "scripted-model",
+      });
+      expect(decision).toMatchObject({
+        allowed: false,
+        code: "max_monthly_tokens_per_workspace",
+      });
+    } finally {
+      usageSpy.mockRestore();
+      restoreBal();
+    }
+  });
+
   test("infra cap (workspace:create) never reads codex credential and is unaffected", async () => {
     const restoreBal = mockZeroBalance();
     // workspace:create is a non-costly action with no workspaceId/model: getBillingBalance

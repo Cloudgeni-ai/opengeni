@@ -1,5 +1,9 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { resolveTurnExecutionPolicyV1, type ModelCatalogDocument } from "@opengeni/config";
+import {
+  configuredModels,
+  resolveTurnExecutionPolicyV1,
+  type ModelCatalogDocument,
+} from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { canonicalConfiguredModel } from "../src/domain/sessions";
@@ -135,7 +139,6 @@ describe("model catalog source resolution", () => {
       expect(policy).toMatchObject({
         providerId: "workspace-gateway",
         upstreamModelId: "anthropic/claude-sonnet-4.6",
-        cost: "workspace",
         billing: { upstreamPayer: "workspace", metering: "external" },
       });
       expect(policy.definitionVersion).toMatch(/^sha256:[a-f0-9]{64}$/u);
@@ -148,6 +151,38 @@ describe("model catalog source resolution", () => {
       expect(() =>
         canonicalConfiguredModel(resolved.settings, "workspace-gateway/unstored/model"),
       ).toThrow("model is not available");
+    } finally {
+      listCustom.mockRestore();
+    }
+  });
+
+  test("lets deployment Gateway membership shadow a colliding custom row", async () => {
+    const listCustom = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([
+      {
+        id: "33333333-3333-4333-8333-333333333333",
+        accountId,
+        workspaceId,
+        upstreamModelId: "deepseek/deepseek-v4-flash-0731",
+        label: "Stale custom label",
+        createdBySubjectId: "subject-a",
+        createdAt: new Date("2026-08-27T12:00:00.000Z"),
+        updatedAt: new Date("2026-08-27T12:00:00.000Z"),
+      },
+    ]);
+    try {
+      const resolved = await resolveWorkspaceCatalogSettings(
+        {} as opengeniDb.Database,
+        testSettings(),
+        { accountId, workspaceId },
+      );
+      const matching = configuredModels(resolved.settings).filter(
+        (model) => model.upstreamModelId === "deepseek/deepseek-v4-flash-0731",
+      );
+      expect(matching).toHaveLength(1);
+      expect(matching[0]).toMatchObject({
+        id: "workspace-gateway/deepseek-v4-flash-0731",
+        label: expect.not.stringContaining("Stale custom label"),
+      });
     } finally {
       listCustom.mockRestore();
     }

@@ -15647,10 +15647,6 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       wireApi: z.enum(["responses", "chat"]),
       credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
-      // Additive so accepted turns created before deployment funding policy
-      // remain readable. New turns always freeze this separate workspace-facing
-      // cost fact; legacy readers fall back to their historical billing rule.
-      cost: ModelCostClassV1.optional(),
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
     })
     .strict()

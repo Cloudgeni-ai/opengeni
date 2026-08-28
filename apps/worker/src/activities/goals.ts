@@ -52,12 +52,13 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
   ): Promise<MaybeContinueGoalResult> {
     const service = await services();
     const { db, bus } = service;
+    const catalogSourceSettings = service.catalogSourceSettings ?? service.settings;
     // Cheap pre-read: the common goal-less session skips the budget queries.
     const existingGoal = await getSessionGoal(db, input.workspaceId, input.sessionId);
     if (!existingGoal || existingGoal.status !== "active") {
       return { action: "none" };
     }
-    let settings = (await resolveCatalogSettings(db, service.settings)).settings;
+    let settings = (await resolveCatalogSettings(db, catalogSourceSettings)).settings;
     // Loaded before the budget check so the codex-billed predicate and the
     // synthesized turn use the SAME effective policy. An explicit per-turn
     // model can differ from the persisted session default; follow-up goal work
@@ -110,7 +111,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     }
     if (continuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
       settings = (
-        await resolveWorkspaceCatalogSettings(db, service.settings, {
+        await resolveWorkspaceCatalogSettings(db, catalogSourceSettings, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
         })

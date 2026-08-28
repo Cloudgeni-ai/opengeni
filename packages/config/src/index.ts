@@ -2080,6 +2080,7 @@ export const ModelCatalogDocument = z
   .superRefine((document, context) => {
     const productIds = new Set<string>();
     const providerIds = new Set<string>();
+    const gatewayUpstreamIds = new Set<string>();
     const add = (id: string, path: Array<string | number>): void => {
       if (/[\u000A\u000D|]/u.test(id)) {
         context.addIssue({
@@ -2115,6 +2116,14 @@ export const ModelCatalogDocument = z
       );
     });
     document.gatewayModels.forEach((model, index) => {
+      if (gatewayUpstreamIds.has(model.upstreamModelId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["gatewayModels", index, "upstreamModelId"],
+          message: `duplicate Gateway upstream model id ${model.upstreamModelId}`,
+        });
+      }
+      gatewayUpstreamIds.add(model.upstreamModelId);
       add(model.productId, ["gatewayModels", index, "productId"]);
       add(model.workspaceProductId, ["gatewayModels", index, "workspaceProductId"]);
     });
@@ -2151,7 +2160,26 @@ function deploymentRegistryProvidersWithHostCredentials(
   return providers.map((provider) => {
     if (provider.kind !== "api-key") return provider;
     const host = hostProviders.get(provider.id);
-    if (!host || host.kind !== "api-key") return provider;
+    if (!host || host.kind !== "api-key") {
+      throw new Error(
+        `database model catalog provider ${provider.id} has no matching host-authorized api-key transport`,
+      );
+    }
+    const transportIdentity = (candidate: typeof provider | RegistryProvider) => ({
+      kind: candidate.kind,
+      baseUrl: candidate.baseUrl,
+      api: candidate.api,
+      wireProfile: candidate.wireProfile,
+      defaultHeaders: candidate.defaultHeaders ?? {},
+      defaultQuery: candidate.defaultQuery ?? {},
+      publicDefaultHeaderNames: candidate.publicDefaultHeaderNames ?? [],
+      publicDefaultQueryNames: candidate.publicDefaultQueryNames ?? [],
+    });
+    if (canonicalJson(transportIdentity(provider)) !== canonicalJson(transportIdentity(host))) {
+      throw new Error(
+        `database model catalog provider ${provider.id} does not match its host-authorized transport`,
+      );
+    }
     return {
       ...provider,
       ...(host.apiKey === undefined ? {} : { apiKey: host.apiKey }),
@@ -3527,6 +3555,7 @@ function gatewayRegistryProvider(
 ): InternalRegistryProvider {
   const workspace = input.kind === "vercel-gateway-workspace";
   const curated = configuredGatewayCatalogModels(settings);
+  const upstreamIds = new Set(curated.map((model) => model.upstreamModelId));
   const models = curated.map((model) => {
     return {
       id: workspace ? model.workspaceProductId : model.productId,
@@ -3546,6 +3575,12 @@ function gatewayRegistryProvider(
   });
   if (workspace) {
     for (const custom of input.customModels ?? []) {
+      // Deployment membership wins over an older or concurrently-created
+      // workspace row with the same upstream identity. This keeps runtime
+      // routing deterministic while leaving the row available for an admin to
+      // remove after the deployment catalog change.
+      if (upstreamIds.has(custom.upstreamModelId)) continue;
+      upstreamIds.add(custom.upstreamModelId);
       models.push({
         id: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${custom.upstreamModelId}`,
         upstreamModelId: custom.upstreamModelId,
@@ -4572,7 +4607,6 @@ export function resolveTurnExecutionPolicyV1(
     wireApi: resolved.model.api,
     credentialSource: resolved.model.credentialSource,
     billing: resolved.model.billing,
-    cost: resolved.model.cost,
     definitionVersion: resolved.model.definitionVersion,
   });
 }
@@ -4636,7 +4670,6 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
     parsed.wireApi !== resolved.model.api ||
     !definitionVersionMatches ||
-    (parsed.cost !== undefined && parsed.cost !== resolved.model.cost) ||
     canonicalJson(parsed.credentialSource) !== canonicalJson(resolved.model.credentialSource) ||
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
   if (mismatched) {
@@ -6432,11 +6465,13 @@ export function validateModelCatalogSettings(settings: Settings): ConfiguredMode
     deploymentProductIds.add(productId);
     noteProductIds.add(productId);
   }
-  for (const productId of Object.keys(costPolicy)) {
-    if (!deploymentProductIds.has(productId)) {
-      throw new Error(
-        `OPENGENI_MODEL_COST_POLICY_JSON references unknown deployment model ${productId}`,
-      );
+  if (settings.modelCatalogSource === "code") {
+    for (const productId of Object.keys(costPolicy)) {
+      if (!deploymentProductIds.has(productId)) {
+        throw new Error(
+          `OPENGENI_MODEL_COST_POLICY_JSON references unknown deployment model ${productId}`,
+        );
+      }
     }
   }
   for (const productId of Object.keys(notes)) {

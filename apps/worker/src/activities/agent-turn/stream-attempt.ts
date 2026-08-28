@@ -911,6 +911,7 @@ export async function runTurnStreamAttempt(
           latencyMode: turnExecutionPolicy.latencyMode,
           metricProvider: streamProvider,
           externallyBilled: billingState.isExternallyBilledTurn,
+          chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
           emittedSourceKeys: emittedModelUsageSourceKeys,
@@ -976,6 +977,7 @@ export async function runTurnStreamAttempt(
               input.workspaceId,
               billingState.isExternallyBilledTurn,
               entitlements,
+              billingState.chargesOpenGeniCredits,
             );
           } catch (limitError) {
             // Capture the run state at the boundary so the budget valve in
@@ -1351,6 +1353,7 @@ export async function runTurnStreamAttempt(
               turnAttemptId: input.attemptId,
               model: turn.model,
               externallyBilled: billingState.isExternallyBilledTurn,
+              chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
               usage: aggregateUsage,
               normalizedUsage: normalizedAggregateUsage,
               sourceKey: aggregateSourceKey,
