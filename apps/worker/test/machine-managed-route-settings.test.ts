@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { sandboxEnvironmentSettingsForRoute } from "../src/activities/agent-turn/run-credentials";
+import { sandboxSettingsForRoute } from "../src/activities/agent-turn/sandbox-route";
 
 describe("machine-home managed-group settings", () => {
   test("uses the managed provider for fallback manifests and preserves machine-primary settings", () => {
     const machineHome = testSettings({ sandboxBackend: "selfhosted" });
 
-    const managed = sandboxEnvironmentSettingsForRoute({
+    const managed = sandboxSettingsForRoute({
       runSettings: machineHome,
       machinePrimary: false,
       groupBoxBackend: "modal",
@@ -15,7 +15,7 @@ describe("machine-home managed-group settings", () => {
     expect(managed.sandboxBackend).toBe("modal");
 
     expect(
-      sandboxEnvironmentSettingsForRoute({
+      sandboxSettingsForRoute({
         runSettings: machineHome,
         machinePrimary: true,
         groupBoxBackend: "selfhosted",
@@ -24,7 +24,7 @@ describe("machine-home managed-group settings", () => {
 
     const modalHome = testSettings({ sandboxBackend: "modal" });
     expect(
-      sandboxEnvironmentSettingsForRoute({
+      sandboxSettingsForRoute({
         runSettings: modalHome,
         machinePrimary: false,
         groupBoxBackend: "modal",

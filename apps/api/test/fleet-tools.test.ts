@@ -551,10 +551,14 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     const { ctx, services, session, sandbox } = await seedFleet({
       sandboxBackend: "selfhosted",
     });
-    const attached = await swapActiveSandbox(services, ctx, sandbox.id);
+    const managedServices = {
+      ...services,
+      settings: testSettings({ ...services.settings, sandboxBackend: "modal" }),
+    };
+    const attached = await swapActiveSandbox(managedServices, ctx, sandbox.id);
     expect(attached).toMatchObject({ swapped: true, activeSandboxId: sandbox.id });
 
-    const listed = await listFleet(services, ctx);
+    const listed = await listFleet(managedServices, ctx);
     const group = listed.sandboxes.find((entry) => entry.isSessionGroup);
     expect(group).toMatchObject({
       id: session.sandboxGroupId,
@@ -567,7 +571,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     let releases = 0;
     const switched = await swapActiveSandbox(
       {
-        ...services,
+        ...managedServices,
         ensureSessionGroupReady: async () => {
           readinessChecks += 1;
           return {

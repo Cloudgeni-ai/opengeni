@@ -56,6 +56,7 @@ import {
   sandboxEstablishPolicyDecision,
   ensureTurnModalRegistryImage,
   sandboxArtifactRuntimeAdmission,
+  sandboxSettingsForRoute,
 } from "./sandbox-route";
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -105,18 +106,6 @@ export type PrepareRunCredentialsDeps = {
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
 };
 
-export function sandboxEnvironmentSettingsForRoute(input: {
-  runSettings: Settings;
-  machinePrimary: boolean;
-  groupBoxBackend: Settings["sandboxBackend"];
-}): Settings {
-  return input.runSettings.sandboxBackend === "selfhosted" &&
-    !input.machinePrimary &&
-    input.groupBoxBackend !== "selfhosted"
-    ? { ...input.runSettings, sandboxBackend: input.groupBoxBackend }
-    : input.runSettings;
-}
-
 export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   const {
     input,
@@ -151,7 +140,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   // manifest environment with that effective provider just as Channel-A and
   // viewer readiness do; otherwise the verified managed box and the agent can
   // disagree on backend-aware HOME/token-file paths.
-  const sandboxEnvironmentSettings = sandboxEnvironmentSettingsForRoute({
+  const sandboxEnvironmentSettings = sandboxSettingsForRoute({
     runSettings,
     machinePrimary,
     groupBoxBackend,

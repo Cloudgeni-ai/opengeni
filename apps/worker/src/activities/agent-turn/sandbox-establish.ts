@@ -63,6 +63,7 @@ import {
   sandboxEstablishPolicyDecision,
   shouldPrefetchManagedSandbox,
   reconcileActiveSandboxPointer,
+  sandboxSettingsForRoute,
 } from "./sandbox-route";
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -254,16 +255,28 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
     ? (managedSessionGroupBackend(settings.sandboxBackend, runSettings.sandboxBackend) ??
       runSettings.sandboxBackend)
     : runSettings.sandboxBackend;
+  const groupRouteSettings = sandboxSettingsForRoute({
+    runSettings,
+    machinePrimary,
+    groupBoxBackend,
+  });
+  if (groupRouteSettings !== runSettings) {
+    // `modelRunSettings` drives SandboxAgent manifest construction and the
+    // legacy SDK-owned client path. Keep its provider/model context overrides,
+    // but replace the stale durable machine-home label with the route that will
+    // actually execute.
+    eventing.modelRunSettings = {
+      ...eventing.modelRunSettings,
+      sandboxBackend: groupRouteSettings.sandboxBackend,
+    };
+  }
   sandboxState.startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
   media.sandboxFileDownloadBackend = sandboxState.startupMilestoneBackend;
   // Durable lease identity is always the logical OCI/base image. A provider
   // image id in runSettings is only a physical cold-create optimization and
   // must never become cross-surface shared-state fencing.
   const groupBoxImage = rigProviderImageSourceImage(logicalSandboxSettings, groupBoxBackend);
-  const sandboxCreationBackend: Settings["sandboxBackend"] =
-    settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
-      ? groupBoxBackend
-      : runSettings.sandboxBackend;
+  const sandboxCreationBackend: Settings["sandboxBackend"] = groupRouteSettings.sandboxBackend;
   const effectiveRunCredentialBackend = activeSandboxBackend ?? groupBoxBackend;
 
   return {

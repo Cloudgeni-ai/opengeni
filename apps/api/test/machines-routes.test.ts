@@ -450,7 +450,9 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     const { accountId, workspaceId, session, sandbox, bus } = await seed({
       sandboxBackend: "selfhosted",
     });
-    const app = appFor(bus);
+    const app = appFor(bus, {
+      settings: testSettings({ ...settings, sandboxBackend: "modal" }),
+    });
     const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
 
     const response = await app.request(
