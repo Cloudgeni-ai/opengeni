@@ -104,6 +104,18 @@ export type EffectiveSessionControl = {
   } | null;
 };
 
+/**
+ * The bounded control projection required by a locked activity-write fence.
+ * Settlement and background-command summaries are read-model concerns and must
+ * not extend the session-event critical section when admission only needs the
+ * effective run state and blocker scope.
+ */
+export type SessionWriteAdmissionControl = {
+  state: EffectiveControlState;
+  controlVersion: number;
+  primaryBlockerKind: EffectiveControlBlocker["kind"] | null;
+};
+
 type SettlementAttemptCounts = {
   attemptCount: number;
   interruptionPendingCount: number;
@@ -1534,6 +1546,46 @@ export async function evaluateSessionControls(
     );
   }
   return result;
+}
+
+/**
+ * Evaluate only the control facts needed to admit an already locked session
+ * write. The workspace-control row must be reused when the caller established
+ * the canonical prefix before session/turn/attempt locks.
+ *
+ * Deliberately omit settlementAttemptCounts and
+ * stoppingBackgroundCommandCounts: those recursive summaries do not affect
+ * effective pause state and their results are discarded by the write fence.
+ */
+export async function evaluateSessionWriteAdmissionControl(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: {
+    lock?: WorkspaceControlLockMode;
+    workspaceControl?: WorkspaceControlRow | undefined;
+  } = {},
+): Promise<SessionWriteAdmissionControl> {
+  if (options.workspaceControl && options.workspaceControl.workspaceId !== workspaceId) {
+    throw new SessionControlInvariantError(
+      `Locked workspace control ${options.workspaceControl.workspaceId} does not match ${workspaceId}`,
+    );
+  }
+  const workspace =
+    options.workspaceControl ??
+    (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
+  const projected = projectEffectiveControl(
+    workspace,
+    sessionId,
+    await loadTargetAncestryRows(db, workspaceId, [sessionId]),
+    NO_SETTLEMENT_ATTEMPTS,
+    0,
+  );
+  return {
+    state: projected.state,
+    controlVersion: projected.controlVersion,
+    primaryBlockerKind: projected.primaryBlocker?.kind ?? null,
+  };
 }
 
 type SessionDiscoveryControlRow = {

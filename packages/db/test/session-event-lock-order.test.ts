@@ -71,6 +71,7 @@ let shared: SharedTestDatabase;
 let admin: postgres.Sql;
 let monitor: postgres.Sql;
 let barrier: postgres.Sql;
+let readModelBlocker: postgres.Sql;
 let appClient: DbClient;
 let db: Database;
 let nextBarrierId = 1;
@@ -820,6 +821,7 @@ beforeAll(async () => {
   admin = shared.admin;
   monitor = postgres(shared.adminUrl, { max: 1 });
   barrier = postgres(shared.adminUrl, { max: 1 });
+  readModelBlocker = postgres(shared.adminUrl, { max: 1 });
   appClient = createDb(shared.appUrl, { max: 20 });
   db = appClient.db;
 
@@ -964,6 +966,7 @@ afterAll(async () => {
   await appClient?.close().catch(() => undefined);
   await monitor?.end().catch(() => undefined);
   await barrier?.end().catch(() => undefined);
+  await readModelBlocker?.end().catch(() => undefined);
   await shared?.release();
 }, 60_000);
 
@@ -1536,6 +1539,41 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       await held;
     }
     await assertCommittedSequence(first, 1);
+  });
+
+  test("does not read background-command settlement projection during attempt append", async () => {
+    const fixture = await seedRunningSession();
+    let release!: () => void;
+    let locked!: () => void;
+    let lockFailed!: (reason?: unknown) => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const acquired = new Promise<void>((resolve, reject) => {
+      locked = resolve;
+      lockFailed = reject;
+    });
+    const blocker = readModelBlocker.begin(async (tx) => {
+      await tx`lock table session_background_commands in access exclusive mode`;
+      locked();
+      await hold;
+    });
+    void blocker.catch(lockFailed);
+    await within(acquired, "the background-command table lock to be acquired", 2_000);
+    try {
+      const result = await within(
+        activityWriter(fixture, "agent.message.delta"),
+        "the attempt append to ignore background-command settlement projection",
+        2_000,
+      );
+      expect(result).toMatchObject({ accepted: true });
+      expect(await assertCommittedSequence(fixture, 1)).toMatchObject([
+        { sequence: 1, type: "agent.message.delta" },
+      ]);
+    } finally {
+      release();
+      await blocker;
+    }
   });
 
   test("locks actor and target rows before command receipt foreign keys can form an upgrade cycle", async () => {
