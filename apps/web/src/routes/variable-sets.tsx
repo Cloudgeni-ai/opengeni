@@ -45,6 +45,27 @@ import type {
   WorkspaceVariableSetSecret,
 } from "@/types";
 
+const VARIABLE_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+const VARIABLE_NAME_MAX_LENGTH = 128;
+
+export function normalizeVariableNameInput(value: string): string {
+  return value
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function variableNameError(value: string): string | null {
+  if (!value) return null;
+  if (value.length > VARIABLE_NAME_MAX_LENGTH) return "Use 128 characters or fewer.";
+  if (!/^[A-Z]/.test(value)) return "Start the name with a letter.";
+  if (!VARIABLE_NAME_PATTERN.test(value)) {
+    return "Use letters, numbers, and underscores only.";
+  }
+  return null;
+}
+
 export function sessionUsesVariableSet(
   session: Pick<Session, "variableSetIds" | "variableSetId">,
   variableSetId: string,
@@ -374,6 +395,20 @@ export function VariableSetCard(props: {
     : attachmentCount > 0
       ? "Detach it from sessions and tasks first"
       : undefined;
+  const normalizedVariableName = normalizeVariableNameInput(variableName);
+  const newVariableNameError =
+    variableName && !normalizedVariableName
+      ? "Start the name with a letter."
+      : variableNameError(normalizedVariableName);
+  const newVariableNameValid =
+    normalizedVariableName.length > 0 &&
+    normalizedVariableName.length <= VARIABLE_NAME_MAX_LENGTH &&
+    VARIABLE_NAME_PATTERN.test(normalizedVariableName);
+  const newVariableNameHint =
+    variableName && normalizedVariableName !== variableName.trim()
+      ? `Saved as ${normalizedVariableName}. Names become environment variables.`
+      : "Environment name. Spaces and hyphens become underscores.";
+  const variableNameHelpId = `new-variable-name-help-${variableSet.id}`;
 
   useEffect(() => {
     setRevealedValues({});
@@ -423,9 +458,13 @@ export function VariableSetCard(props: {
   }
 
   async function addVariable() {
-    const name = variableName.trim();
+    const name = normalizedVariableName;
     if (!name || !variableValue) {
       toast.error("Variable name and value are required");
+      return;
+    }
+    if (!newVariableNameValid) {
+      toast.error(newVariableNameError ?? "Enter a valid environment variable name");
       return;
     }
     const result = await props.onSetVariable(name, variableValue);
@@ -758,15 +797,27 @@ export function VariableSetCard(props: {
                 void addVariable();
               }}
             >
-              <Input
-                name="variable-name"
-                value={variableName}
-                onChange={(event) => setVariableName(event.target.value)}
-                placeholder="VARIABLE_NAME"
-                aria-label="New variable name"
-                autoComplete="off"
-                className="h-8 font-mono text-xs pointer-coarse:min-h-10"
-              />
+              <div className="grid gap-1">
+                <Input
+                  name="variable-name"
+                  value={variableName}
+                  onChange={(event) => setVariableName(event.target.value)}
+                  placeholder="VARIABLE_NAME"
+                  aria-label="New variable name"
+                  aria-describedby={variableNameHelpId}
+                  aria-invalid={newVariableNameError ? true : undefined}
+                  autoComplete="off"
+                  className="h-8 font-mono text-xs pointer-coarse:min-h-10"
+                />
+                <p
+                  id={variableNameHelpId}
+                  className={
+                    newVariableNameError ? "text-2xs text-danger" : "text-2xs text-fg-muted"
+                  }
+                >
+                  {newVariableNameError ?? newVariableNameHint}
+                </p>
+              </div>
               <Input
                 name="variable-value"
                 type="password"
@@ -782,7 +833,7 @@ export function VariableSetCard(props: {
                 variant="secondary"
                 size="sm"
                 className="h-8 pointer-coarse:min-h-10"
-                disabled={props.mutating || !variableName.trim() || !variableValue}
+                disabled={props.mutating || !newVariableNameValid || !variableValue}
               >
                 <PlusIcon className="size-3.5" />
                 Set variable

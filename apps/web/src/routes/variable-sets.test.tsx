@@ -3,7 +3,11 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { sessionUsesVariableSet, VariableSetCard } from "./variable-sets";
+import {
+  normalizeVariableNameInput,
+  sessionUsesVariableSet,
+  VariableSetCard,
+} from "./variable-sets";
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
 import type { Session, WorkspaceVariableSet } from "@/types";
 
@@ -39,7 +43,34 @@ const VARIABLE_SET: WorkspaceVariableSet = {
   updatedAt: "2026-07-28T00:00:00.000Z",
 };
 
+async function setInputValue(element: HTMLInputElement, value: string): Promise<void> {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "value")?.set?.call(
+      element,
+      value,
+    );
+    const reactPropsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+    const onChange = reactPropsKey
+      ? (
+          element as unknown as Record<
+            string,
+            { onChange?: (event: { target: HTMLInputElement }) => void }
+          >
+        )[reactPropsKey]?.onChange
+      : undefined;
+    if (onChange) onChange({ target: element });
+    else element.dispatchEvent(new Event("input", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
 describe("Variable Sets credential-autofill boundaries", () => {
+  test("normalizes friendly labels into portable environment names", () => {
+    expect(normalizeVariableNameInput("test-key")).toBe("TEST_KEY");
+    expect(normalizeVariableNameInput("  service token  ")).toBe("SERVICE_TOKEN");
+    expect(normalizeVariableNameInput("api.key/value")).toBe("API_KEY_VALUE");
+  });
+
   test("uses the complete ordered session selection before the legacy singular fallback", () => {
     const lowerPrecedenceId = "variable-set-low";
     const higherPrecedenceId = "variable-set-high";
@@ -201,6 +232,70 @@ describe("Variable Sets credential-autofill boundaries", () => {
       const variableInputs = [...container.querySelectorAll<HTMLInputElement>("input")];
       expect(variableInputs.map((input) => input.autocomplete)).not.toContain("email");
       expect(variableInputs.map((input) => input.autocomplete)).not.toContain("current-password");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("shows and submits the normalized environment name instead of a backend 422", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const writes: Array<{ name: string; value: string }> = [];
+
+    try {
+      await act(async () => {
+        root.render(
+          <VariableSetCard
+            workspaceId="workspace-1"
+            variableSet={VARIABLE_SET}
+            attachedSessions={[]}
+            attachedTasks={[]}
+            attachmentsUnknown={false}
+            mutating={false}
+            canWriteSet={true}
+            canWriteSecrets={true}
+            canReadSecrets={true}
+            revealEpoch={0}
+            onUpdate={async () => VARIABLE_SET}
+            onDelete={async () => true}
+            onReadVariable={async () => null}
+            onSetVariable={async (name, value) => {
+              writes.push({ name, value });
+              return {};
+            }}
+            onDeleteVariable={async () => true}
+          />,
+        );
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .click();
+      });
+
+      const name = container.querySelector<HTMLInputElement>('[aria-label="New variable name"]')!;
+      const value = container.querySelector<HTMLInputElement>('[aria-label="New variable value"]')!;
+      await setInputValue(name, "1test-key");
+      await setInputValue(value, "secret-value");
+      const submit = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Set variable",
+      )!;
+      expect(name.value).toBe("1test-key");
+      expect(container.textContent).toContain("Start the name with a letter");
+      expect(submit.disabled).toBeTrue();
+
+      await setInputValue(name, "test-key");
+
+      expect(name.value).toBe("test-key");
+      expect(container.textContent).toContain("Saved as TEST_KEY");
+      expect(submit.disabled).toBeFalse();
+      await act(async () => {
+        submit.click();
+        await Promise.resolve();
+      });
+      expect(writes).toEqual([{ name: "TEST_KEY", value: "secret-value" }]);
     } finally {
       await act(async () => root.unmount());
       container.remove();
