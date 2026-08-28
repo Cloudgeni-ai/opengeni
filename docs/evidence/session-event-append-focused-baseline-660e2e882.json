@@ -1,0 +1,244 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-28T11:21:59.763Z",
+  "runtime": {
+    "bun": "1.4.0",
+    "platform": "linux",
+    "arch": "x64",
+    "gitSha": "660e2e882a42746ccd881d9b4d4fa3ddb1227740"
+  },
+  "configuration": {
+    "sessionCount": 16,
+    "workspaceCount": 2,
+    "sampleCount": 200,
+    "batchSizes": [
+      1
+    ],
+    "concurrencies": [
+      1,
+      8
+    ]
+  },
+  "posture": {
+    "postgresVersion": "17.11 (Ubuntu 17.11-1.pgdg22.04+2)",
+    "pgvectorVersion": "0.8.6",
+    "fsync": "on",
+    "synchronousCommit": "on",
+    "fullPageWrites": "on",
+    "appRole": "opengeni_app",
+    "appRoleSuperuser": false,
+    "appRoleBypassRls": false,
+    "sessionsForceRls": true,
+    "sessionEventsForceRls": true
+  },
+  "scenarios": [
+    {
+      "name": "same_session_raw_1",
+      "topology": "same_session",
+      "eventClass": "raw",
+      "batchSize": 1,
+      "concurrency": 1,
+      "latencyMs": {
+        "samples": 200,
+        "min": 13.717,
+        "p50": 15.626,
+        "p95": 18.095,
+        "p99": 19.319,
+        "max": 20.037
+      },
+      "throughputPerSecond": 63.387
+    },
+    {
+      "name": "same_workspace_raw_1_c1",
+      "topology": "same_workspace",
+      "eventClass": "raw",
+      "batchSize": 1,
+      "concurrency": 1,
+      "latencyMs": {
+        "samples": 200,
+        "min": 13.395,
+        "p50": 15.67,
+        "p95": 18.859,
+        "p99": 21.203,
+        "max": 24.376
+      },
+      "throughputPerSecond": 62.935
+    },
+    {
+      "name": "multi_workspace_raw_1_c1",
+      "topology": "multi_workspace",
+      "eventClass": "raw",
+      "batchSize": 1,
+      "concurrency": 1,
+      "latencyMs": {
+        "samples": 200,
+        "min": 13.489,
+        "p50": 14.973,
+        "p95": 17.455,
+        "p99": 19.786,
+        "max": 21.359
+      },
+      "throughputPerSecond": 65.897
+    },
+    {
+      "name": "same_workspace_raw_1_c8",
+      "topology": "same_workspace",
+      "eventClass": "raw",
+      "batchSize": 1,
+      "concurrency": 8,
+      "latencyMs": {
+        "samples": 200,
+        "min": 24.179,
+        "p50": 28.21,
+        "p95": 39.899,
+        "p99": 61.517,
+        "max": 63.712
+      },
+      "throughputPerSecond": 251.972
+    },
+    {
+      "name": "multi_workspace_raw_1_c8",
+      "topology": "multi_workspace",
+      "eventClass": "raw",
+      "batchSize": 1,
+      "concurrency": 8,
+      "latencyMs": {
+        "samples": 200,
+        "min": 24.844,
+        "p50": 27.922,
+        "p95": 33.144,
+        "p99": 33.349,
+        "max": 33.431
+      },
+      "throughputPerSecond": 278.455
+    },
+    {
+      "name": "same_session_semantic_1",
+      "topology": "same_session",
+      "eventClass": "semantic",
+      "batchSize": 1,
+      "concurrency": 1,
+      "latencyMs": {
+        "samples": 200,
+        "min": 18.127,
+        "p50": 20.433,
+        "p95": 23.447,
+        "p99": 25.198,
+        "max": 27.734
+      },
+      "throughputPerSecond": 48.376
+    },
+    {
+      "name": "same_workspace_semantic_1_c1",
+      "topology": "same_workspace",
+      "eventClass": "semantic",
+      "batchSize": 1,
+      "concurrency": 1,
+      "latencyMs": {
+        "samples": 200,
+        "min": 17.144,
+        "p50": 19.726,
+        "p95": 24.579,
+        "p99": 25.791,
+        "max": 28.374
+      },
+      "throughputPerSecond": 49.886
+    },
+    {
+      "name": "multi_workspace_semantic_1_c1",
+      "topology": "multi_workspace",
+      "eventClass": "semantic",
+      "batchSize": 1,
+      "concurrency": 1,
+      "latencyMs": {
+        "samples": 200,
+        "min": 17.382,
+        "p50": 19.908,
+        "p95": 23.633,
+        "p99": 27.533,
+        "max": 30.243
+      },
+      "throughputPerSecond": 49.541
+    },
+    {
+      "name": "same_workspace_semantic_1_c8",
+      "topology": "same_workspace",
+      "eventClass": "semantic",
+      "batchSize": 1,
+      "concurrency": 8,
+      "latencyMs": {
+        "samples": 200,
+        "min": 29.825,
+        "p50": 43.382,
+        "p95": 53.562,
+        "p99": 55.755,
+        "max": 57.561
+      },
+      "throughputPerSecond": 155.693
+    },
+    {
+      "name": "multi_workspace_semantic_1_c8",
+      "topology": "multi_workspace",
+      "eventClass": "semantic",
+      "batchSize": 1,
+      "concurrency": 8,
+      "latencyMs": {
+        "samples": 200,
+        "min": 28.769,
+        "p50": 39.805,
+        "p95": 49.956,
+        "p99": 52.098,
+        "max": 53.942
+      },
+      "throughputPerSecond": 181.217
+    }
+  ],
+  "scaling": [
+    {
+      "topology": "same_workspace",
+      "eventClass": "raw",
+      "batchSize": 1,
+      "concurrency": 8,
+      "efficiency": 0.5
+    },
+    {
+      "topology": "multi_workspace",
+      "eventClass": "raw",
+      "batchSize": 1,
+      "concurrency": 8,
+      "efficiency": 0.528
+    },
+    {
+      "topology": "same_workspace",
+      "eventClass": "semantic",
+      "batchSize": 1,
+      "concurrency": 8,
+      "efficiency": 0.39
+    },
+    {
+      "topology": "multi_workspace",
+      "eventClass": "semantic",
+      "batchSize": 1,
+      "concurrency": 8,
+      "efficiency": 0.457
+    }
+  ],
+  "invariantAudit": {
+    "sessions": 16,
+    "sequenceGapSessions": 0,
+    "duplicateSequenceSessions": 0,
+    "rejectedLateEvents": 0,
+    "missingSessionRows": 0
+  },
+  "thresholds": {
+    "rawP95Ms": 75,
+    "semanticP95Ms": 125,
+    "minimumScalingEfficiency": 0.9
+  },
+  "failures": [
+    "same_workspace raw batch 1 scaling: 0.5 < 0.9",
+    "multi_workspace raw batch 1 scaling: 0.528 < 0.9",
+    "same_workspace semantic batch 1 scaling: 0.39 < 0.9",
+    "multi_workspace semantic batch 1 scaling: 0.457 < 0.9"
+  ]
+}
