@@ -35,7 +35,7 @@ describe("sandbox observability contract", () => {
         condition?: string;
       }>;
     };
-    expect(chart.version).toBe("0.1.8");
+    expect(chart.version).toBe("0.1.9");
     expect(chart.dependencies).toEqual([
       {
         name: "kube-prometheus-stack",
