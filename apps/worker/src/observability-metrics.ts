@@ -1704,6 +1704,23 @@ export function recordSessionEventAppendLatency(
   });
 }
 
+export function recordSessionEventAppendPhaseLatency(
+  observability: Observability,
+  input: {
+    phase: string;
+    outcome: "completed" | "failed";
+    durationSeconds: number;
+  },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_session_event_append_phase_seconds",
+    help: "Duration in seconds of one bounded phase inside a fenced session-event append transaction.",
+    buckets: STREAM_IO_BUCKETS,
+    labels: { phase: input.phase, outcome: input.outcome },
+    value: input.durationSeconds,
+  });
+}
+
 /** Latency of the best-effort NATS live fan-out — the delivery path. A p99 climb
  *  here (with append healthy) is delivery, not the write path. */
 export function recordSessionEventPublishLatency(

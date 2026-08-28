@@ -5600,13 +5600,13 @@ describe("shouldDeferNonEagerToolPreparation", () => {
     ).toBe(true);
   });
 
-  test("keeps approval resumes, editable artifacts, and disabled disclosure eager", () => {
+  test("keeps approval resumes and disabled disclosure eager while artifacts share the wait", () => {
     expect(shouldDeferNonEagerToolPreparation({ ...eligible, triggerKind: "approval" })).toBe(
       false,
     );
     expect(
       shouldDeferNonEagerToolPreparation({ ...eligible, artifactRuntimeAvailable: true }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       shouldDeferNonEagerToolPreparation({
         ...eligible,

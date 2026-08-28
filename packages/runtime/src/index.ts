@@ -3719,8 +3719,17 @@ export async function prepareAgentTools(
       }),
   );
   const deferNonEager = options.deferNonEagerUntilToolDemand === true;
-  const eagerEntries = deferNonEager ? servers.filter((entry) => entry.eager) : servers;
-  const deferredEntries = deferNonEager ? servers.filter((entry) => !entry.eager) : [];
+  // Optional/best-effort integrations are never a first-token dependency. An
+  // explicit eager hint may make them available sooner, but when progressive
+  // disclosure is active their connect/list work joins the same shared
+  // preparation promise as every other deferred server. Required eager MCPs
+  // retain their fail-closed pre-inference contract.
+  const eagerEntries = deferNonEager
+    ? servers.filter((entry) => entry.eager && !entry.bestEffort)
+    : servers;
+  const deferredEntries = deferNonEager
+    ? servers.filter((entry) => !entry.eager || entry.bestEffort)
+    : [];
   const eagerRequiredEntries = eagerEntries.filter((entry) => !entry.bestEffort);
   const eagerBestEffortEntries = eagerEntries.filter((entry) => entry.bestEffort);
   const deferredRequiredEntries = deferredEntries.filter((entry) => !entry.bestEffort);
