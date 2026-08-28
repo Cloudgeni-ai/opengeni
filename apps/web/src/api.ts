@@ -250,21 +250,21 @@ export async function managedActorFetch(
     // so only its wrapper remains actor-bound. A live body must also abort its
     // native fetch after admission: cancelling only the source reader can leave
     // Chromium's HTTP/1 request open, eventually exhausting the per-origin
-    // connection pool across account switches and tabs. Publish the wrapper
-    // abort first so downstream consumption still fails closed with the same
-    // AbortError, then release the native transport in the next microtask.
+    // connection pool across account switches and tabs. Abort the native fetch
+    // synchronously so a pagehide cannot destroy the document before the
+    // transport is released. The native reader rejection is still delivered in
+    // a later microtask, after the wrapper records its fail-closed AbortError.
     const actorBodyController = new AbortController();
     const abortNativeTransport = finiteJsonResponse
       ? undefined
-      : (reason: unknown) => queueMicrotask(() => controller.abort(reason));
+      : (reason: unknown) => controller.abort(reason);
     abortTarget = finiteJsonResponse
       ? (reason) => actorBodyController.abort(reason)
       : (reason) => {
-          // Queue the native abort before publishing the wrapper abort. The
+          // Abort the native fetch before publishing the wrapper abort. The
           // wrapper's abort handler queues reader cancellation, so Chromium
           // sees the fetch signal first and cannot detach an SSE reader while
-          // leaving its HTTP/1 transport alive. Both remain deferred until
-          // after the downstream AbortError state is synchronously recorded.
+          // leaving its HTTP/1 transport alive.
           abortNativeTransport?.(reason);
           actorBodyController.abort(reason);
         };
@@ -387,7 +387,7 @@ function managedActorTrackedResponse(
       async cancel(reason) {
         const ownsSettlement = settle();
         if (ownsSettlement) abortNativeTransport?.(reason);
-        // Let a queued native fetch abort run before detaching its reader. In
+        // Let the native fetch abort propagate before detaching its reader. In
         // Chromium the inverse order can leave the HTTP/1 request open even
         // though the JavaScript ReadableStream has been cancelled.
         if (ownsSettlement && abortNativeTransport) await Promise.resolve();

@@ -140,8 +140,8 @@ describe("web API auth helpers", () => {
       await expect(read).resolves.toMatchObject({ done: false });
       const lateRead = reader.read();
       configureManagedActorEpoch("13");
-      await Promise.resolve();
       expect(observed.signal?.aborted).toBe(true);
+      await Promise.resolve();
       expect(observed.cancelledWith).toMatchObject({ name: "AbortError" });
       expect(transportCloseOrder).toEqual(["native-abort", "source-cancel"]);
       await expect(lateRead).rejects.toMatchObject({ name: "AbortError" });
@@ -176,9 +176,10 @@ describe("web API auth helpers", () => {
       configureManagedActorEpoch("consumer-close");
       const response = await managedActorFetch("https://api.example.test/v1/sessions/live");
       const reason = new DOMException("consumer finished", "AbortError");
-      await response.body!.cancel(reason);
-      await Promise.resolve();
+      const cancel = response.body!.cancel(reason);
       expect(observed.signal?.aborted).toBe(true);
+      await cancel;
+      await Promise.resolve();
       expect(observed.signal?.reason).toBe(reason);
       expect(observed.cancelledWith).toBe(reason);
       expect(transportCloseOrder).toEqual(["native-abort", "source-cancel"]);
@@ -210,8 +211,8 @@ describe("web API auth helpers", () => {
       const response = await managedActorFetch("https://api.example.test/v1/sessions/live");
       const read = response.body!.getReader().read();
       handleManagedActorPageHide(false);
-      await Promise.resolve();
       expect(observed.signal?.aborted).toBe(true);
+      await Promise.resolve();
       await expect(read).rejects.toMatchObject({ name: "AbortError" });
       // The old response must not retain a native body controller that can
       // continue publishing after document teardown.
