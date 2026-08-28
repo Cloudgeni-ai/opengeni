@@ -87,5 +87,12 @@ $body$;
 
 REVOKE ALL ON FUNCTION assert_workspace_member_management_candidate(uuid, uuid, text, text)
   FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION assert_workspace_member_management_candidate(uuid, uuid, text, text)
-  TO opengeni_app;
+DO $workspace_member_management_role$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION assert_workspace_member_management_candidate(
+      uuid, uuid, text, text
+    ) TO opengeni_app;
+  END IF;
+END
+$workspace_member_management_role$;

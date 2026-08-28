@@ -117,5 +117,12 @@ $body$;
 
 REVOKE ALL ON FUNCTION list_workspace_member_management_candidates(uuid, uuid, text)
   FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION list_workspace_member_management_candidates(uuid, uuid, text)
-  TO opengeni_app;
+DO $workspace_member_candidate_inventory_role$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION list_workspace_member_management_candidates(
+      uuid, uuid, text
+    ) TO opengeni_app;
+  END IF;
+END
+$workspace_member_candidate_inventory_role$;

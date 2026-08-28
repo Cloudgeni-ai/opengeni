@@ -146,6 +146,10 @@ describe("workspace access settings convergence", () => {
       expect(rendered.container.textContent).toContain("Add member");
       expect(rendered.container.textContent).toContain("Fine-tune");
       expect(rendered.container.textContent).toContain("Remove");
+      expect(rendered.container.textContent).toContain(
+        "This workspace is permanently owned by its organization",
+      );
+      expect(rendered.container.textContent).toContain("Open organization settings");
       expect(listWorkspaceMembers).toHaveBeenCalledWith(workspaceA);
       expect(updateWorkspaceMember).not.toHaveBeenCalled();
       expect(removeWorkspaceMember).not.toHaveBeenCalled();

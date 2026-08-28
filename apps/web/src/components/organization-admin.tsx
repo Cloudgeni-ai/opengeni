@@ -1537,6 +1537,7 @@ export function OrganizationPeopleSection(props: {
     error: null,
   });
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteName, setInviteName] = useState("");
   const [inviteRole, setInviteRole] = useState<OrganizationMembershipRole>("member");
   const [inviteWorkspaces, setInviteWorkspaces] = useState<OrganizationWorkspaceAccess[]>([]);
   const [inviteWorkspaceIds, setInviteWorkspaceIds] = useState<string[]>([]);
@@ -1820,6 +1821,7 @@ export function OrganizationPeopleSection(props: {
 
   async function createInvitation() {
     const email = inviteEmail.trim().toLowerCase();
+    const name = inviteName.trim();
     if (
       !email ||
       !canInviteOrganizationRole(props.actorRole, inviteRole) ||
@@ -1835,6 +1837,7 @@ export function OrganizationPeopleSection(props: {
         props.identity.organizationId,
         {
           email,
+          ...(name ? { name } : {}),
           role: inviteRole,
           initialWorkspaceIds: inviteWorkspaceIds,
           expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
@@ -1855,6 +1858,7 @@ export function OrganizationPeopleSection(props: {
         error: null,
       }));
       setInviteEmail("");
+      setInviteName("");
       setInviteWorkspaceIds([]);
       setInviteDialogOpen(false);
       setLiveOutcome(invitationDeliveryOutcome(invitation));
@@ -2196,6 +2200,10 @@ export function OrganizationPeopleSection(props: {
             </Button>
           ) : null}
         </div>
+        <Notice title="Personal content stays personal">
+          Organization administration never grants access to another member&apos;s Personal
+          workspace, private sessions, credentials, Connections, or personal resources.
+        </Notice>
         {!canAdminister ? (
           <p className="text-xs text-fg-subtle">
             Only organization owners and administrators can view the organization roster.
@@ -2325,9 +2333,10 @@ export function OrganizationPeopleSection(props: {
                                 {ORGANIZATION_ROLE_LABELS[member.role]}
                               </option>
                             </Select>
-                            <span id={soleOwnerReasonId} className="sr-only">
-                              Add another active owner before changing this role.
-                            </span>
+                            <p id={soleOwnerReasonId} className="mt-1 text-xs text-fg-subtle">
+                              Assign another active owner before changing, pausing, or removing the
+                              sole owner.
+                            </p>
                           </div>
                         ) : capability.canChangeRole ? (
                           <div className="min-w-0 flex-1">
@@ -2480,7 +2489,7 @@ export function OrganizationPeopleSection(props: {
                 className="flex items-center gap-1.5 text-sm font-medium"
               >
                 <UserPlusIcon className="size-3.5 text-brand" />
-                Invitations
+                People &amp; invitations
               </h2>
               <p className="mt-1 text-xs text-fg-muted">
                 Invite people who are not in this organization yet.
@@ -2646,6 +2655,7 @@ export function OrganizationPeopleSection(props: {
               setInviteDialogOpen(open);
               if (!open) {
                 setInviteEmail("");
+                setInviteName("");
                 setInviteRole("member");
                 setInviteWorkspaceIds([]);
               }
@@ -2677,6 +2687,17 @@ export function OrganizationPeopleSection(props: {
                     onChange={(event) => setInviteEmail(event.target.value)}
                     placeholder="name@company.com"
                     autoFocus
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="organization-invite-name">Name</Label>
+                  <Input
+                    id="organization-invite-name"
+                    name="name"
+                    autoComplete="name"
+                    value={inviteName}
+                    onChange={(event) => setInviteName(event.target.value)}
+                    placeholder="Optional"
                   />
                 </div>
                 <div className="grid gap-1.5">
@@ -2736,6 +2757,7 @@ export function OrganizationPeopleSection(props: {
                     onClick={() => {
                       setInviteDialogOpen(false);
                       setInviteEmail("");
+                      setInviteName("");
                       setInviteRole("member");
                       setInviteWorkspaceIds([]);
                     }}

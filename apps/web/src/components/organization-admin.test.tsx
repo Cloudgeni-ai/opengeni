@@ -753,6 +753,8 @@ describe("organization administration component fences", () => {
     await flush();
 
     expect(listOrganizationAdministrationMembers.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("Personal content stays personal");
+    expect(container.textContent).toContain("People & invitations");
     expect(container.textContent).toContain("No pending invitations");
     expect(container.textContent).not.toContain("Invitations for you");
     expect(container.textContent).toContain("Second Owner");
@@ -790,6 +792,49 @@ describe("organization administration component fences", () => {
     expect(updateOrganizationMember).toHaveBeenCalledTimes(1);
     expect(onAuthorityChanged).toHaveBeenCalledTimes(1);
     expect(toastSuccess).toHaveBeenCalledWith("Member access paused");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("keeps the sole-owner safety reason visible", async () => {
+    const actor = member(identityA, "sole-owner");
+    const client = {
+      listOrganizationAdministrationMembers: async () => ({ members: [actor] }),
+      listOrganizationInvitationsForOrganization: async () => ({
+        invitations: [],
+        nextCursor: null,
+      }),
+      listOrganizationInvitations: async () => ({
+        invitations: [],
+        nextCursor: null,
+      }),
+    } as unknown as OpenGeniBrowserClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationPeopleSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          onAuthorityChanged={() => undefined}
+        />,
+      );
+    });
+    await flush();
+
+    const reason = container.querySelector<HTMLElement>("#sole-owner-reason-membership-sole-owner");
+    expect(reason?.textContent).toContain("Assign another active owner");
+    expect(reason?.classList.contains("sr-only")).toBe(false);
+    expect(
+      container.querySelector<HTMLSelectElement>(
+        'select[aria-label="Organization role for Test person (you)"]',
+      )?.disabled,
+    ).toBe(true);
 
     await act(async () => root.unmount());
     container.remove();

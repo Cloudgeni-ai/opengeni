@@ -1,4 +1,12 @@
-import { Loader2Icon, PlusIcon, SearchIcon, SlidersHorizontalIcon, UsersIcon } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import {
+  ArrowUpRightIcon,
+  Loader2Icon,
+  PlusIcon,
+  SearchIcon,
+  SlidersHorizontalIcon,
+  UsersIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -338,6 +346,22 @@ function MembersSectionContent({
           </Button>
         ) : null}
       </div>
+
+      <Notice title="Workspace access is managed from the organization">
+        This workspace is permanently owned by its organization. Granting or revoking access here
+        changes named roles only within this organization. Cross-organization transfer and Personal
+        workspace transfer remain unsupported.
+        <Button asChild type="button" variant="secondary" size="sm" className="mt-2">
+          <Link
+            to="/workspaces/$workspaceId/organization"
+            params={{ workspaceId }}
+            search={{ section: "overview" }}
+          >
+            Open organization settings
+            <ArrowUpRightIcon className="size-3.5" />
+          </Link>
+        </Button>
+      </Notice>
 
       {!membersLoaded ? (
         <div className="grid gap-2">
