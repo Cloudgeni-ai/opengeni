@@ -32,7 +32,11 @@ import type {
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
 } from "./types";
-import { resolveCatalogSettings, resolveWorkspaceCatalogSettings } from "@opengeni/core";
+import {
+  modelFundingForAdmission,
+  resolveCatalogSettings,
+  resolveWorkspaceCatalogSettings,
+} from "@opengeni/core";
 
 export function createGoalActivities(services: () => Promise<ControlActivityServices>) {
   async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
@@ -117,9 +121,11 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       workspaceId: input.workspaceId,
       model: continuationModel,
     });
-    const resolvedModel = resolveModelProvider(settings, continuationModel)?.model;
-    const fundedWithoutCredits =
-      isCodexRun || (resolvedModel !== undefined && resolvedModel.cost !== "credits");
+    const fundedWithoutCredits = goalContinuationFundedWithoutCredits(
+      settings,
+      continuationModel,
+      isCodexRun,
+    );
     // Budget exhaustion pauses the goal visibly instead of failing the
     // session. Computed up front and applied inside the locked decision so a
     // limits pause never consumes continuation budget.
@@ -219,6 +225,14 @@ export function goalContinuationModelDecision(input: {
     model: input.inheritedModel,
     blocked: `workspace model policy blocks model "${input.inheritedModel}"; pick an allowed model or change the workspace model policy`,
   };
+}
+
+export function goalContinuationFundedWithoutCredits(
+  settings: Settings,
+  model: string,
+  codexBilled: boolean,
+): boolean {
+  return modelFundingForAdmission(settings, model, codexBilled).fundedWithoutCredits;
 }
 
 export function goalContinuationPrompt(

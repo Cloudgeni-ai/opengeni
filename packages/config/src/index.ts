@@ -2058,7 +2058,36 @@ export const OpenRouterCatalogModel = z
   .strict();
 export type OpenRouterCatalogModel = z.infer<typeof OpenRouterCatalogModel>;
 
+const DeploymentRegistryBaseUrl = z
+  .string()
+  .url()
+  .superRefine((value, context) => {
+    const url = new URL(value);
+    if (url.username || url.password) {
+      context.addIssue({
+        code: "custom",
+        message: "database catalog provider baseUrl must not contain userinfo",
+      });
+    }
+    if (url.search) {
+      context.addIssue({
+        code: "custom",
+        message: "database catalog provider baseUrl must not contain a query",
+      });
+    }
+    if (url.hash) {
+      context.addIssue({
+        code: "custom",
+        message: "database catalog provider baseUrl must not contain a fragment",
+      });
+    }
+  });
+
+const DeploymentRegistryProviderKind = z.enum(["api-key", "anonymous"]);
+
 const DeploymentRegistryProviderSchema = RegistryProviderSchema.safeExtend({
+  kind: DeploymentRegistryProviderKind.default("api-key"),
+  baseUrl: DeploymentRegistryBaseUrl,
   apiKey: z.never().optional(),
   apiKeyEnv: z.never().optional(),
   defaultHeaders: z.never().optional(),
@@ -4594,6 +4623,22 @@ function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Se
     return withWorkspaceGatewayCatalogProvider(settings);
   }
   return settings;
+}
+
+/**
+ * Resolve the static catalog identity used by an accepted turn. Subscription
+ * overlays contain no account or bearer and do not prove connection readiness;
+ * callers must keep their live credential/readiness gate authoritative.
+ */
+export function resolveModelProviderForTurn(
+  settings: Settings,
+  modelId: string,
+): ReturnType<typeof resolveModelProvider> {
+  const catalogSettings = settingsForTurnExecutionPolicy(settings, modelId);
+  return resolveModelProvider(
+    catalogSettings,
+    canonicalizeConfiguredModelId(catalogSettings, modelId),
+  );
 }
 
 /**

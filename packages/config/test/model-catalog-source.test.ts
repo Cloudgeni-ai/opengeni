@@ -215,6 +215,46 @@ describe("deployment model catalog source", () => {
         ],
       }),
     ).toThrow();
+    for (const [baseUrl, message] of [
+      ["https://user:password@provider.example.test/v1", "must not contain userinfo"],
+      ["https://provider.example.test/v1?api_key=secret", "must not contain a query"],
+      ["https://provider.example.test/v1#secret", "must not contain a fragment"],
+    ] as const) {
+      expect(() =>
+        parseModelCatalogDocument({
+          schemaVersion: 1,
+          builtInModels: ["gpt-5.6-luna"],
+          registryProviders: [
+            {
+              id: "database-provider",
+              baseUrl,
+              models: [{ id: "database/model" }],
+            },
+          ],
+        }),
+      ).toThrow(message);
+    }
+    for (const kind of [
+      "codex-subscription",
+      "xai-subscription",
+      "vercel-gateway-managed",
+      "vercel-gateway-workspace",
+    ] as const) {
+      expect(() =>
+        parseModelCatalogDocument({
+          schemaVersion: 1,
+          builtInModels: ["gpt-5.6-luna"],
+          registryProviders: [
+            {
+              kind,
+              id: "database-provider",
+              baseUrl: "https://provider.example.test/v1",
+              models: [{ id: "database/model" }],
+            },
+          ],
+        }),
+      ).toThrow();
+    }
     for (const forbidden of [
       "defaultHeaders",
       "defaultQuery",

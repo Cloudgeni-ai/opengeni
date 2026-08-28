@@ -67,6 +67,7 @@ import {
   requirePermission,
   releaseManagedAuthRequestActorLease,
   resolveCatalogSettings,
+  resolveWorkspaceCatalogSettings,
   validateManagedAuthRequestActorLease,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -221,6 +222,17 @@ const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
 export function createApp(deps: AppDependencies): Hono {
   return createAppComposition(deps).app;
+}
+
+export async function resolveWorkspaceMcpRouteDeps(
+  routeDeps: ApiRouteDeps,
+  grant: AccessGrant,
+): Promise<ApiRouteDeps> {
+  const resolvedCatalog = await resolveWorkspaceCatalogSettings(routeDeps.db, routeDeps.settings, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+  });
+  return { ...routeDeps, settings: resolvedCatalog.settings };
 }
 
 export function createAppComposition(deps: AppDependencies): {
@@ -893,7 +905,8 @@ export function createAppComposition(deps: AppDependencies): {
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
-      const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
+      const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
+      const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
         requestOrigin: new URL(c.req.url).origin,
         workspaceMemoryEnabled,
         workspaceMemoryPromptMode,

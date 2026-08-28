@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  resolveModelProvider,
 } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { resolveCatalogSettings, type ApiRouteDeps } from "@opengeni/core";
@@ -21,7 +22,11 @@ import {
 } from "@opengeni/testing";
 import { Hono } from "hono";
 
-import { createApp, type AppDependencies } from "../src/app";
+import {
+  createAppComposition,
+  resolveWorkspaceMcpRouteDeps,
+  type AppDependencies,
+} from "../src/app";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
 const SECRET = "gateway-custom-models-test-secret-at-least-32-bytes";
@@ -30,6 +35,7 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
 let publicApp: Hono | null = null;
+let publicRouteDeps: ApiRouteDeps | null = null;
 let grant: Awaited<ReturnType<typeof bootstrapWorkspace>>["workspaceGrants"][number] | null = null;
 
 const settings = testSettings({
@@ -69,13 +75,15 @@ beforeAll(async () => {
     db: client.db,
     resolveCatalogSettings: async () => await resolveCatalogSettings(client!.db, settings),
   } as ApiRouteDeps);
-  publicApp = createApp({
+  const composition = createAppComposition({
     settings,
     db: client.db,
     bus: {} as never,
     workflowClient: {} as never,
     managedAuth: null,
   } satisfies AppDependencies);
+  publicApp = composition.app;
+  publicRouteDeps = composition.routeDeps;
 }, 180_000);
 
 afterAll(async () => {
@@ -196,6 +204,11 @@ describe("workspace Gateway custom model API", () => {
     expect(JSON.stringify(workspacePayload)).not.toContain(
       "not-read-by-metadata-only-catalog-tests",
     );
+    const mcpDeps = await resolveWorkspaceMcpRouteDeps(publicRouteDeps!, grant);
+    expect(resolveModelProvider(mcpDeps.settings, productModelId)?.model).toMatchObject({
+      id: productModelId,
+      cost: "workspace",
+    });
 
     const session = await createSession(client!.db, {
       accountId: grant.accountId,

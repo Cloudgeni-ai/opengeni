@@ -1,4 +1,5 @@
-import { configuredStaticUsageLimits, resolveModelProvider, type Settings } from "@opengeni/config";
+import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
+import { modelFundingForAdmission } from "@opengeni/core";
 import { getBillingBalance, isCodexBilledTurn, sumUsageQuantity } from "@opengeni/db";
 import type { ControlActivityServices } from "./types";
 
@@ -23,9 +24,11 @@ export async function agentRunAdmissionDenial(
     workspaceId: input.workspaceId,
     model: input.model,
   });
-  const resolvedModel = resolveModelProvider(services.settings, input.model)?.model;
-  const externallyBilled =
-    codexBilled || (resolvedModel !== undefined && resolvedModel.cost !== "credits");
+  const externallyBilled = modelFundingForAdmission(
+    services.settings,
+    input.model,
+    codexBilled,
+  ).fundedWithoutCredits;
   if (
     !externallyBilled &&
     (services.settings.billingMode === "stripe" || services.settings.usageLimitsMode === "managed")

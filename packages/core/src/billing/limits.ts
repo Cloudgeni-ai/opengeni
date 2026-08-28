@@ -1,4 +1,8 @@
-import { configuredStaticUsageLimits, resolveModelProvider } from "@opengeni/config";
+import {
+  configuredStaticUsageLimits,
+  resolveModelProviderForTurn,
+  type Settings,
+} from "@opengeni/config";
 import type {
   LimitAction,
   LimitDecision,
@@ -33,6 +37,28 @@ export type LimitCheckInput = {
   model?: string | null;
 };
 
+export function modelFundingForAdmission(
+  settings: Settings,
+  model: string | null | undefined,
+  codexBilled: boolean,
+): { fundedWithoutCredits: boolean; countsTowardTokenCap: boolean } {
+  const resolvedModel = model ? resolveModelProviderForTurn(settings, model)?.model : null;
+  const codexSubscriptionModel =
+    resolvedModel?.credentialSource.kind === "connected_subscription" &&
+    resolvedModel.credentialSource.provider === "codex";
+  return {
+    // A Codex namespace/definition never bypasses credits by itself: the live
+    // workspace credential predicate above remains authoritative. SuperGrok's
+    // static overlay is likewise secret-free; its worker/provider admission
+    // owns live account selection before any upstream request can occur.
+    fundedWithoutCredits:
+      codexBilled ||
+      (resolvedModel != null && !codexSubscriptionModel && resolvedModel.cost !== "credits"),
+    countsTowardTokenCap:
+      !codexBilled && resolvedModel != null && resolvedModel.billing.upstreamPayer === "deployment",
+  };
+}
+
 export async function requireLimit(deps: LimitDependencies, input: LimitCheckInput): Promise<void> {
   const decision = await checkLimit(deps, input);
   if (decision.allowed) {
@@ -58,13 +84,11 @@ export async function checkLimit(
         model: input.model,
       })
     : false;
-  const resolvedModel = input.model
-    ? resolveModelProvider(deps.settings, input.model)?.model
-    : null;
-  const fundedWithoutCredits =
-    codexBilled || (resolvedModel != null && resolvedModel.cost !== "credits");
-  const countsTowardTokenCap =
-    !codexBilled && resolvedModel != null && resolvedModel.billing.upstreamPayer === "deployment";
+  const { fundedWithoutCredits, countsTowardTokenCap } = modelFundingForAdmission(
+    deps.settings,
+    input.model,
+    codexBilled,
+  );
   const creditDecision = await checkCreditBalance(deps, input, fundedWithoutCredits);
   if (!creditDecision.allowed) {
     return creditDecision;

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { goalContinuationModelDecision, goalContinuationPrompt } from "../src/activities/goals";
+import {
+  goalContinuationFundedWithoutCredits,
+  goalContinuationModelDecision,
+  goalContinuationPrompt,
+} from "../src/activities/goals";
 import { testSettings } from "@opengeni/testing";
 
 describe("goalContinuationPrompt", () => {
@@ -130,5 +134,25 @@ describe("goalContinuationModelDecision", () => {
         }),
       ).toEqual({ model, blocked: null });
     }
+  });
+
+  test("treats a SuperGrok continuation as subscription-funded", () => {
+    expect(
+      goalContinuationFundedWithoutCredits(
+        testSettings({ supergrokSubscriptionEnabled: true }),
+        "supergrok/grok-4.6",
+        false,
+      ),
+    ).toBe(true);
+  });
+
+  test("does not fund an unconnected Codex continuation from its namespace alone", () => {
+    expect(
+      goalContinuationFundedWithoutCredits(
+        testSettings({ codexSubscriptionEnabled: true }),
+        "codex/gpt-5.6-sol",
+        false,
+      ),
+    ).toBe(false);
   });
 });

@@ -98,6 +98,32 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
+  test("a SuperGrok subscription model bypasses OpenGeni credits through its synthetic catalog", async () => {
+    const restoreBal = mockZeroBalance();
+    const restoreCred = mockCodexBilled(false);
+    try {
+      const settings = billedSettings({ supergrokSubscriptionEnabled: true });
+      const decision = await checkLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "agent_run:create",
+        quantity: 1,
+        model: "supergrok/grok-4.6",
+      });
+      expect(decision.allowed).toBe(true);
+      await requireLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "agent_run:create",
+        quantity: 1,
+        model: "supergrok/grok-4.6",
+      });
+    } finally {
+      restoreCred();
+      restoreBal();
+    }
+  });
+
   test("(c) a normal model with 0 credits is still gated exactly as before (402)", async () => {
     const restoreBal = mockZeroBalance();
     // No credential spy: a normal model never triggers a credential read.

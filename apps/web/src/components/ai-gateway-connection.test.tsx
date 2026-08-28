@@ -450,6 +450,50 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
+  test("ignores an older custom-model read after a successful add refresh", async () => {
+    const created = customModel("anthropic/claude-sonnet-4.6");
+    let resolveInitialRead:
+      | ((value: { models: WorkspaceGatewayCustomModel[] }) => void)
+      | undefined;
+    let reads = 0;
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 1) {
+        return await new Promise<{ models: WorkspaceGatewayCustomModel[] }>((resolve) => {
+          resolveInitialRead = resolve;
+        });
+      }
+      return { models: [created] };
+    });
+    createWorkspaceGatewayCustomModel.mockImplementation(async () => created);
+    const { container, root } = await renderCard();
+
+    try {
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway model slug"]',
+      )!;
+      await setInputValue(input, created.upstreamModelId);
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+      expect(container.textContent).toContain(created.upstreamModelId);
+
+      await act(async () => {
+        resolveInitialRead?.({ models: [] });
+        await flush();
+      });
+      expect(container.textContent).toContain(created.upstreamModelId);
+      expect(container.textContent).toContain("1 model");
+      expect(container.textContent).not.toContain("No custom model slugs yet");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("blocks Enter and disables the slug input while an add is pending", async () => {
     const created = customModel("anthropic/claude-sonnet-4.6");
     let resolveCreate: ((model: WorkspaceGatewayCustomModel) => void) | undefined;

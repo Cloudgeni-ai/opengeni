@@ -70,6 +70,7 @@ export function AiGatewayConnectionCardWithClient(
   const [removingModelId, setRemovingModelId] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const activeRef = useRef(true);
+  const customModelsRequestGenerationRef = useRef(0);
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const removeButtonRefs = useRef(new Map<string, HTMLButtonElement>());
 
@@ -95,15 +96,20 @@ export function AiGatewayConnectionCardWithClient(
   const modelSlugExists = customModels.some((model) => model.upstreamModelId === modelSlug);
 
   const refreshCustomModels = useCallback(async (): Promise<boolean> => {
+    const requestGeneration = ++customModelsRequestGenerationRef.current;
     try {
       const result = await client.listWorkspaceGatewayCustomModels(props.workspaceId);
-      if (!activeRef.current) return false;
+      if (!activeRef.current || requestGeneration !== customModelsRequestGenerationRef.current) {
+        return false;
+      }
       setCustomModels(result.models);
       setCustomModelsError(null);
       setCustomModelsLoaded(true);
       return true;
     } catch (caught) {
-      if (!activeRef.current) return false;
+      if (!activeRef.current || requestGeneration !== customModelsRequestGenerationRef.current) {
+        return false;
+      }
       setCustomModelsError(caught instanceof Error ? caught.message : String(caught));
       setCustomModelsLoaded(true);
       return false;
@@ -111,6 +117,7 @@ export function AiGatewayConnectionCardWithClient(
   }, [client, props.workspaceId]);
 
   const refresh = useCallback(async () => {
+    const customModelsRequestGeneration = ++customModelsRequestGenerationRef.current;
     const [connectionResult, modelsResult] = await Promise.allSettled([
       props.canManage
         ? client.listConnections(props.workspaceId)
@@ -140,18 +147,20 @@ export function AiGatewayConnectionCardWithClient(
       );
     }
     setLoaded(true);
-    if (modelsResult.status === "fulfilled") {
-      setCustomModels(modelsResult.value.models);
-      setCustomModelsError(null);
-    } else {
-      setCustomModels([]);
-      setCustomModelsError(
-        modelsResult.reason instanceof Error
-          ? modelsResult.reason.message
-          : String(modelsResult.reason),
-      );
+    if (customModelsRequestGeneration === customModelsRequestGenerationRef.current) {
+      if (modelsResult.status === "fulfilled") {
+        setCustomModels(modelsResult.value.models);
+        setCustomModelsError(null);
+      } else {
+        setCustomModels([]);
+        setCustomModelsError(
+          modelsResult.reason instanceof Error
+            ? modelsResult.reason.message
+            : String(modelsResult.reason),
+        );
+      }
+      setCustomModelsLoaded(true);
     }
-    setCustomModelsLoaded(true);
   }, [client, props.canManage, props.workspaceId]);
 
   useEffect(() => {
