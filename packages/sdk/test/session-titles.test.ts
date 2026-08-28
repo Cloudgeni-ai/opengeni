@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { AUTOMATIC_SESSION_TITLE_FALLBACK as CONTRACT_TITLE_FALLBACK } from "@opengeni/contracts";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   deriveSessionDisplayTitle,
@@ -6,6 +7,10 @@ import {
 } from "../src";
 
 describe("session display titles", () => {
+  test("keeps the client pending marker aligned with the durable contract", () => {
+    expect(AUTOMATIC_SESSION_TITLE_FALLBACK).toBe(CONTRACT_TITLE_FALLBACK);
+  });
+
   test("treats only non-user fallback or missing titles as pending", () => {
     expect(sessionTitleIsPending({ title: null, titleSource: null })).toBe(true);
     expect(
@@ -59,13 +64,20 @@ describe("session display titles", () => {
   });
 
   test("keeps the generic fallback for sensitive prompt prefixes and honors a user-set fallback", () => {
-    expect(
-      deriveSessionDisplayTitle({
-        title: AUTOMATIC_SESSION_TITLE_FALLBACK,
-        titleSource: "agent",
-        initialMessage: "SECRET_TOKEN=hunter2 investigate the failed deployment",
-      }),
-    ).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
+    for (const initialMessage of [
+      "SECRET_TOKEN=hunter2 investigate the failed deployment",
+      "Open https://example.com/private?token=hunter2 and inspect the failure",
+      "Bearer abcdefghijklmnop investigate the failed deployment",
+      "Inspect abcdefghijklmnopqrstuvwxyz1234567890",
+    ]) {
+      expect(
+        deriveSessionDisplayTitle({
+          title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+          titleSource: "agent",
+          initialMessage,
+        }),
+      ).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
+    }
 
     expect(
       deriveSessionDisplayTitle({

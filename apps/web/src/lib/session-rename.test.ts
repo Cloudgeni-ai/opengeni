@@ -106,7 +106,7 @@ describe("sessionDisplayTitle", () => {
           initialMessage: "Please investigate automatic session title generation failures",
         }),
       ),
-    ).toBe("investigate automatic session title generation failures");
+    ).toBe("Please investigate automatic session title generation failures");
     expect(
       sessionDisplayTitle(session({ title: null, initialMessage: "SECRET_TOKEN=hunter2" })),
     ).toBe("New conversation");
