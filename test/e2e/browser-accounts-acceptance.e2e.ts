@@ -340,7 +340,8 @@ function sessionSetAuthorityHash(cookieHeader: string | null): string | null {
 }
 
 function requestFailureProblem(input: BrowserRequestFailureInput): string | null {
-  const pathname = new URL(input.url).pathname;
+  const requestUrl = new URL(input.url);
+  const pathname = requestUrl.pathname;
   const isConnectionReset = /NET_RESET|CONNECTION_RESET/iu.test(input.failure);
   const isCancellation =
     /ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
@@ -380,6 +381,27 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
         transition.acceptedAt >= startedAt &&
         transition.acceptedAt <= failedAt,
     ) === true;
+  const isExpectedLogoutAllBoundedStreamCancellation =
+    isCancellation &&
+    !isConnectionReset &&
+    input.method === "GET" &&
+    input.actorEpoch !== null &&
+    input.dispatchPhase === "late-old-epoch-primary-settled-before-old-release" &&
+    input.responsePhase === "logout-all-response-loss-replay" &&
+    requestUrl.searchParams.get("transport") === "http1-bounded" &&
+    /^\/v1\/workspaces\/[0-9a-f-]+\/live-events\/stream$/u.test(pathname) &&
+    typeof startedAt === "number" &&
+    Number.isFinite(startedAt) &&
+    typeof failedAt === "number" &&
+    Number.isFinite(failedAt) &&
+    input.acceptedActorTransitions?.some(
+      (transition) =>
+        transition.path === "/v1/auth/session-set/logout-all" &&
+        transition.actorEpoch !== null &&
+        transition.actorEpoch !== input.actorEpoch &&
+        transition.acceptedAt >= startedAt &&
+        transition.acceptedAt <= failedAt,
+    ) === true;
   const isExpectedEvidenceCatalogCancellation =
     isCancellation &&
     !isConnectionReset &&
@@ -400,6 +422,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
   if (
     isExpectedScopedActorReadCancellation ||
     isAcceptedActorTransitionCancellation ||
+    isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
     isExpectedDocumentBootstrapCancellation
   ) {
@@ -2302,6 +2325,43 @@ describe("provider-neutral browser account acceptance", () => {
         ],
       }),
     ).toContain("/live-events/stream");
+    const signedOutOldActorBoundedStream = {
+      ...longLivedOldActorStream,
+      acceptedActorTransitions: [
+        {
+          acceptedAt: 200,
+          actorEpoch: "signed-out-actor-epoch",
+          path: "/v1/auth/session-set/logout-all",
+          sessionSetAuthorityHash: "b".repeat(64),
+        },
+      ],
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?after=12&transport=http1-bounded`,
+    } satisfies BrowserRequestFailureInput;
+    expect(requestFailureProblem(signedOutOldActorBoundedStream)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        acceptedActorTransitions: [],
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        failure: "NS_ERROR_NET_RESET",
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=sse`,
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?transport=http1-bounded`,
+      }),
+    ).toContain("/sessions");
     expect(
       requestFailureProblem({
         ...longLivedOldActorStream,
