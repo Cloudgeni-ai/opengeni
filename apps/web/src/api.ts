@@ -259,13 +259,13 @@ export async function managedActorFetch(
   if (acceptedEpoch && init.credentials !== "omit" && !headers.has(MANAGED_ACTOR_EPOCH_HEADER)) {
     headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
   }
-  let preHeaderTimer: ReturnType<typeof setTimeout> | null = null;
+  let boundedRequestTimer: ReturnType<typeof setTimeout> | null = null;
   try {
     if (boundedHttp1Sse) {
-      preHeaderTimer = setTimeout(() => {
+      boundedRequestTimer = setTimeout(() => {
         controller.abort(
           new DOMException(
-            "The bounded HTTP/1 stream did not receive response headers in time",
+            "The bounded HTTP/1 stream did not complete its native response in time",
             "AbortError",
           ),
         );
@@ -277,10 +277,6 @@ export async function managedActorFetch(
       headers,
       signal: controller.signal,
     });
-    if (preHeaderTimer !== null) {
-      clearTimeout(preHeaderTimer);
-      preHeaderTimer = null;
-    }
     if (
       acceptedEpoch !== null &&
       response.headers.get(MANAGED_ACTOR_STATE_HEADER)?.toLowerCase() === "changed"
@@ -352,7 +348,7 @@ export async function managedActorFetch(
       detachedResponse ? 0 : nativeLifetimeMs,
     );
   } finally {
-    if (preHeaderTimer !== null) clearTimeout(preHeaderTimer);
+    if (boundedRequestTimer !== null) clearTimeout(boundedRequestTimer);
     if (!responseOwnsCleanup) cleanup();
   }
 }
