@@ -34,6 +34,13 @@ metadata:
 spec:
   groups:
     - name: opengeni.rules
+      # Make every alert and recording rule self-identifying when one Prometheus
+      # evaluates more than one OpenGeni deployment. Dashboard and Alertmanager
+      # consumers can then select the exact release instead of matching globally.
+      labels:
+        namespace: {{ .Release.Namespace | quote }}
+        environment: {{ $environment | quote }}
+        release: {{ .Release.Name | quote }}
       rules:
         # These recording rules admit only a complete inventory projection whose
         # matching domain refreshed on the same scrape target within the configured
