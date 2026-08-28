@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { LiteParse } from "@llamaindex/liteparse";
 import { readFile } from "node:fs/promises";
+import sharp from "sharp";
 import {
   DeterministicEmbeddingProvider,
   HeuristicCurationProvider,
@@ -309,6 +311,35 @@ describe("documents", () => {
       updatedAt: new Date().toISOString(),
     });
     expect(parsed.text).toBe("hello  world");
+  });
+
+  test("recognizes ordinary text filenames when browsers send a generic MIME type", async () => {
+    const parsed = await parseDocumentBytes(new TextEncoder().encode("generic mime text"), {
+      id: "file-1",
+      filename: "notes.txt",
+      safeFilename: "notes.txt",
+      contentType: "application/octet-stream",
+      sizeBytes: 17,
+      status: "ready",
+      bucket: "opengeni-files",
+      objectKey: "files/file-1/original/notes.txt",
+      sha256: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    expect(parsed.text).toBe("generic mime text");
+  });
+
+  test("converts PNG bytes without an ImageMagick runtime", async () => {
+    const png = await sharp({
+      create: { width: 32, height: 32, channels: 3, background: "white" },
+    })
+      .png()
+      .toBuffer();
+    const parsed = await new LiteParse({ ocrEnabled: false, numWorkers: 1, quiet: true }).parse(
+      png,
+    );
+    expect(parsed.totalPages).toBe(1);
   });
 
   test("rejects empty parsed documents", async () => {

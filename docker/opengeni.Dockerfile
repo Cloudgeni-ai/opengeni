@@ -69,7 +69,10 @@ FROM source-base AS worker
 # than only inside the sandbox. The daemon remains outside this image.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client python3 \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client python3 tesseract-ocr-eng \
+  && install -d -o root -g root -m 0555 /opt/opengeni/tessdata \
+  && find /usr/share/tesseract-ocr -name eng.traineddata -exec cp {} /opt/opengeni/tessdata/eng.traineddata \; \
+  && chmod 0444 /opt/opengeni/tessdata/eng.traineddata \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -78,7 +81,8 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends docker-ce-cli \
   && /usr/bin/python3 -c 'import pty' \
   && rm -rf /var/lib/apt/lists/*
-ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3
+ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3 \
+  TESSDATA_PREFIX=/opt/opengeni/tessdata
 USER bun
 RUN bun scripts/build-runtime-processes.ts worker
 CMD ["bun", "apps/worker/dist/process/index.js"]
@@ -124,7 +128,10 @@ FROM artifact-runtime-base AS api
 # outside this image and is reached through the mounted host socket.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg git gnupg openssh-client \
+  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg fonts-liberation git gnupg libreoffice-calc libreoffice-impress libreoffice-writer openssh-client tesseract-ocr-eng \
+  && install -d -o root -g root -m 0555 /opt/opengeni/tessdata \
+  && find /usr/share/tesseract-ocr -name eng.traineddata -exec cp {} /opt/opengeni/tessdata/eng.traineddata \; \
+  && chmod 0444 /opt/opengeni/tessdata/eng.traineddata \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
@@ -134,6 +141,7 @@ RUN apt-get update \
   && docker --version \
   && rm -rf /var/lib/apt/lists/*
 USER bun
+ENV TESSDATA_PREFIX=/opt/opengeni/tessdata
 RUN bun scripts/build-runtime-processes.ts api
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by

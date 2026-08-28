@@ -397,7 +397,7 @@ The generated GitHub URL is only the manifest form target. Opening or copying th
 
 ## Documents And Knowledge
 
-The Documents workspace supports document bases, file upload, indexing status, failed-document retry, and hybrid/vector/keyword search. Indexed documents can carry source metadata such as source kind, URI, title, author, version, timestamps, and ACL tags for retrieval filtering.
+The Documents workspace supports document bases, file upload, indexing status, failed-document retry, and hybrid/vector/keyword search. Typical knowledge uploads include PDF, Word, PowerPoint, Excel, OpenDocument, plain-text/structured-text, email, and common image formats. The stock API and worker images include headless LibreOffice for Office conversion and local English OCR data; native source runs use the parser's built-in image conversion but require LibreOffice on the host to index Office formats. Indexed documents can carry source metadata such as source kind, URI, title, author, version, timestamps, and ACL tags for retrieval filtering.
 
 The workspace knowledge layer also includes reviewed memory records. Agents can search approved memories and propose new memories through the built-in docs MCP server. Human/API review happens through workspace knowledge memory endpoints before proposed memories become approved retrieval context.
 

@@ -41,7 +41,7 @@
     "@aws-sdk/client-s3": "^3.1044.0",
     "@aws-sdk/s3-request-presigner": "^3.1044.0",
     "@hono/zod-validator": "^0.7.6",
-    "@llamaindex/liteparse": "^1.5.3",
+    "@llamaindex/liteparse": "2.14.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/artifact-tool": "workspace:*",
