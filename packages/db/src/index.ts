@@ -43065,6 +43065,28 @@ export async function countQueuedTurns(db: Database): Promise<number> {
   return Number(rows[0]?.count ?? 0);
 }
 
+export type SessionRecoveryBacklogState = "quiescence_missing" | "projection_stale";
+
+export async function countSessionRecoveryBacklog(
+  db: Database,
+): Promise<Record<SessionRecoveryBacklogState, number>> {
+  const counts: Record<SessionRecoveryBacklogState, number> = {
+    quiescence_missing: 0,
+    projection_stale: 0,
+  };
+  const rows = await rawRows<{ state: SessionRecoveryBacklogState; count: number | string }>(
+    db,
+    sql`
+      select state, count
+      from opengeni_private.count_session_recovery_backlog()
+    `,
+  );
+  for (const row of rows) {
+    if (row.state in counts) counts[row.state] = Number(row.count);
+  }
+  return counts;
+}
+
 export async function countSandboxLeasesByLiveness(
   db: Database,
 ): Promise<Record<SandboxLeaseLiveness, number>> {

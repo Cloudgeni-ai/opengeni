@@ -29,6 +29,10 @@ export type TurnTaskQueueStats = {
   tasksAddRate: number;
   tasksDispatchRate: number;
 };
+export type SessionRecoveryBacklog = {
+  quiescence_missing: number;
+  projection_stale: number;
+};
 
 export type TemporalTurnTaskQueueStats = {
   approximateBacklogCount?: unknown;
@@ -724,6 +728,88 @@ export function startTurnCapacityMonitor(input: {
         lastReadSucceeded = false;
         recordStatus();
         input.observability.warn("turn capacity monitor: Temporal task-queue stats failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = null;
+      });
+  };
+  refresh();
+  const timer = setInterval(refresh, intervalMs);
+  timer.unref?.();
+  return {
+    close: async () => {
+      stopped = true;
+      clearInterval(timer);
+      await running;
+    },
+  };
+}
+
+export function recordSessionRecoveryBacklogGauges(
+  observability: Observability,
+  counts: SessionRecoveryBacklog,
+): void {
+  for (const state of ["quiescence_missing", "projection_stale"] as const) {
+    observability.setGauge({
+      name: "opengeni_session_recovery_backlog",
+      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state.",
+      labels: { state },
+      value: nonnegativeFinite(counts[state]),
+    });
+  }
+}
+
+export function startSessionRecoveryMonitor(input: {
+  observability: Observability;
+  read: () => Promise<SessionRecoveryBacklog>;
+  intervalMs?: number;
+  now?: () => number;
+}): { close: () => Promise<void> } {
+  const intervalMs = input.intervalMs ?? 60_000;
+  const now = input.now ?? Date.now;
+  const startedAt = now();
+  let lastSuccessAt: number | null = null;
+  let lastReadSucceeded = false;
+  let stopped = false;
+  let running: Promise<void> | null = null;
+  const recordStatus = () => {
+    const observedAt = now();
+    const successAgeMs = observedAt - (lastSuccessAt ?? startedAt);
+    const set = (name: string, help: string, value: number) =>
+      input.observability.setGauge({ name, help, value });
+    set(
+      "opengeni_session_recovery_monitor_last_read_success",
+      "Whether the latest durable session-recovery aggregate read completed successfully.",
+      lastReadSucceeded ? 1 : 0,
+    );
+    set(
+      "opengeni_session_recovery_monitor_last_success_timestamp_seconds",
+      "Unix timestamp of the latest successful durable session-recovery aggregate read, or zero before one succeeds.",
+      lastSuccessAt === null ? 0 : lastSuccessAt / 1_000,
+    );
+    set(
+      "opengeni_session_recovery_monitor_fresh",
+      "Whether durable session-recovery backlog gauges have a successful read within three monitor intervals.",
+      lastReadSucceeded && lastSuccessAt !== null && successAgeMs <= intervalMs * 3 ? 1 : 0,
+    );
+  };
+  const refresh = () => {
+    recordStatus();
+    if (stopped || running) return;
+    running = input
+      .read()
+      .then((counts) => {
+        recordSessionRecoveryBacklogGauges(input.observability, counts);
+        lastSuccessAt = now();
+        lastReadSucceeded = true;
+        recordStatus();
+      })
+      .catch((error) => {
+        lastReadSucceeded = false;
+        recordStatus();
+        input.observability.warn("session recovery monitor: durable aggregate read failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       })
