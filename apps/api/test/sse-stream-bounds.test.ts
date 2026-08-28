@@ -106,6 +106,8 @@ mock.module("@opengeni/db", () => ({
 }));
 
 const {
+  browserSseDeliveryOptions,
+  createByteBoundedSseStream,
   sseSessionStream,
   sseWorkspaceControlStream,
   sseWorkspaceInteractionRevisionStream,
@@ -114,6 +116,25 @@ const {
 
 afterAll(() => {
   mock.restore();
+});
+
+test("HTTP/1 browser streams cycle cleanly while HTTP/2 streams remain long-lived", async () => {
+  expect(browserSseDeliveryOptions("http1-bounded")).toEqual({ connectionLifetimeMs: 5_000 });
+  expect(browserSseDeliveryOptions(undefined)).toEqual({});
+  expect(browserSseDeliveryOptions("h2")).toEqual({});
+
+  let stopped = 0;
+  const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: 10,
+    onStop: () => {
+      stopped += 1;
+    },
+  });
+  await expect(channel.stream.getReader().read()).resolves.toEqual({
+    done: true,
+    value: undefined,
+  });
+  expect(stopped).toBe(1);
 });
 
 test("workspace interaction SSE projects only the newest durable revision", async () => {

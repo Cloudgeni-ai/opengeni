@@ -350,14 +350,13 @@ const budgets = {
   cssGzip: 32 * kib,
 } as const;
 
-// The canonical sensitive-preview policy adds one small contracts leaf to a
-// direct session load. On the exact current-main Linux/x64 Bun 1.4 merge tree,
-// the graph measures 2,234,452 raw / 626,021 gzip bytes across 32 files. Keep
-// the usual one-KiB raw headroom and 1.5-KiB gzip platform-skew allowance while
-// leaving every initial, per-file, lazy-chunk, and CSS cap unchanged.
+// The canonical sensitive-preview policy measures 626,021 gzip bytes across
+// 32 files. The policy-derived raw envelope above includes the later bounded
+// HTTP/1 browser-stream graph; keep the gzip platform-skew and file-count
+// allowances here while leaving every initial, per-file, lazy, and CSS cap
+// unchanged.
 const effectiveBudgets = {
   ...budgets,
-  directSessionRaw: Math.max(budgets.directSessionRaw, 2_184 * kib),
   directSessionGzip: Math.max(budgets.directSessionGzip, 613 * kib),
   directSessionFiles: Math.max(budgets.directSessionFiles, 32),
 } as const;
