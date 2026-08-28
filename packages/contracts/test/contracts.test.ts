@@ -1742,6 +1742,57 @@ describe("contracts", () => {
     expect(payload.agentConfig.tools[0]?.id).toBe("opengeni");
   });
 
+  test("requires an exact Connected Machine target for self-hosted schedules", () => {
+    const targetSandboxId = "00000000-0000-4000-8000-000000000022";
+    const base = {
+      name: "Machine health check",
+      schedule: { type: "interval" as const, everySeconds: 3600 },
+      runMode: "new_session_per_run" as const,
+      agentConfig: { prompt: "Check the repository on the selected machine" },
+    };
+
+    expect(
+      CreateScheduledTaskRequest.parse({
+        ...base,
+        agentConfig: {
+          ...base.agentConfig,
+          machineTarget: { targetSandboxId, workingDir: "repos/app" },
+        },
+      }),
+    ).toMatchObject({
+      agentConfig: {
+        machineTarget: { targetSandboxId, workingDir: "repos/app" },
+      },
+    });
+    expect(() =>
+      CreateScheduledTaskRequest.parse({
+        ...base,
+        agentConfig: { ...base.agentConfig, sandboxBackend: "selfhosted" },
+      }),
+    ).toThrow();
+    expect(() =>
+      CreateScheduledTaskRequest.parse({
+        ...base,
+        agentConfig: {
+          ...base.agentConfig,
+          sandboxBackend: "modal",
+          machineTarget: { targetSandboxId },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      CreateScheduledTaskRequest.parse({
+        ...base,
+        runMode: "existing_session",
+        targetSessionId: "00000000-0000-4000-8000-000000000023",
+        agentConfig: {
+          ...base.agentConfig,
+          machineTarget: { targetSandboxId },
+        },
+      }),
+    ).toThrow();
+  });
+
   test("requires an exact target only for existing-session scheduled tasks", () => {
     const targetSessionId = "00000000-0000-4000-8000-000000000021";
     const base = {

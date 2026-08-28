@@ -191,6 +191,7 @@ import {
   ScheduledTaskSyncError,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
+  validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   updateScheduledTaskForApi,
   validatedScheduledTaskUpdate,
@@ -1713,6 +1714,14 @@ export function buildOpenGeniMcpServer(
             rigId: task.rigId,
             agentConfig: task.agentConfig,
             missingTargetStatus: 404,
+          });
+          await validateScheduledTaskMachineTarget({
+            settings: deps.settings,
+            db: deps.db,
+            grant,
+            runMode: task.runMode,
+            agentConfig: task.agentConfig,
+            requireOnline: true,
           });
           await requireLimit(deps, {
             accountId: grant.accountId,

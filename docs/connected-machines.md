@@ -181,6 +181,20 @@ Switching projects or machines restores the matching nested choice. Absolute
 host paths remain tied to the exact machine id and are never reused on another
 machine.
 
+Scheduled agent tasks use the same explicit targeting rule. A generated-session
+schedule persists a `machineTarget` containing the exact `targetSandboxId` and
+optional `workingDir`; the worker proves that machine is still available and
+seeds the generated session's active pointer before its first turn. A deployment
+whose default backend is `selfhosted` rejects a generated-session schedule that
+does not select a machine instead of creating a session that cannot execute.
+Manual runs also preflight current liveness and the reported workspace root
+before consuming run capacity.
+
+Unattended schedules currently accept workspace- and organization-scoped
+machines only. User-scoped machines require an owning human's explicit personal
+resource attachment, which a future scheduled-execution authority flow must
+freeze durably before those machines can be offered safely.
+
 ## Discover machines + metrics
 
 `listMachines` returns the workspace fleet plus the active-sandbox pointer. Pass

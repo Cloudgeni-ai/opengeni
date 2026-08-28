@@ -6,9 +6,11 @@ import type {
   Session,
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
+import { testSettings } from "@opengeni/testing";
 import {
   scheduledTaskForGrant,
   scheduledTaskRunForGrant,
+  validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
 } from "@opengeni/core";
 
@@ -178,5 +180,105 @@ describe("scheduled existing-session authorization", () => {
         missingTargetStatus: 404,
       }),
     ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("scheduled Connected Machine targeting", () => {
+  const machineSandboxId = "00000000-0000-4000-8000-000000000005";
+  const enrollmentId = "00000000-0000-4000-8000-000000000006";
+  const settings = testSettings({
+    sandboxBackend: "selfhosted",
+    sandboxOwnershipEnabled: true,
+    sandboxSelfhostedEnabled: true,
+  });
+  const sandbox = {
+    id: machineSandboxId,
+    accountId,
+    workspaceId,
+    kind: "selfhosted" as const,
+    name: "Build machine",
+    enrollmentId,
+    scope: "workspace" as const,
+    generation: 1,
+    createdAt: "2026-08-28T00:00:00.000Z",
+    updatedAt: "2026-08-28T00:00:00.000Z",
+  };
+  const enrollment = {
+    id: enrollmentId,
+    accountId,
+    workspaceId,
+    scope: "workspace" as const,
+    status: "active" as const,
+    os: "linux" as const,
+    workspaceRoot: "/home/test/workspaces",
+  } as db.EnrollmentRecord;
+
+  test("rejects targetless self-hosted generated sessions before database access", async () => {
+    const lookup = spyOn(db, "getSandbox").mockResolvedValue(sandbox);
+    await expect(
+      validateScheduledTaskMachineTarget({
+        settings,
+        db: {} as never,
+        grant: manageOnly,
+        runMode: "new_session_per_run",
+        agentConfig: baseConfig,
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test("accepts an available workspace machine and returns its execution OS", async () => {
+    spyOn(db, "getSandbox").mockResolvedValue(sandbox);
+    spyOn(db, "getLiveEnrollmentConnection").mockResolvedValue(enrollment);
+    await expect(
+      validateScheduledTaskMachineTarget({
+        settings,
+        db: {} as never,
+        grant: manageOnly,
+        runMode: "new_session_per_run",
+        agentConfig: {
+          ...baseConfig,
+          machineTarget: { targetSandboxId: machineSandboxId, workingDir: "repos/app" },
+        },
+        requireOnline: true,
+      }),
+    ).resolves.toEqual({
+      sandboxId: machineSandboxId,
+      enrollmentId,
+      sandboxOs: "linux",
+    });
+  });
+
+  test("rejects personal and offline machines for unattended runs", async () => {
+    const sandboxLookup = spyOn(db, "getSandbox");
+    sandboxLookup.mockResolvedValue({ ...sandbox, scope: "user" });
+    await expect(
+      validateScheduledTaskMachineTarget({
+        settings,
+        db: {} as never,
+        grant: manageOnly,
+        runMode: "new_session_per_run",
+        agentConfig: {
+          ...baseConfig,
+          machineTarget: { targetSandboxId: machineSandboxId },
+        },
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+
+    sandboxLookup.mockResolvedValue(sandbox);
+    spyOn(db, "getLiveEnrollmentConnection").mockResolvedValue(null);
+    await expect(
+      validateScheduledTaskMachineTarget({
+        settings,
+        db: {} as never,
+        grant: manageOnly,
+        runMode: "new_session_per_run",
+        agentConfig: {
+          ...baseConfig,
+          machineTarget: { targetSandboxId: machineSandboxId },
+        },
+        requireOnline: true,
+      }),
+    ).rejects.toMatchObject({ status: 422 });
   });
 });

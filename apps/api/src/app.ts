@@ -783,6 +783,7 @@ export function createAppComposition(deps: AppDependencies): {
         models: configuredModels(catalogSettings).map(projectClientModel),
         defaultReasoningEffort: deps.settings.openaiReasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
+        defaultSandboxBackend: deps.settings.sandboxBackend,
         mcpServers: deps.settings.mcpServers.map((server) => ({
           id: server.id,
           name: server.name ?? server.id,

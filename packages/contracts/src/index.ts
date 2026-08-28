@@ -8509,6 +8509,14 @@ export const ScheduledTaskMetadataInput =
   );
 
 function scheduledTaskAgentConfigShape(bounded: boolean) {
+  const machineTarget = z
+    .object({
+      targetSandboxId: z.string().uuid(),
+      workingDir: bounded
+        ? z.string().trim().min(1).max(4096).optional()
+        : z.string().min(1).optional(),
+    })
+    .strict();
   return {
     prompt: bounded
       ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
@@ -8534,6 +8542,10 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
       : z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
     sandboxBackend: SandboxBackend.optional(),
+    // Connected Machines are a concrete execution target, not a generic
+    // sandbox backend. Persist the exact machine + optional cwd so every
+    // generated session can seed its active route before its first turn.
+    machineTarget: machineTarget.optional(),
     goal: GoalSpec.optional(),
     // Incident telemetry is the only special execution class. Omission keeps
     // every existing task on the byte-compatible ordinary dispatch path.
@@ -8575,6 +8587,20 @@ export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
   .object(scheduledTaskAgentConfigShape(true))
   .superRefine((value, context) => {
+    if (value.machineTarget && value.sandboxBackend !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["machineTarget"],
+        message: "machineTarget cannot be combined with sandboxBackend",
+      });
+    }
+    if (value.sandboxBackend === "selfhosted") {
+      context.addIssue({
+        code: "custom",
+        path: ["sandboxBackend"],
+        message: "selfhosted scheduled tasks require machineTarget",
+      });
+    }
     if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
       context.addIssue({
         code: "custom",
@@ -8899,6 +8925,13 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
       message: "agentConfig.goal cannot be used with an existing-session target",
     });
   }
+  if (value.runMode === "existing_session" && value.agentConfig.machineTarget) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "machineTarget"],
+      message: "machineTarget cannot be used with an existing-session target",
+    });
+  }
 });
 
 const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
@@ -8973,6 +9006,16 @@ export const UpdateScheduledTaskRequest =
         code: "custom",
         path: ["agentConfig", "goal"],
         message: "agentConfig.goal cannot be used with an existing-session target",
+      });
+    }
+    if (
+      value.agentConfig?.machineTarget &&
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfig", "machineTarget"],
+        message: "machineTarget cannot be used with an existing-session target",
       });
     }
   });
@@ -15736,6 +15779,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     models: z.array(ClientModel).default([]),
     defaultReasoningEffort: ReasoningEffort,
     allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
+    // Client-safe execution default. The schedule editor uses this to avoid
+    // presenting a targetless "managed" choice on self-hosted deployments.
+    defaultSandboxBackend: SandboxBackend.default("modal"),
     mcpServers: z
       .array(
         z.object({
