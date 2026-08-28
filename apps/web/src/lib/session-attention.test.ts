@@ -8,6 +8,7 @@ import {
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
+  shouldProjectActiveSessionRead,
   subscribeToSessionAttentionChanges,
   subscribeToLocalSessionDeliveryAttention,
   updateLocalSessionDeliveryAttention,
@@ -109,6 +110,28 @@ describe("active session read acknowledgement", () => {
         liveTipLoaded: true,
       }),
     ).toBe(true);
+  });
+
+  test("clears the foreground route optimistically before its live tip finishes loading", () => {
+    expect(
+      shouldProjectActiveSessionRead({
+        activeSessionId: session.id,
+        workspaceId: session.workspaceId,
+        session,
+        documentVisible: true,
+        windowFocused: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAcknowledgeActiveSession({
+        activeSessionId: session.id,
+        workspaceId: session.workspaceId,
+        session,
+        documentVisible: true,
+        windowFocused: true,
+        liveTipLoaded: false,
+      }),
+    ).toBe(false);
   });
 
   test("does not consume unread state in the background or from a historical window", () => {

@@ -76,22 +76,22 @@ export function sessionReadProjectionKey(sessionId: string, latestEventSequence:
   return `${sessionId}:${latestEventSequence}`;
 }
 
-/**
- * A chat is read only while the exact route is genuinely in the foreground.
- * Merely leaving a session route mounted in a background tab/window must not
- * consume its unread signal.
- */
-export function shouldAcknowledgeActiveSession(input: {
+type ActiveSessionReadEligibility = {
   activeSessionId: string | null;
   workspaceId: string;
   session: ActiveSessionReadCandidate | null;
   documentVisible: boolean;
   windowFocused: boolean;
-  liveTipLoaded: boolean;
-}): boolean {
+};
+
+/**
+ * An unread chat can clear optimistically as soon as its exact route is the
+ * foreground destination. Durable acknowledgement still waits for the live
+ * timeline tip, but loading that timeline must not keep the rail stale.
+ */
+export function shouldProjectActiveSessionRead(input: ActiveSessionReadEligibility): boolean {
   const { session } = input;
   return Boolean(
-    input.liveTipLoaded &&
     input.documentVisible &&
     input.windowFocused &&
     session &&
@@ -100,6 +100,17 @@ export function shouldAcknowledgeActiveSession(input: {
     session.workspaceId === input.workspaceId &&
     session.id === input.activeSessionId,
   );
+}
+
+/**
+ * A chat is read only while the exact route is genuinely in the foreground.
+ * Merely leaving a session route mounted in a background tab/window must not
+ * consume its unread signal.
+ */
+export function shouldAcknowledgeActiveSession(
+  input: ActiveSessionReadEligibility & { liveTipLoaded: boolean },
+): boolean {
+  return input.liveTipLoaded && shouldProjectActiveSessionRead(input);
 }
 
 /**
