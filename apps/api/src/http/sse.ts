@@ -696,6 +696,7 @@ export async function sseWorkspaceLiveStream(
     ...options,
     connectionLifetimeMs: undefined,
     finiteResponseMaxBytes: undefined,
+    finiteResponseMediaType: undefined,
     reauthorize: undefined,
     reauthorizeAfterMs: undefined,
   };
@@ -936,6 +937,8 @@ export type SseDeliveryOptions = {
   connectionLifetimeMs?: number | undefined;
   /** Return a known-length batch instead of a chunked response. HTTP/1 only. */
   finiteResponseMaxBytes?: number | undefined;
+  /** Browser transport classification for a finite response. */
+  finiteResponseMediaType?: "event-stream" | "http1-browser-batch" | undefined;
   maxQueuedBytes?: number;
   stallTimeoutMs?: number;
   heartbeatIntervalMs?: number;
@@ -950,11 +953,15 @@ export type SseDeliveryOptions = {
 
 export function browserSseDeliveryOptions(
   transport: string | undefined,
-): Pick<SseDeliveryOptions, "connectionLifetimeMs" | "finiteResponseMaxBytes"> {
+): Pick<
+  SseDeliveryOptions,
+  "connectionLifetimeMs" | "finiteResponseMaxBytes" | "finiteResponseMediaType"
+> {
   return transport === "http1-bounded"
     ? {
         connectionLifetimeMs: HTTP1_BROWSER_SSE_LIFETIME_MS,
         finiteResponseMaxBytes: HTTP1_BROWSER_SSE_BATCH_MAX_BYTES,
+        finiteResponseMediaType: "http1-browser-batch",
       }
     : {};
 }
@@ -989,9 +996,9 @@ async function sseHttpResponse(
       // every tab. HTTP/2 and other unbounded streams keep the standard media
       // type; only the explicit `http1-bounded` fallback uses this vendor type.
       "Content-Type":
-        contentLength === null
-          ? "text/event-stream; charset=utf-8"
-          : `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`,
+        contentLength !== null && options.finiteResponseMediaType === "http1-browser-batch"
+          ? `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`
+          : "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       // Direct HTTP/1 streams need an unambiguous transport retirement even
       // after a finite Web Stream reaches EOF: Chromium can otherwise keep the

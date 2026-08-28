@@ -123,6 +123,7 @@ test("HTTP/1 browser streams cycle cleanly while HTTP/2 streams remain long-live
   expect(browserSseDeliveryOptions("http1-bounded")).toEqual({
     connectionLifetimeMs: 1_000,
     finiteResponseMaxBytes: 512 * 1024,
+    finiteResponseMediaType: "http1-browser-batch",
   });
   expect(browserSseDeliveryOptions(undefined)).toEqual({});
   expect(browserSseDeliveryOptions("h2")).toEqual({});
@@ -153,6 +154,7 @@ test("HTTP/1 browser fallback returns a fully framed finite SSE batch", async ()
     1,
     new AbortController().signal,
     {
+      ...browserSseDeliveryOptions("http1-bounded"),
       connectionLifetimeMs: 10,
       finiteResponseMaxBytes: 96 * 1024,
       pollIntervalMs: 100,
@@ -166,6 +168,29 @@ test("HTTP/1 browser fallback returns a fully framed finite SSE batch", async ()
   expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
   expect(response.headers.get("connection")).toBe("close");
   expect(new TextDecoder().decode(bytes)).toContain('"sequence":3');
+});
+
+test("an unrelated finite SSE response keeps the standard media type", async () => {
+  interactionRevisionState = {
+    revision: 4,
+    updatedAt: new Date("2026-08-10T00:00:04.000Z"),
+  };
+  const response = await sseWorkspaceInteractionRevisionStream(
+    fakeDb as never,
+    "00000000-0000-4000-8000-000000000010",
+    WORKSPACE_ID,
+    3,
+    new AbortController().signal,
+    {
+      connectionLifetimeMs: 10,
+      finiteResponseMaxBytes: 96 * 1024,
+      pollIntervalMs: 100,
+      heartbeatIntervalMs: 1_000,
+    },
+  );
+  await response.arrayBuffer();
+  expect(response.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
+  expect(response.headers.get("content-length")).not.toBeNull();
 });
 
 test("workspace interaction SSE projects only the newest durable revision", async () => {
