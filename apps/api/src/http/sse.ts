@@ -982,14 +982,14 @@ async function sseHttpResponse(
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
-      // Unbounded direct HTTP/1 streams still need an unambiguous transport
-      // close when authorization ends. A finite batch is already delimited by
-      // Content-Length and must leave its socket reusable: forcing a TCP close
-      // on every bounded batch lets rapid reconnects race ordinary reads
-      // while Chromium is still retiring the previous connection.
-      ...(contentLength === null
-        ? { Connection: "close" }
-        : { "Content-Length": String(contentLength) }),
+      // Direct HTTP/1 streams need an unambiguous transport retirement even
+      // after a finite Web Stream reaches EOF: Chromium can otherwise keep the
+      // native request accounted against its per-origin pool despite a client
+      // abort. The one-second batch, four-second reconnect gap, and browser
+      // foreground gate leave ordinary reads deterministic while this close
+      // prevents an orphaned socket from surviving the logical stream.
+      Connection: "close",
+      ...(contentLength === null ? {} : { "Content-Length": String(contentLength) }),
       ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });

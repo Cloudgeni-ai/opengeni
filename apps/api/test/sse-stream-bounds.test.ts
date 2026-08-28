@@ -160,7 +160,7 @@ test("HTTP/1 browser fallback returns a fully framed finite SSE batch", async ()
   );
   const bytes = await response.arrayBuffer();
   expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
-  expect(response.headers.get("connection")).toBeNull();
+  expect(response.headers.get("connection")).toBe("close");
   expect(new TextDecoder().decode(bytes)).toContain('"sequence":3');
 });
 
