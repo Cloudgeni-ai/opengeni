@@ -300,7 +300,7 @@ export async function managedActorFetch(
     // EOF. Draining here also guarantees the native body already has a
     // rejection consumer before any post-header actor abort.
     let actorResponse = response;
-    const finiteSseBatch = isFiniteSseBatchResponse(response);
+    const finiteSseBatch = isFiniteSseBatchResponse(response, boundedHttp1Sse);
     const detachedResponse = isFiniteJsonResponse(response) || finiteSseBatch;
     if (detachedResponse) {
       const bytes = await readFiniteResponseBytes(response);
@@ -356,7 +356,7 @@ export async function managedActorFetch(
       actorBodyController.signal,
       cleanup,
       abortNativeTransport,
-      isFiniteSseBatchResponse(actorResponse) ? cleanCloseDelayMs : 0,
+      finiteSseBatch ? cleanCloseDelayMs : 0,
       detachedResponse ? 0 : nativeLifetimeMs,
     );
   } finally {
@@ -445,12 +445,17 @@ function isFiniteJsonResponse(response: Response): boolean {
   return contentType === "application/json" || contentType?.endsWith("+json") === true;
 }
 
-function isFiniteSseBatchResponse(response: Response): boolean {
+function isFiniteSseBatchResponse(response: Response, boundedHttp1Sse: boolean): boolean {
+  // The explicit request transform is the authority boundary. Accept the
+  // legacy SSE media type only inside that boundary so a new web bundle can
+  // safely overlap an older API during a rolling deployment without turning
+  // unrelated finite SSE responses into browser-batch transports.
+  if (!boundedHttp1Sse) return false;
   const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   const contentLength = response.headers.get("content-length");
   const parsedContentLength = contentLength === null ? Number.NaN : Number(contentLength);
   return (
-    contentType === boundedHttp1SseBatchContentType &&
+    (contentType === boundedHttp1SseBatchContentType || contentType === "text/event-stream") &&
     contentLength !== null &&
     /^\d+$/.test(contentLength) &&
     Number.isSafeInteger(parsedContentLength) &&
