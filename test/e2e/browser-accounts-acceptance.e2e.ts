@@ -75,10 +75,11 @@ type PendingFiniteRead = {
 };
 
 type BrowserProblems = {
-  acceptedRequestFailures: Array<{
-    failedAt: number;
+  acceptedRequestTerminals: Array<{
+    observedAt: number;
     pathnameAndSearch: string;
     responsePhase: string;
+    terminal: "failed" | "finished";
   }>;
   activeStreams: Map<object, string>;
   boundedHttp1StreamDispatches: number;
@@ -446,8 +447,6 @@ function isExpectedBoundedHttp1NativeSeam(input: {
   ) {
     return false;
   }
-  const url = new URL(input.url);
-  const isStream = url.pathname.endsWith("/stream") || url.pathname.includes("/live-events/stream");
   // Chromium and Firefox expose concrete abort codes; WebKit reports a bare
   // cancellation word. Exact matching prevents an abort-shaped prefix from
   // hiding a reset, timeout, DNS, or other transport failure.
@@ -461,11 +460,19 @@ function isExpectedBoundedHttp1NativeSeam(input: {
   // four-second logical reconnect grace does not extend the native request's
   // cancellation deadline.
   return (
-    isStream &&
+    isBoundedHttp1StreamRequest(input.method, input.url) &&
     isCancellation &&
-    url.searchParams.get("transport") === "http1-bounded" &&
     elapsedMs >= 10_000 &&
     elapsedMs <= 15_000
+  );
+}
+
+function isBoundedHttp1StreamRequest(method: string, rawUrl: string): boolean {
+  if (method !== "GET") return false;
+  const url = new URL(rawUrl);
+  return (
+    (url.pathname.endsWith("/stream") || url.pathname.includes("/live-events/stream")) &&
+    url.searchParams.get("transport") === "http1-bounded"
   );
 }
 
@@ -602,7 +609,7 @@ async function authSessionCount(email: string): Promise<number> {
 
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
-    acceptedRequestFailures: [],
+    acceptedRequestTerminals: [],
     activeStreams: new Map(),
     boundedHttp1StreamDispatches: 0,
     boundedHttp1NativeSeams: 0,
@@ -725,8 +732,26 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("requestfinished", (request) => {
+    const finishedAt = performance.now();
+    const finishedUrl = new URL(request.url());
     problems.activeStreams.delete(request);
     problems.pendingFiniteReads.delete(request);
+    if (
+      problems.phase === "slot-revocation-reauthentication" &&
+      isBoundedHttp1StreamRequest(request.method(), request.url())
+    ) {
+      // After its finite bytes are detached, WebKit may report the explicit
+      // native-fetch retirement as a renderer access-control error while
+      // Playwright has already classified the same request as finished. Keep
+      // exact terminal evidence for the same bijective page-error fence used
+      // by requestfailed; unrelated successful requests cannot authorize it.
+      problems.acceptedRequestTerminals.push({
+        observedAt: finishedAt,
+        pathnameAndSearch: `${finishedUrl.pathname}${finishedUrl.search}`,
+        responsePhase: problems.phase,
+        terminal: "finished",
+      });
+    }
     const retiredTerminalProblem = retiredFiniteReadTerminalProblem(
       problems.retiredFiniteReadTombstones.get(request),
       { kind: "finished" },
@@ -779,10 +804,11 @@ function observeBrowser(page: Page): BrowserProblems {
       // access-control error. Preserve the URL, phase, and timestamp so the
       // page-error gate can require the same strict one-to-one correlation as
       // actor-transition cancellations instead of broadly allowing CORS text.
-      problems.acceptedRequestFailures.push({
-        failedAt,
+      problems.acceptedRequestTerminals.push({
+        observedAt: failedAt,
         pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
         responsePhase,
+        terminal: "failed",
       });
       return;
     }
@@ -802,10 +828,11 @@ function observeBrowser(page: Page): BrowserProblems {
       if (problem !== null) {
         problems.failedRequests.push(problem);
       } else {
-        problems.acceptedRequestFailures.push({
-          failedAt,
+        problems.acceptedRequestTerminals.push({
+          observedAt: failedAt,
           pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
           responsePhase,
+          terminal: "failed",
         });
       }
     })();
@@ -1005,25 +1032,26 @@ async function expectAndConsumeConsoleErrors(
 async function expectAndConsumePageErrors(
   page: Page,
   problems: BrowserProblems,
-  allowed: string[],
-  required: string[] = allowed,
+  allowed: string[] | (() => string[]),
+  required: string[],
 ): Promise<void> {
-  // A request-failure event is delivered over Playwright independently from
-  // the renderer task that reports the corresponding page error. Close the
-  // complete correlation window for every accepted failure, cross two renderer
-  // task boundaries, then check again for a later failure. This derives the
+  // A request terminal is delivered over Playwright independently from the
+  // renderer task that reports the corresponding page error. Close the
+  // complete correlation window for every accepted terminal, cross two renderer
+  // task boundaries, then check again for later evidence. This derives the
   // wait from the same fail-closed time fence used by the matcher instead of an
   // arbitrary delay, so delayed evidence is either present now or too late to
   // be accepted and remains in the final strict ledger.
-  let latestFailureAt = Number.NEGATIVE_INFINITY;
+  let latestEvidenceAt = Number.NEGATIVE_INFINITY;
   while (true) {
     await settlePendingRequestFailureChecks(problems);
-    latestFailureAt = Math.max(
-      latestFailureAt,
-      ...problems.acceptedRequestFailures.map(({ failedAt }) => failedAt),
+    latestEvidenceAt = Math.max(
+      latestEvidenceAt,
+      ...problems.acceptedRequestTerminals.map(({ observedAt }) => observedAt),
+      ...problems.pageErrorEvidence.map(({ observedAt }) => observedAt),
     );
     const remainingCorrelationWindow =
-      latestFailureAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - performance.now();
+      latestEvidenceAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - performance.now();
     if (remainingCorrelationWindow > 0) await Bun.sleep(remainingCorrelationWindow);
     await page.evaluate(
       () =>
@@ -1032,17 +1060,19 @@ async function expectAndConsumePageErrors(
         }),
     );
     await settlePendingRequestFailureChecks(problems);
-    const nextLatestFailureAt = Math.max(
+    const nextLatestEvidenceAt = Math.max(
       Number.NEGATIVE_INFINITY,
-      ...problems.acceptedRequestFailures.map(({ failedAt }) => failedAt),
+      ...problems.acceptedRequestTerminals.map(({ observedAt }) => observedAt),
+      ...problems.pageErrorEvidence.map(({ observedAt }) => observedAt),
     );
     if (
-      nextLatestFailureAt <= latestFailureAt &&
-      performance.now() >= nextLatestFailureAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+      nextLatestEvidenceAt <= latestEvidenceAt &&
+      performance.now() >= nextLatestEvidenceAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
     ) {
       break;
     }
   }
+  const allowedMessages = typeof allowed === "function" ? allowed() : allowed;
   const counts = Object.fromEntries(
     [...new Set(problems.pageErrors)].map((message) => [
       message,
@@ -1050,9 +1080,9 @@ async function expectAndConsumePageErrors(
     ]),
   );
   const allowedCounts = Object.fromEntries(
-    [...new Set(allowed)].map((message) => [
+    [...new Set(allowedMessages)].map((message) => [
       message,
-      allowed.filter((candidate) => candidate === message).length,
+      allowedMessages.filter((candidate) => candidate === message).length,
     ]),
   );
   expect({
@@ -1084,9 +1114,9 @@ function optionalWebKitReauthenticationReloadError(
 
 const WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS = 1_000;
 
-function correlatedWebKitReauthenticationFailureIndex(
+function correlatedWebKitReauthenticationTerminalIndex(
   pageError: BrowserProblems["pageErrorEvidence"][number],
-  acceptedRequestFailures: BrowserProblems["acceptedRequestFailures"],
+  acceptedRequestTerminals: BrowserProblems["acceptedRequestTerminals"],
 ): number | null {
   const match =
     /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_./?=&%-]+) due to access control checks\.$/u.exec(
@@ -1094,18 +1124,18 @@ function correlatedWebKitReauthenticationFailureIndex(
     );
   const pathnameAndSearch = match?.groups?.pathnameAndSearch;
   if (pathnameAndSearch === undefined) return null;
-  const matchingFailureIndexes = acceptedRequestFailures.flatMap((failure, index) =>
-    failure.responsePhase === "slot-revocation-reauthentication" &&
-    failure.pathnameAndSearch === pathnameAndSearch &&
-    Math.abs(pageError.observedAt - failure.failedAt) <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+  const matchingTerminalIndexes = acceptedRequestTerminals.flatMap((terminal, index) =>
+    terminal.responsePhase === "slot-revocation-reauthentication" &&
+    terminal.pathnameAndSearch === pathnameAndSearch &&
+    Math.abs(pageError.observedAt - terminal.observedAt) <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
       ? [index]
       : [],
   );
-  return matchingFailureIndexes.length === 1 ? matchingFailureIndexes[0]! : null;
+  return matchingTerminalIndexes.length === 1 ? matchingTerminalIndexes[0]! : null;
 }
 
 function optionalWebKitReauthenticationAccessControlPageError(
-  problems: Pick<BrowserProblems, "acceptedRequestFailures" | "pageErrorEvidence">,
+  problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence">,
   engine: EngineName,
 ): string[] {
   if (engine !== "webkit") return [];
@@ -1113,26 +1143,26 @@ function optionalWebKitReauthenticationAccessControlPageError(
   // errors in addition to their request-cancellation events. Native-first
   // transport teardown can expose more than one of those errors, so require a
   // bijection: every page error must have exactly one same-phase, exact-URL
-  // cancellation inside the same bounded delivery window, and no cancellation
-  // may authorize a second error. Playwright delivers renderer page errors and
-  // request failures independently, so either callback can arrive first.
+  // failed-or-finished terminal inside the same bounded delivery window, and
+  // no terminal may authorize a second error. Playwright delivers renderer
+  // page errors and request terminals independently, so either can arrive first.
   // Duplicate, late, concurrent, or stale evidence keeps the strict ledger red.
   const candidates = problems.pageErrorEvidence.flatMap((pageError) => {
-    const failureIndex = correlatedWebKitReauthenticationFailureIndex(
+    const terminalIndex = correlatedWebKitReauthenticationTerminalIndex(
       pageError,
-      problems.acceptedRequestFailures,
+      problems.acceptedRequestTerminals,
     );
-    return failureIndex === null ? [] : [{ failureIndex, message: pageError.message }];
+    return terminalIndex === null ? [] : [{ terminalIndex, message: pageError.message }];
   });
-  const failureIndexes = candidates.map(({ failureIndex }) => failureIndex);
+  const terminalIndexes = candidates.map(({ terminalIndex }) => terminalIndex);
   if (
     candidates.length !== problems.pageErrorEvidence.length ||
-    new Set(failureIndexes).size !== failureIndexes.length
+    new Set(terminalIndexes).size !== terminalIndexes.length
   ) {
     return [];
   }
-  for (const failureIndex of [...failureIndexes].sort((left, right) => right - left)) {
-    problems.acceptedRequestFailures.splice(failureIndex, 1);
+  for (const terminalIndex of [...terminalIndexes].sort((left, right) => right - left)) {
+    problems.acceptedRequestTerminals.splice(terminalIndex, 1);
   }
   return candidates.map(({ message }) => message);
 }
@@ -2550,10 +2580,11 @@ describe("provider-neutral browser account acceptance", () => {
       }),
     ).toContain("/v1/config/other");
     const acceptedWebKitCancellation = {
-      failedAt: 100,
+      observedAt: 100,
       pathnameAndSearch:
         "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1",
       responsePhase: "slot-revocation-reauthentication",
+      terminal: "failed" as const,
     };
     const correlatedWebKitPageError = {
       message:
@@ -2561,13 +2592,13 @@ describe("provider-neutral browser account acceptance", () => {
       observedAt: 150,
     };
     expect(
-      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
         acceptedWebKitCancellation,
       ]),
     ).toBe(0);
-    expect(correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [])).toBeNull();
+    expect(correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [])).toBeNull();
     expect(
-      correlatedWebKitReauthenticationFailureIndex(
+      correlatedWebKitReauthenticationTerminalIndex(
         {
           message:
             "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
@@ -2577,7 +2608,7 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationFailureIndex(
+      correlatedWebKitReauthenticationTerminalIndex(
         {
           message:
             "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog due to access control checks.",
@@ -2585,46 +2616,47 @@ describe("provider-neutral browser account acceptance", () => {
         },
         [
           {
-            failedAt: 100,
+            observedAt: 100,
             pathnameAndSearch:
               "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog",
             responsePhase: "slot-revocation-reauthentication",
+            terminal: "failed",
           },
         ],
       ),
     ).toBe(0);
     expect(
-      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
-        { ...acceptedWebKitCancellation, failedAt: 151 },
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+        { ...acceptedWebKitCancellation, observedAt: 151, terminal: "finished" },
       ]),
     ).toBe(0);
     expect(
-      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
-          failedAt: 150 + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS + 1,
+          observedAt: 150 + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS + 1,
         },
       ]),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
-          failedAt: 150 - WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - 1,
+          observedAt: 150 - WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - 1,
         },
       ]),
     ).toBeNull();
     expect(
-      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
         acceptedWebKitCancellation,
-        { ...acceptedWebKitCancellation, failedAt: 125 },
+        { ...acceptedWebKitCancellation, observedAt: 125, terminal: "finished" },
       ]),
     ).toBeNull();
     const consumableWebKitFailures = [acceptedWebKitCancellation];
     expect(
       optionalWebKitReauthenticationAccessControlPageError(
         {
-          acceptedRequestFailures: consumableWebKitFailures,
+          acceptedRequestTerminals: consumableWebKitFailures,
           pageErrorEvidence: [correlatedWebKitPageError],
         },
         "webkit",
@@ -2634,7 +2666,7 @@ describe("provider-neutral browser account acceptance", () => {
     expect(
       optionalWebKitReauthenticationAccessControlPageError(
         {
-          acceptedRequestFailures: [acceptedWebKitCancellation],
+          acceptedRequestTerminals: [acceptedWebKitCancellation],
           pageErrorEvidence: [correlatedWebKitPageError, correlatedWebKitPageError],
         },
         "webkit",
@@ -2654,7 +2686,7 @@ describe("provider-neutral browser account acceptance", () => {
     expect(
       optionalWebKitReauthenticationAccessControlPageError(
         {
-          acceptedRequestFailures: bijectiveWebKitFailures,
+          acceptedRequestTerminals: bijectiveWebKitFailures,
           pageErrorEvidence: [correlatedWebKitPageError, secondCorrelatedWebKitPageError],
         },
         "webkit",
@@ -2803,12 +2835,30 @@ describe("provider-neutral browser account acceptance", () => {
   });
 
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
+    const boundedLiveUrl = `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`;
+    expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl)).toBe(true);
+    expect(
+      isBoundedHttp1StreamRequest(
+        "GET",
+        `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/00000000-0000-0000-0000-000000000002/events/stream?after=4&transport=http1-bounded`,
+      ),
+    ).toBe(true);
+    expect(isBoundedHttp1StreamRequest("POST", boundedLiveUrl)).toBe(false);
+    expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl.replace("http1-bounded", "h2"))).toBe(
+      false,
+    );
+    expect(
+      isBoundedHttp1StreamRequest(
+        "GET",
+        `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001?transport=http1-bounded`,
+      ),
+    ).toBe(false);
     const expected = {
       failedAt: 11_100,
       failure: "net::ERR_ABORTED",
       method: "GET",
       startedAt: 100,
-      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`,
+      url: boundedLiveUrl,
     };
     expect(isExpectedBoundedHttp1NativeSeam(expected)).toBe(true);
     expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 10_099 })).toBe(false);
@@ -3145,7 +3195,7 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumePageErrors(
         page,
         pageProblems,
-        optionalWebKitReauthenticationAccessControlPageError(pageProblems, engine),
+        () => optionalWebKitReauthenticationAccessControlPageError(pageProblems, engine),
         [],
       );
 
