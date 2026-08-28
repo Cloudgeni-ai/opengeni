@@ -1097,8 +1097,7 @@ function correlatedWebKitReauthenticationFailureIndex(
   const matchingFailureIndexes = acceptedRequestFailures.flatMap((failure, index) =>
     failure.responsePhase === "slot-revocation-reauthentication" &&
     failure.pathnameAndSearch === pathnameAndSearch &&
-    failure.failedAt <= pageError.observedAt &&
-    pageError.observedAt - failure.failedAt <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+    Math.abs(pageError.observedAt - failure.failedAt) <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
       ? [index]
       : [],
   );
@@ -1114,9 +1113,10 @@ function optionalWebKitReauthenticationAccessControlPageError(
   // errors in addition to their request-cancellation events. Native-first
   // transport teardown can expose more than one of those errors, so require a
   // bijection: every page error must have exactly one same-phase, exact-URL
-  // cancellation immediately before it, and no cancellation may authorize a
-  // second error. Duplicate, late, concurrent, or stale evidence keeps the
-  // strict page-error ledger red.
+  // cancellation inside the same bounded delivery window, and no cancellation
+  // may authorize a second error. Playwright delivers renderer page errors and
+  // request failures independently, so either callback can arrive first.
+  // Duplicate, late, concurrent, or stale evidence keeps the strict ledger red.
   const candidates = problems.pageErrorEvidence.flatMap((pageError) => {
     const failureIndex = correlatedWebKitReauthenticationFailureIndex(
       pageError,
@@ -2596,6 +2596,14 @@ describe("provider-neutral browser account acceptance", () => {
     expect(
       correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
         { ...acceptedWebKitCancellation, failedAt: 151 },
+      ]),
+    ).toBe(0);
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+        {
+          ...acceptedWebKitCancellation,
+          failedAt: 150 + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS + 1,
+        },
       ]),
     ).toBeNull();
     expect(
