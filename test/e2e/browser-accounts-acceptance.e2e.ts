@@ -82,6 +82,7 @@ type BrowserProblems = {
   }>;
   activeStreams: Map<object, string>;
   boundedHttp1StreamDispatches: number;
+  boundedHttp1NativeSeams: number;
   actorDispatches: Array<{ actorEpoch: string; startedAt: number }>;
   actorFenceResponses: string[];
   actorTransitionResponses: Array<{
@@ -407,6 +408,43 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
   return `[dispatch=${input.dispatchPhase}; actor=${input.actorEpoch ?? "missing"}; response=${input.responsePhase}] ${input.method} ${input.url}: ${input.failure}`;
 }
 
+function isExpectedBoundedHttp1NativeSeam(input: {
+  failedAt: number;
+  failure: string;
+  method: string;
+  startedAt?: number;
+  url: string;
+}): boolean {
+  if (
+    input.method !== "GET" ||
+    typeof input.startedAt !== "number" ||
+    !Number.isFinite(input.startedAt) ||
+    !Number.isFinite(input.failedAt)
+  ) {
+    return false;
+  }
+  const url = new URL(input.url);
+  const isStream = url.pathname.endsWith("/stream") || url.pathname.includes("/live-events/stream");
+  // Chromium and Firefox expose concrete abort codes; WebKit reports a bare
+  // cancellation word. Exact matching prevents an abort-shaped prefix from
+  // hiding a reset, timeout, DNS, or other transport failure.
+  const isCancellation =
+    /^(?:(?:net::)?ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|(?:request (?:was )?)?(?:cancelled|canceled))$/iu.test(
+      input.failure.trim(),
+    );
+  const elapsedMs = input.failedAt - input.startedAt;
+  // The browser-owned seam fires at nine seconds. Allow only the request-start
+  // offset plus bounded scheduling jitter; the two-second logical reconnect
+  // grace does not extend the native request's cancellation deadline.
+  return (
+    isStream &&
+    isCancellation &&
+    url.searchParams.get("transport") === "http1-bounded" &&
+    elapsedMs >= 8_000 &&
+    elapsedMs <= 13_000
+  );
+}
+
 function retiredFiniteReadTerminalProblem(
   description: string | undefined,
   terminal: { kind: "finished" } | { kind: "response"; status: number },
@@ -543,6 +581,7 @@ function observeBrowser(page: Page): BrowserProblems {
     acceptedRequestFailures: [],
     activeStreams: new Map(),
     boundedHttp1StreamDispatches: 0,
+    boundedHttp1NativeSeams: 0,
     actorDispatches: [],
     actorFenceResponses: [],
     actorTransitionResponses: [],
@@ -702,6 +741,18 @@ function observeBrowser(page: Page): BrowserProblems {
     // quiescence tracking, but keep every non-transition failure in the strict
     // final ledger—including canceled product mutations.
     problems.pendingFiniteReads.delete(request);
+    if (
+      isExpectedBoundedHttp1NativeSeam({
+        failedAt,
+        failure,
+        method: request.method(),
+        startedAt: dispatch?.startedAt,
+        url: request.url(),
+      })
+    ) {
+      problems.boundedHttp1NativeSeams += 1;
+      return;
+    }
     const check = (async () => {
       const problem = requestFailureProblem({
         acceptedActorTransitions: actorMutationAcceptances,
@@ -2656,6 +2707,40 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBe(false);
   });
 
+  test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
+    const expected = {
+      failedAt: 9_100,
+      failure: "net::ERR_ABORTED",
+      method: "GET",
+      startedAt: 100,
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`,
+    };
+    expect(isExpectedBoundedHttp1NativeSeam(expected)).toBe(true);
+    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 7_999 })).toBe(false);
+    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 13_101 })).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "net::ERR_CONNECTION_RESET" }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "cancelled: connection reset" }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "canceled: transport failure" }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        url: `${publicOrigin}/v1/workspaces?transport=http1-bounded`,
+      }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream`,
+      }),
+    ).toBe(false);
+  });
+
   test("real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state", async () => {
     if (!owned) throw new Error("database fixture unavailable");
     const engine = requestedEngine as EngineName;
@@ -3218,6 +3303,11 @@ describe("provider-neutral browser account acceptance", () => {
               primary: pageProblems.boundedHttp1StreamDispatches,
               secondTab: secondTabProblems.boundedHttp1StreamDispatches,
               independentSet: otherProblems.boundedHttp1StreamDispatches,
+            },
+            boundedHttp1NativeSeams: {
+              primary: pageProblems.boundedHttp1NativeSeams,
+              secondTab: secondTabProblems.boundedHttp1NativeSeams,
+              independentSet: otherProblems.boundedHttp1NativeSeams,
             },
             sameSetSecondTabNeutralizedAfterLogoutAll: true,
             anotherBrowserSetSurvivedLogoutAll: true,

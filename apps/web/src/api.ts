@@ -24,6 +24,11 @@ const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 const boundedHttp1SseTransport = "http1-bounded";
 const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 2_000;
+// The API normally closes bounded HTTP/1 streams after five seconds. Keep a
+// browser-owned backstop as well: a server/runtime adapter can acknowledge a
+// Web Stream close without retiring Chromium's native request, and one such
+// orphan per tab is enough to exhaust the shared per-origin connection pool.
+const HTTP1_BROWSER_SSE_NATIVE_LIFETIME_MS = 9_000;
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 let managedActorEpoch: string | null = null;
 let managedActorRevision = 0;
@@ -201,7 +206,11 @@ export async function managedActorFetch(
     typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined,
   );
   new Headers(init.headers).forEach((value, key) => headers.set(key, value));
-  const [transportInput, cleanCloseDelayMs] = browserSseTransportInput(input, init, headers);
+  const [transportInput, cleanCloseDelayMs, nativeLifetimeMs] = browserSseTransportInput(
+    input,
+    init,
+    headers,
+  );
   if (acceptedEpoch && init.credentials !== "omit" && !headers.has(MANAGED_ACTOR_EPOCH_HEADER)) {
     headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
   }
@@ -278,6 +287,7 @@ export async function managedActorFetch(
       cleanup,
       abortNativeTransport,
       finiteJsonResponse ? 0 : cleanCloseDelayMs,
+      finiteJsonResponse ? 0 : nativeLifetimeMs,
     );
   } finally {
     if (!responseOwnsCleanup) cleanup();
@@ -294,18 +304,22 @@ function browserSseTransportInput(
   input: string | URL | Request,
   init: RequestInit,
   headers: Headers,
-): readonly [input: string | URL | Request, cleanCloseDelayMs: number] {
+): readonly [input: string | URL | Request, cleanCloseDelayMs: number, nativeLifetimeMs: number] {
   if (
     requestMethod(input, init) !== "GET" ||
     !headers.get("accept")?.toLowerCase().includes("text/event-stream") ||
     (typeof Request !== "undefined" && input instanceof Request) ||
     !shouldBoundBrowserSseForProtocol(observedApiProtocol())
   ) {
-    return [input, 0];
+    return [input, 0, 0];
   }
   const url = new URL(String(input), window.location.href);
   url.searchParams.set("transport", boundedHttp1SseTransport);
-  return [typeof input === "string" ? url.toString() : url, HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS];
+  return [
+    typeof input === "string" ? url.toString() : url,
+    HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS,
+    HTTP1_BROWSER_SSE_NATIVE_LIFETIME_MS,
+  ];
 }
 
 function observedApiProtocol(): string | null {
@@ -362,11 +376,14 @@ export function managedActorTrackedResponse(
   cleanup: () => void,
   abortNativeTransport?: (reason: unknown) => void,
   cleanCloseDelayMs = 0,
+  nativeLifetimeMs = 0,
 ): Response {
   const reader = response.body!.getReader();
   let settled = false;
   let readerReleased = false;
   let actorAbortReason: unknown | null = null;
+  let cleanSeamGrace: Promise<void> | null = null;
+  let lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
   const releaseReader = () => {
     if (readerReleased) return;
     try {
@@ -380,6 +397,10 @@ export function managedActorTrackedResponse(
   const settle = () => {
     if (settled) return false;
     settled = true;
+    if (lifetimeTimer !== null) {
+      clearTimeout(lifetimeTimer);
+      lifetimeTimer = null;
+    }
     signal.removeEventListener("abort", abortBody);
     cleanup();
     return true;
@@ -401,6 +422,31 @@ export function managedActorTrackedResponse(
       .catch(() => undefined)
       .finally(releaseReader);
   };
+  const beginCleanSeam = () => {
+    if (settled || cleanSeamGrace !== null) return;
+    const reason = new DOMException(
+      "The bounded HTTP/1 stream reached its native lifetime",
+      "AbortError",
+    );
+    cleanSeamGrace = abortableDelay(cleanCloseDelayMs, signal);
+    // The browser signal must be aborted before its locked reader is
+    // cancelled. This owns the native request lifecycle even when the API's
+    // clean terminal chunk never releases Chromium's connection accounting.
+    abortNativeTransport?.(reason);
+    void reader
+      .cancel(reason)
+      .catch(() => undefined)
+      .finally(releaseReader);
+  };
+  const closeCleanSeam = async (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    await cleanSeamGrace;
+    if (actorAbortReason !== null) {
+      controller.error(actorAbortReason);
+      return;
+    }
+    releaseReader();
+    if (settle()) controller.close();
+  };
   // Keep actor-abort rejection consumer-owned. WebKit can report a stream
   // error raised directly inside the abort event as an unhandled page error
   // before the SDK has attached its body reader. Zero buffering also prevents
@@ -417,10 +463,18 @@ export function managedActorTrackedResponse(
           return;
         }
         if (settled) return;
+        if (cleanSeamGrace !== null) {
+          await closeCleanSeam(controller);
+          return;
+        }
         try {
           const next = await reader.read();
           if (actorAbortReason !== null) {
             controller.error(actorAbortReason);
+            return;
+          }
+          if (cleanSeamGrace !== null) {
+            await closeCleanSeam(controller);
             return;
           }
           if (next.done) {
@@ -444,6 +498,8 @@ export function managedActorTrackedResponse(
           releaseReader();
           if (actorAbortReason !== null) {
             controller.error(actorAbortReason);
+          } else if (cleanSeamGrace !== null) {
+            await closeCleanSeam(controller);
           } else if (settle()) {
             controller.error(error);
           }
@@ -465,6 +521,9 @@ export function managedActorTrackedResponse(
     },
     { highWaterMark: 0 },
   );
+  if (nativeLifetimeMs > 0 && abortNativeTransport) {
+    lifetimeTimer = setTimeout(beginCleanSeam, nativeLifetimeMs);
+  }
   return new Response(body, {
     status: response.status,
     statusText: response.statusText,
