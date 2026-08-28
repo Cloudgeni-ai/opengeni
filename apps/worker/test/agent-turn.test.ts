@@ -739,15 +739,35 @@ describe("turn exact-content boundaries", () => {
     const source = await Bun.file(
       new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
+    const streamCompletionAuthority = source.indexOf(
+      "await assertSuccessfulAgentStreamCompletion({",
+    );
+    const postCompactionRecovery = source.indexOf(
+      "throw new PostCompactionContinuationEmptyError();",
+      streamCompletionAuthority,
+    );
+    const cancelledStreamGuard = source.indexOf(
+      "assertAgentStreamNotCancelled(eventing.stream.cancelled);",
+      postCompactionRecovery,
+    );
+    const interruptionPath = source.indexOf(
+      "if (eventing.stream.interruptions.length > 0)",
+      cancelledStreamGuard,
+    );
     const completionPath = source.indexOf(
-      'const finalOutput = String(eventing.stream.finalOutput ?? "");',
+      "String(requireAgentStreamFinalOutput(eventing.stream.finalOutput))",
+      interruptionPath,
     );
     const mandatoryBarrier = source.indexOf(
       "await historySink.reconcileConversationTruth({ requireDurable: true });",
       completionPath,
     );
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
-    expect(completionPath).toBeGreaterThan(-1);
+    expect(streamCompletionAuthority).toBeGreaterThan(-1);
+    expect(postCompactionRecovery).toBeGreaterThan(streamCompletionAuthority);
+    expect(cancelledStreamGuard).toBeGreaterThan(postCompactionRecovery);
+    expect(interruptionPath).toBeGreaterThan(cancelledStreamGuard);
+    expect(completionPath).toBeGreaterThan(interruptionPath);
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
 
