@@ -737,20 +737,29 @@ export async function lockSessionEventWriteRows(
       `Session event cursor lock set was incomplete for workspace ${input.workspaceId}`,
     );
   }
-  for (let index = 0; index < sessions.length; index += 1) {
-    const session = sessions[index]!;
+  const canonicalSessions = sessions.map((session, index) => {
     const cursor = cursors[index]!;
     if (
       cursor.sessionId !== session.id ||
       cursor.accountId !== session.accountId ||
-      cursor.workspaceId !== session.workspaceId ||
-      cursor.lastSequence !== session.lastSequence
+      cursor.workspaceId !== session.workspaceId
     ) {
       throw new SessionControlInvariantError(
-        `Session event cursor parity failed for session ${session.id}`,
+        `Session event cursor identity failed for session ${session.id}`,
       );
     }
-  }
+    // The cursor is the allocation authority. The wide session column remains
+    // a rolling compatibility/read projection until every reader is cut over.
+    // It may lag after the later pure-append activation, but it must never lead
+    // the durable cursor or an old writer could have committed an unverified
+    // sequence.
+    if (cursor.lastSequence < session.lastSequence) {
+      throw new SessionControlInvariantError(
+        `Session event cursor is behind session projection for session ${session.id}`,
+      );
+    }
+    return { ...session, lastSequence: cursor.lastSequence };
+  });
 
   const turnIds = [...new Set(input.turnIds ?? [])].sort();
   const turns =
@@ -784,7 +793,7 @@ export async function lockSessionEventWriteRows(
           .for("update")
       : [];
 
-  return { control, workspace, sessions, cursors, turns, attempts };
+  return { control, workspace, sessions: canonicalSessions, cursors, turns, attempts };
 }
 
 export async function registerSessionTurnAttemptClaim(
