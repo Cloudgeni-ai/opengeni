@@ -179,6 +179,9 @@ describe("release schema contract", () => {
     const orderedVariableSetRuntimeAuthority = completeSourceContract.migrations.some(
       (migration) => migration.path === "0372_ordered_variable_set_runtime_authority.sql",
     );
+    const sandboxSharedPreparation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0372_sandbox_shared_preparation.sql",
+    );
     const automaticSessionTitleMigrationPaths = new Set([
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
@@ -200,6 +203,7 @@ describe("release schema contract", () => {
       "0370_workspace_member_management_scope.sql",
       "0371_workspace_member_candidate_inventory.sql",
       "0372_ordered_variable_set_runtime_authority.sql",
+      "0372_sandbox_shared_preparation.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -227,9 +231,12 @@ describe("release schema contract", () => {
         (localHumanPersonalAuthority ? 1 : 0) +
         (workspaceMemberManagementScope ? 1 : 0) +
         (workspaceMemberCandidateInventory ? 1 : 0) +
-        (orderedVariableSetRuntimeAuthority ? 1 : 0),
-      latestMigration: orderedVariableSetRuntimeAuthority
-        ? "0372_ordered_variable_set_runtime_authority.sql"
+        (orderedVariableSetRuntimeAuthority ? 1 : 0) +
+        (sandboxSharedPreparation ? 1 : 0),
+      latestMigration: sandboxSharedPreparation
+        ? "0372_sandbox_shared_preparation.sql"
+        : orderedVariableSetRuntimeAuthority
+          ? "0372_ordered_variable_set_runtime_authority.sql"
         : workspaceMemberCandidateInventory
           ? "0371_workspace_member_candidate_inventory.sql"
           : workspaceMemberManagementScope
@@ -382,6 +389,7 @@ describe("release schema contract", () => {
       "0370_workspace_member_management_scope.sql",
       "0371_workspace_member_candidate_inventory.sql",
       "0372_ordered_variable_set_runtime_authority.sql",
+      "0372_sandbox_shared_preparation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -484,6 +492,9 @@ describe("release schema contract", () => {
     const orderedVariableSetRuntimeAuthority = completeSourceContract.migrations.some(
       (migration) => migration.path === "0372_ordered_variable_set_runtime_authority.sql",
     );
+    const sandboxSharedPreparation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0372_sandbox_shared_preparation.sql",
+    );
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
@@ -511,9 +522,12 @@ describe("release schema contract", () => {
         (localHumanPersonalAuthority ? 1 : 0) +
         (workspaceMemberManagementScope ? 1 : 0) +
         (workspaceMemberCandidateInventory ? 1 : 0) +
-        (orderedVariableSetRuntimeAuthority ? 1 : 0),
-      latestMigration: orderedVariableSetRuntimeAuthority
-        ? "0372_ordered_variable_set_runtime_authority.sql"
+        (orderedVariableSetRuntimeAuthority ? 1 : 0) +
+        (sandboxSharedPreparation ? 1 : 0),
+      latestMigration: sandboxSharedPreparation
+        ? "0372_sandbox_shared_preparation.sql"
+        : orderedVariableSetRuntimeAuthority
+          ? "0372_ordered_variable_set_runtime_authority.sql"
         : workspaceMemberCandidateInventory
           ? "0371_workspace_member_candidate_inventory.sql"
           : workspaceMemberManagementScope

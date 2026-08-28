@@ -1092,6 +1092,19 @@ rolls only the exact warming epoch back to cold, and fails the turn rather than
 rapidly creating sibling boxes. Any later display/setup failure follows the same
 owned cleanup path.
 
+After a managed lease is warm, immutable Rig setup has a second, setup-specific
+single-flight boundary. One worker claims the exact `(lease epoch, provider
+instance, setup spec hash)` receipt and runs the existing marker-guarded script;
+sibling turns join or reuse its durable completion instead of entering the
+sandbox concurrently. Join reads back off from 100 ms to a two-second ceiling
+and reset when the durable revision advances. If provider execution succeeds
+but database settlement is unavailable, the current turn does not replay the
+script; after the bounded claim deadline, a successor re-enters the same
+box-local marker and records completion. Failed setup remains fail-closed and
+retryable. Per-turn Git/run credentials, Codemode tokens, Azure login,
+repository clone authority, file resources, and generated media are always
+prepared privately after the shared Rig boundary.
+
 Lazy establishment observes one correlation-qualified logical provision at a
 time. Its terminal durable `sandbox.provision` event records a closed structural
 stage/category/code plus internal-attempt count; expected lease supersession or

@@ -8472,6 +8472,29 @@ export const sandboxLeases = pgTable(
     currentCheckpointArtifactId: uuid("current_checkpoint_artifact_id"),
     previousCheckpointArtifactId: uuid("previous_checkpoint_artifact_id"),
 
+    // Durable single-flight for immutable machine setup (currently exact rig
+    // setup only). Per-turn credentials, repositories, files, and cloud login
+    // deliberately remain outside this lease-scoped receipt.
+    sharedPreparationLeaseEpoch: integer("shared_preparation_lease_epoch"),
+    sharedPreparationInstanceId: text("shared_preparation_instance_id"),
+    sharedPreparationSpecHash: text("shared_preparation_spec_hash"),
+    sharedPreparationStatus: text("shared_preparation_status", {
+      enum: ["running", "completed", "failed"],
+    }),
+    sharedPreparationClaimId: uuid("shared_preparation_claim_id"),
+    sharedPreparationOwnerAttemptId: uuid("shared_preparation_owner_attempt_id"),
+    sharedPreparationAttempt: integer("shared_preparation_attempt"),
+    sharedPreparationRevision: integer("shared_preparation_revision").notNull().default(0),
+    sharedPreparationStartedAt: timestamp("shared_preparation_started_at", {
+      withTimezone: true,
+    }),
+    sharedPreparationDeadlineAt: timestamp("shared_preparation_deadline_at", {
+      withTimezone: true,
+    }),
+    sharedPreparationSettledAt: timestamp("shared_preparation_settled_at", {
+      withTimezone: true,
+    }),
+
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

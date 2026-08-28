@@ -43,6 +43,7 @@ import {
   makeMachineOpObserver,
   recordSandboxLogicalProvision,
   recordSandboxProvisionAttempt,
+  recordSandboxSharedPreparation,
   recordTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
@@ -69,6 +70,7 @@ import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
+import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 
 export type SandboxRouteDeps = {
   input: RunAgentTurnInput;
@@ -1020,6 +1022,24 @@ export async function bindLazySandboxProvisioner(
                           eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
                             eventing.toolCancellationFenceRef.current,
                           ),
+                      }
+                    : {}),
+                  ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
+                    ? {
+                        coordinateSharedRigSetup: createSharedRigSetupCoordinator({
+                          db,
+                          accountId: input.accountId,
+                          workspaceId: input.workspaceId,
+                          sandboxGroupId: sandboxState.sandboxGroupId,
+                          attemptId: input.attemptId,
+                          holderId: sandboxState.sandboxHolderId,
+                          sandbox: provisioned,
+                          ...(runtimeCancellationSignal
+                            ? { signal: runtimeCancellationSignal }
+                            : {}),
+                          observe: (measurement) =>
+                            recordSandboxSharedPreparation(observability, measurement),
+                        }),
                       }
                     : {}),
                 },

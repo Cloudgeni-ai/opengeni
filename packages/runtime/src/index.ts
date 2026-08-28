@@ -7150,6 +7150,13 @@ export async function runOwnedSandboxSetup(
     gitCredentialBindingsOverride?: GitCredentialBindingSeed[];
     codemodeTokenSeedOverride?: string;
     commandRunner?: SandboxLifecycleCommandRunner;
+    /** Durable host coordinator for immutable rig setup on one exact managed
+     * sandbox. Turn-private hooks always run after this callback returns. */
+    coordinateSharedRigSetup?: (input: {
+      specHash: string;
+      timeoutMs: number;
+      execute: () => Promise<void>;
+    }) => Promise<"executed" | "reused">;
   },
 ): Promise<void> {
   const { settings, environment } = opts;
@@ -7176,14 +7183,8 @@ export async function runOwnedSandboxSetup(
   const ownedCodemodeTokenSeed = opts.codemodeTokenSeedOverride ?? codemodeTokenSeedForAgent(agent);
   const ownedCodemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
-  const ownedHooks = [
-    // M3: rig setup runs FIRST so any tooling it installs is present for the
-    // credential / repository-clone hooks below; the rig's credential hooks are
-    // unioned into the deployment preparation-profile hooks (deduped by id).
-    // This is the LIVE owned-path execution (the provided session skips the
-    // client create/resume decoration), so the rig hooks MUST be here or a
-    // rig-bound turn would start without ever running the frozen setup script.
-    ...sandboxRigSetupHooksForAgent(agent),
+  const ownedRigSetupHooks = sandboxRigSetupHooksForAgent(agent);
+  const ownedTurnPrivateHooks = [
     ...sandboxArtifactRuntimeHooksForAgent(agent),
     ...unionCredentialHooks(
       sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
@@ -7212,7 +7213,36 @@ export async function runOwnedSandboxSetup(
   // platform must not run setup against it (clone hooks are already empty there;
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
-    await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
+    if (ownedRigSetupHooks.length > 0 && ownedRigSetup) {
+      const execute = async (): Promise<void> => {
+        await runBeforeAgentStartHooks(setupSession, ownedRigSetupHooks, ownedHookContext);
+      };
+      if (opts.coordinateSharedRigSetup) {
+        const sourceHash =
+          ownedRigSetup.contentHash ??
+          `sha256:${createHash("sha256").update(ownedRigSetup.script, "utf8").digest("hex")}`;
+        const specHash = `sha256:${createHash("sha256")
+          .update(`${ownedRigSetup.versionId}\0${sourceHash}`, "utf8")
+          .digest("hex")}`;
+        const outcome = await opts.coordinateSharedRigSetup({
+          specHash,
+          timeoutMs: ownedRigSetup.timeoutMs,
+          execute,
+        });
+        if (outcome === "reused") {
+          const payload = {
+            rigId: ownedRigSetup.rigId,
+            versionId: ownedRigSetup.versionId,
+            rigName: ownedRigSetup.rigName,
+          };
+          await opts.onRuntimeEvent?.({ type: "rig.setup.started", payload });
+          await opts.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
+        }
+      } else {
+        await execute();
+      }
+    }
+    await runBeforeAgentStartHooks(setupSession, ownedTurnPrivateHooks, ownedHookContext);
   }
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is

@@ -1416,6 +1416,22 @@ export function recordSandboxLogicalProvision(
   }
 }
 
+export function recordSandboxSharedPreparation(
+  observability: Observability,
+  measurement: {
+    path: "owner" | "joined" | "reused";
+    outcome: "completed" | "failed";
+    durationSeconds: number;
+  },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_sandbox_shared_preparation_duration_seconds",
+    help: "Duration of exact-lease immutable sandbox preparation by durable coordination path and outcome.",
+    labels: { path: measurement.path, outcome: measurement.outcome },
+    value: Math.max(0, measurement.durationSeconds),
+  });
+}
+
 export function recordTurnWorkerPreparationTotal(
   observability: Observability,
   input: {
