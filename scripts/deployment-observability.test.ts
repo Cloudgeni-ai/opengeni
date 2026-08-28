@@ -29,7 +29,7 @@ describe("observability deployment plan", () => {
     });
 
     expect(plan.chartPath).toBe("deploy/observability");
-    expect(plan.chartVersion).toBe("0.1.8");
+    expect(plan.chartVersion).toBe("0.1.9");
     expect(plan.kubePrometheusStackVersion).toBe("87.16.1");
     expect(plan.opensandbox).toBe(true);
     expect(plan.valuesFiles).toEqual([
