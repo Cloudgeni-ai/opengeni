@@ -76,6 +76,7 @@ type PendingFiniteRead = {
 
 type BrowserProblems = {
   acceptedRequestFailures: Array<{
+    failedAt: number;
     pathnameAndSearch: string;
     responsePhase: string;
   }>;
@@ -95,6 +96,7 @@ type BrowserProblems = {
   }>;
   consoleErrors: string[];
   phase: string;
+  pageErrorEvidence: Array<{ message: string; observedAt: number }>;
   pageErrors: string[];
   failedRequests: string[];
   pendingFiniteReads: Map<object, PendingFiniteRead>;
@@ -510,6 +512,7 @@ function observeBrowser(page: Page): BrowserProblems {
     actorTransitionResponses: [],
     consoleErrors: [],
     phase: "initialization",
+    pageErrorEvidence: [],
     pageErrors: [],
     failedRequests: [],
     pendingFiniteReads: new Map(),
@@ -643,7 +646,9 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("pageerror", (error) => {
-    problems.pageErrors.push(`[${problems.phase}] ${error.message}`);
+    const message = `[${problems.phase}] ${error.message}`;
+    problems.pageErrorEvidence.push({ message, observedAt: performance.now() });
+    problems.pageErrors.push(message);
   });
   page.on("requestfailed", (request) => {
     const failedAt = performance.now();
@@ -674,6 +679,7 @@ function observeBrowser(page: Page): BrowserProblems {
         problems.failedRequests.push(problem);
       } else {
         problems.acceptedRequestFailures.push({
+          failedAt,
           pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
           responsePhase,
         });
@@ -897,6 +903,7 @@ async function expectAndConsumePageErrors(
     ),
     missing: required.filter((message) => !problems.pageErrors.includes(message)),
   }).toEqual({ excess: {}, missing: [] });
+  problems.pageErrorEvidence.splice(0);
   problems.pageErrors.splice(0);
 }
 
@@ -917,40 +924,52 @@ function optionalWebKitReauthenticationReloadError(
     .slice(0, 1);
 }
 
-function isWebKitReauthenticationAccessControlPageError(
-  message: string,
+const WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS = 1_000;
+
+function correlatedWebKitReauthenticationFailureIndex(
+  pageError: BrowserProblems["pageErrorEvidence"][number],
   acceptedRequestFailures: BrowserProblems["acceptedRequestFailures"],
-): boolean {
+): number | null {
   const match =
     /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_./?=&%-]+) due to access control checks\.$/u.exec(
-      message,
+      pageError.message,
     );
   const pathnameAndSearch = match?.groups?.pathnameAndSearch;
-  return (
-    pathnameAndSearch !== undefined &&
-    acceptedRequestFailures.some(
-      (failure) =>
-        failure.responsePhase === "slot-revocation-reauthentication" &&
-        failure.pathnameAndSearch === pathnameAndSearch,
-    )
+  if (pathnameAndSearch === undefined) return null;
+  const matchingFailureIndexes = acceptedRequestFailures.flatMap((failure, index) =>
+    failure.responsePhase === "slot-revocation-reauthentication" &&
+    failure.pathnameAndSearch === pathnameAndSearch &&
+    failure.failedAt <= pageError.observedAt &&
+    pageError.observedAt - failure.failedAt <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+      ? [index]
+      : [],
   );
+  return matchingFailureIndexes.length === 1 ? matchingFailureIndexes[0]! : null;
 }
 
 function optionalWebKitReauthenticationAccessControlPageError(
-  problems: BrowserProblems,
+  problems: Pick<BrowserProblems, "acceptedRequestFailures" | "pageErrorEvidence">,
   engine: EngineName,
 ): string[] {
   if (engine !== "webkit") return [];
   // WebKit can surface one read from the deliberately replaced document as a
   // page error in addition to its request-cancellation event. The endpoint is
   // timing-dependent, so accept it only when the independent request ledger
-  // already proved the exact URL was a fenced old-actor cancellation. Keep
-  // the phase, origin, browser, request correlation, and maximum count exact.
-  return problems.pageErrors
-    .filter((message) =>
-      isWebKitReauthenticationAccessControlPageError(message, problems.acceptedRequestFailures),
-    )
-    .slice(0, 1);
+  // already proved exactly one cancellation of that URL immediately before
+  // the error. Consume that evidence one-to-one; duplicate, late, concurrent,
+  // or stale cancellations keep the strict page-error ledger red.
+  const candidates = problems.pageErrorEvidence.flatMap((pageError) => {
+    const failureIndex = correlatedWebKitReauthenticationFailureIndex(
+      pageError,
+      problems.acceptedRequestFailures,
+    );
+    return failureIndex === null ? [] : [{ failureIndex, message: pageError.message }];
+  });
+  if (candidates.length !== 1) return [];
+  const [candidate] = candidates;
+  if (!candidate) return [];
+  problems.acceptedRequestFailures.splice(candidate.failureIndex, 1);
+  return [candidate.message];
 }
 
 async function expectAndConsumeActorTransitionResponse(
@@ -2206,38 +2225,88 @@ describe("provider-neutral browser account acceptance", () => {
       }),
     ).toContain("/v1/config/other");
     const acceptedWebKitCancellation = {
+      failedAt: 100,
       pathnameAndSearch:
         "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1",
       responsePhase: "slot-revocation-reauthentication",
     };
-    const correlatedWebKitPageError =
-      "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.";
+    const correlatedWebKitPageError = {
+      message:
+        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+      observedAt: 150,
+    };
     expect(
-      isWebKitReauthenticationAccessControlPageError(correlatedWebKitPageError, [
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
         acceptedWebKitCancellation,
       ]),
-    ).toBe(true);
-    expect(isWebKitReauthenticationAccessControlPageError(correlatedWebKitPageError, [])).toBe(
-      false,
-    );
+    ).toBe(0);
+    expect(correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [])).toBeNull();
     expect(
-      isWebKitReauthenticationAccessControlPageError(
-        "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+      correlatedWebKitReauthenticationFailureIndex(
+        {
+          message:
+            "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+          observedAt: 150,
+        },
         [acceptedWebKitCancellation],
       ),
-    ).toBe(false);
+    ).toBeNull();
     expect(
-      isWebKitReauthenticationAccessControlPageError(
-        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog due to access control checks.",
+      correlatedWebKitReauthenticationFailureIndex(
+        {
+          message:
+            "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog due to access control checks.",
+          observedAt: 150,
+        },
         [
           {
+            failedAt: 100,
             pathnameAndSearch:
               "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog",
             responsePhase: "slot-revocation-reauthentication",
           },
         ],
       ),
-    ).toBe(true);
+    ).toBe(0);
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+        { ...acceptedWebKitCancellation, failedAt: 151 },
+      ]),
+    ).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+        {
+          ...acceptedWebKitCancellation,
+          failedAt: 150 - WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - 1,
+        },
+      ]),
+    ).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationFailureIndex(correlatedWebKitPageError, [
+        acceptedWebKitCancellation,
+        { ...acceptedWebKitCancellation, failedAt: 125 },
+      ]),
+    ).toBeNull();
+    const consumableWebKitFailures = [acceptedWebKitCancellation];
+    expect(
+      optionalWebKitReauthenticationAccessControlPageError(
+        {
+          acceptedRequestFailures: consumableWebKitFailures,
+          pageErrorEvidence: [correlatedWebKitPageError],
+        },
+        "webkit",
+      ),
+    ).toEqual([correlatedWebKitPageError.message]);
+    expect(consumableWebKitFailures).toEqual([]);
+    expect(
+      optionalWebKitReauthenticationAccessControlPageError(
+        {
+          acceptedRequestFailures: [acceptedWebKitCancellation],
+          pageErrorEvidence: [correlatedWebKitPageError, correlatedWebKitPageError],
+        },
+        "webkit",
+      ),
+    ).toEqual([]);
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
@@ -2679,6 +2748,9 @@ describe("provider-neutral browser account acceptance", () => {
         ],
         [],
       );
+      // Let WebKit deliver the page-error task before correlating it with the
+      // already timestamped request-failure event.
+      await page.waitForTimeout(100);
       await settlePendingRequestFailureChecks(pageProblems);
       await expectAndConsumePageErrors(
         page,
