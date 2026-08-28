@@ -148,6 +148,50 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(server)).toEqual(["set_session_title"]);
   });
 
+  test("the operator can stop exact-attempt work-claim mutations without deleting evidence", () => {
+    const selected: FirstPartyMcpToolName[] = ["work_claim_upsert", "work_claim_release"];
+    const enabled = buildOpenGeniMcpServer(deps(), grant(["sessions:control"], selected));
+    expect(registeredToolNames(enabled)).toEqual([...selected].sort());
+
+    const disabledDeps = deps();
+    disabledDeps.settings = testSettings({ workClaimMutationsEnabled: false });
+    const disabled = buildOpenGeniMcpServer(disabledDeps, grant(["sessions:control"], selected));
+    expect(registeredToolNames(disabled)).toEqual([]);
+  });
+
+  test("operator-disabled MCP relevance discovery fails before storage", async () => {
+    let databaseTouches = 0;
+    const routeDeps = deps();
+    routeDeps.settings = testSettings({ workDiscoveryEnabled: false });
+    routeDeps.sessionAuthorization = {
+      authorizeSession: async () => ({ allowed: true }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          databaseTouches += 1;
+          throw new Error("disabled MCP work discovery reached storage");
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    const discoveryGrant: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "user:work-discovery-rollout-test",
+      permissions: ["sessions:read"],
+      principalKind: "human_session",
+      metadata: { firstPartyMcpTools: ["sessions_list"] },
+    };
+    const server = buildOpenGeniMcpServer(routeDeps, discoveryGrant);
+
+    await expect(
+      callRegisteredTool(server, "sessions_list", { query: "permission-scoped" }),
+    ).rejects.toThrow("work discovery is disabled");
+    expect(databaseTouches).toBe(0);
+  });
+
   test("ordinary omission excludes connector tools while explicit authorized selection stays exact", () => {
     const ordinary = buildOpenGeniMcpServer(
       deps(),

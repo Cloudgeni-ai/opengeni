@@ -52,6 +52,32 @@ const AGENT_DIAGRAM_COLUMN_GAP = 48;
 const AGENT_DIAGRAM_ROW_GAP = 64;
 const AGENT_DIAGRAM_PADDING = 24;
 
+type RollingAgentTopologySession = Omit<AgentTopologySession, "goal" | "relatedWork"> &
+  Partial<Pick<AgentTopologySession, "goal" | "relatedWork">>;
+
+/** Additive same-major fields may be absent while older API replicas drain. */
+export function normalizeAgentTopologySession(session: AgentTopologySession): AgentTopologySession {
+  const rolling = session as RollingAgentTopologySession;
+  return {
+    ...session,
+    goal: rolling.goal ?? null,
+    relatedWork: rolling.relatedWork ?? {
+      claims: [],
+      claimsTruncated: false,
+      match: null,
+      possibleOverlap: false,
+      advisoryOnly: true,
+      noAdditionalAccess: true,
+    },
+  };
+}
+
+export function normalizeAgentTopologySessions(
+  sessions: AgentTopologySession[],
+): AgentTopologySession[] {
+  return sessions.map(normalizeAgentTopologySession);
+}
+
 export function isPausedAgent(session: AgentTopologySession): boolean {
   return session.pause.state === "paused";
 }

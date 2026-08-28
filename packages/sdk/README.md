@@ -52,6 +52,45 @@ const operatorClient = new OpenGeniDocumentAuthorityClient({
 });
 ```
 
+## Related-work discovery
+
+`listAgentTopology` returns a bounded hierarchy page plus provider-neutral
+`relatedWork` evidence. A text query searches durable semantic titles, active
+goals, and typed work claims; it never searches the opening prompt. An exact
+subject filter looks up one canonical typed identity:
+
+```ts
+const page = await client.listAgentTopology(workspaceId, {
+  query: "permission scoped discovery",
+  statuses: ["running", "requires_action"],
+  activeOnly: true,
+  recentHours: 72,
+  claimLimit: 4,
+});
+
+for (const session of page.sessions) {
+  if (!session.relatedWork.possibleOverlap) continue;
+  console.log(session.title, session.relatedWork.match, session.relatedWork.claims);
+}
+
+const exact = await client.listAgentTopology(workspaceId, {
+  subject: {
+    namespace: "github",
+    type: "pull_request",
+    canonicalKey: "acme/app#42",
+  },
+});
+```
+
+The evidence is always advisory: `advisoryOnly` and `noAdditionalAccess` are
+literal `true` fields, and receiving a row does not authorize detail, message,
+or control operations. Preserve `nextCursor` with the exact same filters;
+relevance cursors are filter- and activity-snapshot-bound. A topology response
+may carry `humanAdvisoriesEnabled: false`, which lets a human-facing client hide
+the advisory UI without changing stored evidence or API authority. See
+[`docs/work-discovery.md`](../../docs/work-discovery.md) for ranking, bounds,
+claim lifecycle, and rollout semantics.
+
 ## Session visibility and forks
 
 For organizations with session-tenancy activation, a canonical managed-cookie

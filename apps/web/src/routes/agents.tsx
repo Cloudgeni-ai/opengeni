@@ -18,6 +18,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { PageHeader } from "@/components/common";
+import { RelatedWorkAdvisory } from "@/components/related-work-advisory";
 import { Button } from "@/components/ui/button";
 import { ContentPage, ContentSurface } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/common";
@@ -37,6 +38,7 @@ import {
   layoutAgentTopologyDiagram,
   limitAgentTopology,
   mergeAgentTopologySessions,
+  normalizeAgentTopologySessions,
   selectAgentTopologyBranchesToLoad,
   summarizeAgentTopology,
   type AgentTopologyFilter,
@@ -62,6 +64,7 @@ type AgentTopologyData = {
   total: number;
   hasMore: boolean;
   nextCursor: string | null;
+  humanAdvisoriesEnabled: boolean;
   error: Error | null;
 };
 
@@ -81,6 +84,7 @@ const EMPTY_DATA: AgentTopologyData = {
   total: 0,
   hasMore: false,
   nextCursor: null,
+  humanAdvisoriesEnabled: true,
   error: null,
 };
 
@@ -128,7 +132,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
           return {
             sessions: mergeAgentTopologySessions(
               current.sessions,
-              page.sessions,
+              normalizeAgentTopologySessions(page.sessions),
               MAX_LOADED_AGENTS,
             ),
             loading: false,
@@ -137,6 +141,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
             total: page.total,
             hasMore: page.hasMore,
             nextCursor: page.nextCursor,
+            humanAdvisoriesEnabled: page.humanAdvisoriesEnabled !== false,
             error: null,
           };
         });
@@ -219,7 +224,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
             ...current,
             sessions: mergeAgentTopologySessions(
               current.sessions,
-              page.sessions,
+              normalizeAgentTopologySessions(page.sessions),
               MAX_LOADED_AGENTS,
             ),
           };
@@ -480,6 +485,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
                   branchPages={branchPages}
                   loadedChildrenByParent={loadedChildrenByParent}
                   canLoadMore={data.sessions.length < MAX_LOADED_AGENTS}
+                  advisoriesEnabled={data.humanAdvisoriesEnabled}
                   onLoadMore={(parentSessionId, cursor) =>
                     void loadChildren(parentSessionId, cursor)
                   }
@@ -505,6 +511,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
               collapsed={collapsed}
               onToggle={toggleCollapsed}
               hiddenByParent={limitedTopology.hiddenByParent}
+              advisoriesEnabled={data.humanAdvisoriesEnabled}
             />
           )}
         </div>
@@ -556,12 +563,14 @@ function AgentDiagram({
   collapsed,
   onToggle,
   hiddenByParent,
+  advisoriesEnabled,
 }: {
   roots: AgentTopologyNode[];
   workspaceId: string;
   collapsed: ReadonlySet<string>;
   onToggle: (sessionId: string) => void;
   hiddenByParent: ReadonlyMap<string, number>;
+  advisoriesEnabled: boolean;
 }) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const layout = useMemo(() => layoutAgentTopologyDiagram(roots, collapsed), [collapsed, roots]);
@@ -666,6 +675,9 @@ function AgentDiagram({
                   {node.detached ? (
                     <span className="truncate text-2xs text-status-waiting">Detached</span>
                   ) : null}
+                  {advisoriesEnabled && node.session.relatedWork.possibleOverlap ? (
+                    <span className="truncate text-2xs text-status-waiting">Possible overlap</span>
+                  ) : null}
                 </div>
                 <div className="mt-1 line-clamp-2 min-w-0 text-xs font-medium leading-4 text-fg">
                   {title}
@@ -740,6 +752,7 @@ function AgentBranch({
   branchPages,
   loadedChildrenByParent,
   canLoadMore,
+  advisoriesEnabled,
   onLoadMore,
 }: {
   node: AgentTopologyNode;
@@ -751,6 +764,7 @@ function AgentBranch({
   branchPages: ReadonlyMap<string, AgentTopologyBranchPage>;
   loadedChildrenByParent: ReadonlyMap<string, number>;
   canLoadMore: boolean;
+  advisoriesEnabled: boolean;
   onLoadMore: (parentSessionId: string, cursor: string) => void;
 }) {
   const hasChildren = node.session.children.directChildren > 0 || node.children.length > 0;
@@ -837,6 +851,9 @@ function AgentBranch({
                   .join(" › ")}
               </div>
             ) : null}
+            {advisoriesEnabled ? (
+              <RelatedWorkAdvisory projection={node.session.relatedWork} />
+            ) : null}
           </Link>
 
           <div className="hidden shrink-0 items-center gap-2 sm:flex">
@@ -869,6 +886,7 @@ function AgentBranch({
               branchPages={branchPages}
               loadedChildrenByParent={loadedChildrenByParent}
               canLoadMore={canLoadMore}
+              advisoriesEnabled={advisoriesEnabled}
               onLoadMore={onLoadMore}
             />
           ))}
@@ -1079,6 +1097,7 @@ export function AgentTopologyPreviewRoute() {
                   branchPages={new Map()}
                   loadedChildrenByParent={new Map()}
                   canLoadMore={false}
+                  advisoriesEnabled
                   onLoadMore={() => {}}
                 />
               ))}
@@ -1091,6 +1110,7 @@ export function AgentTopologyPreviewRoute() {
                 collapsed={collapsed}
                 onToggle={toggleCollapsed}
                 hiddenByParent={limitedTopology.hiddenByParent}
+                advisoriesEnabled
               />
             </div>
           )}
@@ -1127,6 +1147,7 @@ function previewSessions(): AgentTopologySession[] {
     sandboxBackend?: string;
     paused?: boolean;
     activeTurn?: boolean;
+    relatedWork?: AgentTopologySession["relatedWork"];
   }): AgentTopologySession => ({
     id: input.id,
     parentSessionId: input.parentSessionId ?? null,
@@ -1136,6 +1157,15 @@ function previewSessions(): AgentTopologySession[] {
     rootSessionId: input.parentSessionId ?? input.id,
     nestedAgentDepth: input.depth,
     ancestorPath: [],
+    goal: null,
+    relatedWork: input.relatedWork ?? {
+      claims: [],
+      claimsTruncated: false,
+      match: null,
+      possibleOverlap: false,
+      advisoryOnly: true,
+      noAdditionalAccess: true,
+    },
     pause: {
       state: input.paused ? "paused" : "active",
       additionalBlockerCount: 0,
@@ -1198,6 +1228,38 @@ function previewSessions(): AgentTopologySession[] {
       status: "requires_action",
       depth: 1,
       minutesAgo: 4,
+      relatedWork: {
+        claims: [
+          {
+            id: "00000000-0000-4000-8000-000000000201",
+            sessionId: ids.security,
+            subject: {
+              namespace: "github",
+              type: "pull_request",
+              canonicalKey: "Cloudgeni-ai/opengeni#1842",
+              displayLabel: "Network boundary review",
+            },
+            role: "reviewing",
+            state: "active",
+            revision: 2,
+            provenance: "explicit_agent",
+            version: { kind: "pull_request_head", value: "8f09c3d" },
+            observedAt: new Date(now - 5 * 60_000).toISOString(),
+            updatedAt: new Date(now - 4 * 60_000).toISOString(),
+            settledAt: null,
+          },
+        ],
+        claimsTruncated: false,
+        match: {
+          class: "exact_subject",
+          field: "subject",
+          scoreBand: "exact",
+          claimId: "00000000-0000-4000-8000-000000000201",
+        },
+        possibleOverlap: true,
+        advisoryOnly: true,
+        noAdditionalAccess: true,
+      },
     }),
     make({
       id: ids.compliance,

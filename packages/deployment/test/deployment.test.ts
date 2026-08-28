@@ -1389,13 +1389,29 @@ describe("deployment contract", () => {
     const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
       OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true",
       OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "true",
+      OPENGENI_WORK_DISCOVERY_ENABLED: "false",
+      OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED: "false",
+      OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED: "false",
+      OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED: "true",
     });
     expect(configured.runtimeEnv).toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED=true");
     expect(configured.runtimeEnv).toContain("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=true");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WORK_DISCOVERY_ENABLED=false");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED=false");
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED=false",
+    );
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED=true",
+    );
     expect(configured.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     expect(absent.runtimeEnv).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=");
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_ENABLED=");
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED=");
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED=");
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED=");
     expect(absent.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
   });
 

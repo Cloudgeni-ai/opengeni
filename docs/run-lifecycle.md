@@ -321,6 +321,15 @@ filter is agent-monitoring only: REST event pages (which the browser composer
 uses to reconcile an outcome-unknown Send by `clientEventId`), SSE, and forensic
 reads stay byte-identical, and stored events are never rewritten.
 
+Related-work search is another compact projection over this same durable state,
+not a new run-lifecycle input. It searches semantic titles, active goals, and
+bounded typed work claims only after ordinary authorization/host narrowing; it
+never searches opening prompts or makes a claim control the turn, goal, queue,
+or worker. Terminal goal/session lifecycle settles active claim evidence while
+Pause and recovery preserve it. See
+[`work-discovery.md`](work-discovery.md) for the complete authority, ranking,
+mutation, and rollout contract.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
@@ -474,7 +483,13 @@ replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
 exhaustion evidence. This is an infrastructure retry budget, not a goal,
 continuation, model-call, or run-length cap; a later human/API prompt may retry as
-new accepted work. Every Steer commits a control wake revision, including when
+new accepted work. If an operational database outage interrupts the recovery
+checkpoint itself, the existing post-claim failure wire carries the immutable
+turn identity, classified provider cause, and exact next recovery count into the
+DB-only control lane. That lane accepts the checkpoint only when the identity
+still owns the attempt and the count is exactly one beyond durable turn metadata;
+ambiguous commits and stale replays therefore cannot reset the retry budget.
+Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes
 the new direction immediately.
