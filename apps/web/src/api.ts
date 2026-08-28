@@ -24,6 +24,7 @@ const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 const boundedHttp1SseTransport = "http1-bounded";
 const HTTP1_BROWSER_SSE_RECONNECT_GRACE_MS = 2_000;
+const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
 // The API normally closes bounded HTTP/1 streams after five seconds. Keep a
 // browser-owned backstop as well: a server/runtime adapter can acknowledge a
 // Web Stream close without retiring Chromium's native request, and one such
@@ -242,8 +243,8 @@ export async function managedActorFetch(
     // EOF. Draining here also guarantees the native body already has a
     // rejection consumer before any post-header actor abort.
     let actorResponse = response;
-    const finiteJsonResponse = isFiniteJsonResponse(response);
-    if (finiteJsonResponse) {
+    const detachedResponse = isFiniteJsonResponse(response) || isFiniteSseBatchResponse(response);
+    if (detachedResponse) {
       const bytes = await readFiniteResponseBytes(response);
       if (responseIsStale()) {
         throw new DOMException(
@@ -257,7 +258,7 @@ export async function managedActorFetch(
         headers: response.headers,
       });
     }
-    // Before headers—and through a finite JSON drain—actor rotation aborts the
+    // Before headers—and through a finite response drain—actor rotation aborts the
     // native fetch. A detached finite body no longer owns a network resource,
     // so only its wrapper remains actor-bound. A live body must also abort its
     // native fetch after admission: cancelling only the source reader can leave
@@ -267,10 +268,10 @@ export async function managedActorFetch(
     // transport is released. The native reader rejection is still delivered in
     // a later microtask, after the wrapper records its fail-closed AbortError.
     const actorBodyController = new AbortController();
-    const abortNativeTransport = finiteJsonResponse
+    const abortNativeTransport = detachedResponse
       ? undefined
       : (reason: unknown) => controller.abort(reason);
-    abortTarget = finiteJsonResponse
+    abortTarget = detachedResponse
       ? (reason) => actorBodyController.abort(reason)
       : (reason) => {
           // Abort the native fetch before publishing the wrapper abort. The
@@ -286,8 +287,8 @@ export async function managedActorFetch(
       actorBodyController.signal,
       cleanup,
       abortNativeTransport,
-      finiteJsonResponse ? 0 : cleanCloseDelayMs,
-      finiteJsonResponse ? 0 : nativeLifetimeMs,
+      isFiniteSseBatchResponse(actorResponse) ? cleanCloseDelayMs : 0,
+      detachedResponse ? 0 : nativeLifetimeMs,
     );
   } finally {
     if (!responseOwnsCleanup) cleanup();
@@ -345,6 +346,19 @@ function observedApiProtocol(): string | null {
 function isFiniteJsonResponse(response: Response): boolean {
   const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   return contentType === "application/json" || contentType?.endsWith("+json") === true;
+}
+
+function isFiniteSseBatchResponse(response: Response): boolean {
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  const contentLength = response.headers.get("content-length");
+  const parsedContentLength = contentLength === null ? Number.NaN : Number(contentLength);
+  return (
+    contentType === "text/event-stream" &&
+    contentLength !== null &&
+    /^\d+$/.test(contentLength) &&
+    Number.isSafeInteger(parsedContentLength) &&
+    parsedContentLength <= HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
+  );
 }
 
 async function readFiniteResponseBytes(response: Response): Promise<ArrayBuffer> {

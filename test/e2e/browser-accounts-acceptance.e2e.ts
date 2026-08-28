@@ -340,7 +340,8 @@ function sessionSetAuthorityHash(cookieHeader: string | null): string | null {
 }
 
 function requestFailureProblem(input: BrowserRequestFailureInput): string | null {
-  const pathname = new URL(input.url).pathname;
+  const requestUrl = new URL(input.url);
+  const pathname = requestUrl.pathname;
   const isConnectionReset = /NET_RESET|CONNECTION_RESET/iu.test(input.failure);
   const isCancellation =
     /ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
@@ -380,6 +381,27 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
         transition.acceptedAt >= startedAt &&
         transition.acceptedAt <= failedAt,
     ) === true;
+  const isExpectedLogoutAllBoundedStreamCancellation =
+    isCancellation &&
+    !isConnectionReset &&
+    input.method === "GET" &&
+    input.actorEpoch !== null &&
+    input.dispatchPhase === "late-old-epoch-primary-settled-before-old-release" &&
+    input.responsePhase === "logout-all-response-loss-replay" &&
+    requestUrl.searchParams.get("transport") === "http1-bounded" &&
+    /^\/v1\/workspaces\/[0-9a-f-]+\/live-events\/stream$/u.test(pathname) &&
+    typeof startedAt === "number" &&
+    Number.isFinite(startedAt) &&
+    typeof failedAt === "number" &&
+    Number.isFinite(failedAt) &&
+    input.acceptedActorTransitions?.some(
+      (transition) =>
+        transition.path === "/v1/auth/session-set/logout-all" &&
+        transition.actorEpoch !== null &&
+        transition.actorEpoch !== input.actorEpoch &&
+        transition.acceptedAt >= startedAt &&
+        transition.acceptedAt <= failedAt,
+    ) === true;
   const isExpectedEvidenceCatalogCancellation =
     isCancellation &&
     !isConnectionReset &&
@@ -400,6 +422,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
   if (
     isExpectedScopedActorReadCancellation ||
     isAcceptedActorTransitionCancellation ||
+    isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
     isExpectedDocumentBootstrapCancellation
   ) {
@@ -1409,7 +1432,11 @@ function accountMenuSurface(page: Page): Locator {
     .last();
 }
 
-async function openAccountMenu(page: Page, displayName: string): Promise<Locator> {
+async function openAccountMenu(
+  page: Page,
+  displayName: string,
+  prepareTrigger?: () => Promise<void>,
+): Promise<Locator> {
   const trigger = accountMenuTrigger(page, displayName);
   const menu = accountMenuSurface(page);
   let lastError: unknown;
@@ -1424,10 +1451,23 @@ async function openAccountMenu(page: Page, displayName: string): Promise<Locator
         await page.waitForTimeout(100);
       }
     }
-    if ((await trigger.getAttribute("aria-expanded")) === "true") {
-      await page.keyboard.press("Escape");
+    try {
+      await prepareTrigger?.();
+      await trigger.waitFor({ state: "visible", timeout: 3_000 });
+      if ((await trigger.getAttribute("aria-expanded", { timeout: 1_000 })) === "true") {
+        await page.keyboard.press("Escape");
+      }
+      await trigger.click({ timeout: 3_000 });
+    } catch (error) {
+      // Responsive navigation can finish a route transition after its account
+      // trigger first becomes visible, remounting or closing the drawer between
+      // two locator operations. Retry that bounded UI transition instead of
+      // spending Playwright's full default timeout on the vanished element.
+      lastError = error;
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await page.waitForTimeout(100);
+      continue;
     }
-    await trigger.click();
     try {
       await menu.waitFor({ timeout: 3_000 });
       await waitForStableAccountMenu(page, menu);
@@ -1464,20 +1504,20 @@ async function openResponsiveAccountMenu(
   displayName: string,
   width: number,
 ): Promise<Locator> {
-  const menu = accountMenuSurface(page);
-  if (await menu.isVisible()) {
-    await waitForStableAccountMenu(page, menu);
-    return menu;
-  }
-  if (width < 1_024) {
-    const trigger = accountMenuTrigger(page, displayName);
-    if (!(await trigger.isVisible())) {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-      await page.getByRole("tab", { name: "Workspace" }).click();
-      await trigger.waitFor();
-    }
-  }
-  const opened = await openAccountMenu(page, displayName);
+  const prepareTrigger =
+    width < 1_024
+      ? async () => {
+          const trigger = accountMenuTrigger(page, displayName);
+          if (await trigger.isVisible()) return;
+          const workspaceTab = page.getByRole("tab", { name: "Workspace" });
+          if (!(await workspaceTab.isVisible())) {
+            await page.getByRole("button", { name: "Open navigation" }).click({ timeout: 3_000 });
+          }
+          await workspaceTab.click({ timeout: 3_000 });
+          await trigger.waitFor({ state: "visible", timeout: 3_000 });
+        }
+      : undefined;
+  const opened = await openAccountMenu(page, displayName, prepareTrigger);
   return opened;
 }
 
@@ -2285,6 +2325,43 @@ describe("provider-neutral browser account acceptance", () => {
         ],
       }),
     ).toContain("/live-events/stream");
+    const signedOutOldActorBoundedStream = {
+      ...longLivedOldActorStream,
+      acceptedActorTransitions: [
+        {
+          acceptedAt: 200,
+          actorEpoch: "signed-out-actor-epoch",
+          path: "/v1/auth/session-set/logout-all",
+          sessionSetAuthorityHash: "b".repeat(64),
+        },
+      ],
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?after=12&transport=http1-bounded`,
+    } satisfies BrowserRequestFailureInput;
+    expect(requestFailureProblem(signedOutOldActorBoundedStream)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        acceptedActorTransitions: [],
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        failure: "NS_ERROR_NET_RESET",
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=sse`,
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?transport=http1-bounded`,
+      }),
+    ).toContain("/sessions");
     expect(
       requestFailureProblem({
         ...longLivedOldActorStream,
