@@ -318,7 +318,7 @@ describe("session event byte-bounded HTTP pages", () => {
     const [session] = await admin<
       Array<{ accountId: string }>
     >`select account_id as "accountId" from sessions where id = ${sessionId}`;
-    for (let sequence = 10; sequence <= 50; sequence += 1) {
+    for (let sequence = 1; sequence <= 50; sequence += 1) {
       await admin`
         insert into session_events (
           account_id, workspace_id, session_id, sequence, type, payload
