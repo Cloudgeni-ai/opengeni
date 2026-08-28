@@ -495,6 +495,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       { waitUntil: "domcontentloaded" },
     );
     await page.getByRole("heading", { name: "Workspaces & access" }).waitFor();
+    await page.getByRole("button", { name: "Create new workspace" }).click();
     await page.getByLabel("New workspace name").fill("Launch Room");
     await page.getByRole("button", { name: "Create workspace" }).click();
     await page.getByText("Launch Room created").waitFor();

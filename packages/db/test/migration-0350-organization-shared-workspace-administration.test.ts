@@ -21,6 +21,7 @@ import {
   putOrganizationWorkspaceMember,
   requireWorkspace,
   revokeOrganizationWorkspaceMember,
+  upsertWorkspaceMemberAsWorkspaceManager,
   updateOrganizationMember,
   updateOrganizationWorkspace,
   type DbClient,
@@ -294,6 +295,17 @@ describe("migration 0350 organization shared-workspace administration", () => {
         }),
       "42501",
     );
+    await expect(
+      upsertWorkspaceMemberAsWorkspaceManager(client.db, {
+        accountId: organizationId,
+        workspaceId: workspace.id,
+        actorSubjectId: ownerSubject,
+        targetSubjectId: ownerSubject,
+        mode: "update",
+        role: "viewer",
+        permissions: ["workspace:read"],
+      }),
+    ).rejects.toMatchObject({ code: "WORKSPACE_MEMBER_SELF_UPDATE" });
 
     const grantOperationId = crypto.randomUUID();
     const viewer = await putOrganizationWorkspaceMember(client.db, {

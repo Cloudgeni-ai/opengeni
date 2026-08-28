@@ -2289,6 +2289,97 @@ export async function grantWorkspaceAccess(
     });
 }
 
+export class WorkspaceMemberManagementError extends Error {
+  constructor(
+    readonly code:
+      | "WORKSPACE_MEMBER_ALREADY_EXISTS"
+      | "WORKSPACE_MEMBER_NOT_FOUND"
+      | "WORKSPACE_MEMBER_SELF_UPDATE"
+      | "WORKSPACE_MEMBER_LAST_ADMIN",
+  ) {
+    super(code);
+    this.name = "WorkspaceMemberManagementError";
+  }
+}
+
+/**
+ * Add or update one human workspace member under the same organization fence
+ * used by suspension, offboarding, organization-level grants, and removals.
+ * The SECURITY DEFINER candidate check runs after the fence is held, so a
+ * concurrent lifecycle transition cannot invalidate authority between the
+ * check and the membership write.
+ */
+export async function upsertWorkspaceMemberAsWorkspaceManager(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    targetSubjectId: string;
+    mode: "add" | "update";
+    subjectLabel?: string;
+    role: string;
+    permissions: Permission[];
+  },
+): Promise<void> {
+  await db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Database;
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(
+        ${`organization-membership:${input.accountId}`}, 0
+      ))`,
+    );
+    await assertWorkspaceMemberManagementCandidate(tx, input);
+    if (input.targetSubjectId === input.actorSubjectId) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_SELF_UPDATE");
+    }
+    if (!input.targetSubjectId.startsWith("user:")) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_NOT_FOUND");
+    }
+
+    const roster = await tx
+      .select({
+        subjectId: schema.workspaceMemberships.subjectId,
+        permissions: schema.workspaceMemberships.permissions,
+      })
+      .from(schema.workspaceMemberships)
+      .where(eq(schema.workspaceMemberships.workspaceId, input.workspaceId))
+      .orderBy(asc(schema.workspaceMemberships.id))
+      .for("update");
+    const target = roster.find((member) => member.subjectId === input.targetSubjectId);
+    if (input.mode === "add" && target) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_ALREADY_EXISTS");
+    }
+    if (input.mode === "update" && !target) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_NOT_FOUND");
+    }
+    const administers = (permissions: unknown): boolean => {
+      const normalized = normalizeWorkspaceMembershipPermissions(permissions);
+      return normalized.includes("workspace:admin") || normalized.includes("members:manage");
+    };
+    if (
+      target &&
+      administers(target.permissions) &&
+      !administers(input.permissions) &&
+      !roster.some(
+        (member) =>
+          member.subjectId !== input.targetSubjectId && administers(member.permissions),
+      )
+    ) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_LAST_ADMIN");
+    }
+
+    await grantWorkspaceAccess(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.targetSubjectId,
+      ...(input.subjectLabel !== undefined ? { subjectLabel: input.subjectLabel } : {}),
+      role: input.role,
+      permissions: input.permissions,
+    });
+  });
+}
+
 /** Prove workspace-scoped management and same-organization active membership. */
 export async function assertWorkspaceMemberManagementCandidate(
   db: Database,

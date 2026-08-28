@@ -22,7 +22,6 @@ import {
 } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
-  assertWorkspaceMemberManagementCandidate,
   createWorkspace,
   deleteWorkspaceIfQuiescent,
   getManagedUserProfilesByIds,
@@ -40,6 +39,7 @@ import {
   setWorkspaceDefaultRig,
   updateWorkspace,
   updateWorkspaceSettings,
+  upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
   workspaceCodexSubscriptionActive,
   workspaceControlRequestLockTimeoutMs,
@@ -545,14 +545,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "this person already has access to the workspace",
       });
     }
-    await grantWorkspaceAccess(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId,
-      subjectLabel: candidate.name?.trim() || candidate.email || subjectId,
-      ...(payload.role !== undefined ? { role: payload.role } : {}),
-      permissions: payload.permissions,
-    });
+    try {
+      await upsertWorkspaceMemberAsWorkspaceManager(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        actorSubjectId: grant.subjectId,
+        targetSubjectId: subjectId,
+        mode: "add",
+        subjectLabel: candidate.name?.trim() || candidate.email || subjectId,
+        role: payload.role ?? "member",
+        permissions: payload.permissions,
+      });
+    } catch (error) {
+      rethrowWorkspaceMemberCandidateError(error);
+    }
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((addedMember) => addedMember.subjectId === subjectId);
     if (!member) {
@@ -577,20 +583,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       callerSubjectId: grant.subjectId,
       nextPermissions: payload.permissions,
     });
-    await requireWorkspaceMemberCandidate(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      actorSubjectId: grant.subjectId,
-      targetSubjectId: subjectId,
-    });
-    await grantWorkspaceAccess(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId,
-      ...(current.subjectLabel ? { subjectLabel: current.subjectLabel } : {}),
-      role: payload.role ?? current.role,
-      permissions: payload.permissions,
-    });
+    try {
+      await upsertWorkspaceMemberAsWorkspaceManager(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        actorSubjectId: grant.subjectId,
+        targetSubjectId: subjectId,
+        mode: "update",
+        ...(current.subjectLabel ? { subjectLabel: current.subjectLabel } : {}),
+        role: payload.role ?? current.role,
+        permissions: payload.permissions,
+      });
+    } catch (error) {
+      rethrowWorkspaceMemberCandidateError(error);
+    }
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((candidate) => candidate.subjectId === subjectId);
     if (!member) {
@@ -639,34 +645,27 @@ async function listWorkspacePeople(
   }));
 }
 
-async function requireWorkspaceMemberCandidate(
-  deps: ApiRouteDeps,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    actorSubjectId: string;
-    targetSubjectId: string;
-  },
-): Promise<void> {
-  try {
-    await assertWorkspaceMemberManagementCandidate(deps.db, input);
-  } catch (error) {
-    const sqlState = nestedPostgresSqlState(error);
-    if (sqlState === "P0002") {
-      throw new HTTPException(404, {
-        message: "active organization member not found",
-      });
-    }
-    if (sqlState === "42501") {
-      throw new HTTPException(403, {
-        message: "workspace member management is not allowed",
-      });
-    }
-    throw error;
-  }
-}
-
 function rethrowWorkspaceMemberCandidateError(error: unknown): never {
+  const managementCode =
+    error && typeof error === "object" && "code" in error ? error.code : undefined;
+  if (managementCode === "WORKSPACE_MEMBER_ALREADY_EXISTS") {
+    throw new HTTPException(409, {
+      message: "this person already has access to the workspace",
+    });
+  }
+  if (managementCode === "WORKSPACE_MEMBER_NOT_FOUND") {
+    throw new HTTPException(404, { message: "member not found" });
+  }
+  if (managementCode === "WORKSPACE_MEMBER_SELF_UPDATE") {
+    throw new HTTPException(409, {
+      message: "you cannot change your own workspace access",
+    });
+  }
+  if (managementCode === "WORKSPACE_MEMBER_LAST_ADMIN") {
+    throw new HTTPException(409, {
+      message: "the workspace must keep at least one administrator",
+    });
+  }
   const sqlState = nestedPostgresSqlState(error);
   if (sqlState === "P0002") {
     throw new HTTPException(404, { message: "workspace not found" });
