@@ -16,7 +16,7 @@ import {
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
   type Database,
-  type SessionEventAppendPersistencePhase,
+  type SessionEventAppendObserver,
 } from "@opengeni/db";
 import {
   connect,
@@ -635,11 +635,7 @@ export async function createResponderConnection(
  */
 export type AppendPublishObserver = {
   onAppend?: (info: { durationSeconds: number; count: number }) => void;
-  onAppendPhase?: (info: {
-    phase: SessionEventAppendPersistencePhase;
-    outcome: "completed" | "failed";
-    durationSeconds: number;
-  }) => void;
+  onAppendPhase?: SessionEventAppendObserver["onPhase"];
   onPublish?: (info: { durationSeconds: number; count: number }) => void;
 };
 
@@ -773,7 +769,7 @@ export async function appendAndPublishTurnEventsFenced(
     executionGeneration,
     attemptId,
     events,
-    { ...(observe?.onAppendPhase ? { onPhase: observe.onAppendPhase } : {}) },
+    observe?.onAppendPhase ? { onPhase: observe.onAppendPhase } : undefined,
   );
   observeSince(observe?.onAppend, appendStartedAt, result.events.length);
   if (result.events.length === 0) return result;

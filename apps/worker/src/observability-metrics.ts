@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
+import type { SessionEventAppendPhaseObservation } from "@opengeni/db";
 import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
@@ -1704,20 +1705,33 @@ export function recordSessionEventAppendLatency(
   });
 }
 
-export function recordSessionEventAppendPhaseLatency(
+export function sessionEventBatchSizeClass(eventCount: number): string {
+  if (!Number.isFinite(eventCount) || eventCount <= 0) return "unknown";
+  if (eventCount === 1) return "1";
+  if (eventCount <= 5) return "2-5";
+  if (eventCount <= 10) return "6-10";
+  if (eventCount <= 25) return "11-25";
+  if (eventCount <= 50) return "26-50";
+  return "51+";
+}
+
+/** Bounded database-phase attribution for exact-attempt event appends. */
+export function recordSessionEventAppendPhase(
   observability: Observability,
-  input: {
-    phase: string;
-    outcome: "completed" | "failed";
-    durationSeconds: number;
-  },
+  observation: SessionEventAppendPhaseObservation,
 ): void {
   observability.observeHistogram({
     name: "opengeni_session_event_append_phase_seconds",
-    help: "Duration in seconds of one bounded phase inside a fenced session-event append transaction.",
+    help: "Duration of one bounded database phase in an exact-attempt session event append.",
     buckets: STREAM_IO_BUCKETS,
-    labels: { phase: input.phase, outcome: input.outcome },
-    value: input.durationSeconds,
+    labels: {
+      path: "turn_attempt",
+      event_class: observation.eventClass,
+      batch_size_class: sessionEventBatchSizeClass(observation.eventCount),
+      phase: observation.phase,
+      outcome: observation.outcome,
+    },
+    value: Math.max(0, observation.durationSeconds),
   });
 }
 

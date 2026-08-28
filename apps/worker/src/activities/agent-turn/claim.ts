@@ -41,7 +41,7 @@ import type {
 import { makeTurnOpJournal, type TurnHeartbeatDetails } from "../../op-journal";
 import {
   recordSessionEventAppendLatency,
-  recordSessionEventAppendPhaseLatency,
+  recordSessionEventAppendPhase,
   recordSessionEventPublishLatency,
   recordTurnStartupPhase,
   recordTurnStartupMilestone,
@@ -389,12 +389,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           recordSessionEventAppendLatency(observability, {
             durationSeconds,
           }),
-        onAppendPhase: ({ phase, outcome, durationSeconds }) =>
-          recordSessionEventAppendPhaseLatency(observability, {
-            phase,
-            outcome,
-            durationSeconds,
-          }),
+        onAppendPhase: (observation) => recordSessionEventAppendPhase(observability, observation),
         onPublish: ({ durationSeconds }) =>
           recordSessionEventPublishLatency(observability, {
             durationSeconds,

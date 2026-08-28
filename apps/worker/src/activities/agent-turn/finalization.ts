@@ -23,7 +23,11 @@ import type {
 import { captureWorkspaceRevision, openFreshWorkspaceCaptureSession } from "../workspace-capture";
 import { type ChannelASession } from "@opengeni/runtime/sandbox";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
-import { makeMachineOpObserver, turnLifecycleMetricsFor } from "../../observability-metrics";
+import {
+  makeMachineOpObserver,
+  recordSessionEventAppendPhase,
+  turnLifecycleMetricsFor,
+} from "../../observability-metrics";
 import {
   maybePersistWarmWorkspaceSnapshot,
   waitForWarmSnapshot,
@@ -327,6 +331,10 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
             ...event,
             turnId: attempt.turnId ?? null,
           })),
+          {
+            onAppendPhase: (observation) =>
+              recordSessionEventAppendPhase(observability, observation),
+          },
         ).catch(() => undefined),
         finalizerSignal,
       );
