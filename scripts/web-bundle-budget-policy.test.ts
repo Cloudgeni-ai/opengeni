@@ -14,10 +14,10 @@ import {
 } from "./web-bundle-budget-policy";
 
 describe("web bundle budget policy", () => {
-  test("retains at least one KiB above the exact embedded attachment-preview graph", () => {
-    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_200_819);
-    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2151 * KIB);
-    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_805);
+  test("retains at least one KiB above the combined personal GitHub and current-main graph", () => {
+    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_219_469);
+    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2169 * KIB);
+    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_587);
     expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBeGreaterThanOrEqual(
       MINIMUM_RAW_HEADROOM_BYTES,
     );

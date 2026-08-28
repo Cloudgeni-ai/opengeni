@@ -521,6 +521,7 @@ export type {
   CompleteFileUploadResponse,
   ConnectionKind,
   ConnectionMetadata,
+  McpConnectionAuthoritySelection,
   ConnectionOwnership,
   ConnectionResponse,
   ConnectionStatus,

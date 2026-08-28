@@ -279,6 +279,20 @@ const budgets = {
   // entry. The exact merged Bun 1.4 Linux/x64 graph measures 2,198,390 raw
   // bytes. Advance only the policy-derived raw envelope to 2,148 KiB, retaining
   // 1,162 bytes of headroom; every other cap remains fixed.
+  // Personal GitHub identity selection adds the exact connection-authority and
+  // repository-resource projection to create and follow-up session surfaces.
+  // The exact Linux/x64 Bun 1.4 graph measures 2,210,048 raw / 618,646 gzip
+  // bytes. Advance only these direct-session aggregates: raw through the shared
+  // policy envelope and gzip to 606 KiB, preserving the established 1.5-KiB
+  // platform-skew allowance. Initial, file-count, lazy-chunk, CSS, and unrelated
+  // per-file caps remain fixed.
+  // Combined with main's attachment preview, exact-ID Variable Set selection,
+  // permission-scoped work discovery, and the accessible notification transition,
+  // the exact Linux/x64 Bun 1.4 graph measures 2,219,469 raw / 621,190 gzip bytes,
+  // and the CSS asset measures 31,784 gzip bytes. Advance only the raw policy
+  // envelope, direct-session gzip to 609 KiB, and CSS gzip to 32 KiB. They retain
+  // 1,587, 2,426, and 984 bytes of headroom respectively; initial, file-count,
+  // lazy-chunk, and unrelated per-file caps remain fixed.
   // Permission-scoped work discovery keeps its advisory UI on the lazy Agents
   // route and isolates the topology/work-claim validators behind a contracts
   // leaf, so unrelated browser imports do not retain the write-side schemas.
@@ -297,11 +311,11 @@ const budgets = {
   // allowance remains intact. Initial, file-count, lazy, CSS, and unrelated
   // per-file caps stay fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
-  directSessionGzip: 605 * kib,
+  directSessionGzip: 609 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
-  cssGzip: 31 * kib,
+  cssGzip: 32 * kib,
 } as const;
 
 const repoRoot = path.resolve(import.meta.dir, "..");

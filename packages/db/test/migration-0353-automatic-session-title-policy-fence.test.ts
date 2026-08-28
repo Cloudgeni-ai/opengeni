@@ -1004,6 +1004,10 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "upsert_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text, text, text, text, text)",
       "release_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
     ]);
+    const post0353CapabilityRoutines = new Set([
+      ...sessionSetRoutines,
+      "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
+    ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(
       (table) => !post0353ProtectedTables.has(table),
@@ -1017,7 +1021,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       ),
     );
     const preSessionSetCapabilityRoutines = RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.filter(
-      (routine) => !sessionSetRoutines.has(routine),
+      (routine) => !post0353CapabilityRoutines.has(routine),
     );
     const postureOptions = (expectedRole: string) => ({
       rlsStrategy: "force" as const,

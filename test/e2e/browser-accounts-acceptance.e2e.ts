@@ -184,7 +184,12 @@ const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<string, ReadonlySet<string
   ["cross-tab-select-race", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["late-old-epoch-setup-beta-to-alpha", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["cross-slot-deep-link", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["slot-revocation-reauthentication", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["responsive-evidence-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+]);
+
+const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
+  ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
 ]);
 
 const EXPECTED_HTTP_CONSOLE_ERRORS: ReadonlyArray<{
@@ -345,8 +350,11 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     isCancellation &&
     !isConnectionReset &&
     input.method === "GET" &&
-    input.dispatchPhase === input.responsePhase &&
-    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true;
+    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true &&
+    (input.dispatchPhase === input.responsePhase ||
+      DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES.get(input.responsePhase)?.has(
+        input.dispatchPhase,
+      ) === true);
   if (
     isExpectedScopedActorReadCancellation ||
     isAcceptedActorTransitionCancellation ||
@@ -844,6 +852,68 @@ async function expectAndConsumeConsoleErrors(
     missing: required.filter((message) => !problems.consoleErrors.includes(message)),
   }).toEqual({ excess: {}, missing: [] });
   problems.consoleErrors.splice(0);
+}
+
+async function expectAndConsumePageErrors(
+  page: Page,
+  problems: BrowserProblems,
+  allowed: string[],
+  required: string[] = allowed,
+): Promise<void> {
+  await page.waitForTimeout(100);
+  const counts = Object.fromEntries(
+    [...new Set(problems.pageErrors)].map((message) => [
+      message,
+      problems.pageErrors.filter((candidate) => candidate === message).length,
+    ]),
+  );
+  const allowedCounts = Object.fromEntries(
+    [...new Set(allowed)].map((message) => [
+      message,
+      allowed.filter((candidate) => candidate === message).length,
+    ]),
+  );
+  expect({
+    excess: Object.fromEntries(
+      Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
+    ),
+    missing: required.filter((message) => !problems.pageErrors.includes(message)),
+  }).toEqual({ excess: {}, missing: [] });
+  problems.pageErrors.splice(0);
+}
+
+function optionalWebKitReauthenticationReloadError(
+  problems: BrowserProblems,
+  engine: EngineName,
+): string[] {
+  if (engine !== "webkit") return [];
+  // WebKit can report the deliberately replaced document's canceled root
+  // module import after the re-authenticated document has already won. Keep
+  // the phase, message, hashed entry asset, and maximum count exact.
+  return problems.consoleErrors
+    .filter((message) =>
+      /^\[slot-revocation-reauthentication\] TypeError: Importing a module script failed\. @ \/assets\/index-[A-Za-z0-9_-]+\.js$/u.test(
+        message,
+      ),
+    )
+    .slice(0, 1);
+}
+
+function isWebKitReauthenticationAccessControlPageError(message: string): boolean {
+  return /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/turns\?latestStarted=1 due to access control checks\.$/u.test(
+    message,
+  );
+}
+
+function optionalWebKitReauthenticationAccessControlPageError(
+  problems: BrowserProblems,
+  engine: EngineName,
+): string[] {
+  if (engine !== "webkit") return [];
+  // WebKit can surface one read from the deliberately replaced document as a
+  // page error instead of a request cancellation. Keep the phase, origin,
+  // endpoint shape, query, browser, and maximum count exact.
+  return problems.pageErrors.filter(isWebKitReauthenticationAccessControlPageError).slice(0, 1);
 }
 
 async function expectAndConsumeActorTransitionResponse(
@@ -2044,6 +2114,41 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/config/client`,
       }),
     ).toBeNull();
+    const reauthenticationBootstrapRead = {
+      ...crossTabBootstrapRead,
+      actorEpoch: "current-actor",
+      dispatchPhase: "slot-revocation-reauthentication",
+      responsePhase: "slot-revocation-reauthentication",
+    };
+    expect(requestFailureProblem(reauthenticationBootstrapRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        dispatchPhase: "cross-slot-deep-link",
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        dispatchPhase: "late-old-epoch-alpha-to-beta",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        url: `${publicOrigin}/v1/config/other`,
+      }),
+    ).toContain("/v1/config/other");
+    expect(
+      isWebKitReauthenticationAccessControlPageError(
+        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+      ),
+    ).toBe(true);
+    expect(
+      isWebKitReauthenticationAccessControlPageError(
+        "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+      ),
+    ).toBe(false);
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
@@ -2474,9 +2579,17 @@ describe("provider-neutral browser account acceptance", () => {
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+          ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
         ],
+        [],
+      );
+      await expectAndConsumePageErrors(
+        page,
+        pageProblems,
+        optionalWebKitReauthenticationAccessControlPageError(pageProblems, engine),
         [],
       );
 

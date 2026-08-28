@@ -13,8 +13,11 @@ mutation.
 
 Personal GitHub is disabled by default. Managed staging and production must use
 different GitHub OAuth Apps and configure the exact API-origin callback
-`/v1/integrations/github-personal/oauth/callback`. Keep device flow disabled and
-store each client secret only in that environment's secret manager. Runtime
+`/v1/integrations/github-personal/oauth/callback`. Local and self-hosted
+operators create one OAuth App for their own installation; localhost HTTP is
+accepted in local/test, while non-local environments require HTTPS. Keep device
+flow disabled and store each client secret only in that environment's secret
+manager. Runtime
 artifacts pass through `OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED`,
 `OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID`, and
 `OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET`; enabling the feature also

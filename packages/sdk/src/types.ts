@@ -637,6 +637,7 @@ export type McpPersonalConnectionSummary = Pick<
 
 export type ConnectionMetadata = {
   id: string;
+  authorityId?: string | undefined;
   accountId: string;
   workspaceId: string;
   subjectId: string | null;
