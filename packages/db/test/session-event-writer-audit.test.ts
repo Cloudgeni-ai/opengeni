@@ -200,7 +200,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/index.ts#claimSessionWorkForAttempt": {
-    inserts: 4,
+    inserts: 5,
     contract: "canonical",
   },
   "packages/db/src/index.ts#failScheduledGeneratedSessionRoute": {

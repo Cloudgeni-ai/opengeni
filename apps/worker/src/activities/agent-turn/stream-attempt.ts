@@ -215,6 +215,7 @@ export type TurnStreamAttemptDeps = {
   turn: { executionGeneration: number; model: string };
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
+  attachPendingUpdatesAfterOpenSuffix: () => Promise<boolean>;
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]>;
   resolvedModel: ReturnType<ActivityServices["runtime"]["resolveTurnModel"]>;
   providerApi: HistoryProviderApi;
@@ -239,6 +240,16 @@ export type TurnStreamAttemptDeps = {
   runCredentialResolver: BoundRunCredentialResolver | null;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
 };
+
+export async function attachPendingUpdatesBeforePreparingModelInput(input: {
+  shouldAttach: boolean;
+  attachPendingUpdates: () => Promise<boolean>;
+  prepareModelInput: () => Promise<void>;
+}): Promise<boolean> {
+  if (input.shouldAttach && !(await input.attachPendingUpdates())) return false;
+  await input.prepareModelInput();
+  return true;
+}
 
 export async function runTurnStreamAttempt(
   deps: TurnStreamAttemptDeps,
@@ -296,6 +307,7 @@ export async function runTurnStreamAttempt(
     turn,
     trigger,
     humanInputResume,
+    attachPendingUpdatesAfterOpenSuffix,
     agent,
     resolvedModel,
     providerApi,
@@ -1574,8 +1586,16 @@ export async function runTurnStreamAttempt(
     control.activityStatus = "requires_action";
     return claimedResult({ status: "requires_action" });
   }
-
-  await prepareRunAttemptInput();
+  if (
+    !(await attachPendingUpdatesBeforePreparingModelInput({
+      shouldAttach:
+        trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse",
+      attachPendingUpdates: attachPendingUpdatesAfterOpenSuffix,
+      prepareModelInput: prepareRunAttemptInput,
+    }))
+  ) {
+    return claimedResult({ status: "cancelled" });
+  }
   let retriedAfterCompaction = false;
   while (true) {
     try {

@@ -556,9 +556,13 @@ Steer-equivalent replacement only when the active, unpaused branch is waiting in
 `requires_action`; checked-out queue edits, paused sessions, and other active
 lifecycle states keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
-through the claim transaction. Pause blocks admission without pretending that
-physical execution has already stopped. Cancel fences a session subtree and is
-terminal for the affected sessions.
+through the claim transaction. A `requires_action` resume preserves that rule
+without violating provider protocol: it first writes the interrupted
+call/result pair, then re-enters the exact attempt claim to attach only machine
+input whose durable pending-event sequence was inside the resume attempt's
+frozen start boundary. Pause blocks
+admission without pretending that physical execution has already stopped.
+Cancel fences a session subtree and is terminal for the affected sessions.
 
 Steer ordinarily inserts at the head and immediately supersedes the live
 direction. Active compaction is the exact exception: while a claimed standalone
