@@ -1,5 +1,20 @@
 # @opengeni/github
 
+## 0.6.4
+
+### Patch Changes
+
+- 227c54c: Expose a non-secret health warning when workspace GitHub App settings cannot provide a stable Git commit identity.
+
+## 0.6.3
+
+### Patch Changes
+
+- Updated dependencies [595939e]
+- Updated dependencies [80d7594]
+  - @opengeni/config@0.22.2
+  - @opengeni/contracts@2.8.0
+
 ## 0.6.2
 
 ### Patch Changes

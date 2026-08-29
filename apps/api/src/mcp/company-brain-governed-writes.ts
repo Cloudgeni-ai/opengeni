@@ -11,7 +11,7 @@ import {
   type CompanyBrainGovernedWriteAttempt,
 } from "@opengeni/contracts";
 import { createCompanyBrainLearningPolicyRouter } from "@opengeni/core";
-import type { Database } from "@opengeni/db";
+import { PreferenceRegistryStableKeyConflictError, type Database } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
@@ -66,6 +66,20 @@ export function registerCompanyBrainGovernedWriteTools(
   input: RegisterCompanyBrainGovernedWriteToolsInput,
 ): void {
   const router = input.router ?? createCompanyBrainLearningPolicyRouter({ db: input.db });
+  const writeResult = async (write: () => ReturnType<typeof router.write>) => {
+    try {
+      return input.json(await write());
+    } catch (error) {
+      if (error instanceof PreferenceRegistryStableKeyConflictError) {
+        return input.json({
+          status: "not_proposed",
+          code: "preference_stable_key_conflict",
+          message: error.message,
+        });
+      }
+      throw error;
+    }
+  };
   input.server.registerTool(
     "knowledge_propose",
     {
@@ -75,8 +89,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "propose_knowledge", ...request },
         }),
@@ -93,8 +107,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "correct_knowledge", ...request },
         }),
@@ -111,8 +125,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "promote_task_note_knowledge", ...request },
         }),
@@ -136,8 +150,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "promote_task_note_instruction_policy", ...request },
         }),
@@ -172,8 +186,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "promote_task_note_preference", ...request },
         }),
@@ -206,8 +220,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "propose_instruction_policy", ...request },
         }),
@@ -251,8 +265,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "propose_preference", ...request },
         }),

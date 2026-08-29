@@ -359,6 +359,7 @@ function SessionTitleEditor(props: {
       // the rename feeling like editing the text, not filling in a form field.
       <input
         ref={rename.inputRef}
+        data-session-title-current={display}
         value={rename.draft}
         onChange={(event) => rename.setDraft(event.target.value)}
         onBlur={() => void rename.commit()}

@@ -39,4 +39,41 @@ describe("managed sandbox logical image identity", () => {
     expect(route.groupBoxImage).toBe(logicalImage);
     expect(runSettings.modalImageId).toBe("im-01M0X53D38C3458D71F48QH2T1");
   });
+
+  test("binds a machine-home default route to the deployment-managed runtime", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      sandboxSelfhostedEnabled: false,
+      sandboxOwnershipEnabled: false,
+    });
+    const runSettings: Settings = { ...settings, sandboxBackend: "selfhosted" };
+    const modelRunSettings: Settings = {
+      ...runSettings,
+      modelContextWindowTokens: 123_456,
+    };
+    const eventing = { modelRunSettings };
+
+    const route = await resolveSandboxRoute({
+      input: {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+      } as never,
+      settings,
+      db: {} as never,
+      eventing: eventing as never,
+      sandboxState: {} as never,
+      media: {} as never,
+      fileAuthoritySubjectId: null,
+      runSettings,
+      logicalSandboxSettings: settings,
+    });
+
+    expect(route.groupBoxBackend).toBe("modal");
+    expect(route.sandboxCreationBackend).toBe("modal");
+    expect(eventing.modelRunSettings).not.toBe(modelRunSettings);
+    expect(eventing.modelRunSettings.sandboxBackend).toBe("modal");
+    expect(eventing.modelRunSettings.modelContextWindowTokens).toBe(123_456);
+    expect(runSettings.sandboxBackend).toBe("selfhosted");
+  });
 });

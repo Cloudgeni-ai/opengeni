@@ -44,7 +44,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function sessionFixture(): Promise<{
+async function sessionFixture(ordered = false): Promise<{
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -58,24 +58,6 @@ async function sessionFixture(): Promise<{
   await admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
-  const session = await createSession(db, {
-    accountId: account!.id,
-    workspaceId: workspace!.id,
-    initialMessage: "attach me",
-    resources: [],
-    metadata: {},
-    model: "test-model",
-    reasoningEffort: "medium" as const,
-    latencyMode: "standard" as const,
-    sandboxBackend: "none",
-  });
-  await initializeSessionStartAtomically(db, {
-    accountId: account!.id,
-    workspaceId: workspace!.id,
-    sessionId: session.id,
-    reasoningEffortFallback: "low",
-    createdEventPayload: {},
-  });
   const [variableSet] = await admin<{ id: string }[]>`
     insert into workspace_variable_sets (account_id, workspace_id, name, origin_workspace_id)
     values (${account!.id}, ${workspace!.id}, 'attach set', ${workspace!.id})
@@ -86,8 +68,33 @@ async function sessionFixture(): Promise<{
     ) values (
       ${account!.id}, ${workspace!.id}, ${variableSet!.id}, 'TOKEN', 'ciphertext'
     )`;
-  await admin`
-    update sessions set variable_set_id = ${variableSet!.id} where id = ${session.id}`;
+  const [finalVariableSet] = ordered
+    ? await admin<{ id: string }[]>`
+        insert into workspace_variable_sets (
+          account_id, workspace_id, name, origin_workspace_id
+        ) values (
+          ${account!.id}, ${workspace!.id}, 'final attach set', ${workspace!.id}
+        ) returning id`
+    : [variableSet!];
+  const session = await createSession(db, {
+    accountId: account!.id,
+    workspaceId: workspace!.id,
+    initialMessage: "attach me",
+    resources: [],
+    metadata: {},
+    model: "test-model",
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none",
+    variableSetIds: [variableSet!.id, ...(ordered ? [finalVariableSet!.id] : [])],
+  });
+  await initializeSessionStartAtomically(db, {
+    accountId: account!.id,
+    workspaceId: workspace!.id,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
   return {
     accountId: account!.id,
     workspaceId: workspace!.id,
@@ -120,7 +127,7 @@ describe("migration 0282 session-attach materialization attribution", () => {
 
   test("a subject-attributed session attach materializes and records the audit fact", async () => {
     if (!available) return;
-    const fixture = await sessionFixture();
+    const fixture = await sessionFixture(true);
     const human = `user:attach-${crypto.randomUUID()}`;
     const result = await getVariableSetValuesForRun(db, {
       accountId: fixture.accountId,

@@ -30,6 +30,7 @@ import type { SessionRealtimeModel, WorkspaceRealtimeModelCatalogResponse } from
 export type SessionRealtimeClientLike = CodexRealtimeControllerClient & {
   getWorkspaceRealtimeModelCatalog(
     workspaceId: string,
+    options?: { signal?: AbortSignal | undefined },
   ): Promise<WorkspaceRealtimeModelCatalogResponse>;
 };
 

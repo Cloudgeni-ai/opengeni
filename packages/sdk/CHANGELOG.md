@@ -1,5 +1,25 @@
 # @opengeni/sdk
 
+## 3.2.1
+
+### Patch Changes
+
+- fd05df1: Cancel abandoned session detail, lineage, and goal reads after their final mounted consumer leaves while preserving shared reads for consumers that are still active.
+- 7988c84: Fence the initiating browser tab before account-changing mutations and cancel abandoned session-page, draft, turn-policy, model-catalog, and realtime-catalog reads without interrupting remaining shared consumers.
+
+## 3.2.0
+
+### Minor Changes
+
+- 80d7594: Show a bounded, sensitive-safe opening-prompt preview while a session's durable automatic title is still pending, then yield automatically to the semantic agent title or a human rename.
+
+### Patch Changes
+
+- 595939e: Add managed Google and GitHub sign-in through fenced browser session-set transactions, server-side OAuth state, provider-aware canonical login bindings, and isolated popup UI flows.
+- Updated dependencies [595939e]
+- Updated dependencies [80d7594]
+  - @opengeni/contracts@2.8.0
+
 ## 3.1.1
 
 ### Patch Changes

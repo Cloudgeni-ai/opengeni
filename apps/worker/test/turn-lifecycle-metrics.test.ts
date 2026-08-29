@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
-import { recordCreditBalanceGauges, TurnLifecycleMetrics } from "../src/observability-metrics";
+import {
+  initializeWorkerOutcomeMetrics,
+  recordCreditBalanceGauges,
+  recordWorkerDeathRecoveryMetrics,
+  TurnLifecycleMetrics,
+} from "../src/observability-metrics";
 
 describe("turn lifecycle metrics", () => {
   test("start and finish update inflight gauges and terminal totals", async () => {
@@ -68,5 +73,51 @@ describe("turn lifecycle metrics", () => {
     expect(metrics).toMatch(
       new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountB}"[^}]*\\} 0`),
     );
+  });
+
+  test("records fenced worker-death recovery and terminal exhaustion outcomes", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+    initializeWorkerOutcomeMetrics(observability);
+
+    recordWorkerDeathRecoveryMetrics(observability, {
+      outcome: "recovering",
+      timeoutType: "HEARTBEAT",
+    });
+    recordWorkerDeathRecoveryMetrics(observability, {
+      outcome: "exhausted",
+      timeoutType: "HEARTBEAT",
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_worker_death_recoveries_total\{[^}]*outcome="recovering"[^}]*timeout_type="heartbeat"[^}]*\} 1/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_worker_death_recoveries_total\{[^}]*outcome="exhausted"[^}]*timeout_type="heartbeat"[^}]*\} 1/,
+    );
+    expect(metrics).toMatch(/opengeni_turns_total\{[^}]*outcome="recovering"[^}]*\} 1/);
+    expect(metrics).toMatch(/opengeni_turns_total\{[^}]*outcome="failed"[^}]*\} 1/);
+  });
+
+  test("publishes zero outcome series before the first rare failure", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-turn" });
+
+    initializeWorkerOutcomeMetrics(observability);
+
+    const metrics = await observability.prometheusMetrics();
+    for (const outcome of ["completed", "failed", "cancelled", "recovering"]) {
+      expect(metrics).toMatch(
+        new RegExp(`opengeni_turns_total\\{[^}]*outcome="${outcome}"[^}]*\\} 0`),
+      );
+    }
+    for (const outcome of ["recovering", "exhausted"]) {
+      for (const timeoutType of ["heartbeat", "schedule_to_start"]) {
+        expect(metrics).toMatch(
+          new RegExp(
+            `opengeni_turn_worker_death_recoveries_total\\{[^}]*outcome="${outcome}"[^}]*timeout_type="${timeoutType}"[^}]*\\} 0`,
+          ),
+        );
+      }
+    }
   });
 });

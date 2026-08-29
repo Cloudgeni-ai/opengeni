@@ -93,13 +93,31 @@ function session(patch: Partial<Session> = {}): Session {
 }
 
 describe("sessionDisplayTitle", () => {
-  test("prefers the durable title and never falls back to raw prompt text", () => {
+  test("prefers the durable title and previews the prompt while automatic naming is pending", () => {
     expect(sessionDisplayTitle(session({ title: "  Ship the rename UI  " }))).toBe(
       "Ship the rename UI",
     );
-    expect(sessionDisplayTitle(session({ title: null }))).toBe("New conversation");
+    expect(sessionDisplayTitle(session({ title: null }))).toBe("Inspect the repo");
+    expect(
+      sessionDisplayTitle(
+        session({
+          title: "New conversation",
+          titleSource: "agent",
+          initialMessage: "Please investigate automatic session title generation failures",
+        }),
+      ),
+    ).toBe("Please investigate automatic session title generation failures");
     expect(
       sessionDisplayTitle(session({ title: null, initialMessage: "SECRET_TOKEN=hunter2" })),
+    ).toBe("New conversation");
+    expect(
+      sessionDisplayTitle(
+        session({
+          title: "New conversation",
+          titleSource: "user",
+          initialMessage: "Inspect the repo",
+        }),
+      ),
     ).toBe("New conversation");
     expect(
       sessionDisplayTitle(session({ title: "   ", initialMessage: null as unknown as string })),
@@ -108,10 +126,18 @@ describe("sessionDisplayTitle", () => {
 });
 
 describe("renameSeedValue", () => {
-  test("seeds the editor only from durable title metadata, never prompt text or fallback", () => {
+  test("seeds the editor from durable or safe provisional display text, never the fallback", () => {
     expect(renameSeedValue(session({ title: "Existing title" }))).toBe("Existing title");
-    expect(renameSeedValue(session({ title: "New conversation", titleSource: "agent" }))).toBe("");
-    expect(renameSeedValue(session({ title: null }))).toBe("");
+    expect(renameSeedValue(session({ title: "New conversation", titleSource: "agent" }))).toBe(
+      "Inspect the repo",
+    );
+    expect(renameSeedValue(session({ title: null }))).toBe("Inspect the repo");
+    expect(renameSeedValue(session({ title: null, initialMessage: "SECRET_TOKEN=hunter2" }))).toBe(
+      "",
+    );
+    expect(renameSeedValue(session({ title: "New conversation", titleSource: "user" }))).toBe(
+      "New conversation",
+    );
     expect(
       renameSeedValue(session({ title: null, initialMessage: null as unknown as string })),
     ).toBe("");
@@ -133,6 +159,12 @@ describe("resolveRenameSubmission", () => {
   test("treats an unchanged draft (after trim) as a no-op cancel", () => {
     expect(resolveRenameSubmission(display, display)).toBeNull();
     expect(resolveRenameSubmission(`  ${display}  `, display)).toBeNull();
+  });
+
+  test("treats an untouched edit seed as a no-op after the display title changes", () => {
+    expect(
+      resolveRenameSubmission("Inspect the repo", "Automatic Session Naming", "Inspect the repo"),
+    ).toBeNull();
   });
 });
 
@@ -183,8 +215,8 @@ describe("performRename (the commit every rename surface runs)", () => {
     expect(await performRename(session({ title: "Keep me" }), "   ", rename.fn)).toBeNull();
     // Unchanged from the displayed title.
     expect(await performRename(session({ title: "Keep me" }), "Keep me", rename.fn)).toBeNull();
-    // Unchanged from the prompt-free fallback display.
-    expect(await performRename(session({ title: null }), "New conversation", rename.fn)).toBeNull();
+    // Unchanged from the opening-prompt preview.
+    expect(await performRename(session({ title: null }), "Inspect the repo", rename.fn)).toBeNull();
     expect(rename.calls).toEqual([]);
   });
 });
@@ -225,6 +257,72 @@ describe("useInlineRename commit fencing", () => {
       await Promise.all([first, second]);
     });
     expect(calls).toHaveLength(1);
+    await hook.unmount();
+  });
+
+  test("an untouched provisional draft cannot overwrite a semantic title arriving mid-edit", async () => {
+    const calls: string[] = [];
+    const hook = await renderHook(
+      ({ current }: { current: Session }) =>
+        useInlineRename(current, async (_workspaceId, _sessionId, title) => {
+          calls.push(title);
+          return session({ title, titleSource: "user" });
+        }),
+      {
+        current: session({
+          title: "New conversation",
+          titleSource: "agent",
+          initialMessage: "Inspect the repo",
+        }),
+      },
+    );
+
+    await actRun(() => hook.result.current.startEditing());
+    expect(hook.result.current.draft).toBe("Inspect the repo");
+
+    await hook.rerender({
+      current: session({
+        title: "Automatic Session Naming",
+        titleSource: "agent",
+        initialMessage: "Inspect the repo",
+      }),
+    });
+    await actRun(() => hook.result.current.commit());
+
+    expect(calls).toEqual([]);
+    expect(hook.result.current.editing).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a deliberate edit still persists after a semantic title arrives mid-edit", async () => {
+    const calls: string[] = [];
+    const hook = await renderHook(
+      ({ current }: { current: Session }) =>
+        useInlineRename(current, async (_workspaceId, _sessionId, title) => {
+          calls.push(title);
+          return session({ title, titleSource: "user" });
+        }),
+      {
+        current: session({
+          title: "New conversation",
+          titleSource: "agent",
+          initialMessage: "Inspect the repo",
+        }),
+      },
+    );
+
+    await actRun(() => hook.result.current.startEditing());
+    await actRun(() => hook.result.current.setDraft("My chosen title"));
+    await hook.rerender({
+      current: session({
+        title: "Automatic Session Naming",
+        titleSource: "agent",
+        initialMessage: "Inspect the repo",
+      }),
+    });
+    await actRun(() => hook.result.current.commit());
+
+    expect(calls).toEqual(["My chosen title"]);
     await hook.unmount();
   });
 });

@@ -292,6 +292,15 @@ outcome; text-only reasoning can still begin without contacting it. OpenGeni
 never interprets an offline machine as permission to cold-create a rival box,
 snapshot it, or provider-terminate the user's computer.
 
+A machine-home session does not pre-provision a hidden managed box. When the
+deployment has a managed sandbox backend, its fleet nevertheless exposes the
+session's synthetic managed group as a separate explicit target. Selecting
+`session`/`default` clears the active machine pointer, verifies that managed
+group through the ordinary viewer/lease lifecycle, and lets the next operation
+or turn use it. This is an intentional user route change, not an
+offline-machine fallback; deployments configured with only `none` or
+`selfhosted` expose no managed group.
+
 Canonical: `packages/runtime/src/sandbox/selfhosted/`,
 `apps/worker/src/activities/agent-turn/sandbox-establish.ts`,
 `agent/proto/opengeni_agent.proto`, [`connected-machines.md`](connected-machines.md),
@@ -315,6 +324,12 @@ operation to be replayed.
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
 or selected pointer alone is not proof that a command can run.
+
+The effective backend behind a synthetic managed group is resolved once from
+the session policy and deployment backend. Fleet projection, swap readiness,
+viewer attachment, API-direct operations, and worker turns must use that same
+answer so a route cannot be advertised under one backend and established under
+another.
 
 The canonical backend enum currently contains `docker`, `modal`, `local`,
 `none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`,
@@ -793,6 +808,13 @@ settlement, recovery, capacity waits, scheduling, and injected process
 dependencies. `@opengeni/runtime` owns provider-neutral agent construction,
 model input/output handling, tool execution, progressive disclosure, and the
 sandbox interface.
+
+The embedding process—not the Agents SDK—owns process-global rejection and
+termination policy. SDK background lifecycle work must settle an owned promise;
+it may not detach a rejecting task or install an `unhandledRejection` handler
+that exits the shared worker. The worker's global rejection listener is a
+last-resort observational boundary, while deliberate restart remains an
+OpenGeni drain-and-checkpoint decision.
 
 The worker supplies frozen authority and durable sinks. Runtime must not invent
 tenancy or persistence authority from its in-memory agent context.

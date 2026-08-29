@@ -1334,6 +1334,36 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(released).toMatchObject({ liveness: "draining", viewerHolders: 0, refcount: 0 });
   }, 60_000);
 
+  test("machine-home readiness attaches the deployment-managed group backend", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const { sandboxGroupId, sessionId } = await seedWarmBox(accountId, workspaceId);
+    await admin`
+      update sessions
+      set sandbox_backend = 'selfhosted', sandbox_os = 'macos'
+      where workspace_id = ${workspaceId} and id = ${sessionId}
+    `;
+    const session = await getSession(db, workspaceId, sessionId);
+    const managedSettings = testSettings({
+      ...settings,
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+    });
+
+    const hold = await ensureSessionGroupReady(
+      { db, settings: managedSettings },
+      { accountId, workspaceId, session: session! },
+    );
+    expect(hold.lease).toMatchObject({
+      sandboxGroupId,
+      backend: "local",
+      liveness: "warm",
+      viewerHolders: 1,
+    });
+
+    await hold.release();
+  }, 60_000);
+
   test("releasing the viewer → the reaper drains the box (liveness = turn OR viewer)", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

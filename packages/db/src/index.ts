@@ -20080,11 +20080,21 @@ async function getVariableSetValuesForRunInTransaction(
       } else {
         await scopedDb.execute(sql`select set_config('opengeni.subject_id', '', true)`);
       }
-      if (input.authority.initiatingHumanSubjectId) {
-        await scopedDb.execute(sql`select set_config(
-          'opengeni.initiating_human_subject_id',
-          ${input.authority.initiatingHumanSubjectId}, true)`);
-      }
+      // Always replace the causal-human GUC. A nested/reused transaction can
+      // otherwise retain an earlier actor and let a later direct attach borrow
+      // that actor's personal-resource grant. The authenticated user is the
+      // default causal human; an explicit null still clears inherited state.
+      await scopedDb.execute(sql`select set_config(
+        'opengeni.initiating_human_subject_id',
+        ${
+          input.authority.initiatingHumanSubjectId === undefined
+            ? input.authority.subjectId?.startsWith("user:")
+              ? input.authority.subjectId
+              : ""
+            : (input.authority.initiatingHumanSubjectId ?? "")
+        },
+        true
+      )`);
     }
     if (input.authority.kind === "agent_attempt") {
       await setSubjectRlsContext(scopedDb, input.authority.subjectId);
@@ -42946,6 +42956,25 @@ export class SandboxWorkspaceMutationFencedError extends Error {
   }
 }
 
+/** A process-scoped mutation named a durable retained process that has already
+ * reached a terminal state. This remains a fence—the provider must not be
+ * called again—but carries the existing terminal result so model-facing shell
+ * tools can report completion/loss instead of presenting a retryable platform
+ * failure for a handle that can never become active again. */
+export class SandboxRetainedProcessTerminalError extends SandboxWorkspaceMutationFencedError {
+  readonly name = "SandboxRetainedProcessTerminalError";
+
+  constructor(
+    public readonly state: "exited" | "lost",
+    public readonly exitCode: number | null,
+  ) {
+    super(
+      "process_fenced",
+      `Workspace mutation rejected because the retained process already ${state}`,
+    );
+  }
+}
+
 export type SandboxWorkspaceMutationAdmission = {
   id: string;
   leaseId: string;
@@ -43745,11 +43774,14 @@ async function lockWorkspaceMutationAuthorityTx(
     )
     .for("update")
     .limit(1);
-  if (!process || process.state !== "active") {
+  if (!process) {
     throw new SandboxWorkspaceMutationFencedError(
       "process_fenced",
-      "Workspace mutation rejected because the retained process is not active",
+      "Workspace mutation rejected because the retained process does not exist",
     );
+  }
+  if (process.state !== "active") {
+    throw new SandboxRetainedProcessTerminalError(process.state, process.exitCode);
   }
   if (session.sandboxGroupId !== process.sandboxGroupId) {
     throw new SandboxWorkspaceMutationFencedError(

@@ -417,6 +417,8 @@ try {
     "package/dist/editable-artifacts.d.ts",
     "package/dist/editable-artifact-live.js",
     "package/dist/editable-artifact-live.d.ts",
+    "package/dist/session-titles.js",
+    "package/dist/session-titles.d.ts",
   ]) {
     if (!contractsTarballContents.split("\n").includes(artifact)) {
       throw new Error(`contracts tarball is missing ${artifact}`);
@@ -430,6 +432,15 @@ try {
     contractsLiveExport.import !== "./dist/editable-artifact-live.js"
   ) {
     throw new Error("contracts tarball has an invalid ./editable-artifact-live export");
+  }
+  const contractsSessionTitlesExport = contracts.manifest.exports?.["./session-titles"];
+  if (
+    !contractsSessionTitlesExport ||
+    typeof contractsSessionTitlesExport === "string" ||
+    contractsSessionTitlesExport.types !== "./dist/session-titles.d.ts" ||
+    contractsSessionTitlesExport.import !== "./dist/session-titles.js"
+  ) {
+    throw new Error("contracts tarball has an invalid ./session-titles export");
   }
   const runtimeTarballContents = await run(["tar", "-tzf", runtime.tarball], consumerRoot, true);
   for (const artifact of [
@@ -468,6 +479,7 @@ try {
       "artifact-contract": "bun artifact-contract.ts",
       "artifact-codecs": "bun artifact-codecs.ts",
       "codemode-proof": "bun codemode-proof.ts",
+      "session-title-proof": "bun session-title-proof.ts",
     },
     dependencies: {
       ...(reactSource.peerDependencies ?? {}),
@@ -519,6 +531,7 @@ try {
             "presentation.tsx",
             "runtime-proof.ts",
             "sdk-types.ts",
+            "session-title-proof.ts",
             "session.ts",
             "session.vite.config.ts",
             "ssr.tsx",
@@ -843,6 +856,28 @@ try {
       'import type { CreateSessionRequest, Session } from "@opengeni/sdk";\ntype Assert<T extends true> = T;\nexport type CreateSessionRequestExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof CreateSessionRequest ? true : false>;\nexport type SessionExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof Session ? true : false>;\n',
     ),
     writeFile(
+      join(consumerRoot, "session-title-proof.ts"),
+      [
+        'import { AUTOMATIC_SESSION_TITLE_FALLBACK, deriveSessionDisplayTitle } from "@opengeni/sdk";',
+        "",
+        "const preview = deriveSessionDisplayTitle({",
+        "  title: AUTOMATIC_SESSION_TITLE_FALLBACK,",
+        '  titleSource: "agent",',
+        '  initialMessage: "Inspect the installed package path",',
+        "});",
+        'if (preview !== "Inspect the installed package path") throw new Error(`packed SDK session-title path returned ${preview}`);',
+        "",
+        "const sensitive = deriveSessionDisplayTitle({",
+        "  title: AUTOMATIC_SESSION_TITLE_FALLBACK,",
+        '  titleSource: "agent",',
+        '  initialMessage: "Open localhost:3000/admin",',
+        "});",
+        'if (sensitive !== AUTOMATIC_SESSION_TITLE_FALLBACK) throw new Error("packed SDK lost the contracts sensitive-title policy");',
+        "console.log(`SESSION_TITLE_PACKAGE_OK preview=${preview}`);",
+        "",
+      ].join("\n"),
+    ),
+    writeFile(
       join(consumerRoot, "session.ts"),
       await readFile(join(repoRoot, "packages/react/test/fixtures/session-consumer.ts"), "utf8"),
     ),
@@ -1158,6 +1193,7 @@ try {
   await run(["bun", "run", "artifact-contract"], consumerRoot);
   await run(["bun", "run", "artifact-codecs"], consumerRoot);
   await run(["bun", "run", "codemode-proof"], consumerRoot);
+  await run(["bun", "run", "session-title-proof"], consumerRoot);
   await run(["bun", "run", "runtime-proof.ts"], consumerRoot);
   process.stdout.write("[publish-consumer] installing spreadsheet-only artifact consumer\n");
   await run(["bun", "install"], minimalSpreadsheetRoot);

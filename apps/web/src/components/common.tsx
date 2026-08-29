@@ -52,6 +52,7 @@ export function ConnectionPill({ state }: { state: SessionEventsConnectionState 
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-2 py-1 text-xs font-medium",
         meta.text,
+        state === "reconnecting" && "og-connection-pill-reconnect",
       )}
     >
       <span className={cn("size-2 rounded-full motion-safe:animate-pulse", meta.dot)} />

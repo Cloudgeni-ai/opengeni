@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { CompanyBrainLearningPolicyRouteReceipt } from "@opengeni/contracts";
-import type { Database } from "@opengeni/db";
+import { PreferenceRegistryStableKeyConflictError, type Database } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerCompanyBrainGovernedWriteTools } from "../src/mcp/company-brain-governed-writes";
 
@@ -168,5 +168,47 @@ describe("Company Brain governed write tools", () => {
       }),
     ).rejects.toThrow("denied");
     expect(writes).toBe(0);
+  });
+
+  test("returns a bounded stable-key conflict instead of throwing persistence details", async () => {
+    const handlers = new Map<string, Handler>();
+    registerCompanyBrainGovernedWriteTools({
+      server: {
+        registerTool(name: string, _config: unknown, handler: Handler) {
+          handlers.set(name, handler);
+        },
+      } as unknown as McpServer,
+      db: {} as Database,
+      attempt: ATTEMPT,
+      async authorize() {},
+      json: (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] }),
+      router: {
+        async write() {
+          throw new PreferenceRegistryStableKeyConflictError(
+            "A preference with this stable key already exists for the workspace",
+          );
+        },
+      },
+    });
+
+    const result = await handlers.get("preference_propose")!({
+      operationId: "00000000-0000-4000-8000-000000000114",
+      claimId: CLAIM_ID,
+      evidenceId: EVIDENCE_ID,
+      stableKey: "support.tone",
+      title: "Support tone",
+      description: "Suggested tone for support replies.",
+      content: "Use a concise, direct tone for support replies.",
+      precedenceRank: 0,
+      conflictStrategy: "override",
+      conflictsWith: [],
+      expiresAt: null,
+      reason: "Propose an evidence-backed working method.",
+    });
+    expect(JSON.parse((result as { content: Array<{ text: string }> }).content[0]!.text)).toEqual({
+      status: "not_proposed",
+      code: "preference_stable_key_conflict",
+      message: "A preference with this stable key already exists for the workspace",
+    });
   });
 });

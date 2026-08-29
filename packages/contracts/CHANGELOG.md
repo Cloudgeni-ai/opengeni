@@ -1,5 +1,15 @@
 # @opengeni/contracts
 
+## 2.8.0
+
+### Minor Changes
+
+- 80d7594: Show a bounded, sensitive-safe opening-prompt preview while a session's durable automatic title is still pending, then yield automatically to the semantic agent title or a human rename.
+
+### Patch Changes
+
+- 595939e: Add managed Google and GitHub sign-in through fenced browser session-set transactions, server-side OAuth state, provider-aware canonical login bindings, and isolated popup UI flows.
+
 ## 2.7.1
 
 ### Patch Changes

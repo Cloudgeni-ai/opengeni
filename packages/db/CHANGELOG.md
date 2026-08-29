@@ -1,5 +1,24 @@
 # @opengeni/db
 
+## 3.6.3
+
+### Patch Changes
+
+- 551cead: Return durable retained-process exit or loss results to shell tools instead of rendering a retryable platform fault for an already-terminal command handle.
+- 06fda28: Return bounded stable-key conflict outcomes for governed preference proposals instead of exposing persistence query details.
+
+## 3.6.2
+
+### Patch Changes
+
+- 8dc432d: Settle interrupted native tool-search calls with the provider correlation identity retained in provider metadata.
+- c705de3: Bound session-control settlement reads to the requested session subtrees, avoid redundant workspace refreshes for session-scoped control events, and add low-cardinality MCP lifecycle telemetry with failure, latency, and runtime reliability alerts and dashboards.
+- Updated dependencies [595939e]
+- Updated dependencies [80d7594]
+  - @opengeni/config@0.22.2
+  - @opengeni/contracts@2.8.0
+  - @opengeni/codemode@0.4.19
+
 ## 3.6.1
 
 ### Patch Changes

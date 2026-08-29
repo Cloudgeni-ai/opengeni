@@ -14,6 +14,7 @@ export default defineConfig({
     "src/managed-auth-session-sets.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",
+    "src/session-titles.ts",
     "src/slack-bot-scopes.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifact-committed-transaction.ts",

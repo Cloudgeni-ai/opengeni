@@ -3,7 +3,7 @@
   "title": "OpenGeni · Runtime Failures",
   "description": "One exact deployment's turn, MCP, sandbox, API, provider, and durable-write failures. Identity and error content stay in authenticated logs and durable events, never metric labels.",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 3,
   "editable": true,
   "graphTooltip": 1,
   "timezone": "browser",
@@ -31,10 +31,10 @@
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
         "query": {
-          "query": "label_values(opengeni_turns_total, namespace)",
+          "query": "label_values(up{opengeni_workload_component=~\"api|worker-control|worker-turns\"}, namespace)",
           "refId": "namespace"
         },
-        "definition": "label_values(opengeni_turns_total, namespace)",
+        "definition": "label_values(up{opengeni_workload_component=~\"api|worker-control|worker-turns\"}, namespace)",
         "current": {},
         "includeAll": false,
         "multi": false,
@@ -47,10 +47,10 @@
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
         "query": {
-          "query": "label_values(opengeni_turns_total{namespace=\"$namespace\"}, environment)",
+          "query": "label_values(opengeni_build_info{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, environment)",
           "refId": "environment"
         },
-        "definition": "label_values(opengeni_turns_total{namespace=\"$namespace\"}, environment)",
+        "definition": "label_values(opengeni_build_info{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, environment)",
         "current": {},
         "includeAll": false,
         "multi": false,
@@ -63,10 +63,10 @@
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
         "query": {
-          "query": "label_values(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+          "query": "label_values(up{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, release)",
           "refId": "release"
         },
-        "definition": "label_values(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+        "definition": "label_values(up{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, release)",
         "current": {},
         "includeAll": false,
         "multi": false,
@@ -77,12 +77,331 @@
   },
   "panels": [
     {
+      "id": 16,
+      "type": "row",
+      "title": "At a glance",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Critical alerts",
+      "description": "Current firing OpenGeni critical alerts. Zero is explicit because Prometheus omits the ALERTS series when no alert is firing.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
+          "legendFormat": "critical",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 }
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Warnings",
+      "description": "Current firing OpenGeni warning alerts. The card turns amber immediately and red when several warnings overlap.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=\"warning\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) or vector(0)",
+          "legendFormat": "warning",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 }
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "Scrape health",
+      "description": "Percentage of selected OpenGeni application scrape targets currently reachable. No data is a telemetry outage, not a healthy zero.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "min": 0,
+          "max": 100,
+          "noValue": "Missing",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 99 },
+              { "color": "green", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * avg(up{namespace=\"$namespace\",release=\"$release\",opengeni_workload_component=~\"api|worker-control|worker-turns\"})",
+          "legendFormat": "healthy",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 }
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "Probe age",
+      "description": "Seconds since the managed synthetic session probe last completed successfully. It runs every 30 minutes; missing or older than one hour is unhealthy.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "noValue": "Never seen",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 2700 },
+              { "color": "red", "value": 3600 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(kube_cronjob_status_last_successful_time{namespace=\"observability\",cronjob=\"opengeni-synthetic-probe\"})",
+          "legendFormat": "age",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Worker restarts · 15m",
+      "description": "Container restarts from release-owned turn workers. Rollout replacement does not increment this signal; process exits and liveness failures do.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "noValue": "Missing",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"$namespace\",container=\"worker\"}[15m]) * on(namespace, pod) group_left() max by (namespace, pod) (kube_pod_labels{namespace=\"$namespace\",label_app_kubernetes_io_instance=\"$release\",label_app_kubernetes_io_component=\"worker-turns\"}))",
+          "legendFormat": "restarts",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Recovery exhausted",
+      "description": "Logical turns durably failed after losing four workers. Zero is explicit when application scrape health is present; each non-zero value is a critical session failure.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_turn_worker_death_recoveries_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"exhausted\"}[$__range])) or on() (0 * count(up{namespace=\"$namespace\",release=\"$release\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}))",
+          "legendFormat": "exhausted",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": { "x": 20, "y": 1, "w": 4, "h": 4 }
+    },
+    {
+      "id": 23,
+      "type": "table",
+      "title": "Firing OpenGeni alerts",
+      "description": "The exact warning and critical alert names behind the summary cards. Open Alerting for full annotations and runbook context.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Severity", "desc": false }]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "ALERTS{alertstate=\"firing\",alertname=~\"OpenGeni.*\",severity=~\"warning|critical\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}",
+          "format": "table",
+          "legendFormat": "{{severity}} · {{alertname}}",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "alertstate": true,
+              "environment": true,
+              "namespace": true,
+              "release": true
+            },
+            "indexByName": { "severity": 0, "alertname": 1 },
+            "renameByName": { "alertname": "Alert", "severity": "Severity" }
+          }
+        }
+      ],
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 5 }
+    },
+    {
       "id": 1,
       "type": "row",
       "title": "Turn health",
       "collapsed": false,
       "panels": [],
-      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+      "gridPos": { "x": 0, "y": 10, "w": 24, "h": 1 }
     },
     {
       "id": 2,
@@ -104,7 +423,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 0, "y": 1, "w": 12, "h": 8 }
+      "gridPos": { "x": 0, "y": 11, "w": 12, "h": 8 }
     },
     {
       "id": 3,
@@ -120,20 +439,20 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__rate_interval])) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "expr": "(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
           "legendFormat": "failed",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"recovering\"}[$__rate_interval])) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "expr": "(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"recovering\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
           "legendFormat": "recovering",
           "editorMode": "code",
           "range": true
         }
       ],
-      "gridPos": { "x": 12, "y": 1, "w": 12, "h": 8 }
+      "gridPos": { "x": 12, "y": 11, "w": 12, "h": 8 }
     },
     {
       "id": 4,
@@ -141,7 +460,7 @@
       "title": "MCP connections and tool use",
       "collapsed": false,
       "panels": [],
-      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 }
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 1 }
     },
     {
       "id": 5,
@@ -163,7 +482,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 8 }
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 }
     },
     {
       "id": 6,
@@ -185,7 +504,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 8 }
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 }
     },
     {
       "id": 7,
@@ -207,7 +526,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 0, "y": 18, "w": 12, "h": 8 }
+      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 8 }
     },
     {
       "id": 8,
@@ -229,7 +548,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 12, "y": 18, "w": 12, "h": 8 }
+      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 8 }
     },
     {
       "id": 9,
@@ -237,7 +556,7 @@
       "title": "Sandbox, API, provider, and durable storage",
       "collapsed": false,
       "panels": [],
-      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 1 }
+      "gridPos": { "x": 0, "y": 36, "w": 24, "h": 1 }
     },
     {
       "id": 10,
@@ -259,7 +578,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 0, "y": 27, "w": 12, "h": 8 }
+      "gridPos": { "x": 0, "y": 37, "w": 12, "h": 8 }
     },
     {
       "id": 11,
@@ -281,7 +600,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 12, "y": 27, "w": 12, "h": 8 }
+      "gridPos": { "x": 12, "y": 37, "w": 12, "h": 8 }
     },
     {
       "id": 15,
@@ -303,7 +622,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 0, "y": 35, "w": 12, "h": 8 }
+      "gridPos": { "x": 0, "y": 45, "w": 12, "h": 8 }
     },
     {
       "id": 12,
@@ -332,7 +651,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 12, "y": 35, "w": 12, "h": 8 }
+      "gridPos": { "x": 12, "y": 45, "w": 12, "h": 8 }
     },
     {
       "id": 13,
@@ -354,7 +673,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 0, "y": 43, "w": 12, "h": 8 }
+      "gridPos": { "x": 0, "y": 53, "w": 12, "h": 8 }
     },
     {
       "id": 14,
@@ -390,7 +709,7 @@
           "range": true
         }
       ],
-      "gridPos": { "x": 12, "y": 43, "w": 12, "h": 8 }
+      "gridPos": { "x": 12, "y": 53, "w": 12, "h": 8 }
     }
   ]
 }
