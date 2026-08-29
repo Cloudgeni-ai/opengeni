@@ -585,10 +585,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // Logical settlement is complete, but the exact predecessor activity has
       // not yet durably proved sandbox/tool quiescence. Prefer its transactional
       // queueChanged wake. Also retain one low-frequency deterministic timer:
-      // Pause may acknowledge its control wake before quiescence, leaving no
-      // pending outbox row to restart this workflow after the activity heartbeat
-      // lease expires. The timer guarantees convergence without admission or a
-      // hot control-activity loop.
+      // the recovery wake can already be delivered while the physical activity
+      // still owns its heartbeat lease, leaving no future transaction that can
+      // signalWithStart after the lease expires. Keeping this workflow available
+      // guarantees passive receipt convergence without admitting replacement
+      // work or creating a hot control-activity loop.
       const seenSignalVersion = signalVersion;
       const woke = await condition(() => signalVersion !== seenSignalVersion, "2 minutes");
       if (woke) continue;

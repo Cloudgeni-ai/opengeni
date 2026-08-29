@@ -168,7 +168,7 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
       expect(organizationRig.scope).toBe("organization");
       expect(personalRig.scope).toBe("user");
 
-      const verificationFinishedAt = "2026-08-29T18:16:46.181Z";
+      const verificationOccurredAt = "2026-08-29T18:16:47.181Z";
       await admin`
         insert into audit_events (
           account_id, workspace_id, subject_id, action, target_type, target_id,
@@ -179,10 +179,10 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
           ${admin.json({
             rigId: organizationRig.id,
             versionId: organizationRig.activeVersion.id,
-            finishedAt: verificationFinishedAt,
+            finishedAt: "malformed-untrusted-audit-metadata",
             passed: true,
           })}::jsonb,
-          ${verificationFinishedAt}::timestamptz
+          ${verificationOccurredAt}::timestamptz
         )
       `;
       const organizationRigHealth = await asActor(app, ownerB, async (tx) => {
@@ -202,7 +202,7 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
       });
       expect(organizationRigHealth.checkHealth).toBe("passing");
       expect(new Date(organizationRigHealth.lastVerifiedAt!).toISOString()).toBe(
-        verificationFinishedAt,
+        verificationOccurredAt,
       );
 
       const machine = await asActor(app, ownerA, async (tx) => {
