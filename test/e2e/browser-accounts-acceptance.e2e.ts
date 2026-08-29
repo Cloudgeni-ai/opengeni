@@ -40,9 +40,11 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
 const PASSWORD = "Browser-accounts-password-1234";
 const EVIDENCE_DIR =
-  process.env.OPENGENI_ACCOUNT_EVIDENCE_DIR ?? "/tmp/opengeni-account-acceptance";
+  process.env.OPENGENI_ACCOUNT_EVIDENCE_DIR ??
+  "/tmp/opengeni-account-acceptance";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const requestedEngine = process.env.OPENGENI_ACCOUNT_BROWSER_ENGINE ?? "chromium";
+const requestedEngine =
+  process.env.OPENGENI_ACCOUNT_BROWSER_ENGINE ?? "chromium";
 
 const ENGINES = {
   chromium,
@@ -92,6 +94,7 @@ type BrowserProblems = {
     method: string;
     pathname: string;
     responsePhase: string;
+    search: string;
     startedAt: number;
     status: number;
   }>;
@@ -141,28 +144,39 @@ const ACTOR_TRANSITION_PHASES = [
   "signed-out-settled",
 ] as const;
 
-const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
-  ["add-response-loss-replay", new Set(["primary-set-sign-in", "add-response-loss-replay"])],
+const DIRECT_RACE_ACTOR_RESPONSE_DISPATCH_PHASES = new Set([
+  "primary-set-sign-in",
+  "second-tab-bootstrap",
+  "add-response-loss-replay",
+  "cross-tab-select-race",
+]);
+
+const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<
+  string,
+  ReadonlySet<string>
+>([
   [
-    "cross-tab-select-race",
-    new Set([
-      "primary-set-sign-in",
-      "second-tab-bootstrap",
-      "add-response-loss-replay",
-      "cross-tab-select-race",
-    ]),
+    "add-response-loss-replay",
+    new Set(["primary-set-sign-in", "add-response-loss-replay"]),
   ],
+  ["cross-tab-select-race", DIRECT_RACE_ACTOR_RESPONSE_DISPATCH_PHASES],
   [
     "late-old-epoch-setup-beta-to-alpha",
     new Set(["cross-tab-select-race", "late-old-epoch-setup-beta-to-alpha"]),
   ],
   [
     "late-old-epoch-alpha-to-beta",
-    new Set(["late-old-epoch-setup-beta-to-alpha", "late-old-epoch-alpha-to-beta"]),
+    new Set([
+      "late-old-epoch-setup-beta-to-alpha",
+      "late-old-epoch-alpha-to-beta",
+    ]),
   ],
   [
     "late-old-epoch-primary-settled-before-old-release",
-    new Set(["late-old-epoch-alpha-to-beta", "late-old-epoch-primary-settled-before-old-release"]),
+    new Set([
+      "late-old-epoch-alpha-to-beta",
+      "late-old-epoch-primary-settled-before-old-release",
+    ]),
   ],
   [
     "cross-slot-deep-link",
@@ -187,34 +201,79 @@ const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlyS
       "logout-all-response-loss-replay",
     ]),
   ],
-  ["signed-out-settled", new Set(["logout-all-response-loss-replay", "signed-out-settled"])],
+  [
+    "signed-out-settled",
+    new Set(["logout-all-response-loss-replay", "signed-out-settled"]),
+  ],
   [
     "independent-set-after-other-logout-all",
-    new Set(["independent-set-sign-in", "independent-set-after-other-logout-all"]),
+    new Set([
+      "independent-set-sign-in",
+      "independent-set-after-other-logout-all",
+    ]),
   ],
 ]);
 
-const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<string, ReadonlySet<string>>([
+const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<
+  string,
+  ReadonlySet<string>
+>([
   // These phases intentionally create or reload a whole document. React can
   // cancel only its configuration/session bootstrap reads while replacing
   // that document; keep endpoint and phase checks exact so other reads stay red.
-  ["primary-set-sign-in", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["add-response-loss-replay", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["second-tab-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["cross-tab-select-race", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["late-old-epoch-setup-beta-to-alpha", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["late-old-epoch-alpha-to-beta", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  [
+    "primary-set-sign-in",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+  [
+    "add-response-loss-replay",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+  [
+    "second-tab-bootstrap",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+  [
+    "cross-tab-select-race",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+  [
+    "late-old-epoch-setup-beta-to-alpha",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+  [
+    "late-old-epoch-alpha-to-beta",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
   [
     "late-old-epoch-primary-settled-before-old-release",
     new Set(["/v1/config/client", "/v1/auth/get-session"]),
   ],
-  ["cross-slot-deep-link", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["slot-revocation-reauthentication", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  [
+    "cross-slot-deep-link",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+  [
+    "slot-revocation-reauthentication",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
   ["logout-one", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["logout-all-response-loss-replay", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["signed-out-settled", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["responsive-evidence-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
-  ["independent-set-sign-in", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  [
+    "logout-all-response-loss-replay",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+  [
+    "signed-out-settled",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+  [
+    "responsive-evidence-bootstrap",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+  [
+    "independent-set-sign-in",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
   [
     "independent-set-after-other-logout-all",
     new Set(["/v1/config/client", "/v1/auth/get-session"]),
@@ -242,10 +301,17 @@ const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
 // Session-page hooks now own their native request lifetime just like the
 // catalog hooks above. A deliberate route/document replacement may therefore
 // cancel only the exact paged session-list GET dispatched by that same phase.
-const DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES = DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
+const DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES =
+  DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
 
-const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
-  ["late-old-epoch-primary-settled-before-old-release", new Set(["late-old-epoch-alpha-to-beta"])],
+const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<
+  string,
+  ReadonlySet<string>
+>([
+  [
+    "late-old-epoch-primary-settled-before-old-release",
+    new Set(["late-old-epoch-alpha-to-beta"]),
+  ],
   ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
 ]);
 
@@ -333,6 +399,20 @@ type FiniteReadRetirementInput = {
   startedAt: number;
 };
 
+type DocumentReplacementRetirementInput = {
+  actorEpoch: string | null;
+  confirmedActorEpoch: string;
+  currentSessionSetAuthorityHash: string | null;
+  dispatchPhase: string;
+  expectedDispatchPhase: string;
+  method: string;
+  pathname: string;
+  replacementStartedAt: number;
+  requestSessionSetAuthorityHash: string | null;
+  startedAt: number;
+  workspaceId: string;
+};
+
 const ACTOR_CHANGING_ACCEPTANCE_PATHS = new Set([
   "/v1/auth/session-set/logout-all",
   "/v1/auth/session-set/logout-one",
@@ -351,10 +431,14 @@ function sessionSetAuthorityHash(cookieHeader: string | null): string | null {
     ?.split(";")
     .map((cookie) => cookie.trim().split("=", 2))
     .find(([name]) => name === MANAGED_AUTH_SESSION_SET_COOKIE)?.[1];
-  return authority && /^[A-Za-z0-9_-]{43}$/u.test(authority) ? managedAuthSha256(authority) : null;
+  return authority && /^[A-Za-z0-9_-]{43}$/u.test(authority)
+    ? managedAuthSha256(authority)
+    : null;
 }
 
-function requestFailureProblem(input: BrowserRequestFailureInput): string | null {
+function requestFailureProblem(
+  input: BrowserRequestFailureInput,
+): string | null {
   const requestUrl = new URL(input.url);
   const pathname = requestUrl.pathname;
   const isConnectionReset = /NET_RESET|CONNECTION_RESET/iu.test(input.failure);
@@ -368,9 +452,8 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
       pathname === "/v1/auth/session-set" ||
       pathname === "/v1/workspaces" ||
       pathname.startsWith("/v1/workspaces/"));
-  const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
-    input.responsePhase,
-  );
+  const allowedDispatchPhases =
+    SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(input.responsePhase);
   const isExpectedScopedActorReadCancellation =
     isCancellation &&
     !isConnectionReset &&
@@ -401,7 +484,8 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     !isConnectionReset &&
     input.method === "GET" &&
     input.actorEpoch !== null &&
-    input.dispatchPhase === "late-old-epoch-primary-settled-before-old-release" &&
+    input.dispatchPhase ===
+      "late-old-epoch-primary-settled-before-old-release" &&
     input.responsePhase === "logout-all-response-loss-replay" &&
     requestUrl.searchParams.get("transport") === "http1-bounded" &&
     /^\/v1\/workspaces\/[0-9a-f-]+\/live-events\/stream$/u.test(pathname) &&
@@ -424,7 +508,9 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     input.actorEpoch !== null &&
     input.dispatchPhase === input.responsePhase &&
     DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES.has(input.responsePhase) &&
-    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname);
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(
+      pathname,
+    );
   const isExpectedDocumentSessionPageCancellation =
     isCancellation &&
     !isConnectionReset &&
@@ -438,11 +524,13 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     isCancellation &&
     !isConnectionReset &&
     input.method === "GET" &&
-    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true &&
+    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(
+      pathname,
+    ) === true &&
     (input.dispatchPhase === input.responsePhase ||
-      DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES.get(input.responsePhase)?.has(
-        input.dispatchPhase,
-      ) === true);
+      DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES.get(
+        input.responsePhase,
+      )?.has(input.dispatchPhase) === true);
   if (
     isExpectedScopedActorReadCancellation ||
     isAcceptedActorTransitionCancellation ||
@@ -495,7 +583,8 @@ function isBoundedHttp1StreamRequest(method: string, rawUrl: string): boolean {
   if (method !== "GET") return false;
   const url = new URL(rawUrl);
   return (
-    (url.pathname.endsWith("/stream") || url.pathname.includes("/live-events/stream")) &&
+    (url.pathname.endsWith("/stream") ||
+      url.pathname.includes("/live-events/stream")) &&
     url.searchParams.get("transport") === "http1-bounded"
   );
 }
@@ -510,7 +599,9 @@ function retiredFiniteReadTerminalProblem(
     : `${description} [unexpected-late-finish]`;
 }
 
-function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInput): boolean {
+function finiteReadMayRetireAfterActorTransition(
+  input: FiniteReadRetirementInput,
+): boolean {
   const exactOldWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.oldWorkspaceId)}/`;
   // Chromium can omit the HttpOnly Cookie header from both synchronous and
   // asynchronous Playwright request inspection after an aborted document.
@@ -520,9 +611,12 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
   // current authority hash, and no session-set replacement occurs in either
   // phase.
   const requestAuthorityMatches =
-    input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash ||
+    input.requestSessionSetAuthorityHash ===
+      input.currentSessionSetAuthorityHash ||
     (input.requestSessionSetAuthorityHash === null &&
-      new Set(["second-tab-bootstrap", "cross-tab-select-race"]).has(input.dispatchPhase));
+      new Set(["second-tab-bootstrap", "cross-tab-select-race"]).has(
+        input.dispatchPhase,
+      ));
   return (
     new Set(["GET", "HEAD"]).has(input.method) &&
     input.actorEpoch !== null &&
@@ -535,7 +629,8 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
       (transition) =>
         transition.path === "/v1/auth/session-set/select" &&
         transition.actorEpoch === input.confirmedActorEpoch &&
-        transition.sessionSetAuthorityHash === input.currentSessionSetAuthorityHash &&
+        transition.sessionSetAuthorityHash ===
+          input.currentSessionSetAuthorityHash &&
         transition.acceptedAt <= input.confirmedAt &&
         input.actorDispatches.some(
           (dispatch) =>
@@ -546,6 +641,51 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
         ),
     )
   );
+}
+
+function finiteReadMayRetireAfterDocumentReplacement(
+  input: DocumentReplacementRetirementInput,
+): boolean {
+  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`;
+  const documentOwnedSessionRead = new RegExp(
+    `^${exactWorkspacePrefix.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}sessions/[0-9a-f-]+(?:/lineage)?$`,
+    "u",
+  ).test(input.pathname);
+  // Chromium may omit the HttpOnly Cookie header from Playwright metadata
+  // after destroying the old document. The only headerless exception is the
+  // exact same-actor deep-link document replaced before re-authentication;
+  // that interval cannot replace the session-set authority, and every other
+  // actor, phase, path, method, and timing check remains mandatory.
+  const requestAuthorityMatches =
+    input.requestSessionSetAuthorityHash ===
+      input.currentSessionSetAuthorityHash ||
+    (input.requestSessionSetAuthorityHash === null &&
+      input.expectedDispatchPhase === "cross-slot-deep-link");
+  return (
+    new Set(["GET", "HEAD"]).has(input.method) &&
+    input.actorEpoch !== null &&
+    input.actorEpoch === input.confirmedActorEpoch &&
+    input.dispatchPhase === input.expectedDispatchPhase &&
+    documentOwnedSessionRead &&
+    input.currentSessionSetAuthorityHash !== null &&
+    requestAuthorityMatches &&
+    Number.isFinite(input.startedAt) &&
+    Number.isFinite(input.replacementStartedAt) &&
+    input.startedAt <= input.replacementStartedAt
+  );
+}
+
+function actorTransitionResponseDispatchPhaseMatches(input: {
+  dispatchPhase: string;
+  expectedPhase: string;
+  permitsDirectRacePredecessors: boolean;
+  responsePhase: string;
+}): boolean {
+  if (input.responsePhase !== input.expectedPhase) return false;
+  return input.permitsDirectRacePredecessors
+    ? input.expectedPhase === "cross-tab-select-race" &&
+        DIRECT_RACE_ACTOR_RESPONSE_DISPATCH_PHASES.has(input.dispatchPhase)
+    : input.dispatchPhase === input.expectedPhase;
 }
 
 let owned: OwnerMigratedTestDatabase | null = null;
@@ -664,13 +804,18 @@ function observeBrowser(page: Page): BrowserProblems {
   page.on("request", (request) => {
     const requestUrl = new URL(request.url());
     const pathname = requestUrl.pathname;
-    const actorEpoch = request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null;
+    const actorEpoch =
+      request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null;
     const startedAt = performance.now();
     const requestSessionSetAuthorityHash = request
       .headerValue("cookie")
       .then(sessionSetAuthorityHash, () => null);
-    if (actorEpoch !== null) problems.actorDispatches.push({ actorEpoch, startedAt });
-    if (pathname.endsWith("/stream") || pathname.includes("/live-events/stream")) {
+    if (actorEpoch !== null)
+      problems.actorDispatches.push({ actorEpoch, startedAt });
+    if (
+      pathname.endsWith("/stream") ||
+      pathname.includes("/live-events/stream")
+    ) {
       if (requestUrl.searchParams.get("transport") === "http1-bounded") {
         problems.boundedHttp1StreamDispatches += 1;
       }
@@ -728,6 +873,7 @@ function observeBrowser(page: Page): BrowserProblems {
     }
     if (response.status() === 401 && pathname.startsWith("/v1/workspaces/")) {
       const dispatch = requestPhases.get(request);
+      const responseUrl = new URL(response.url());
       problems.actorFenceResponses.push({
         actorEpoch: dispatch?.actorEpoch ?? null,
         dispatchPhase: dispatch?.phase ?? "unknown",
@@ -735,6 +881,7 @@ function observeBrowser(page: Page): BrowserProblems {
         method: request.method(),
         pathname,
         responsePhase: problems.phase,
+        search: responseUrl.search,
         startedAt: dispatch?.startedAt ?? Number.NaN,
         status: response.status(),
       });
@@ -742,7 +889,9 @@ function observeBrowser(page: Page): BrowserProblems {
     const recordsActorTransition =
       (response.status() === 403 &&
         pathname.endsWith("/attention") &&
-        new Set(["logout-one", "logout-all-response-loss-replay"]).has(problems.phase)) ||
+        new Set(["logout-one", "logout-all-response-loss-replay"]).has(
+          problems.phase,
+        )) ||
       (response.status() === 409 &&
         request.method() === "GET" &&
         pathname.startsWith("/v1/workspaces/") &&
@@ -766,7 +915,10 @@ function observeBrowser(page: Page): BrowserProblems {
     const finishedAt = performance.now();
     const finishedUrl = new URL(request.url());
     const finishedFiniteRead = problems.pendingFiniteReads.get(request);
-    const finishedBoundedStream = isBoundedHttp1StreamRequest(request.method(), request.url());
+    const finishedBoundedStream = isBoundedHttp1StreamRequest(
+      request.method(),
+      request.url(),
+    );
     problems.activeStreams.delete(request);
     problems.pendingFiniteReads.delete(request);
     if (
@@ -799,7 +951,9 @@ function observeBrowser(page: Page): BrowserProblems {
   page.on("console", (message) => {
     if (message.type() === "error") {
       const source = message.location().url;
-      const rendered = source ? `${message.text()} @ ${new URL(source).pathname}` : message.text();
+      const rendered = source
+        ? `${message.text()} @ ${new URL(source).pathname}`
+        : message.text();
       // The journey deliberately proves fail-closed 403/409 requests, while a
       // disabled Connected Machines surface deliberately returns 404. Keep
       // every other browser error strict.
@@ -856,7 +1010,9 @@ function observeBrowser(page: Page): BrowserProblems {
         failure,
         method: request.method(),
         responsePhase,
-        sessionSetAuthorityHash: dispatch ? await dispatch.sessionSetAuthorityHash : null,
+        sessionSetAuthorityHash: dispatch
+          ? await dispatch.sessionSetAuthorityHash
+          : null,
         startedAt: dispatch?.startedAt,
         url: request.url(),
       });
@@ -872,7 +1028,9 @@ function observeBrowser(page: Page): BrowserProblems {
       }
     })();
     problems.pendingRequestFailureChecks.add(check);
-    void check.finally(() => problems.pendingRequestFailureChecks.delete(check));
+    void check.finally(() =>
+      problems.pendingRequestFailureChecks.delete(check),
+    );
   });
   return problems;
 }
@@ -962,7 +1120,10 @@ async function retirePendingReadsAfterConfirmedActorTransition(
   for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
     const requestSessionSetAuthorityHash =
       pending.sessionSetAuthorityHashImmediate ??
-      (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
+      (await Promise.race([
+        pending.sessionSetAuthorityHash,
+        Bun.sleep(1_000).then(() => null),
+      ]));
     const retirementInput = {
       acceptedActorTransitions: actorMutationAcceptances,
       actorDispatches: problems.actorDispatches,
@@ -983,13 +1144,15 @@ async function retirePendingReadsAfterConfirmedActorTransition(
       JSON.stringify({
         actorEpoch: pending.actorEpoch,
         confirmedActorEpoch: input.confirmedActorEpoch,
-        currentSessionSetAuthorityPresent: currentSessionSetAuthorityHash !== null,
+        currentSessionSetAuthorityPresent:
+          currentSessionSetAuthorityHash !== null,
         dispatchPhase: pending.dispatchPhase,
         method: pending.method,
         pathname: pending.pathname,
         requestSessionSetAuthorityMatches:
           requestSessionSetAuthorityHash === currentSessionSetAuthorityHash,
-        requestSessionSetAuthorityPresent: requestSessionSetAuthorityHash !== null,
+        requestSessionSetAuthorityPresent:
+          requestSessionSetAuthorityHash !== null,
         responseSeen: pending.responseSeen,
         result: mayRetire ? "retired" : "kept",
         startedAt: pending.startedAt,
@@ -1006,13 +1169,68 @@ async function retirePendingReadsAfterConfirmedActorTransition(
   }
 }
 
-async function settlePendingRequestFailureChecks(problems: BrowserProblems): Promise<void> {
+async function retirePendingReadsAfterConfirmedDocumentReplacement(
+  page: Page,
+  problems: BrowserProblems,
+  input: {
+    confirmedActorEpoch: string;
+    dispatchPhase: string;
+    replacementStartedAt: number;
+    workspaceId: string;
+  },
+): Promise<void> {
+  const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
+    await browserCookieHeader(page.context()),
+  );
+  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sessions/`;
+  for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
+    if (
+      (pending.method !== "GET" && pending.method !== "HEAD") ||
+      pending.actorEpoch !== input.confirmedActorEpoch ||
+      pending.dispatchPhase !== input.dispatchPhase ||
+      !pending.pathname.startsWith(exactWorkspacePrefix) ||
+      pending.startedAt > input.replacementStartedAt
+    ) {
+      continue;
+    }
+    const requestSessionSetAuthorityHash =
+      pending.sessionSetAuthorityHashImmediate ??
+      (await Promise.race([
+        pending.sessionSetAuthorityHash,
+        Bun.sleep(1_000).then(() => null),
+      ]));
+    const mayRetire = finiteReadMayRetireAfterDocumentReplacement({
+      actorEpoch: pending.actorEpoch,
+      confirmedActorEpoch: input.confirmedActorEpoch,
+      currentSessionSetAuthorityHash,
+      dispatchPhase: pending.dispatchPhase,
+      expectedDispatchPhase: input.dispatchPhase,
+      method: pending.method,
+      pathname: pending.pathname,
+      replacementStartedAt: input.replacementStartedAt,
+      requestSessionSetAuthorityHash,
+      startedAt: pending.startedAt,
+      workspaceId: input.workspaceId,
+    });
+    if (!mayRetire) continue;
+    problems.retiredFiniteReads.push(
+      `${pending.description} [retired=confirmed-document-replacement]`,
+    );
+    problems.pendingFiniteReads.delete(request);
+  }
+}
+
+async function settlePendingRequestFailureChecks(
+  problems: BrowserProblems,
+): Promise<void> {
   while (problems.pendingRequestFailureChecks.size > 0) {
     await Promise.all([...problems.pendingRequestFailureChecks]);
   }
 }
 
-async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void> {
+async function expectNoBrowserProblems(
+  problems: BrowserProblems,
+): Promise<void> {
   await settlePendingRequestFailureChecks(problems);
   expect({
     actorFenceResponses: problems.actorFenceResponses,
@@ -1046,7 +1264,8 @@ async function expectAndConsumeConsoleErrors(
   const counts = Object.fromEntries(
     [...new Set(problems.consoleErrors)].map((message) => [
       message,
-      problems.consoleErrors.filter((candidate) => candidate === message).length,
+      problems.consoleErrors.filter((candidate) => candidate === message)
+        .length,
     ]),
   );
   const allowedCounts = Object.fromEntries(
@@ -1057,9 +1276,13 @@ async function expectAndConsumeConsoleErrors(
   );
   expect({
     excess: Object.fromEntries(
-      Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
+      Object.entries(counts).filter(
+        ([message, count]) => count > (allowedCounts[message] ?? 0),
+      ),
     ),
-    missing: required.filter((message) => !problems.consoleErrors.includes(message)),
+    missing: required.filter(
+      (message) => !problems.consoleErrors.includes(message),
+    ),
   }).toEqual({ excess: {}, missing: [] });
   problems.consoleErrors.splice(0);
 }
@@ -1086,8 +1309,11 @@ async function expectAndConsumePageErrors(
       ...problems.pageErrorEvidence.map(({ observedAt }) => observedAt),
     );
     const remainingCorrelationWindow =
-      latestEvidenceAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - performance.now();
-    if (remainingCorrelationWindow > 0) await Bun.sleep(remainingCorrelationWindow);
+      latestEvidenceAt +
+      WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS -
+      performance.now();
+    if (remainingCorrelationWindow > 0)
+      await Bun.sleep(remainingCorrelationWindow);
     await page.evaluate(
       () =>
         new Promise<void>((resolve) => {
@@ -1102,7 +1328,8 @@ async function expectAndConsumePageErrors(
     );
     if (
       nextLatestEvidenceAt <= latestEvidenceAt &&
-      performance.now() >= nextLatestEvidenceAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+      performance.now() >=
+        nextLatestEvidenceAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
     ) {
       break;
     }
@@ -1122,9 +1349,13 @@ async function expectAndConsumePageErrors(
   );
   expect({
     excess: Object.fromEntries(
-      Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
+      Object.entries(counts).filter(
+        ([message, count]) => count > (allowedCounts[message] ?? 0),
+      ),
     ),
-    missing: required.filter((message) => !problems.pageErrors.includes(message)),
+    missing: required.filter(
+      (message) => !problems.pageErrors.includes(message),
+    ),
   }).toEqual({ excess: {}, missing: [] });
   problems.pageErrorEvidence.splice(0);
   problems.pageErrors.splice(0);
@@ -1163,18 +1394,25 @@ function correlatedWebKitReauthenticationTerminalIndex(
     );
   const pathnameAndSearch = match?.groups?.pathnameAndSearch;
   if (pathnameAndSearch === undefined) return null;
-  const matchingTerminalIndexes = acceptedRequestTerminals.flatMap((terminal, index) =>
-    terminal.responsePhase === "slot-revocation-reauthentication" &&
-    terminal.pathnameAndSearch === pathnameAndSearch &&
-    Math.abs(pageError.observedAt - terminal.observedAt) <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
-      ? [index]
-      : [],
+  const matchingTerminalIndexes = acceptedRequestTerminals.flatMap(
+    (terminal, index) =>
+      terminal.responsePhase === "slot-revocation-reauthentication" &&
+      terminal.pathnameAndSearch === pathnameAndSearch &&
+      Math.abs(pageError.observedAt - terminal.observedAt) <=
+        WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+        ? [index]
+        : [],
   );
-  return matchingTerminalIndexes.length === 1 ? matchingTerminalIndexes[0]! : null;
+  return matchingTerminalIndexes.length === 1
+    ? matchingTerminalIndexes[0]!
+    : null;
 }
 
 function optionalWebKitReauthenticationAccessControlPageError(
-  problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence">,
+  problems: Pick<
+    BrowserProblems,
+    "acceptedRequestTerminals" | "pageErrorEvidence"
+  >,
   engine: EngineName,
 ): string[] {
   if (engine !== "webkit") return [];
@@ -1191,7 +1429,9 @@ function optionalWebKitReauthenticationAccessControlPageError(
       pageError,
       problems.acceptedRequestTerminals,
     );
-    return terminalIndex === null ? [] : [{ terminalIndex, message: pageError.message }];
+    return terminalIndex === null
+      ? []
+      : [{ terminalIndex, message: pageError.message }];
   });
   const terminalIndexes = candidates.map(({ terminalIndex }) => terminalIndex);
   if (
@@ -1200,7 +1440,9 @@ function optionalWebKitReauthenticationAccessControlPageError(
   ) {
     return [];
   }
-  for (const terminalIndex of [...terminalIndexes].sort((left, right) => right - left)) {
+  for (const terminalIndex of [...terminalIndexes].sort(
+    (left, right) => right - left,
+  )) {
     problems.acceptedRequestTerminals.splice(terminalIndex, 1);
   }
   return candidates.map(({ message }) => message);
@@ -1215,13 +1457,19 @@ function logoutAllActorFenceResponseProblem(
     workspaceId: string;
   },
 ): string | null {
-  const expectedPath = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sessions`;
+  const expectedWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}`;
+  const isSessionList =
+    response.pathname === `${expectedWorkspacePrefix}/sessions` &&
+    response.search === "";
+  const isBoundedLiveStream =
+    response.pathname === `${expectedWorkspacePrefix}/live-events/stream` &&
+    new URLSearchParams(response.search).get("transport") === "http1-bounded";
   const exactShape =
     response.actorEpoch === input.actorEpoch &&
     response.dispatchPhase === "logout-all-response-loss-replay" &&
     response.responsePhase === "logout-all-response-loss-replay" &&
     response.method === "GET" &&
-    response.pathname === expectedPath &&
+    (isSessionList || isBoundedLiveStream) &&
     response.status === 401;
   const exactTiming =
     Number.isFinite(response.startedAt) &&
@@ -1244,17 +1492,22 @@ async function expectAndConsumeLogoutAllActorFenceResponses(
     workspaceId: string;
   },
 ): Promise<void> {
-  // A sibling tab can dispatch its current session-list read immediately
-  // before the accepted logout rotates the shared HttpOnly authority. The API
-  // must fence that exact old-actor request with 401; Firefox may deliver the
-  // response instead of the cancellation observed by Chromium/WebKit. Keep the
-  // optional race strict by actor, phase, path, method, status, and acceptance
-  // window, and leave every other 401 in the final failure ledger.
+  // A sibling tab can dispatch its current session-list read or one bounded
+  // event poll immediately before the accepted logout rotates the shared
+  // HttpOnly authority. The API must fence that exact old-actor request with
+  // 401; a browser may deliver the response instead of a cancellation. Keep
+  // the optional race strict by actor, phase, path, transport, method, status,
+  // and acceptance window, and leave every other 401 in the final ledger.
   await page.waitForTimeout(1_000);
   const validationInput = { ...input, settledAt: performance.now() };
-  expect(problems.actorFenceResponses.length).toBeLessThanOrEqual(1);
+  expect(problems.actorFenceResponses.length).toBeLessThanOrEqual(2);
+  expect(
+    new Set(problems.actorFenceResponses.map(({ pathname }) => pathname)).size,
+  ).toBe(problems.actorFenceResponses.length);
   for (const response of problems.actorFenceResponses) {
-    expect(logoutAllActorFenceResponseProblem(response, validationInput)).toBeNull();
+    expect(
+      logoutAllActorFenceResponseProblem(response, validationInput),
+    ).toBeNull();
   }
   const exactConsoleErrors = problems.actorFenceResponses.map(
     ({ pathname }) =>
@@ -1290,24 +1543,37 @@ async function expectAndConsumeActorTransitionResponse(
     expect(responseEvidence).toEqual(
       expect.objectContaining({
         actorEpoch: input.actorEpoch,
-        dispatchPhase: input.phase,
         method: input.method,
         responsePhase: input.phase,
         status: input.status,
       }),
     );
+    const dispatchPhaseValid = actorTransitionResponseDispatchPhaseMatches({
+      dispatchPhase: response.dispatchPhase,
+      expectedPhase: input.phase,
+      permitsDirectRacePredecessors: input.timing !== undefined,
+      responsePhase: response.responsePhase,
+    });
+    if (!dispatchPhaseValid) {
+      throw new Error(
+        `actor transition response did not originate in its exact transition window: ${JSON.stringify({ input, response: responseEvidence })}`,
+      );
+    }
     const pathnameValid =
       response.pathname === input.pathname ||
       (input.timing?.kind === "direct-race-fence" &&
         input.workspaceId !== undefined &&
-        response.pathname.startsWith(`/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`));
+        response.pathname.startsWith(
+          `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`,
+        ));
     if (!pathnameValid) {
       throw new Error(
         `actor transition response did not target its exact old workspace: ${JSON.stringify({ input, response: responseEvidence })}`,
       );
     }
     const responseSpansAcceptance =
-      response.startedAt <= input.acceptedAt && response.endedAt >= input.acceptedAt;
+      response.startedAt <= input.acceptedAt &&
+      response.endedAt >= input.acceptedAt;
     const responseIsBoundedAfterDirectAcceptance =
       input.timing !== undefined &&
       response.startedAt >= input.acceptedAt &&
@@ -1343,7 +1609,10 @@ async function expectAndConsumeActorTransitionResponse(
   problems.actorTransitionResponses.splice(0);
 }
 
-async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
+async function expectNoAxeViolations(
+  page: Page,
+  include?: string,
+): Promise<void> {
   const analyzer = new AxeBuilder({ page }).withTags([
     "wcag2a",
     "wcag2aa",
@@ -1402,7 +1671,9 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
       offenders: metrics
         .filter(
           ({ left, right, visuallyHidden, width }) =>
-            !visuallyHidden && width > 0 && (left < -1 || right > innerWidth + 1),
+            !visuallyHidden &&
+            width > 0 &&
+            (left < -1 || right > innerWidth + 1),
         )
         .map(({ visuallyHidden: _visuallyHidden, ...metric }) => metric)
         .slice(0, 20),
@@ -1413,7 +1684,9 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
     evidence.document.scrollWidth > evidence.document.clientWidth ||
     evidence.body.scrollWidth > evidence.body.clientWidth
   ) {
-    throw new Error(`horizontal document overflow: ${JSON.stringify(evidence, null, 2)}`);
+    throw new Error(
+      `horizontal document overflow: ${JSON.stringify(evidence, null, 2)}`,
+    );
   }
   expect({
     offenders: evidence.offenders,
@@ -1438,10 +1711,15 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
       const data = event.data;
       debugWindow.__accountAcceptanceMessages?.push({
         keys:
-          data && typeof data === "object" && !Array.isArray(data) ? Object.keys(data).sort() : [],
+          data && typeof data === "object" && !Array.isArray(data)
+            ? Object.keys(data).sort()
+            : [],
         origin: event.origin,
         type:
-          data && typeof data === "object" && !Array.isArray(data) && "type" in data
+          data &&
+          typeof data === "object" &&
+          !Array.isArray(data) &&
+          "type" in data
             ? String(data.type)
             : typeof data,
       });
@@ -1492,9 +1770,11 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
         }),
       ]);
       await continueAsAccount.click();
-      await page.getByRole("heading", { name: "Create your organization" }).waitFor({
-        timeout: 30_000,
-      });
+      await page
+        .getByRole("heading", { name: "Create your organization" })
+        .waitFor({
+          timeout: 30_000,
+        });
     } catch (error) {
       const projection = await sessionSet(page);
       const messages = await page.evaluate(() => {
@@ -1520,7 +1800,10 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
     );
     const selected = await sessionSet(page);
     expect(selected.selectedSlotId).not.toBeNull();
-    const accountClient = sdk(await browserCookieHeader(page.context()), selected.actorEpoch);
+    const accountClient = sdk(
+      await browserCookieHeader(page.context()),
+      selected.actorEpoch,
+    );
     const memberships = await accountClient.listOrganizationMemberships();
     expect(memberships.memberships).toHaveLength(1);
     const membership = memberships.memberships[0]!;
@@ -1539,9 +1822,12 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
       where id = ${session.id}`;
   }
   try {
-    await page.waitForURL(new RegExp(`/workspaces/${account.workspaceId}(?:/|$)`), {
-      timeout: 30_000,
-    });
+    await page.waitForURL(
+      new RegExp(`/workspaces/${account.workspaceId}(?:/|$)`),
+      {
+        timeout: 30_000,
+      },
+    );
   } catch (error) {
     const cookies = await page.context().cookies(publicOrigin);
     throw new Error(
@@ -1554,7 +1840,9 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
 
 function accountMenuTrigger(page: Page, displayName: string) {
   return page.getByRole("button", {
-    name: new RegExp(`^Account menu\\. ${escapeRegExp(displayName)} is active\\.$`),
+    name: new RegExp(
+      `^Account menu\\. ${escapeRegExp(displayName)} is active\\.$`,
+    ),
   });
 }
 
@@ -1591,7 +1879,10 @@ async function openAccountMenu(
     try {
       await prepareTrigger?.();
       await trigger.waitFor({ state: "visible", timeout: 3_000 });
-      if ((await trigger.getAttribute("aria-expanded", { timeout: 1_000 })) === "true") {
+      if (
+        (await trigger.getAttribute("aria-expanded", { timeout: 1_000 })) ===
+        "true"
+      ) {
         await page.keyboard.press("Escape");
       }
       await trigger.click({ timeout: 3_000 });
@@ -1625,7 +1916,10 @@ async function openAccountMenu(
   );
 }
 
-async function waitForStableAccountMenu(page: Page, menu: Locator): Promise<void> {
+async function waitForStableAccountMenu(
+  page: Page,
+  menu: Locator,
+): Promise<void> {
   const firstItem = menu.getByRole("menuitem").first();
   for (let sample = 0; sample < 3; sample += 1) {
     await firstItem.waitFor({ timeout: 1_000 });
@@ -1648,7 +1942,9 @@ async function openResponsiveAccountMenu(
           if (await trigger.isVisible()) return;
           const workspaceTab = page.getByRole("tab", { name: "Workspace" });
           if (!(await workspaceTab.isVisible())) {
-            await page.getByRole("button", { name: "Open navigation" }).click({ timeout: 3_000 });
+            await page
+              .getByRole("button", { name: "Open navigation" })
+              .click({ timeout: 3_000 });
           }
           await workspaceTab.click({ timeout: 3_000 });
           await trigger.waitFor({ state: "visible", timeout: 3_000 });
@@ -1658,14 +1954,20 @@ async function openResponsiveAccountMenu(
   return opened;
 }
 
-async function closeResponsiveAccountMenu(page: Page, width: number): Promise<void> {
+async function closeResponsiveAccountMenu(
+  page: Page,
+  width: number,
+): Promise<void> {
   await page.keyboard.press("Escape");
   if (width < 1_024) {
     await page.getByRole("button", { name: "Close navigation" }).click();
   }
 }
 
-async function expectActiveAccountAnnouncement(page: Page, account: AccountFixture): Promise<void> {
+async function expectActiveAccountAnnouncement(
+  page: Page,
+  account: AccountFixture,
+): Promise<void> {
   await page
     .locator('span[aria-live="polite"][aria-atomic="true"]')
     .filter({
@@ -1674,11 +1976,16 @@ async function expectActiveAccountAnnouncement(page: Page, account: AccountFixtu
     .waitFor();
 }
 
-async function expectAccountMenuEvidenceVisible(page: Page, displayName: string): Promise<void> {
+async function expectAccountMenuEvidenceVisible(
+  page: Page,
+  displayName: string,
+): Promise<void> {
   const menu = accountMenuSurface(page);
   const bounds = await menu.boundingBox();
   const viewport = page.viewportSize();
-  const expanded = await accountMenuTrigger(page, displayName).getAttribute("aria-expanded");
+  const expanded = await accountMenuTrigger(page, displayName).getAttribute(
+    "aria-expanded",
+  );
   const evidence = {
     bounds,
     boundsInsideViewport:
@@ -1733,7 +2040,9 @@ async function completePopup(
   account: AccountFixture,
   options: { replayLostResponse?: boolean } = {},
 ): Promise<void> {
-  await popup.getByRole("heading", { name: "Authenticate this account" }).waitFor();
+  await popup
+    .getByRole("heading", { name: "Authenticate this account" })
+    .waitFor();
   await popup.getByLabel("Email").fill(account.email);
   await popup.getByLabel("Password").fill(PASSWORD);
   if (options.replayLostResponse) {
@@ -1776,7 +2085,8 @@ async function completePopup(
     }
   } catch (error) {
     const opener = await popup.opener();
-    const projection = opener && !opener.isClosed() ? await sessionSet(opener) : null;
+    const projection =
+      opener && !opener.isClosed() ? await sessionSet(opener) : null;
     throw new Error(
       `account popup did not complete: url=${popup.url()} responseLoss=${JSON.stringify(completionResponseLoss ? { attempts: completionResponseLoss.attempts, dropped: completionResponseLoss.dropped, exactBodies: completionResponseLoss.exactBodies, statuses: completionResponseLoss.statuses } : null)} projection=${JSON.stringify(projection ? { actorEpoch: projection.actorEpoch, generation: projection.generation, selected: projection.selectedSlotId !== null, slots: projection.slots.map(({ displayName, state }) => ({ displayName, state })) } : null)} body=${JSON.stringify((await popup.locator("body").innerText()).slice(0, 2_000))}`,
       { cause: error },
@@ -1812,9 +2122,12 @@ async function selectAccount(
     }
   }
   if (!clicked) {
-    throw new Error(`account selection gesture did not settle for ${target.displayName}`, {
-      cause: lastGestureError,
-    });
+    throw new Error(
+      `account selection gesture did not settle for ${target.displayName}`,
+      {
+        cause: lastGestureError,
+      },
+    );
   }
   try {
     await Promise.all([
@@ -1832,11 +2145,17 @@ async function selectAccount(
   }
 }
 
-async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> {
+async function sessionSet(
+  page: Page,
+): Promise<ManagedAuthSessionSetProjection> {
   const acceptanceProbeId = crypto.randomUUID();
   const startedAt = performance.now();
   const projection = await page.evaluate(
-    async ({ acceptanceProbeId: probeId, contractHeader, contractRevision }) => {
+    async ({
+      acceptanceProbeId: probeId,
+      contractHeader,
+      contractRevision,
+    }) => {
       const response = await fetch(
         `/v1/auth/session-set?acceptance_probe=${encodeURIComponent(probeId)}`,
         {
@@ -1844,7 +2163,8 @@ async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> 
           headers: { [contractHeader]: contractRevision },
         },
       );
-      if (!response.ok) throw new Error(`session set read failed: ${response.status}`);
+      if (!response.ok)
+        throw new Error(`session set read failed: ${response.status}`);
       return (await response.json()) as ManagedAuthSessionSetProjection;
     },
     {
@@ -1856,27 +2176,38 @@ async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> 
   const completedAt = performance.now();
   const problems = observedBrowserProblems.get(page);
   if (problems) {
-    const completedDirectProbes = [...problems.pendingFiniteReads.entries()].filter(
+    const completedDirectProbes = [
+      ...problems.pendingFiniteReads.entries(),
+    ].filter(
       ([, pending]) =>
         pending.actorEpoch === null &&
         pending.method === "GET" &&
         pending.pathname === "/v1/auth/session-set" &&
-        new URL(pending.url).searchParams.get("acceptance_probe") === acceptanceProbeId &&
+        new URL(pending.url).searchParams.get("acceptance_probe") ===
+          acceptanceProbeId &&
         pending.startedAt >= startedAt &&
         pending.startedAt <= completedAt,
     );
     if (completedDirectProbes.length > 1) {
-      throw new Error("session-set acceptance probe overlapped another unowned session-set read");
+      throw new Error(
+        "session-set acceptance probe overlapped another unowned session-set read",
+      );
     }
     for (const [request, pending] of completedDirectProbes) {
-      problems.retiredFiniteReads.push(`${pending.description} [retired=awaited-json-probe]`);
+      problems.retiredFiniteReads.push(
+        `${pending.description} [retired=awaited-json-probe]`,
+      );
       problems.pendingFiniteReads.delete(request);
     }
   }
   return projection;
 }
 
-async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjection, slotId: string) {
+async function raceSelect(
+  page: Page,
+  projection: ManagedAuthSessionSetProjection,
+  slotId: string,
+) {
   return await page.evaluate(
     async ({
       projection: acceptedProjection,
@@ -1933,7 +2264,11 @@ async function captureResponsiveEvidence(
   // test. The journey itself continues to prove the shared-tab behavior.
   const evidenceBrowser = await launchAccountBrowser(engine);
   try {
-    await captureResponsiveEvidenceInBrowser(evidenceBrowser, storageState, engine);
+    await captureResponsiveEvidenceInBrowser(
+      evidenceBrowser,
+      storageState,
+      engine,
+    );
   } finally {
     await evidenceBrowser.close();
   }
@@ -1965,9 +2300,12 @@ async function captureResponsiveEvidenceInBrowser(
     const evidenceProblems = observeBrowser(evidencePage);
     setBrowserPhase(evidenceProblems, "responsive-evidence-bootstrap");
     try {
-      await evidencePage.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
-        waitUntil: "domcontentloaded",
-      });
+      await evidencePage.goto(
+        `${publicOrigin}/workspaces/${alpha.workspaceId}`,
+        {
+          waitUntil: "domcontentloaded",
+        },
+      );
       await evidencePage.evaluate((theme) => {
         document.documentElement.setAttribute("data-og-theme", theme);
       }, capture.scheme);
@@ -1978,11 +2316,26 @@ async function captureResponsiveEvidenceInBrowser(
         })),
       ).toEqual({ attribute: capture.scheme, computed: capture.scheme });
       await waitForFiniteReadQuiescence(evidenceProblems);
-      await openResponsiveAccountMenu(evidencePage, alpha.displayName, capture.width);
+      await openResponsiveAccountMenu(
+        evidencePage,
+        alpha.displayName,
+        capture.width,
+      );
       await expectNoHorizontalOverflow(evidencePage);
-      await openResponsiveAccountMenu(evidencePage, alpha.displayName, capture.width);
-      await expectNoAxeViolations(evidencePage, '[data-slot="dropdown-menu-content"]');
-      await openResponsiveAccountMenu(evidencePage, alpha.displayName, capture.width);
+      await openResponsiveAccountMenu(
+        evidencePage,
+        alpha.displayName,
+        capture.width,
+      );
+      await expectNoAxeViolations(
+        evidencePage,
+        '[data-slot="dropdown-menu-content"]',
+      );
+      await openResponsiveAccountMenu(
+        evidencePage,
+        alpha.displayName,
+        capture.width,
+      );
       await expectAccountMenuEvidenceVisible(evidencePage, alpha.displayName);
       const screenshot = await evidencePage.screenshot({
         path: `${EVIDENCE_DIR}/${engine}-accounts-${capture.width}-${capture.scheme}.png`,
@@ -2013,9 +2366,12 @@ async function captureResponsiveEvidenceInBrowser(
   const forcedColorsProblems = observeBrowser(forcedColorsPage);
   setBrowserPhase(forcedColorsProblems, "responsive-evidence-bootstrap");
   try {
-    await forcedColorsPage.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
-      waitUntil: "domcontentloaded",
-    });
+    await forcedColorsPage.goto(
+      `${publicOrigin}/workspaces/${alpha.workspaceId}`,
+      {
+        waitUntil: "domcontentloaded",
+      },
+    );
     await forcedColorsPage.evaluate(() => {
       document.documentElement.setAttribute("data-og-theme", "light");
     });
@@ -2029,7 +2385,10 @@ async function captureResponsiveEvidenceInBrowser(
     await openResponsiveAccountMenu(forcedColorsPage, alpha.displayName, 768);
     await expectNoHorizontalOverflow(forcedColorsPage);
     await openResponsiveAccountMenu(forcedColorsPage, alpha.displayName, 768);
-    await expectNoAxeViolations(forcedColorsPage, '[data-slot="dropdown-menu-content"]');
+    await expectNoAxeViolations(
+      forcedColorsPage,
+      '[data-slot="dropdown-menu-content"]',
+    );
     await openResponsiveAccountMenu(forcedColorsPage, alpha.displayName, 768);
     await expectAccountMenuEvidenceVisible(forcedColorsPage, alpha.displayName);
     const forcedColorsScreenshot = await forcedColorsPage.screenshot({
@@ -2095,14 +2454,18 @@ async function captureResponsiveEvidenceInBrowser(
   await touchTrigger.tap();
   await touchPage.getByRole("menu").waitFor();
   await expectNoHorizontalOverflow(touchPage);
-  const menuTargetSizes = await touchPage.getByRole("menuitem").evaluateAll((items) =>
-    items.map((item) => {
-      const bounds = item.getBoundingClientRect();
-      return { height: bounds.height, width: bounds.width };
-    }),
-  );
+  const menuTargetSizes = await touchPage
+    .getByRole("menuitem")
+    .evaluateAll((items) =>
+      items.map((item) => {
+        const bounds = item.getBoundingClientRect();
+        return { height: bounds.height, width: bounds.width };
+      }),
+    );
   expect(menuTargetSizes.length).toBeGreaterThan(0);
-  expect(menuTargetSizes.every(({ height, width }) => height >= 44 && width >= 44)).toBe(true);
+  expect(
+    menuTargetSizes.every(({ height, width }) => height >= 44 && width >= 44),
+  ).toBe(true);
   await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
   await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
   await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
@@ -2152,7 +2515,9 @@ async function delayedWorkspaceResponse(page: Page, oldActorEpoch: string) {
 
 beforeAll(async () => {
   if (!(requestedEngine in ENGINES)) {
-    throw new Error(`unsupported OPENGENI_ACCOUNT_BROWSER_ENGINE: ${requestedEngine}`);
+    throw new Error(
+      `unsupported OPENGENI_ACCOUNT_BROWSER_ENGINE: ${requestedEngine}`,
+    );
   }
   owned = await acquireOwnerMigratedTestDatabase("browser-accounts-acceptance");
   if (!owned) {
@@ -2224,7 +2589,9 @@ beforeAll(async () => {
     stderr: "pipe",
   });
   if ((await build.exited) !== 0) {
-    throw new Error(`Browser account web build failed: ${await new Response(build.stderr).text()}`);
+    throw new Error(
+      `Browser account web build failed: ${await new Response(build.stderr).text()}`,
+    );
   }
   const webDist = `${repoRoot}/apps/web/dist`;
   edge = Bun.serve({
@@ -2239,7 +2606,9 @@ beforeAll(async () => {
           const firstBody = completionResponseLoss.firstBody;
           completionResponseLoss.firstBody ??= requestBody;
           completionResponseLoss.attempts += 1;
-          completionResponseLoss.exactBodies.push(firstBody === null || firstBody === requestBody);
+          completionResponseLoss.exactBodies.push(
+            firstBody === null || firstBody === requestBody,
+          );
           const response = await api.fetch(request);
           completionResponseLoss.statuses.push(response.status);
           if (completionResponseLoss.acceptedAt === null && response.ok) {
@@ -2248,7 +2617,9 @@ beforeAll(async () => {
               acceptedAt: completionResponseLoss.acceptedAt,
               actorEpoch: response.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
               path: url.pathname,
-              sessionSetAuthorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
+              sessionSetAuthorityHash: sessionSetAuthorityHash(
+                request.headers.get("cookie"),
+              ),
             });
           }
           if (!completionResponseLoss.dropped && response.ok) {
@@ -2288,21 +2659,28 @@ beforeAll(async () => {
             "/v1/auth/session-set/select",
             "/v1/auth/session-set/transactions/email-password",
           ]).has(url.pathname) ||
-            (request.method === "GET" && url.pathname === "/v1/auth/session-set"))
+            (request.method === "GET" &&
+              url.pathname === "/v1/auth/session-set"))
         ) {
           actorMutationAcceptances.push({
             acceptedAt: performance.now(),
             actorEpoch: response.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
             path: url.pathname,
-            sessionSetAuthorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
+            sessionSetAuthorityHash: sessionSetAuthorityHash(
+              request.headers.get("cookie"),
+            ),
           });
         }
         return response;
       }
       const safePath = decodeURIComponent(url.pathname).replace(/^\/+/, "");
-      const requested = safePath.includes("..") ? null : Bun.file(`${webDist}/${safePath}`);
+      const requested = safePath.includes("..")
+        ? null
+        : Bun.file(`${webDist}/${safePath}`);
       const asset =
-        requested && (await requested.exists()) ? requested : Bun.file(`${webDist}/index.html`);
+        requested && (await requested.exists())
+          ? requested
+          : Bun.file(`${webDist}/index.html`);
       return new Response(asset, { headers: { "content-type": asset.type } });
     },
   });
@@ -2338,10 +2716,12 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
-    expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_ABORT" })).toBeNull();
-    expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" })).toContain(
-      "/sessions",
-    );
+    expect(
+      requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_ABORT" }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" }),
+    ).toContain("/sessions");
     expect(
       requestFailureProblem({
         ...oldActorRead,
@@ -2390,8 +2770,12 @@ describe("provider-neutral browser account acceptance", () => {
         dispatchPhase: "responsive-accessibility-evidence",
       }),
     ).toContain("responsive-accessibility-evidence");
-    expect(requestFailureProblem({ ...oldActorRead, method: "POST" })).toContain("POST");
-    expect(requestFailureProblem({ ...oldActorRead, actorEpoch: null })).toContain("actor=missing");
+    expect(
+      requestFailureProblem({ ...oldActorRead, method: "POST" }),
+    ).toContain("POST");
+    expect(
+      requestFailureProblem({ ...oldActorRead, actorEpoch: null }),
+    ).toContain("actor=missing");
     expect(
       requestFailureProblem({
         ...oldActorRead,
@@ -2569,7 +2953,10 @@ describe("provider-neutral browser account acceptance", () => {
     };
     expect(requestFailureProblem(evidenceSessionPageRead)).toBeNull();
     expect(
-      requestFailureProblem({ ...evidenceSessionPageRead, failure: "NS_ERROR_NET_RESET" }),
+      requestFailureProblem({
+        ...evidenceSessionPageRead,
+        failure: "NS_ERROR_NET_RESET",
+      }),
     ).toContain("/sessions");
     expect(
       requestFailureProblem({
@@ -2707,7 +3094,12 @@ describe("provider-neutral browser account acceptance", () => {
         acceptedWebKitCancellation,
       ]),
     ).toBe(0);
-    expect(correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [])).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationTerminalIndex(
+        correlatedWebKitPageError,
+        [],
+      ),
+    ).toBeNull();
     expect(
       correlatedWebKitReauthenticationTerminalIndex(
         {
@@ -2738,7 +3130,11 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBe(0);
     expect(
       correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
-        { ...acceptedWebKitCancellation, observedAt: 151, terminal: "finished" },
+        {
+          ...acceptedWebKitCancellation,
+          observedAt: 151,
+          terminal: "finished",
+        },
       ]),
     ).toBe(0);
     expect(
@@ -2760,7 +3156,11 @@ describe("provider-neutral browser account acceptance", () => {
     expect(
       correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
         acceptedWebKitCancellation,
-        { ...acceptedWebKitCancellation, observedAt: 125, terminal: "finished" },
+        {
+          ...acceptedWebKitCancellation,
+          observedAt: 125,
+          terminal: "finished",
+        },
       ]),
     ).toBeNull();
     const consumableWebKitFailures = [acceptedWebKitCancellation];
@@ -2778,7 +3178,10 @@ describe("provider-neutral browser account acceptance", () => {
       optionalWebKitReauthenticationAccessControlPageError(
         {
           acceptedRequestTerminals: [acceptedWebKitCancellation],
-          pageErrorEvidence: [correlatedWebKitPageError, correlatedWebKitPageError],
+          pageErrorEvidence: [
+            correlatedWebKitPageError,
+            correlatedWebKitPageError,
+          ],
         },
         "webkit",
       ),
@@ -2793,16 +3196,25 @@ describe("provider-neutral browser account acceptance", () => {
         "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/queue due to access control checks.",
       observedAt: 175,
     };
-    const bijectiveWebKitFailures = [acceptedWebKitCancellation, secondAcceptedWebKitCancellation];
+    const bijectiveWebKitFailures = [
+      acceptedWebKitCancellation,
+      secondAcceptedWebKitCancellation,
+    ];
     expect(
       optionalWebKitReauthenticationAccessControlPageError(
         {
           acceptedRequestTerminals: bijectiveWebKitFailures,
-          pageErrorEvidence: [correlatedWebKitPageError, secondCorrelatedWebKitPageError],
+          pageErrorEvidence: [
+            correlatedWebKitPageError,
+            secondCorrelatedWebKitPageError,
+          ],
         },
         "webkit",
       ),
-    ).toEqual([correlatedWebKitPageError.message, secondCorrelatedWebKitPageError.message]);
+    ).toEqual([
+      correlatedWebKitPageError.message,
+      secondCorrelatedWebKitPageError.message,
+    ]);
     expect(bijectiveWebKitFailures).toEqual([]);
     expect(
       requestFailureProblem({
@@ -2925,11 +3337,111 @@ describe("provider-neutral browser account acceptance", () => {
       }),
     ).toBe(true);
 
+    const documentReplacementRetirement = {
+      actorEpoch: "current-actor-epoch",
+      confirmedActorEpoch: "current-actor-epoch",
+      currentSessionSetAuthorityHash: "a".repeat(64),
+      dispatchPhase: "cross-slot-deep-link",
+      expectedDispatchPhase: "cross-slot-deep-link",
+      method: "GET",
+      pathname:
+        "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/00000000-0000-4000-8000-000000000002/lineage",
+      replacementStartedAt: 200,
+      requestSessionSetAuthorityHash: "a".repeat(64),
+      startedAt: 100,
+      workspaceId: "00000000-0000-0000-0000-000000000001",
+    } satisfies DocumentReplacementRetirementInput;
+    expect(
+      finiteReadMayRetireAfterDocumentReplacement(
+        documentReplacementRetirement,
+      ),
+    ).toBe(true);
+    expect(
+      finiteReadMayRetireAfterDocumentReplacement({
+        ...documentReplacementRetirement,
+        requestSessionSetAuthorityHash: null,
+      }),
+    ).toBe(true);
+    for (const invalid of [
+      { ...documentReplacementRetirement, method: "POST" },
+      { ...documentReplacementRetirement, actorEpoch: null },
+      { ...documentReplacementRetirement, actorEpoch: "old-actor-epoch" },
+      {
+        ...documentReplacementRetirement,
+        dispatchPhase: "slot-revocation-reauthentication",
+      },
+      {
+        ...documentReplacementRetirement,
+        pathname:
+          "/v1/workspaces/another-workspace/sessions/session-id/lineage",
+      },
+      {
+        ...documentReplacementRetirement,
+        pathname:
+          "/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog",
+      },
+      {
+        ...documentReplacementRetirement,
+        currentSessionSetAuthorityHash: null,
+      },
+      {
+        ...documentReplacementRetirement,
+        dispatchPhase: "slot-revocation-reauthentication",
+        expectedDispatchPhase: "slot-revocation-reauthentication",
+        requestSessionSetAuthorityHash: null,
+      },
+      {
+        ...documentReplacementRetirement,
+        requestSessionSetAuthorityHash: "b".repeat(64),
+      },
+      { ...documentReplacementRetirement, startedAt: 201 },
+    ]) {
+      expect(finiteReadMayRetireAfterDocumentReplacement(invalid)).toBe(false);
+    }
+
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "second-tab-bootstrap",
+        expectedPhase: "cross-tab-select-race",
+        permitsDirectRacePredecessors: true,
+        responsePhase: "cross-tab-select-race",
+      }),
+    ).toBe(true);
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "second-tab-bootstrap",
+        expectedPhase: "cross-tab-select-race",
+        permitsDirectRacePredecessors: false,
+        responsePhase: "cross-tab-select-race",
+      }),
+    ).toBe(false);
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "second-tab-bootstrap",
+        expectedPhase: "cross-tab-select-race",
+        permitsDirectRacePredecessors: true,
+        responsePhase: "late-old-epoch-setup-beta-to-alpha",
+      }),
+    ).toBe(false);
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "logout-one",
+        expectedPhase: "logout-one",
+        permitsDirectRacePredecessors: true,
+        responsePhase: "logout-one",
+      }),
+    ).toBe(false);
+
     const expectedRaceConsole =
       "Failed to load resource: the server responded with a status of 409 (Conflict) @ /v1/auth/session-set/select";
-    expect(isExpectedHttpConsoleError(expectedRaceConsole, "cross-tab-select-race")).toBe(true);
     expect(
-      isExpectedHttpConsoleError(expectedRaceConsole, "responsive-accessibility-evidence"),
+      isExpectedHttpConsoleError(expectedRaceConsole, "cross-tab-select-race"),
+    ).toBe(true);
+    expect(
+      isExpectedHttpConsoleError(
+        expectedRaceConsole,
+        "responsive-accessibility-evidence",
+      ),
     ).toBe(false);
     const expectedIndependentReloadConsole =
       "Failed to load resource: the server responded with a status of 409 (Conflict) @ /v1/auth/get-session";
@@ -2939,9 +3451,17 @@ describe("provider-neutral browser account acceptance", () => {
         "independent-set-after-other-logout-all",
       ),
     ).toBe(true);
-    expect(isExpectedHttpConsoleError(expectedIndependentReloadConsole, "logout-one")).toBe(true);
     expect(
-      isExpectedHttpConsoleError(expectedIndependentReloadConsole, "independent-set-sign-in"),
+      isExpectedHttpConsoleError(
+        expectedIndependentReloadConsole,
+        "logout-one",
+      ),
+    ).toBe(true);
+    expect(
+      isExpectedHttpConsoleError(
+        expectedIndependentReloadConsole,
+        "independent-set-sign-in",
+      ),
     ).toBe(false);
   });
 
@@ -2955,9 +3475,12 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toBe(true);
     expect(isBoundedHttp1StreamRequest("POST", boundedLiveUrl)).toBe(false);
-    expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl.replace("http1-bounded", "h2"))).toBe(
-      false,
-    );
+    expect(
+      isBoundedHttp1StreamRequest(
+        "GET",
+        boundedLiveUrl.replace("http1-bounded", "h2"),
+      ),
+    ).toBe(false);
     expect(
       isBoundedHttp1StreamRequest(
         "GET",
@@ -2972,16 +3495,29 @@ describe("provider-neutral browser account acceptance", () => {
       url: boundedLiveUrl,
     };
     expect(isExpectedBoundedHttp1NativeSeam(expected)).toBe(true);
-    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 10_099 })).toBe(false);
-    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 15_101 })).toBe(false);
     expect(
-      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "net::ERR_CONNECTION_RESET" }),
+      isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 10_099 }),
     ).toBe(false);
     expect(
-      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "cancelled: connection reset" }),
+      isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 15_101 }),
     ).toBe(false);
     expect(
-      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "canceled: transport failure" }),
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        failure: "net::ERR_CONNECTION_RESET",
+      }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        failure: "cancelled: connection reset",
+      }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        failure: "canceled: transport failure",
+      }),
     ).toBe(false);
     expect(
       isExpectedBoundedHttp1NativeSeam({
@@ -3003,6 +3539,7 @@ describe("provider-neutral browser account acceptance", () => {
       method: "GET",
       pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions",
       responsePhase: "logout-all-response-loss-replay",
+      search: "",
       startedAt: 100,
       status: 401,
     } satisfies BrowserProblems["actorFenceResponses"][number];
@@ -3012,21 +3549,46 @@ describe("provider-neutral browser account acceptance", () => {
       settledAt: 300,
       workspaceId: "00000000-0000-0000-0000-000000000001",
     };
-    expect(logoutAllActorFenceResponseProblem(logoutAllFence, logoutAllFenceInput)).toBeNull();
+    expect(
+      logoutAllActorFenceResponseProblem(logoutAllFence, logoutAllFenceInput),
+    ).toBeNull();
+    expect(
+      logoutAllActorFenceResponseProblem(
+        {
+          ...logoutAllFence,
+          pathname:
+            "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+          search: "?after=12&transport=http1-bounded",
+        },
+        logoutAllFenceInput,
+      ),
+    ).toBeNull();
     for (const invalid of [
       { ...logoutAllFence, actorEpoch: "new-actor" },
       { ...logoutAllFence, dispatchPhase: "signed-out-settled" },
       { ...logoutAllFence, responsePhase: "signed-out-settled" },
       { ...logoutAllFence, method: "POST" },
       { ...logoutAllFence, pathname: "/v1/workspaces" },
+      {
+        ...logoutAllFence,
+        pathname:
+          "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        search: "?transport=h2",
+      },
+      {
+        ...logoutAllFence,
+        pathname:
+          "/v1/workspaces/00000000-0000-0000-0000-000000000002/live-events/stream",
+        search: "?transport=http1-bounded",
+      },
       { ...logoutAllFence, status: 403 },
       { ...logoutAllFence, endedAt: 199 },
       { ...logoutAllFence, endedAt: 301 },
       { ...logoutAllFence, startedAt: 301, endedAt: 302 },
     ]) {
-      expect(logoutAllActorFenceResponseProblem(invalid, logoutAllFenceInput)).toContain(
-        "unexpected logout-all actor fence",
-      );
+      expect(
+        logoutAllActorFenceResponseProblem(invalid, logoutAllFenceInput),
+      ).toContain("unexpected logout-all actor fence");
     }
   });
 
@@ -3069,26 +3631,36 @@ describe("provider-neutral browser account acceptance", () => {
       // Loading a full document in the shared browser set is a distinct
       // bootstrap boundary. Both tabs must be finite-read quiescent and clean
       // before the deliberate cross-tab actor races begin below.
-      await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
+      await waitForFiniteReadQuiescenceAcross([
+        pageProblems,
+        secondTabProblems,
+      ]);
       await expectNoBrowserProblems(pageProblems);
       await expectNoBrowserProblems(secondTabProblems);
 
       setBrowserPhase(pageProblems, "add-response-loss-replay");
-      const betaProviderSessionsBeforeReplay = await authSessionCount(beta.email);
+      const betaProviderSessionsBeforeReplay = await authSessionCount(
+        beta.email,
+      );
       await addOrReauth(page, alpha, beta, "add");
       let projection = await sessionSet(page);
       expect(projection.slots).toHaveLength(2);
       expect(
-        projection.slots.find((slot) => slot.id === projection.selectedSlotId)?.displayName,
+        projection.slots.find((slot) => slot.id === projection.selectedSlotId)
+          ?.displayName,
       ).toBe(alpha.displayName);
-      expect(await authSessionCount(beta.email)).toBe(betaProviderSessionsBeforeReplay + 1);
+      expect(await authSessionCount(beta.email)).toBe(
+        betaProviderSessionsBeforeReplay + 1,
+      );
 
       // Wait until the React projection has incorporated the added slot before
       // exercising focus ownership. The authoritative GET above can lead the
       // cross-tab projection broadcast by one task.
       await waitForFiniteReadQuiescence(pageProblems);
       const settledMenu = await openAccountMenu(page, alpha.displayName);
-      await settledMenu.getByRole("menuitem", { name: new RegExp(beta.displayName) }).waitFor();
+      await settledMenu
+        .getByRole("menuitem", { name: new RegExp(beta.displayName) })
+        .waitFor();
       const trigger = accountMenuTrigger(page, alpha.displayName);
       await page.keyboard.press("Escape");
       await settledMenu.waitFor({ state: "detached" });
@@ -3102,29 +3674,41 @@ describe("provider-neutral browser account acceptance", () => {
         .locator('[data-slot="dropdown-menu-content"][data-state="open"]')
         .filter({ hasText: "Browser accounts" });
       await keyboardMenu.getByRole("menuitem").first().waitFor();
-      expect(await keyboardMenu.getByRole("menuitem").count()).toBeGreaterThan(0);
+      expect(await keyboardMenu.getByRole("menuitem").count()).toBeGreaterThan(
+        0,
+      );
       await page.waitForFunction(() =>
-        [...document.querySelectorAll('[data-slot="dropdown-menu-content"]')].some(
+        [
+          ...document.querySelectorAll('[data-slot="dropdown-menu-content"]'),
+        ].some(
           (menu) =>
-            menu.textContent?.includes("Browser accounts") && menu.contains(document.activeElement),
+            menu.textContent?.includes("Browser accounts") &&
+            menu.contains(document.activeElement),
         ),
       );
       await page.keyboard.press("ArrowDown");
       await page.waitForFunction(() =>
-        [...document.querySelectorAll('[data-slot="dropdown-menu-content"]')].some(
+        [
+          ...document.querySelectorAll('[data-slot="dropdown-menu-content"]'),
+        ].some(
           (menu) =>
-            menu.textContent?.includes("Browser accounts") && menu.contains(document.activeElement),
+            menu.textContent?.includes("Browser accounts") &&
+            menu.contains(document.activeElement),
         ),
       );
       expect(
-        await page.evaluate(() => document.activeElement?.getAttribute("role") === "menuitem"),
+        await page.evaluate(
+          () => document.activeElement?.getAttribute("role") === "menuitem",
+        ),
       ).toBe(true);
       await page.keyboard.press("Escape");
       await page.waitForFunction(
         (label) => document.activeElement?.getAttribute("aria-label") === label,
         `Account menu. ${alpha.displayName} is active.`,
       );
-      expect(await trigger.evaluate((element) => element === document.activeElement)).toBe(true);
+      expect(
+        await trigger.evaluate((element) => element === document.activeElement),
+      ).toBe(true);
 
       if (engine === "chromium") {
         setBrowserPhase(pageProblems, "responsive-accessibility-evidence");
@@ -3134,7 +3718,9 @@ describe("provider-neutral browser account acceptance", () => {
       setBrowserPhase(pageProblems, "cross-tab-select-race");
       setBrowserPhase(secondTabProblems, "cross-tab-select-race");
       projection = await sessionSet(page);
-      const betaSlot = projection.slots.find((slot) => slot.displayName === beta.displayName);
+      const betaSlot = projection.slots.find(
+        (slot) => slot.displayName === beta.displayName,
+      );
       if (!betaSlot) throw new Error("Beta slot missing after add");
       const [pageProjection, tabProjection] = await Promise.all([
         sessionSet(page),
@@ -3169,32 +3755,38 @@ describe("provider-neutral browser account acceptance", () => {
         [page, pageProblems],
         [secondTab, secondTabProblems],
       ] as const) {
-        await expectAndConsumeActorTransitionResponse(observedPage, observedProblems, {
-          acceptedAt: racedSelectAcceptedAt,
-          actorEpoch: pageProjection.actorEpoch,
-          method: "GET",
-          pathname: `/v1/workspaces/${alpha.workspaceId}/live-events/stream`,
-          phase: "cross-tab-select-race",
-          status: 409,
-          statusLabel: "Conflict",
-          workspaceId: alpha.workspaceId,
-          timing: {
-            kind: "direct-race-fence",
-            settledAt: racedSelectionSettledAt,
+        await expectAndConsumeActorTransitionResponse(
+          observedPage,
+          observedProblems,
+          {
+            acceptedAt: racedSelectAcceptedAt,
+            actorEpoch: pageProjection.actorEpoch,
+            method: "GET",
+            pathname: `/v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+            phase: "cross-tab-select-race",
+            status: 409,
+            statusLabel: "Conflict",
+            workspaceId: alpha.workspaceId,
+            timing: {
+              kind: "direct-race-fence",
+              settledAt: racedSelectionSettledAt,
+            },
+            allowedConsoleErrors:
+              engine === "chromium"
+                ? [
+                    `[cross-tab-select-race] Failed to load resource: net::ERR_CONNECTION_RESET @ /v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+                  ]
+                : [],
           },
-          allowedConsoleErrors:
-            engine === "chromium"
-              ? [
-                  `[cross-tab-select-race] Failed to load resource: net::ERR_CONNECTION_RESET @ /v1/workspaces/${alpha.workspaceId}/live-events/stream`,
-                ]
-              : [],
-        });
+        );
       }
       const racedSelectionAcceptance = actorMutationAcceptances
         .filter(({ path }) => path === "/v1/auth/session-set/select")
         .at(-1);
       if (!racedSelectionAcceptance?.actorEpoch) {
-        throw new Error("raced selection did not expose its accepted actor epoch");
+        throw new Error(
+          "raced selection did not expose its accepted actor epoch",
+        );
       }
       await Promise.all([
         retirePendingReadsAfterConfirmedActorTransition(page, pageProblems, {
@@ -3202,11 +3794,15 @@ describe("provider-neutral browser account acceptance", () => {
           confirmedAt: racedSelectionSettledAt,
           oldWorkspaceId: alpha.workspaceId,
         }),
-        retirePendingReadsAfterConfirmedActorTransition(secondTab, secondTabProblems, {
-          confirmedActorEpoch: racedSelectionAcceptance.actorEpoch,
-          confirmedAt: racedSelectionSettledAt,
-          oldWorkspaceId: alpha.workspaceId,
-        }),
+        retirePendingReadsAfterConfirmedActorTransition(
+          secondTab,
+          secondTabProblems,
+          {
+            confirmedActorEpoch: racedSelectionAcceptance.actorEpoch,
+            confirmedAt: racedSelectionSettledAt,
+            oldWorkspaceId: alpha.workspaceId,
+          },
+        ),
       ]);
 
       setBrowserPhase(pageProblems, "late-old-epoch-setup-beta-to-alpha");
@@ -3220,7 +3816,9 @@ describe("provider-neutral browser account acceptance", () => {
         .filter(({ path }) => path === "/v1/auth/session-set/select")
         .at(-1);
       if (!alphaSelectionAcceptance?.actorEpoch) {
-        throw new Error("alpha selection did not expose its accepted actor epoch");
+        throw new Error(
+          "alpha selection did not expose its accepted actor epoch",
+        );
       }
       await Promise.all([
         retirePendingReadsAfterConfirmedActorTransition(page, pageProblems, {
@@ -3228,23 +3826,44 @@ describe("provider-neutral browser account acceptance", () => {
           confirmedAt: confirmedAlphaAt,
           oldWorkspaceId: beta.workspaceId,
         }),
-        retirePendingReadsAfterConfirmedActorTransition(secondTab, secondTabProblems, {
-          confirmedActorEpoch: alphaSelectionAcceptance.actorEpoch,
-          confirmedAt: confirmedAlphaAt,
-          oldWorkspaceId: beta.workspaceId,
-        }),
+        retirePendingReadsAfterConfirmedActorTransition(
+          secondTab,
+          secondTabProblems,
+          {
+            confirmedActorEpoch: alphaSelectionAcceptance.actorEpoch,
+            confirmedAt: confirmedAlphaAt,
+            oldWorkspaceId: beta.workspaceId,
+          },
+        ),
       ]);
-      await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
+      await waitForFiniteReadQuiescenceAcross([
+        pageProblems,
+        secondTabProblems,
+      ]);
       const oldProjection = await sessionSet(secondTab);
-      const delay = await delayedWorkspaceResponse(secondTab, oldProjection.actorEpoch);
-      const reload = secondTab.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
+      const delay = await delayedWorkspaceResponse(
+        secondTab,
+        oldProjection.actorEpoch,
+      );
+      const reload = secondTab
+        .reload({ waitUntil: "domcontentloaded" })
+        .catch(() => null);
       const intentionallyHeldRequest = await delay.intercepted;
-      await waitForCompanionFiniteReadQuiescence(secondTabProblems, intentionallyHeldRequest);
+      await waitForCompanionFiniteReadQuiescence(
+        secondTabProblems,
+        intentionallyHeldRequest,
+      );
       setBrowserPhase(pageProblems, "late-old-epoch-alpha-to-beta");
       setBrowserPhase(secondTabProblems, "late-old-epoch-alpha-to-beta");
       await selectAccount(page, alpha, beta);
-      setBrowserPhase(pageProblems, "late-old-epoch-primary-settled-before-old-release");
-      setBrowserPhase(secondTabProblems, "late-old-epoch-primary-settled-before-old-release");
+      setBrowserPhase(
+        pageProblems,
+        "late-old-epoch-primary-settled-before-old-release",
+      );
+      setBrowserPhase(
+        secondTabProblems,
+        "late-old-epoch-primary-settled-before-old-release",
+      );
       delay.release();
       await reload;
       await delay.dispose();
@@ -3256,13 +3875,19 @@ describe("provider-neutral browser account acceptance", () => {
         .filter(({ path }) => path === "/v1/auth/session-set/select")
         .at(-1);
       if (!betaSelectionAcceptance?.actorEpoch) {
-        throw new Error("beta selection did not expose its accepted actor epoch");
+        throw new Error(
+          "beta selection did not expose its accepted actor epoch",
+        );
       }
-      await retirePendingReadsAfterConfirmedActorTransition(secondTab, secondTabProblems, {
-        confirmedActorEpoch: betaSelectionAcceptance.actorEpoch,
-        confirmedAt: confirmedTabBetaAfterDelayAt,
-        oldWorkspaceId: alpha.workspaceId,
-      });
+      await retirePendingReadsAfterConfirmedActorTransition(
+        secondTab,
+        secondTabProblems,
+        {
+          confirmedActorEpoch: betaSelectionAcceptance.actorEpoch,
+          confirmedAt: confirmedTabBetaAfterDelayAt,
+          oldWorkspaceId: alpha.workspaceId,
+        },
+      );
       expect(secondTab.url()).toContain(beta.workspaceId);
       expect(secondTab.url()).not.toContain(alpha.workspaceId);
 
@@ -3272,11 +3897,23 @@ describe("provider-neutral browser account acceptance", () => {
       await page.goto(`${publicOrigin}/sessions/${beta.sessionId}`, {
         waitUntil: "domcontentloaded",
       });
-      await page.getByRole("heading", { name: "Open with another account" }).waitFor();
-      expect(await page.getByText(beta.displayName, { exact: false }).count()).toBeGreaterThan(0);
-      expect(await page.getByText(beta.email, { exact: false }).count()).toBeGreaterThan(0);
-      expect(await page.getByText("Account Beta Organization", { exact: false }).count()).toBe(0);
-      await page.getByRole("button", { name: `Open as ${beta.displayName}` }).click();
+      await page
+        .getByRole("heading", { name: "Open with another account" })
+        .waitFor();
+      expect(
+        await page.getByText(beta.displayName, { exact: false }).count(),
+      ).toBeGreaterThan(0);
+      expect(
+        await page.getByText(beta.email, { exact: false }).count(),
+      ).toBeGreaterThan(0);
+      expect(
+        await page
+          .getByText("Account Beta Organization", { exact: false })
+          .count(),
+      ).toBe(0);
+      await page
+        .getByRole("button", { name: `Open as ${beta.displayName}` })
+        .click();
       await accountMenuTrigger(page, beta.displayName).waitFor({
         timeout: 30_000,
       });
@@ -3297,30 +3934,47 @@ describe("provider-neutral browser account acceptance", () => {
       );
 
       setBrowserPhase(pageProblems, "slot-revocation-reauthentication");
-      const alphaSlot = (await sessionSet(page)).slots.find(
+      const projectionBeforeSlotRevocation = await sessionSet(page);
+      const alphaSlot = projectionBeforeSlotRevocation.slots.find(
         (slot) => slot.displayName === alpha.displayName,
       );
-      if (!alphaSlot) throw new Error("Alpha slot missing before re-authentication");
+      if (!alphaSlot)
+        throw new Error("Alpha slot missing before re-authentication");
       await owned.admin`
         delete from auth_sessions where id = (
           select auth_session_id from managed_auth_login_slots where id = ${alphaSlot.id}
         )`;
+      const slotRevocationReloadStartedAt = performance.now();
       await page.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(page, beta.displayName).waitFor();
+      await retirePendingReadsAfterConfirmedDocumentReplacement(
+        page,
+        pageProblems,
+        {
+          confirmedActorEpoch: projectionBeforeSlotRevocation.actorEpoch,
+          dispatchPhase: "cross-slot-deep-link",
+          replacementStartedAt: slotRevocationReloadStartedAt,
+          workspaceId: beta.workspaceId,
+        },
+      );
       const reauthMenu = await openAccountMenu(page, beta.displayName);
       const alphaReauthSlot = reauthMenu.getByRole("menuitem", {
         name: new RegExp(alpha.displayName),
       });
-      expect(await alphaReauthSlot.innerText()).toContain("Re-authentication required");
+      expect(await alphaReauthSlot.innerText()).toContain(
+        "Re-authentication required",
+      );
       await page.keyboard.press("Escape");
       await addOrReauth(page, beta, alpha, "reauth");
       projection = await sessionSet(page);
       expect(projection.selectedSlotId).toBe(
-        projection.slots.find((slot) => slot.displayName === beta.displayName)?.id,
+        projection.slots.find((slot) => slot.displayName === beta.displayName)
+          ?.id,
       );
-      expect(projection.slots.find((slot) => slot.displayName === alpha.displayName)?.state).toBe(
-        "active",
-      );
+      expect(
+        projection.slots.find((slot) => slot.displayName === alpha.displayName)
+          ?.state,
+      ).toBe("active");
       await expectAndConsumeConsoleErrors(
         page,
         pageProblems,
@@ -3339,26 +3993,38 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumePageErrors(
         page,
         pageProblems,
-        () => optionalWebKitReauthenticationAccessControlPageError(pageProblems, engine),
+        () =>
+          optionalWebKitReauthenticationAccessControlPageError(
+            pageProblems,
+            engine,
+          ),
         [],
       );
 
       const projectionBeforeLogoutOne = projection;
       setBrowserPhase(pageProblems, "logout-one");
       await openAccountMenu(page, beta.displayName);
-      await page.getByRole("menuitem", { name: new RegExp(alpha.displayName) }).hover();
-      await page.getByRole("menuitem", { name: "Sign out this account" }).click();
-      await page.getByRole("heading", { name: `Sign out ${alpha.displayName}?` }).waitFor();
+      await page
+        .getByRole("menuitem", { name: new RegExp(alpha.displayName) })
+        .hover();
+      await page
+        .getByRole("menuitem", { name: "Sign out this account" })
+        .click();
+      await page
+        .getByRole("heading", { name: `Sign out ${alpha.displayName}?` })
+        .waitFor();
       await page.getByRole("button", { name: "Sign out", exact: true }).click();
       await accountMenuTrigger(page, beta.displayName).waitFor();
-      expect((await sessionSet(page)).slots.map((slot) => slot.displayName)).toEqual([
-        beta.displayName,
-      ]);
+      expect(
+        (await sessionSet(page)).slots.map((slot) => slot.displayName),
+      ).toEqual([beta.displayName]);
       const logoutOneAcceptedAt = actorMutationAcceptances
         .filter(({ path }) => path === "/v1/auth/session-set/logout-one")
         .at(-1)?.acceptedAt;
       if (logoutOneAcceptedAt === undefined) {
-        throw new Error("logout-one acceptance timestamp was not observed at the edge");
+        throw new Error(
+          "logout-one acceptance timestamp was not observed at the edge",
+        );
       }
       await expectAndConsumeActorTransitionResponse(page, pageProblems, {
         acceptedAt: logoutOneAcceptedAt,
@@ -3394,9 +4060,9 @@ describe("provider-neutral browser account acceptance", () => {
       );
       expect(csrfFailure).toBe(403);
 
-      const authorityBeforeLogoutAll = (await context.cookies(publicOrigin)).find(
-        ({ name }) => name === "opengeni.session_set",
-      )?.value;
+      const authorityBeforeLogoutAll = (
+        await context.cookies(publicOrigin)
+      ).find(({ name }) => name === "opengeni.session_set")?.value;
       expect(authorityBeforeLogoutAll).toHaveLength(43);
       const projectionBeforeLogoutAll = await sessionSet(page);
       setBrowserPhase(pageProblems, "logout-all-response-loss-replay");
@@ -3411,13 +4077,21 @@ describe("provider-neutral browser account acceptance", () => {
         statuses: [],
       };
       await openAccountMenu(page, beta.displayName);
-      await page.getByRole("menuitem", { name: "Sign out all browser accounts" }).click();
-      await page.getByRole("heading", { name: "Sign out all browser accounts?" }).waitFor();
-      await page.getByRole("button", { name: "Sign out all", exact: true }).click();
+      await page
+        .getByRole("menuitem", { name: "Sign out all browser accounts" })
+        .click();
+      await page
+        .getByRole("heading", { name: "Sign out all browser accounts?" })
+        .waitFor();
+      await page
+        .getByRole("button", { name: "Sign out all", exact: true })
+        .click();
       try {
-        await page.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor({
-          timeout: 30_000,
-        });
+        await page
+          .getByRole("heading", { name: "Sign in to OpenGeni" })
+          .waitFor({
+            timeout: 30_000,
+          });
       } catch (error) {
         const signedOutProjection = await sessionSet(page);
         throw new Error(
@@ -3466,14 +4140,16 @@ describe("provider-neutral browser account acceptance", () => {
           state: "ready",
         }),
       );
-      const authorityAfterLogoutAll = (await context.cookies(publicOrigin)).find(
-        ({ name }) => name === "opengeni.session_set",
-      )?.value;
+      const authorityAfterLogoutAll = (
+        await context.cookies(publicOrigin)
+      ).find(({ name }) => name === "opengeni.session_set")?.value;
       expect(authorityAfterLogoutAll).toHaveLength(43);
       expect(authorityAfterLogoutAll).not.toBe(authorityBeforeLogoutAll);
-      await secondTab.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor({
-        timeout: 30_000,
-      });
+      await secondTab
+        .getByRole("heading", { name: "Sign in to OpenGeni" })
+        .waitFor({
+          timeout: 30_000,
+        });
       const signedOutSecondTabProjection = await sessionSet(secondTab);
       expect(signedOutSecondTabProjection).toEqual(
         expect.objectContaining({
@@ -3491,7 +4167,9 @@ describe("provider-neutral browser account acceptance", () => {
         pathname: signedOutSecondTabUrl.pathname,
         search: signedOutSecondTabUrl.search,
       }).toEqual({ hash: "", origin: publicOrigin, pathname: "/", search: "" });
-      const signedOutSecondTabBody = await secondTab.locator("body").innerText();
+      const signedOutSecondTabBody = await secondTab
+        .locator("body")
+        .innerText();
       for (const tenantValue of [
         alpha.displayName,
         beta.displayName,
@@ -3512,11 +4190,15 @@ describe("provider-neutral browser account acceptance", () => {
           actorEpoch: projectionBeforeLogoutAll.actorEpoch,
           workspaceId: beta.workspaceId,
         }),
-        expectAndConsumeLogoutAllActorFenceResponses(secondTab, secondTabProblems, {
-          acceptedAt: logoutAllResponseLoss!.acceptedAt!,
-          actorEpoch: projectionBeforeLogoutAll.actorEpoch,
-          workspaceId: beta.workspaceId,
-        }),
+        expectAndConsumeLogoutAllActorFenceResponses(
+          secondTab,
+          secondTabProblems,
+          {
+            acceptedAt: logoutAllResponseLoss!.acceptedAt!,
+            actorEpoch: projectionBeforeLogoutAll.actorEpoch,
+            workspaceId: beta.workspaceId,
+          },
+        ),
       ]);
       setBrowserPhase(pageProblems, "signed-out-settled");
       setBrowserPhase(secondTabProblems, "signed-out-settled");
@@ -3576,7 +4258,11 @@ describe("provider-neutral browser account acceptance", () => {
         providerTokenColumns: 0,
       });
 
-      await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems, otherProblems]);
+      await waitForFiniteReadQuiescenceAcross([
+        pageProblems,
+        secondTabProblems,
+        otherProblems,
+      ]);
       for (const problems of [pageProblems, secondTabProblems, otherProblems]) {
         expect(problems.boundedHttp1StreamDispatches).toBeGreaterThan(0);
       }
