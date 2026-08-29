@@ -12550,3 +12550,4 @@ export * from "./governed-learning-activation-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
 export * from "./interaction-schema";
+export * from "./apps-schema";

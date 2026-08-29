@@ -18,6 +18,12 @@ spec:
     {{- end }}
   ingress:
     - from:
+        {{- if .Values.appHost.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: app-host
+        {{- end }}
         - podSelector:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}

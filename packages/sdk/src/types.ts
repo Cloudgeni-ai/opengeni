@@ -2820,6 +2820,11 @@ export const KNOWN_PERMISSIONS = [
   "rigs:manage",
   "artifacts:read",
   "artifacts:publish",
+  "apps:read",
+  "apps:write",
+  "apps:publish",
+  "apps:run",
+  "apps:delete",
 ] as const;
 
 export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];

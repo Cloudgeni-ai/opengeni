@@ -37,6 +37,9 @@ const workspaceRouteContracts = {
   workspaceDocumentsRoute: { kind: "page", source: "routes/documents.tsx" },
   workspaceMemoryRoute: { kind: "page", source: "routes/memory.tsx" },
   workspaceStateRoute: { kind: "page", source: "routes/workspace-state.tsx" },
+  workspaceAppsRoute: { kind: "page", source: "routes/apps.tsx" },
+  workspaceAppDetailRoute: { kind: "page", source: "routes/apps.tsx" },
+  workspaceAppRunRoute: { kind: "page", source: "routes/apps.tsx" },
   workspaceArtifactsRoute: { kind: "page", source: "routes/artifacts.tsx" },
   workspaceArtifactDetailRoute: {
     kind: "page",

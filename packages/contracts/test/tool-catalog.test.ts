@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { AttemptToolCatalog, AttemptToolResult, type AttemptToolCatalogEntry } from "../src";
+import {
+  AttemptToolCatalog,
+  AttemptToolResult,
+  CanonicalToolDescriptor,
+  CanonicalToolResult,
+  type AttemptToolCatalogEntry,
+} from "../src";
 
 const ids = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -106,5 +112,60 @@ describe("AttemptToolResult", () => {
       "resource",
     ]);
     expect(parsed.structuredContent).toEqual({ ok: true });
+  });
+});
+
+describe("caller-neutral canonical tool contracts", () => {
+  test("retains canonical metadata without changing Attempt compatibility names", () => {
+    const descriptor = CanonicalToolDescriptor.parse({
+      identity: { serverId: "docs", toolName: "search" },
+      modelName: "docs__search",
+      programmaticPath: ["docs", "search"],
+      description: "Search documents",
+      inputSchema: { type: "object", additionalProperties: false },
+      source: "docs",
+      effect: "read",
+      replaySafety: "safe",
+      openWorld: false,
+      approval: "none",
+      supportedSurfaces: ["model", "codemode", "app"],
+      requiredPermissions: ["artifacts:read"],
+    });
+    expect(descriptor.programmaticPath).toEqual(["docs", "search"]);
+    expect(descriptor.supportedSurfaces).toContain("app");
+    expect(CanonicalToolResult).toBe(AttemptToolResult);
+  });
+
+  test("defaults missing authoritative open-world metadata closed", () => {
+    const descriptor = CanonicalToolDescriptor.parse({
+      identity: { serverId: "docs", toolName: "search" },
+      modelName: "docs__search",
+      programmaticPath: ["docs", "search"],
+      inputSchema: { type: "object" },
+      source: "docs",
+      effect: "read",
+      replaySafety: "safe",
+      approval: "none",
+      supportedSurfaces: ["app"],
+      requiredPermissions: [],
+    });
+    expect(descriptor.openWorld).toBe(true);
+  });
+
+  test("rejects duplicate caller surfaces and required permissions", () => {
+    const descriptor = {
+      identity: { serverId: "docs", toolName: "search" },
+      modelName: "docs__search",
+      programmaticPath: ["docs", "search"],
+      inputSchema: { type: "object" },
+      source: "docs",
+      effect: "read",
+      replaySafety: "safe",
+      openWorld: false,
+      approval: "none",
+      supportedSurfaces: ["app", "app"],
+      requiredPermissions: ["artifacts:read", "artifacts:read"],
+    };
+    expect(CanonicalToolDescriptor.safeParse(descriptor).success).toBe(false);
   });
 });

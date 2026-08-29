@@ -1,0 +1,214 @@
+{{- if .Values.appHost.enabled }}
+{{- $appHost := .Values.appHost }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" $appHost.priorityClassName "tier" "presentation") }}
+{{- $credentialsSecret := default (include "opengeni.secretName" .) $appHost.credentialsSecret }}
+{{- $storageBackend := default "s3-compatible" (index .Values.config "OPENGENI_OBJECT_STORAGE_BACKEND") }}
+{{- $resolverUrl := $appHost.resolverUrl }}
+{{- if and (not $resolverUrl) .Values.api.enabled }}
+{{- $resolverUrl = printf "http://%s-api:%d/internal/apps/resolve-launch" (include "opengeni.fullname" .) (.Values.api.service.port | int) }}
+{{- end }}
+
+{{- if not $resolverUrl }}
+{{- fail "appHost.resolverUrl is required when api.enabled=false" }}
+{{- end }}
+{{- include "opengeni.assertExclusiveObjectStorageFixture" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-app-host
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app-host
+spec:
+  replicas: {{ $appHost.replicaCount }}
+  {{- with $appHost.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: app-host
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: app-host
+      annotations:
+        {{- if and .Values.secret.create (not $appHost.credentialsSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with $appHost.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ $appHost.terminationGracePeriodSeconds }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $appHost.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: app-host
+          image: {{ include "opengeni.image" (dict "root" . "image" $appHost.image) | quote }}
+          imagePullPolicy: {{ $appHost.image.pullPolicy }}
+          command:
+            {{- toYaml $appHost.command | nindent 12 }}
+          securityContext:
+            {{- toYaml $appHost.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ $appHost.containerPort }}
+          env:
+            - name: OPENGENI_APP_HOST_HOST
+              value: 0.0.0.0
+            - name: OPENGENI_APP_HOST_PORT
+              value: {{ $appHost.containerPort | quote }}
+            - name: OPENGENI_APP_HOST_RESOLVER_URL
+              value: {{ $resolverUrl | quote }}
+            - name: OPENGENI_APP_HOST_RESOLVER_TIMEOUT_MS
+              value: {{ $appHost.resolverTimeoutMs | quote }}
+            - name: OPENGENI_APP_HOST_FRAME_ANCESTORS
+              value: {{ join "," $appHost.frameAncestors | quote }}
+            - name: OPENGENI_APP_HOST_RESOLVER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "appHost.resolverKeySecretKey is required" $appHost.resolverKeySecretKey }}
+            - name: OPENGENI_SERVICE_NAME
+              value: opengeni-app-host
+            - name: OPENGENI_ENVIRONMENT
+              value: {{ index .Values.config "OPENGENI_ENVIRONMENT" | quote }}
+            - name: OPENGENI_DEPLOYMENT_REVISION
+              value: {{ index .Values.config "OPENGENI_DEPLOYMENT_REVISION" | quote }}
+            - name: OPENGENI_SANDBOX_BACKEND
+              value: none
+            {{- if or .Values.garage.enabled .Values.minio.enabled }}
+            - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
+              value: {{ include "opengeni.objectStorageInternalEndpoint" . | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT
+              value: {{ include "opengeni.objectStorageInternalEndpoint" . | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_BACKEND
+              value: s3-compatible
+            - name: OPENGENI_OBJECT_STORAGE_BUCKET
+              value: {{ include "opengeni.objectStorageBucket" . | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_REGION
+              value: us-east-1
+            - name: OPENGENI_OBJECT_STORAGE_S3_PROVIDER
+              value: {{ include "opengeni.objectStorageS3Provider" . | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE
+              value: "true"
+            - name: OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.objectStorageSecretName" . }}
+                  key: {{ include "opengeni.objectStorageAccessKeyKey" . }}
+            - name: OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.objectStorageSecretName" . }}
+                  key: {{ include "opengeni.objectStorageSecretKeyKey" . }}
+            {{- else }}
+            - name: OPENGENI_OBJECT_STORAGE_BACKEND
+              value: {{ $storageBackend | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_BUCKET
+              value: {{ index .Values.config "OPENGENI_OBJECT_STORAGE_BUCKET" | quote }}
+            {{- if or (eq $storageBackend "s3-compatible") (eq $storageBackend "aws-s3") }}
+            - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
+              value: {{ default (index .Values.config "OPENGENI_OBJECT_STORAGE_ENDPOINT") (index .Values.config "OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT") | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT
+              value: {{ default (index .Values.config "OPENGENI_OBJECT_STORAGE_ENDPOINT") (index .Values.config "OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT") | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_REGION
+              value: {{ index .Values.config "OPENGENI_OBJECT_STORAGE_REGION" | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_S3_PROVIDER
+              value: {{ index .Values.config "OPENGENI_OBJECT_STORAGE_S3_PROVIDER" | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE
+              value: {{ index .Values.config "OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE" | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "appHost.objectStorageAccessKeyIdSecretKey is required" $appHost.objectStorageAccessKeyIdSecretKey }}
+                  optional: {{ eq $storageBackend "aws-s3" }}
+            - name: OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "appHost.objectStorageSecretAccessKeySecretKey is required" $appHost.objectStorageSecretAccessKeySecretKey }}
+                  optional: {{ eq $storageBackend "aws-s3" }}
+            {{- else if eq $storageBackend "azure-blob" }}
+            - name: OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT
+              value: {{ index .Values.config "OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT" | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "appHost.objectStorageAzureConnectionStringSecretKey is required" $appHost.objectStorageAzureConnectionStringSecretKey }}
+                  optional: true
+            - name: OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "appHost.objectStorageAzureAccountNameSecretKey is required" $appHost.objectStorageAzureAccountNameSecretKey }}
+                  optional: true
+            - name: OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "appHost.objectStorageAzureAccountKeySecretKey is required" $appHost.objectStorageAzureAccountKeySecretKey }}
+                  optional: true
+            {{- else if eq $storageBackend "gcs" }}
+            - name: OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID
+              value: {{ index .Values.config "OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID" | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_GCS_KEY_FILENAME
+              value: {{ index .Values.config "OPENGENI_OBJECT_STORAGE_GCS_KEY_FILENAME" | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_GCS_API_ENDPOINT
+              value: {{ index .Values.config "OPENGENI_OBJECT_STORAGE_GCS_API_ENDPOINT" | quote }}
+            - name: OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $credentialsSecret }}
+                  key: {{ required "appHost.objectStorageGcsCredentialsJsonSecretKey is required" $appHost.objectStorageGcsCredentialsJsonSecretKey }}
+                  optional: true
+            {{- end }}
+            {{- end }}
+          {{- if $appHost.probes.readiness.enabled }}
+          readinessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" $appHost.probes.readiness) | nindent 12 }}
+          {{- end }}
+          {{- if $appHost.probes.liveness.enabled }}
+          livenessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" $appHost.probes.liveness) | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $appHost.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- if $appHost.topologySpreadConstraints.enabled }}
+      topologySpreadConstraints:
+        {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "app-host" "values" $appHost) | nindent 8 }}
+      {{- end }}
+      {{- with $appHost.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $appHost.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $appHost.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

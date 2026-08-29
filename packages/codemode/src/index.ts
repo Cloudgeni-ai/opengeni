@@ -1,14 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
-import Ajv, { type ValidateFunction } from "ajv";
-import Ajv2019 from "ajv/dist/2019.js";
-import Ajv2020 from "ajv/dist/2020.js";
+import { randomUUID } from "node:crypto";
 import {
   ATTEMPT_TOOL_CATALOG_VERSION,
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
   AttemptToolCall,
   AttemptToolCatalog,
   AttemptToolCatalogEntry,
-  AttemptToolResult,
   CodemodeCallSubmission,
   CodemodeOperation,
   CodemodeDispatchAck,
@@ -26,6 +22,18 @@ import {
   type CodemodeDispatchRequest as CodemodeDispatchRequestValue,
   type CodemodeOperation as CodemodeOperationValue,
 } from "@opengeni/contracts";
+import {
+  allocateProgrammaticPaths,
+  canonicalToolIdentityKey,
+  canonicalToolResultError,
+  compileCanonicalToolSchema,
+  createCanonicalToolSchemaCompilers,
+  digestCanonicalJson,
+  inspectCanonicalToolResult,
+  normalizeCanonicalToolResult,
+  serializedJsonBytes,
+  type CanonicalToolSchemaValidator,
+} from "@opengeni/tool-runtime";
 
 export type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
 
@@ -187,7 +195,7 @@ export class CodemodeToolCallError extends Error {
   readonly retryable: boolean;
 
   constructor(readonly result: AttemptToolResultValue) {
-    const error = structuredToolError(result);
+    const error = canonicalToolResultError(result, "Codemode tool failed");
     super(error.message);
     this.name = "CodemodeToolCallError";
     this.code = error.code;
@@ -298,7 +306,7 @@ export class CodemodeClient {
       } else {
         operation = await this.read(operationId, options.signal);
       }
-      if (operation.state === "completed") return AttemptToolResult.parse(operation.result);
+      if (operation.state === "completed") return normalizeCanonicalToolResult(operation.result);
       if (["failed", "outcome_unknown", "cancelled"].includes(operation.state)) {
         throw new CodemodeOperationError(
           operation,
@@ -346,14 +354,18 @@ export class CodemodeClient {
     if (matches.length !== 1) throw new AttemptToolNotFoundError();
     const entry = matches[0]!;
     const result = await this.call(entry.identity, argumentsValue, options);
-    if (!entry.outputSchema) return result;
-    if (result.isError) throw new CodemodeToolCallError(result);
-    if (!result.structuredContent) {
+    const inspection = inspectCanonicalToolResult(result, {
+      expectsStructured: entry.outputSchema !== undefined,
+      errorFallbackMessage: "Codemode tool failed",
+    });
+    if (inspection.kind === "result") return inspection.result;
+    if (inspection.kind === "error") throw new CodemodeToolCallError(inspection.result);
+    if (inspection.kind === "missing_structured") {
       throw new CodemodeToolContractError(
         `Codemode tool ${path.join(".")} declared outputSchema but returned no structured content`,
       );
     }
-    return result.structuredContent;
+    return inspection.value;
   }
 
   private async submit(
@@ -441,8 +453,8 @@ export function compileCodemodeTools(
 type CompiledDefinition = {
   entry: AttemptToolCatalogEntryValue;
   execute: AttemptToolDefinition["execute"];
-  validateInput: ValidateFunction<unknown>;
-  validateOutput: ValidateFunction<unknown> | null;
+  validateInput: CanonicalToolSchemaValidator;
+  validateOutput: CanonicalToolSchemaValidator | null;
 };
 
 export class AttemptToolEnvironment {
@@ -484,7 +496,7 @@ export class AttemptToolEnvironment {
       throw new AttemptToolInputValidationError();
     }
     await this.authorize?.({ call, entry: definition.entry });
-    const result = AttemptToolResult.parse(
+    const result = normalizeCanonicalToolResult(
       await definition.execute(call.arguments, {
         operationId: call.operationId,
         caller: call.caller,
@@ -528,8 +540,14 @@ export function createAttemptToolEnvironment(
   input: CreateAttemptToolEnvironmentInput,
 ): AttemptToolEnvironment {
   const createdAt = (input.createdAt ?? new Date()).toISOString();
-  const paths = allocateCodemodePaths(input.definitions);
-  const schemaValidators = createSchemaValidators();
+  const paths = allocateProgrammaticPaths(
+    input.definitions.map((definition) => ({
+      identity: definition.identity,
+      ...(definition.codemodePath ? { programmaticPath: definition.codemodePath } : {}),
+    })),
+    { resolveSecondaryCollisions: false },
+  );
+  const schemaValidators = createCanonicalToolSchemaCompilers();
   const compiled = input.definitions.map((definition, index): CompiledDefinition => {
     const { execute, codemodePath: _path, ...entryInput } = definition;
     const entry = AttemptToolCatalogEntry.parse({
@@ -539,9 +557,9 @@ export function createAttemptToolEnvironment(
     return {
       entry,
       execute,
-      validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
+      validateInput: compileCanonicalToolSchema(entry.inputSchema, schemaValidators),
       validateOutput: entry.outputSchema
-        ? compileCatalogSchema(schemaValidators, entry.outputSchema)
+        ? compileCanonicalToolSchema(entry.outputSchema, schemaValidators)
         : null,
     };
   });
@@ -605,129 +623,13 @@ export function parseVerifiedAttemptToolCatalog(input: unknown): AttemptToolCata
 }
 
 function assertCatalogSize(catalog: AttemptToolCatalogValue): void {
-  if (
-    new TextEncoder().encode(JSON.stringify(catalog)).byteLength > ATTEMPT_TOOL_CATALOG_MAX_BYTES
-  ) {
+  if (serializedJsonBytes(catalog) > ATTEMPT_TOOL_CATALOG_MAX_BYTES) {
     throw new AttemptToolCatalogTooLargeError();
   }
 }
 
-type SchemaCompiler = { compile(schema: object): ValidateFunction<unknown> };
-
-// Validator compilation is structural and independent of attempt identity,
-// executable closures, credentials, and authorization. Reuse only exact
-// content-addressed validators; the attempt environment and catalog remain
-// freshly bound and digested on every execution. The hard cap prevents an
-// untrusted MCP schema stream from turning this process cache into a memory
-// sink.
-const COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES = 512;
-const compiledCatalogSchemaCache = new Map<string, ValidateFunction<unknown>>();
-
-function createSchemaValidators(): {
-  draft7: SchemaCompiler;
-  draft2019: SchemaCompiler;
-  draft2020: SchemaCompiler;
-} {
-  const options = {
-    allErrors: false,
-    coerceTypes: false,
-    strict: false,
-    useDefaults: false,
-    validateFormats: false,
-  } as const;
-  return {
-    draft7: new Ajv(options),
-    draft2019: new Ajv2019(options),
-    draft2020: new Ajv2020(options),
-  };
-}
-
-function compileCatalogSchema(
-  validators: ReturnType<typeof createSchemaValidators>,
-  schema: AttemptToolCatalogEntryValue["inputSchema"],
-): ValidateFunction<unknown> {
-  const dialect = typeof schema.$schema === "string" ? schema.$schema : "";
-  const family = dialect.includes("2020-12")
-    ? "2020-12"
-    : dialect.includes("2019-09")
-      ? "2019-09"
-      : "draft7";
-  const cacheKey = `${family}:${digestCanonicalJson(schema)}`;
-  const cached = compiledCatalogSchemaCache.get(cacheKey);
-  if (cached) {
-    compiledCatalogSchemaCache.delete(cacheKey);
-    compiledCatalogSchemaCache.set(cacheKey, cached);
-    return cached;
-  }
-  const compiled =
-    family === "2020-12"
-      ? validators.draft2020.compile(schema)
-      : family === "2019-09"
-        ? validators.draft2019.compile(schema)
-        : validators.draft7.compile(schema);
-  while (compiledCatalogSchemaCache.size >= COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES) {
-    const oldest = compiledCatalogSchemaCache.keys().next().value;
-    if (oldest === undefined) break;
-    compiledCatalogSchemaCache.delete(oldest);
-  }
-  compiledCatalogSchemaCache.set(cacheKey, compiled);
-  return compiled;
-}
-
-function allocateCodemodePaths(definitions: readonly AttemptToolDefinition[]): string[][] {
-  const bases = definitions.map((definition) =>
-    (definition.codemodePath?.length
-      ? definition.codemodePath
-      : [definition.identity.serverId, definition.identity.toolName]
-    ).map(safeNamespaceSegment),
-  );
-  const counts = new Map<string, number>();
-  for (const path of bases) {
-    const key = path.join("\u0000");
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return bases.map((base, index) => {
-    const key = base.join("\u0000");
-    if (counts.get(key) === 1) return base;
-    const suffix = `_${shortIdentityDigest(definitions[index]!.identity)}`;
-    const last = base.at(-1)!;
-    return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
-  });
-}
-
-function safeNamespaceSegment(value: string): string {
-  let normalized = value.replace(/[^A-Za-z0-9_$]/gu, "_");
-  if (!/^[A-Za-z_$]/u.test(normalized)) normalized = `_${normalized}`;
-  if (["__proto__", "prototype", "constructor"].includes(normalized)) {
-    normalized = `_${normalized}`;
-  }
-  return normalized.slice(0, 128) || "_";
-}
-
-function shortIdentityDigest(identity: AttemptToolIdentity): string {
-  return createHash("sha256").update(identityKey(identity), "utf8").digest("hex").slice(0, 10);
-}
-
 function identityKey(identity: AttemptToolIdentity): string {
-  return `${identity.serverId}\u0000${identity.toolName}`;
-}
-
-function digestCanonicalJson(value: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(canonicalJsonValue(value)), "utf8")
-    .digest("hex");
-}
-
-function canonicalJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalJsonValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
-    );
-  }
-  return value;
+  return canonicalToolIdentityKey(identity);
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -739,22 +641,6 @@ function boundedPositiveInteger(value: number, minimum: number, maximum: number)
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
-}
-
-function structuredToolError(result: AttemptToolResultValue): {
-  code: string;
-  message: string;
-  retryable: boolean;
-} {
-  const structured = result.structuredContent as
-    | { error?: { code?: unknown; message?: unknown; retryable?: unknown } }
-    | undefined;
-  const error = structured?.error;
-  return {
-    code: typeof error?.code === "string" ? error.code : "tool_error",
-    message: typeof error?.message === "string" ? error.message : "Codemode tool failed",
-    retryable: error?.retryable === true,
-  };
 }
 
 async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {

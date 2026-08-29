@@ -52,5 +52,10 @@ export const Permission = z.enum([
   "rigs:manage",
   "artifacts:read",
   "artifacts:publish",
+  "apps:read",
+  "apps:write",
+  "apps:publish",
+  "apps:run",
+  "apps:delete",
 ]);
 export type Permission = z.infer<typeof Permission>;

@@ -1603,6 +1603,12 @@ Production self-hosted platform dependencies should use mature upstream projects
 
 The OpenGeni Helm chart owns OpenGeni API, web, worker, migrations, optional Terraform Registry MCP docs service, and integration resources such as `ServiceMonitor`, `PrometheusRule`, `ExternalSecret`, and workload NetworkPolicies. It must not become a replacement chart for NATS, Temporal, Postgres, cert-manager, or the observability platform.
 
+The chart also contains a disabled-by-default dedicated Apps origin workload.
+Its DNS/TLS, least-privilege storage IAM, resolver credential, ingress behavior,
+provider limitations, and acceptance procedure are defined in
+[`apps.md`](apps.md). Do not route Apps through the web/API origin or project the
+general runtime Secret into that workload.
+
 The stack wrapper may install upstream charts as a convenience layer. That
 keeps lifecycle commands visible and reversible without making those charts
 OpenGeni chart dependencies.
