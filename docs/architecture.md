@@ -928,6 +928,14 @@ holders, workspace mutation generation, archive/recovery state, and teardown
 authority. The active session pointer selects an effective target without
 rewriting the session's durable home policy.
 
+Immutable rig setup is single-flight at the lease boundary. The exact lease
+epoch, provider instance, and non-secret setup specification hash own one
+durable claim/revision/settlement receipt. Sibling turns join or reuse that
+receipt with backed-off durable reads; after an owner disappears, a deadline
+successor safely re-enters the box-local marker guard. This shared receipt never
+contains or covers per-turn credentials, repository authorization, Codemode
+tokens, cloud login, attached files, or generated media.
+
 Rigs layer versioned setup and checks on the deployment-owned platform sandbox
 base; they cannot replace that base image. A verified provider-native Rig image
 is only a physical cold-create optimization and never changes the logical lease

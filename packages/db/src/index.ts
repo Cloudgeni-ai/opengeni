@@ -37346,6 +37346,17 @@ type LeaseRow = {
   rotation_reason: "provider_deadline" | "operator" | "teardown_claim" | null;
   current_checkpoint_artifact_id: string | null;
   previous_checkpoint_artifact_id: string | null;
+  shared_preparation_lease_epoch: number | string | null;
+  shared_preparation_instance_id: string | null;
+  shared_preparation_spec_hash: string | null;
+  shared_preparation_status: "running" | "completed" | "failed" | null;
+  shared_preparation_claim_id: string | null;
+  shared_preparation_owner_attempt_id: string | null;
+  shared_preparation_attempt: number | string | null;
+  shared_preparation_revision: number | string;
+  shared_preparation_started_at: Date | string | null;
+  shared_preparation_deadline_at: Date | string | null;
+  shared_preparation_settled_at: Date | string | null;
   expires_at: Date | string;
 } & Record<string, unknown>;
 
@@ -37511,6 +37522,299 @@ export type AcquireLeaseResult =
         | "provider_recovery_in_progress";
       lease: LeaseSnapshot;
     };
+
+export type SandboxSharedPreparationSnapshot = {
+  status: "running" | "completed" | "failed";
+  leaseEpoch: number;
+  instanceId: string;
+  specHash: string;
+  claimId: string;
+  ownerAttemptId: string;
+  attempt: number;
+  revision: number;
+  startedAt: Date;
+  deadlineAt: Date;
+  settledAt: Date | null;
+};
+
+export type ClaimSandboxSharedPreparationInput = {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  expectedLeaseEpoch: number;
+  expectedInstanceId: string;
+  specHash: string;
+  holderId: string;
+  claimId: string;
+  ownerAttemptId: string;
+  timeoutMs: number;
+};
+
+export type ClaimSandboxSharedPreparationResult =
+  | { role: "owner" | "joined" | "reused"; preparation: SandboxSharedPreparationSnapshot }
+  | { role: "fenced"; lease: LeaseSnapshot | null };
+
+function validateSandboxSharedPreparationIdentity(input: ClaimSandboxSharedPreparationInput): void {
+  if (!Number.isSafeInteger(input.expectedLeaseEpoch) || input.expectedLeaseEpoch < 0) {
+    throw new Error("Sandbox shared preparation lease epoch is invalid");
+  }
+  if (!input.expectedInstanceId.trim()) {
+    throw new Error("Sandbox shared preparation provider instance is invalid");
+  }
+  if (!input.holderId.trim()) {
+    throw new Error("Sandbox shared preparation lease holder is invalid");
+  }
+  if (!/^sha256:[0-9a-f]{64}$/u.test(input.specHash)) {
+    throw new Error("Sandbox shared preparation specification hash is invalid");
+  }
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      input.claimId,
+    )
+  ) {
+    throw new Error("Sandbox shared preparation claim id is invalid");
+  }
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      input.ownerAttemptId,
+    )
+  ) {
+    throw new Error("Sandbox shared preparation owner attempt id is invalid");
+  }
+  if (
+    !Number.isSafeInteger(input.timeoutMs) ||
+    input.timeoutMs < 1_000 ||
+    input.timeoutMs > 3_600_000
+  ) {
+    throw new Error("Sandbox shared preparation timeout is invalid");
+  }
+}
+
+function sandboxSharedPreparationFromLeaseRow(
+  row: LeaseRow,
+): SandboxSharedPreparationSnapshot | null {
+  if (
+    row.shared_preparation_status === null ||
+    row.shared_preparation_lease_epoch === null ||
+    row.shared_preparation_instance_id === null ||
+    row.shared_preparation_spec_hash === null ||
+    row.shared_preparation_claim_id === null ||
+    row.shared_preparation_owner_attempt_id === null ||
+    row.shared_preparation_attempt === null ||
+    row.shared_preparation_started_at === null ||
+    row.shared_preparation_deadline_at === null
+  ) {
+    return null;
+  }
+  return {
+    status: row.shared_preparation_status,
+    leaseEpoch: Number(row.shared_preparation_lease_epoch),
+    instanceId: row.shared_preparation_instance_id,
+    specHash: row.shared_preparation_spec_hash,
+    claimId: row.shared_preparation_claim_id,
+    ownerAttemptId: row.shared_preparation_owner_attempt_id,
+    attempt: Number(row.shared_preparation_attempt),
+    revision: Number(row.shared_preparation_revision),
+    startedAt:
+      row.shared_preparation_started_at instanceof Date
+        ? row.shared_preparation_started_at
+        : new Date(row.shared_preparation_started_at),
+    deadlineAt:
+      row.shared_preparation_deadline_at instanceof Date
+        ? row.shared_preparation_deadline_at
+        : new Date(row.shared_preparation_deadline_at),
+    settledAt:
+      row.shared_preparation_settled_at === null
+        ? null
+        : row.shared_preparation_settled_at instanceof Date
+          ? row.shared_preparation_settled_at
+          : new Date(row.shared_preparation_settled_at),
+  };
+}
+
+function sandboxSharedPreparationMatches(
+  row: LeaseRow,
+  input: Pick<
+    ClaimSandboxSharedPreparationInput,
+    "expectedLeaseEpoch" | "expectedInstanceId" | "specHash"
+  >,
+): boolean {
+  return (
+    Number(row.shared_preparation_lease_epoch) === input.expectedLeaseEpoch &&
+    row.shared_preparation_instance_id === input.expectedInstanceId &&
+    row.shared_preparation_spec_hash === input.specHash
+  );
+}
+
+/**
+ * Claim, join, or reuse immutable setup for one exact physical sandbox. The
+ * provider operation remains outside the transaction; the claim deadline and
+ * box-local idempotency marker make a lost owner recoverable without sharing
+ * any turn-private credential or file material.
+ */
+export async function claimSandboxSharedPreparation(
+  db: Database,
+  input: ClaimSandboxSharedPreparationInput,
+): Promise<ClaimSandboxSharedPreparationResult> {
+  validateSandboxSharedPreparationIdentity(input);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (
+          !row ||
+          row.liveness !== "warm" ||
+          Number(row.lease_epoch) !== input.expectedLeaseEpoch ||
+          row.instance_id !== input.expectedInstanceId
+        ) {
+          return { role: "fenced" as const, lease: row ? mapLeaseRow(row) : null };
+        }
+        const holderRows = await tx.execute<{ present: boolean }>(sql`
+          select exists (
+            select 1 from sandbox_lease_holders
+            where lease_id = ${row.id}
+              and kind = 'turn'
+              and holder_id = ${input.holderId}
+          ) as present
+        `);
+        if (holderRows[0]?.present !== true) {
+          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+        }
+
+        const current = sandboxSharedPreparationFromLeaseRow(row);
+        const exact = sandboxSharedPreparationMatches(row, input);
+        if (exact && current?.status === "completed") {
+          return { role: "reused" as const, preparation: current };
+        }
+        if (exact && current?.status === "running" && current.deadlineAt.getTime() > Date.now()) {
+          return {
+            role: current.claimId === input.claimId ? ("owner" as const) : ("joined" as const),
+            preparation: current,
+          };
+        }
+
+        const updatedRows = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set
+            shared_preparation_lease_epoch = ${input.expectedLeaseEpoch},
+            shared_preparation_instance_id = ${input.expectedInstanceId},
+            shared_preparation_spec_hash = ${input.specHash},
+            shared_preparation_status = 'running',
+            shared_preparation_claim_id = ${input.claimId},
+            shared_preparation_owner_attempt_id = ${input.ownerAttemptId},
+            shared_preparation_attempt = ${exact ? Number(row.shared_preparation_attempt ?? 0) + 1 : 1},
+            shared_preparation_revision = shared_preparation_revision + 1,
+            shared_preparation_started_at = now(),
+            shared_preparation_deadline_at = now() + (${String(input.timeoutMs)} || ' milliseconds')::interval,
+            shared_preparation_settled_at = null,
+            updated_at = now()
+          where id = ${row.id}
+            and lease_epoch = ${input.expectedLeaseEpoch}
+            and instance_id = ${input.expectedInstanceId}
+            and liveness = 'warm'
+          returning *
+        `);
+        const updated = updatedRows[0];
+        return updated
+          ? {
+              role: "owner" as const,
+              preparation: sandboxSharedPreparationFromLeaseRow(updated)!,
+            }
+          : { role: "fenced" as const, lease: mapLeaseRow(row) };
+      }),
+  );
+}
+
+export async function readSandboxSharedPreparation(
+  db: Database,
+  input: Omit<ClaimSandboxSharedPreparationInput, "claimId" | "ownerAttemptId" | "timeoutMs">,
+): Promise<
+  { status: "available"; preparation: SandboxSharedPreparationSnapshot } | { status: "fenced" }
+> {
+  if (!/^sha256:[0-9a-f]{64}$/u.test(input.specHash)) {
+    throw new Error("Sandbox shared preparation specification hash is invalid");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        select lease.* from sandbox_leases lease
+        where lease.workspace_id = ${input.workspaceId}
+          and lease.sandbox_group_id = ${input.sandboxGroupId}
+          and exists (
+            select 1 from sandbox_lease_holders holder
+            where holder.lease_id = lease.id
+              and holder.kind = 'turn'
+              and holder.holder_id = ${input.holderId}
+          )
+      `);
+      const row = rows[0];
+      const preparation = row ? sandboxSharedPreparationFromLeaseRow(row) : null;
+      if (
+        !row ||
+        row.liveness !== "warm" ||
+        Number(row.lease_epoch) !== input.expectedLeaseEpoch ||
+        row.instance_id !== input.expectedInstanceId ||
+        !preparation ||
+        !sandboxSharedPreparationMatches(row, input)
+      ) {
+        return { status: "fenced" as const };
+      }
+      return { status: "available" as const, preparation };
+    },
+  );
+}
+
+export async function settleSandboxSharedPreparation(
+  db: Database,
+  input: Omit<ClaimSandboxSharedPreparationInput, "ownerAttemptId" | "timeoutMs"> & {
+    outcome: "completed" | "failed";
+  },
+): Promise<boolean> {
+  if (!/^sha256:[0-9a-f]{64}$/u.test(input.specHash)) {
+    throw new Error("Sandbox shared preparation specification hash is invalid");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set
+          shared_preparation_status = ${input.outcome},
+          shared_preparation_revision = shared_preparation_revision + 1,
+          shared_preparation_settled_at = now(),
+          updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm'
+          and lease_epoch = ${input.expectedLeaseEpoch}
+          and instance_id = ${input.expectedInstanceId}
+          and shared_preparation_lease_epoch = ${input.expectedLeaseEpoch}
+          and shared_preparation_instance_id = ${input.expectedInstanceId}
+          and shared_preparation_spec_hash = ${input.specHash}
+          and shared_preparation_claim_id = ${input.claimId}
+          and shared_preparation_status = 'running'
+          and exists (
+            select 1 from sandbox_lease_holders holder
+            where holder.lease_id = sandbox_leases.id
+              and holder.kind = 'turn'
+              and holder.holder_id = ${input.holderId}
+          )
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
 
 // Thrown by callers that treat a fenced/superseded epoch as an error path.
 export class SandboxLeaseSupersededError extends Error {
