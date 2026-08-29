@@ -276,6 +276,28 @@ EXCEPTION WHEN OTHERS THEN
 END
 $advance_session_event_cursors$;
 
+-- Trigger functions may resolve target-schema relations, but pg_temp must not
+-- precede those relations. In particular, the SECURITY DEFINER event trigger
+-- must not be redirected through caller-owned temporary objects.
+DO $session_event_cursor_function_paths$
+DECLARE
+  target_schema text := pg_catalog.current_schema();
+BEGIN
+  EXECUTE pg_catalog.format(
+    'ALTER FUNCTION %I.initialize_session_event_cursors_for_inserted_sessions() '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema,
+    target_schema
+  );
+  EXECUTE pg_catalog.format(
+    'ALTER FUNCTION %I.advance_session_event_cursors_for_inserted_events() '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema,
+    target_schema
+  );
+END
+$session_event_cursor_function_paths$;
+
 REVOKE ALL ON FUNCTION advance_session_event_cursors_for_inserted_events() FROM PUBLIC;
 
 CREATE TRIGGER session_events_advance_event_cursors

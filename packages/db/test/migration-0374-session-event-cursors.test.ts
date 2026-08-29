@@ -1,13 +1,72 @@
 import { describe, expect, test } from "bun:test";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { bootstrapWorkspace, createDb, createSession } from "../src";
 import { migrate } from "../src/migrate";
 
 const migrationName = "0374_session_event_cursors.sql";
+const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 describe("migration 0374 session event cursors", () => {
+  test("pins both trigger functions ahead of caller-owned temporary schemas", async () => {
+    const source = await readFile(migrationUrl, "utf8");
+
+    expect(source).toContain(
+      "ALTER FUNCTION %I.initialize_session_event_cursors_for_inserted_sessions()",
+    );
+    expect(source).toContain(
+      "ALTER FUNCTION %I.advance_session_event_cursors_for_inserted_events()",
+    );
+    expect(source.match(/SET search_path = pg_catalog, %I, pg_temp/gu)).toHaveLength(2);
+  });
+
+  test("installs both trigger functions with pg_temp last", async () => {
+    const blank = await acquireBlankTestDatabase("migration-0374-function-paths");
+    if (!blank) {
+      if (requireRealDatabase) throw new Error("real blank database unavailable");
+      return;
+    }
+
+    const sql = postgres(blank.databaseUrl, { max: 1, prepare: false });
+    try {
+      await migrate(blank.databaseUrl);
+
+      const [schema] = await sql<Array<{ name: string }>>`
+        select current_schema() as name
+      `;
+      const functions = Array.from(
+        await sql<Array<{ name: string; config: string[] | null }>>`
+          select
+            procedure.proname as name,
+            procedure.proconfig as config
+          from pg_proc as procedure
+          join pg_namespace as namespace
+            on namespace.oid = procedure.pronamespace
+          where namespace.nspname = current_schema()
+            and procedure.proname in (
+              'initialize_session_event_cursors_for_inserted_sessions',
+              'advance_session_event_cursors_for_inserted_events'
+            )
+          order by procedure.proname
+        `,
+      );
+
+      expect(functions).toHaveLength(2);
+      expect(functions.map((entry) => entry.name)).toEqual([
+        "advance_session_event_cursors_for_inserted_events",
+        "initialize_session_event_cursors_for_inserted_sessions",
+      ]);
+      for (const entry of functions) {
+        expect(entry.config).toContain(`search_path=pg_catalog, ${schema!.name}, pg_temp`);
+      }
+    } finally {
+      await sql.end({ timeout: 5 }).catch(() => undefined);
+      await blank.release();
+    }
+  }, 180_000);
+
   test("refuses a legacy event history with a missing sequence", async () => {
     const blank = await acquireBlankTestDatabase("migration-0374-gapped-history");
     if (!blank) {
