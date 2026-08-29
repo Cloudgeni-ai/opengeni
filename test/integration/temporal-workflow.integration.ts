@@ -1069,7 +1069,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "Temporal activity failure never manufactures quiescence or pins workflow completion",
+    "Temporal activity failure never manufactures quiescence and keeps reconciliation live",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -1080,6 +1080,7 @@ describe("Temporal workflow integration", () => {
       const queuedTurns = [first];
       const controls: unknown[] = [];
       let runs = 0;
+      let reconciliationAttempts = 0;
       let cancellationWaitAttemptId: string | null = null;
       let terminateFirst = false;
       const admission = createTurnAdmission(queuedTurns, async () => {
@@ -1108,7 +1109,10 @@ describe("Temporal workflow integration", () => {
           terminateFirst = true;
           return { action: "continue" as const };
         },
-        reconcileSessionAttemptQuiescence: async () => ({ action: "pending" as const }),
+        reconcileSessionAttemptQuiescence: async () => {
+          reconciliationAttempts += 1;
+          return { action: "pending" as const };
+        },
       });
       const run = worker.run();
       try {
@@ -1122,12 +1126,21 @@ describe("Temporal workflow integration", () => {
         queuedTurns.push(second);
         await handle.signal("userMessage", second.triggerEventId);
         await handle.signal("sessionControl", "control-event");
-        await handle.result();
+        await waitFor(() => reconciliationAttempts >= 1);
+
+        // A later wake must drive another exact reconciliation pass without
+        // admitting the queued replacement or closing the workflow. This
+        // distinguishes persistent receipt convergence from a single RUNNING
+        // snapshot taken just before an erroneous workflow completion.
+        await handle.signal("queueChanged");
+        await waitFor(() => reconciliationAttempts >= 2);
 
         expect(runs).toBe(1);
         expect(controls).toEqual([
           { ...scope, sessionId, attemptId: expect.any(String), workflowId },
         ]);
+        expect((await handle.describe()).status.name).toBe("RUNNING");
+        await handle.terminate("test verified persistent reconciliation");
       } finally {
         terminateFirst = true;
         worker.shutdown();

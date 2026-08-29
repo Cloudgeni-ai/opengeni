@@ -583,19 +583,21 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         if (reconciliation.action === "quiesced") continue;
       }
       // Logical settlement is complete, but the exact predecessor activity has
-      // not yet durably proved sandbox/tool quiescence. Wait only briefly for
-      // its transactional queueChanged wake. If provider/tool cancellation is
-      // genuinely slow, close this workflow run rather than consuming a turn
-      // slot or churning control activities; the outbox uses signalWithStart to
-      // restart this exact workflow after the receipt commits.
+      // not yet durably proved sandbox/tool quiescence. Prefer its transactional
+      // queueChanged wake. Also retain one low-frequency deterministic timer:
+      // the recovery wake can already be delivered while the physical activity
+      // still owns its heartbeat lease, leaving no future transaction that can
+      // signalWithStart after the lease expires. Keeping this workflow available
+      // guarantees passive receipt convergence without admitting replacement
+      // work or creating a hot control-activity loop.
       const seenSignalVersion = signalVersion;
-      const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
+      const woke = await condition(() => signalVersion !== seenSignalVersion, "2 minutes");
       if (woke) continue;
       // Close only against the same signal snapshot. A proof signal accepted
       // at the timer/completion boundary must loop through the DB-only receipt
       // activity rather than disappearing with this workflow run.
       if (signalVersion !== seenSignalVersion || pendingQuiescenceProofs.size > 0) continue;
-      return;
+      continue;
     }
     if (peek.kind === "capacity-wait") {
       await waitForProviderCapacity(peek.ref);
