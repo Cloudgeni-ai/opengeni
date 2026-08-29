@@ -1571,6 +1571,11 @@ export async function createSessionForRequestWithOutcome(
   agentChildPresentation?: AgentChildSessionCreatePresentation,
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+  if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
+    throw new HTTPException(422, {
+      message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
+    });
+  }
   const settings = await resolveWorkspaceModelBoundarySettings(
     unresolvedDeps,
     grant,
@@ -1593,11 +1598,6 @@ export async function createSessionForRequestWithOutcome(
         message: "Only-me sessions require their own sandbox",
       });
     }
-  }
-  if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
-    throw new HTTPException(422, {
-      message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
-    });
   }
   // A committed keyed denial is the idempotent outcome even if mutable
   // resources, policy, authorization, or budget have changed since the first
