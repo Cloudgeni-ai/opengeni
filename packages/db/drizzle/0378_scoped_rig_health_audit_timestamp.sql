@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
--- Keep the access-controlled Rig projection in parity with the ordinary
--- workspace query: terminal verification evidence for the active version must
--- be visible to REST and first-party MCP callers instead of staying unknown.
+-- Repair the already-ledgered scoped Rig health projection so generic audit
+-- metadata can never abort a SECURITY DEFINER read. Audit occurrence time is
+-- the trusted ordering and display timestamp for audit-backed evidence.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -48,10 +48,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path FROM CURRENT AS $$
           UNION ALL
           SELECT CASE event.action WHEN 'rig.verification.passed' THEN 'passing'
               ELSE 'failing' END,
-            coalesce(
-              nullif(event.metadata ->> 'finishedAt', '')::timestamptz,
-              event.occurred_at
-            )
+            event.occurred_at
           FROM audit_events event
           WHERE event.account_id = active_version.account_id
             AND event.workspace_id = active_version.workspace_id
@@ -77,4 +74,4 @@ $$;
 REVOKE ALL ON FUNCTION scoped_rig_json(uuid) FROM PUBLIC;
 
 COMMENT ON FUNCTION scoped_rig_json(uuid) IS
-  'Access-controlled Rig projection with active-version health from the latest terminal change or audit verification evidence.';
+  'Access-controlled Rig projection with active-version health from terminal evidence and trusted audit occurrence timestamps.';

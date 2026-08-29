@@ -13,8 +13,7 @@ describe("migration 0377 scoped Rig health projection", () => {
     expect(source).toContain("FROM audit_events event");
     expect(source).toContain("'rig.verification.passed', 'rig.verification.failed'");
     expect(source).toContain("event.metadata ->> 'versionId' = active_version.id::text");
-    expect(source).toContain("event.occurred_at");
-    expect(source).not.toContain("event.metadata ->> 'finishedAt'");
+    expect(source).toContain("nullif(event.metadata ->> 'finishedAt', '')::timestamptz");
     expect(source).toContain("REVOKE ALL ON FUNCTION scoped_rig_json(uuid) FROM PUBLIC");
     expect(source).not.toContain(
       "jsonb_build_object('checkHealth', 'unknown', 'lastVerifiedAt', NULL)",
