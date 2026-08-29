@@ -7,7 +7,6 @@ import {
 
 function fakeProcess() {
   let listener: ((reason: unknown) => void) | undefined;
-  const exits: number[] = [];
   const runtimeProcess: WorkerUnhandledRejectionProcess = {
     on: (_event, next) => {
       listener = next;
@@ -15,14 +14,10 @@ function fakeProcess() {
     off: (_event, current) => {
       if (listener === current) listener = undefined;
     },
-    exit: (code) => {
-      exits.push(code);
-    },
   };
   return {
     runtimeProcess,
     emit: (reason: unknown) => listener?.(reason),
-    exits,
     hasListener: () => listener !== undefined,
   };
 }
@@ -30,7 +25,10 @@ function fakeProcess() {
 describe("worker unhandled rejection boundary", () => {
   test("keeps detached structural MCP lifecycle duplicates non-fatal", () => {
     const runtime = fakeProcess();
-    const dispose = installWorkerUnhandledRejectionBoundary(runtime.runtimeProcess);
+    const reports: string[] = [];
+    const dispose = installWorkerUnhandledRejectionBoundary(runtime.runtimeProcess, (event) =>
+      reports.push(event),
+    );
 
     runtime.emit(
       Object.assign(new Error("MCP lifecycle connect failed"), {
@@ -41,19 +39,20 @@ describe("worker unhandled rejection boundary", () => {
       }),
     );
 
-    expect(runtime.exits).toEqual([]);
+    expect(reports).toEqual(["detached_runtime_mcp_lifecycle"]);
     dispose();
     expect(runtime.hasListener()).toBe(false);
   });
 
-  test("keeps unknown and malformed rejections fatal", () => {
+  test("keeps unknown and malformed detached rejections non-fatal", () => {
     const runtime = fakeProcess();
-    installWorkerUnhandledRejectionBoundary(runtime.runtimeProcess);
+    const reports: string[] = [];
+    installWorkerUnhandledRejectionBoundary(runtime.runtimeProcess, (event) => reports.push(event));
 
     runtime.emit(new Error("unknown"));
     runtime.emit({ name: "McpLifecycleError", code: "mcp_connect_failed" });
 
-    expect(runtime.exits).toEqual([1, 1]);
+    expect(reports).toEqual(["detached_unknown", "detached_unknown"]);
   });
 
   test("fails closed for hostile rejection objects", () => {
