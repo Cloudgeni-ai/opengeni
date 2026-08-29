@@ -53,6 +53,7 @@ import {
   settleSandboxSharedPreparation,
   type Database,
   type DbClient,
+  type WorkspaceDeleteObservation,
 } from "../src/index";
 
 // The 0017 lease state machine driven through the REAL packages/db query fns
@@ -611,7 +612,12 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       where workspace_id = ${workspaceId}`;
     expect(attachmentBeforeDelete?.count).toBe(1);
 
-    const deleted = await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId });
+    const deleteObservations: WorkspaceDeleteObservation[] = [];
+    const deleted = await deleteWorkspaceIfQuiescent(db, {
+      accountId,
+      workspaceId,
+      observer: { onPhase: (observation) => deleteObservations.push(observation) },
+    });
     expect(deleted.status).toBe("deleted");
     if (deleted.status !== "deleted") throw new Error("workspace deletion did not commit");
     const cleanup = deleted.temporalScheduleCleanups[0];
@@ -639,6 +645,26 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(workspaceCount?.count).toBe(0);
     expect(scheduleCount?.count).toBe(0);
     expect(commandCount?.count).toBe(0);
+    expect(deleteObservations.map((observation) => observation.phase)).toEqual([
+      "lifecycle_lock",
+      "account_workspace_lock",
+      "session_fence",
+      "runtime_ownership",
+      "external_cleanup",
+      "variable_set_detach",
+      "cascade",
+      "transaction",
+    ]);
+    expect(deleteObservations.find((observation) => observation.phase === "cascade")).toMatchObject(
+      { outcome: "deleted" },
+    );
+    expect(
+      deleteObservations.find((observation) => observation.phase === "external_cleanup"),
+    ).toMatchObject({ inventory: { temporal_schedules: 1 } });
+    expect(deleteObservations.at(-1)).toMatchObject({
+      phase: "transaction",
+      outcome: "deleted",
+    });
 
     // The receipt intentionally survives the workspace FK cascade. A stale
     // process cannot settle it; a failed exact owner releases it, and another
