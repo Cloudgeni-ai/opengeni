@@ -3506,8 +3506,6 @@ export type ClientConfig = {
         allowed: FirstPartyMcpToolName[];
       }
     | undefined;
-  /** Deployment default used to choose the truthful initial compute target. */
-  defaultSandboxBackend?: SandboxBackend | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
