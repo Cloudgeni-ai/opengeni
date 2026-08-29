@@ -1,5 +1,34 @@
 # @opengeni/api-router
 
+## 2.5.4
+
+### Patch Changes
+
+- 06fda28: Return bounded stable-key conflict outcomes for governed preference proposals instead of exposing persistence query details.
+- Updated dependencies [3c75347]
+- Updated dependencies [551cead]
+- Updated dependencies [06460ae]
+- Updated dependencies [227c54c]
+- Updated dependencies [06fda28]
+- Updated dependencies [499cc48]
+- Updated dependencies [37faec3]
+  - @opengeni/runtime@1.4.6
+  - @opengeni/db@3.6.3
+  - @opengeni/core@2.5.7
+  - @opengeni/github@0.6.4
+  - @opengeni/documents@0.8.9
+  - @opengeni/events@0.4.7
+
+## 2.5.3
+
+### Patch Changes
+
+- becd349: Return browser HTTP/1 event streams as capped, known-length batches so multiple tabs cannot retain ambiguous streaming requests and starve ordinary API reads.
+- 9787ca2: Close authorization-revoked SSE responses cleanly and cycle browser streams with server- and browser-owned HTTP/1 lifetimes so stale or orphaned native requests cannot exhaust the shared connection pool or starve ordinary API reads.
+- 34a05ca: Deliver browser HTTP/1 events as immediate, vendor-typed snapshots read from the durable event store, without opening a timed live subscription or closing the reusable socket. Preserve cursor-based replay while preventing replaced documents from starving ordinary API reads across tabs and account changes.
+  - @opengeni/runtime@1.4.5
+  - @opengeni/core@2.5.6
+
 ## 2.5.2
 
 ### Patch Changes

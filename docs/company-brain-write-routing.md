@@ -83,6 +83,12 @@ is a write-destination receipt only; it does not select context, freeze a
 logical-turn snapshot, or overlap the permission-first selector's context
 receipt ownership.
 
+A new operation that selects a workspace preference stable key already owned by
+another proposal returns the bounded `preference_stable_key_conflict` tool
+outcome. The database adapter maps the collision to the preference registry's
+domain error before the MCP surface renders it, so SQL text and parameters are
+never part of the public failure.
+
 Migration `0255_company_brain_governed_write_proposals.sql` broadens the
 historically named onboarding-proposal validator without changing its table. A
 Knowledge-backed instruction draft is admitted only when its provenance source
@@ -136,6 +142,13 @@ activation operation ids are derived deterministically from the proposal
 operation id, so exact retries converge on the same receipts. The public
 receipt exposes only the effective source-specific decision and snapshot
 identity/hash, not the snapshot's other source overrides.
+
+Optional post-activation Slack publication starts only after the activation
+receipt is durable and is never awaited by the proposal or `remember` router. A
+stalled notification sink therefore cannot withhold the activated receipt.
+Exact retries return the same durable activation outcome and may dispatch the
+publication again; the publication outbox deduplicates on the activation
+receipt identity.
 
 The first-party proposal surface is intentionally explicit:
 `knowledge_propose`, `knowledge_correct`, `task_note_promote_knowledge`,

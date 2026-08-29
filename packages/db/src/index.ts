@@ -42956,6 +42956,25 @@ export class SandboxWorkspaceMutationFencedError extends Error {
   }
 }
 
+/** A process-scoped mutation named a durable retained process that has already
+ * reached a terminal state. This remains a fence—the provider must not be
+ * called again—but carries the existing terminal result so model-facing shell
+ * tools can report completion/loss instead of presenting a retryable platform
+ * failure for a handle that can never become active again. */
+export class SandboxRetainedProcessTerminalError extends SandboxWorkspaceMutationFencedError {
+  readonly name = "SandboxRetainedProcessTerminalError";
+
+  constructor(
+    public readonly state: "exited" | "lost",
+    public readonly exitCode: number | null,
+  ) {
+    super(
+      "process_fenced",
+      `Workspace mutation rejected because the retained process already ${state}`,
+    );
+  }
+}
+
 export type SandboxWorkspaceMutationAdmission = {
   id: string;
   leaseId: string;
@@ -43755,11 +43774,14 @@ async function lockWorkspaceMutationAuthorityTx(
     )
     .for("update")
     .limit(1);
-  if (!process || process.state !== "active") {
+  if (!process) {
     throw new SandboxWorkspaceMutationFencedError(
       "process_fenced",
-      "Workspace mutation rejected because the retained process is not active",
+      "Workspace mutation rejected because the retained process does not exist",
     );
+  }
+  if (process.state !== "active") {
+    throw new SandboxRetainedProcessTerminalError(process.state, process.exitCode);
   }
   if (session.sandboxGroupId !== process.sandboxGroupId) {
     throw new SandboxWorkspaceMutationFencedError(

@@ -26,6 +26,8 @@ const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
 export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+export const HTTP1_BROWSER_SSE_BATCH_MAX_BYTES = 512 * 1024;
+export const HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE = "application/vnd.opengeni.sse-batch";
 type SseStreamKind = "session" | "workspace_control" | "workspace_interaction";
 const activeSseStreams: Record<SseStreamKind, number> = {
   session: 0,
@@ -41,6 +43,7 @@ export type SseDeliveryBoundObservation = {
 };
 
 export type ByteBoundedSseStreamOptions = {
+  connectionLifetimeMs?: number | undefined;
   maxQueuedBytes?: number;
   stallTimeoutMs?: number;
   onStop?: () => void;
@@ -72,16 +75,24 @@ export function createByteBoundedSseStream(
 ): ByteBoundedSseStream {
   const maxQueuedBytes = options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES;
   const stallTimeoutMs = options.stallTimeoutMs ?? SSE_WRITE_STALL_TIMEOUT_MS;
+  const connectionLifetimeMs = options.connectionLifetimeMs;
   if (!Number.isSafeInteger(maxQueuedBytes) || maxQueuedBytes <= 0) {
     throw new RangeError("SSE byte high-water mark must be a positive safe integer");
   }
   if (!Number.isSafeInteger(stallTimeoutMs) || stallTimeoutMs <= 0) {
     throw new RangeError("SSE write stall timeout must be a positive safe integer");
   }
+  if (
+    connectionLifetimeMs !== undefined &&
+    (!Number.isSafeInteger(connectionLifetimeMs) || connectionLifetimeMs <= 0)
+  ) {
+    throw new RangeError("SSE connection lifetime must be a positive safe integer");
+  }
   const encoder = new TextEncoder();
   let controller!: ReadableStreamDefaultController<Uint8Array>;
   let stopped = false;
   let capacityWake: (() => void) | null = null;
+  let lifetimeTimer: ReturnType<typeof setTimeout> | null = null;
   let queuedFrames = 0;
   let queuedBytes = 0;
 
@@ -93,6 +104,10 @@ export function createByteBoundedSseStream(
   const stop = (settle: () => void) => {
     if (stopped) return;
     stopped = true;
+    if (lifetimeTimer !== null) {
+      clearTimeout(lifetimeTimer);
+      lifetimeTimer = null;
+    }
     wakeWriter();
     options.onStop?.();
     try {
@@ -127,6 +142,9 @@ export function createByteBoundedSseStream(
       size: () => 1,
     },
   );
+  if (connectionLifetimeMs !== undefined) {
+    lifetimeTimer = setTimeout(() => stop(() => controller.close()), connectionLifetimeMs);
+  }
 
   return {
     stream,
@@ -271,6 +289,17 @@ export async function sseSessionStream(
   signal: AbortSignal,
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
+  if (isHttp1BrowserBatch(options)) {
+    const events = await listSessionEvents(db, workspaceId, sessionId, {
+      after,
+      limit: SESSION_REPLAY_PAGE_SIZE,
+    });
+    await options.reauthorize?.();
+    return finiteSseBatchResponse(
+      coalesceSessionEventDeltas(events).map(formatSessionEventSse),
+      options,
+    );
+  }
   const durableFanout = requireSessionEventDurableFanoutCapability(bus);
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
@@ -299,6 +328,7 @@ export async function sseSessionStream(
     release?.();
   };
   const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
     onObservation: sseObservationReporter("session", options),
@@ -309,14 +339,14 @@ export async function sseSessionStream(
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("session event stream delivery failed", error));
   };
-  stopReauthorization = startSseReauthorization(options, channel.stopped, fail);
+  stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
   let writeTail = Promise.resolve();
   const writeFrame = (frame: string): Promise<void> => {
     const write = writeTail.then(async () => {
       // A periodic check closes an idle stream, while this exact pre-delivery
       // check prevents a buffered/replayed event from crossing a revocation
       // boundary merely because its timer has not fired yet.
-      await options.reauthorize?.();
+      await reauthorizeSseOrClose(options, channel);
       if (!(await channel.write(frame))) throw new SseStreamStoppedError();
     });
     writeTail = write.catch(() => {});
@@ -459,14 +489,7 @@ export async function sseSessionStream(
     detachAbortListener = () => signal.removeEventListener("abort", abort);
   }
 
-  return new Response(channel.stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
-    },
-  });
+  return await sseHttpResponse(channel.stream, options);
 }
 
 export async function replaySessionEvents(
@@ -506,6 +529,21 @@ export async function sseWorkspaceControlStream(
   signal: AbortSignal,
   options: SseDeliveryOptions = {},
 ): Promise<Response> {
+  if (isHttp1BrowserBatch(options)) {
+    const events = await listWorkspaceControlEvents(
+      db,
+      workspaceId,
+      after,
+      WORKSPACE_CONTROL_REPLAY_PAGE_SIZE,
+    );
+    await options.reauthorize?.();
+    return finiteSseBatchResponse(
+      events
+        .sort((left, right) => left.sequence - right.sequence)
+        .map(formatWorkspaceControlEventSse),
+      options,
+    );
+  }
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
   let bootstrapping = true;
@@ -530,6 +568,7 @@ export async function sseWorkspaceControlStream(
     release?.();
   };
   const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
     onObservation: sseObservationReporter("workspace_control", options),
@@ -540,11 +579,11 @@ export async function sseWorkspaceControlStream(
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("workspace control stream delivery failed", error));
   };
-  stopReauthorization = startSseReauthorization(options, channel.stopped, fail);
+  stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
   let writeTail = Promise.resolve();
   const writeFrame = (frame: string): Promise<void> => {
     const write = writeTail.then(async () => {
-      await options.reauthorize?.();
+      await reauthorizeSseOrClose(options, channel);
       if (!(await channel.write(frame))) throw new SseStreamStoppedError();
     });
     writeTail = write.catch(() => {});
@@ -633,14 +672,7 @@ export async function sseWorkspaceControlStream(
     detachAbortListener = () => signal.removeEventListener("abort", abort);
   }
 
-  return new Response(channel.stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
-    },
-  });
+  return await sseHttpResponse(channel.stream, options);
 }
 
 export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
@@ -664,9 +696,37 @@ export async function sseWorkspaceLiveStream(
   signal: AbortSignal,
   options: WorkspaceInteractionSseOptions = {},
 ): Promise<Response> {
+  if (isHttp1BrowserBatch(options)) {
+    const [controlEvents, interactionState] = await Promise.all([
+      listWorkspaceControlEvents(db, workspaceId, controlAfter, WORKSPACE_CONTROL_REPLAY_PAGE_SIZE),
+      getWorkspaceInteractionRevisionState(db, { accountId, workspaceId }),
+    ]);
+    await options.reauthorize?.();
+    const frames: string[] = [];
+    if (interactionState.revision > interactionAfter) {
+      frames.push(
+        formatWorkspaceInteractionRevisionSse(
+          WorkspaceInteractionRevisionEvent.parse({
+            workspaceId,
+            sequence: interactionState.revision,
+            revision: interactionState.revision,
+            type: "workspace.interaction.changed",
+            occurredAt: (interactionState.updatedAt ?? new Date()).toISOString(),
+          }),
+        ),
+      );
+    }
+    frames.push(
+      ...controlEvents
+        .sort((left, right) => left.sequence - right.sequence)
+        .map(formatWorkspaceControlEventSse),
+    );
+    return finiteSseBatchResponse(frames, options);
+  }
   const upstream = new AbortController();
   let stopReauthorization = () => {};
   const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
     onObservation: sseObservationReporter("workspace_interaction", options),
@@ -682,12 +742,13 @@ export async function sseWorkspaceLiveStream(
   };
   if (signal.aborted) abort();
   else signal.addEventListener("abort", abort, { once: true });
-  stopReauthorization = startSseReauthorization(options, channel.stopped, (error) => {
-    channel.fail(retryableSseFailure("workspace live stream authorization failed", error));
-  });
+  stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
 
   const upstreamOptions: WorkspaceInteractionSseOptions = {
     ...options,
+    connectionLifetimeMs: undefined,
+    finiteResponseMaxBytes: undefined,
+    finiteResponseMediaType: undefined,
     reauthorize: undefined,
     reauthorizeAfterMs: undefined,
   };
@@ -695,7 +756,7 @@ export async function sseWorkspaceLiveStream(
   let writeTail = Promise.resolve(true);
   const write = (frame: string): Promise<boolean> => {
     const pending = writeTail.then(async () => {
-      await options.reauthorize?.();
+      await reauthorizeSseOrClose(options, channel);
       return await channel.write(frame);
     });
     writeTail = pending.catch(() => false);
@@ -761,14 +822,7 @@ export async function sseWorkspaceLiveStream(
     }
   })();
 
-  return new Response(channel.stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
-    },
-  });
+  return await sseHttpResponse(channel.stream, options);
 }
 
 /**
@@ -784,6 +838,28 @@ export async function sseWorkspaceInteractionRevisionStream(
   signal: AbortSignal,
   options: WorkspaceInteractionSseOptions = {},
 ): Promise<Response> {
+  if (isHttp1BrowserBatch(options)) {
+    const state = await getWorkspaceInteractionRevisionState(db, {
+      accountId,
+      workspaceId,
+    });
+    await options.reauthorize?.();
+    const frames =
+      state.revision > after
+        ? [
+            formatWorkspaceInteractionRevisionSse(
+              WorkspaceInteractionRevisionEvent.parse({
+                workspaceId,
+                sequence: state.revision,
+                revision: state.revision,
+                type: "workspace.interaction.changed",
+                occurredAt: (state.updatedAt ?? new Date()).toISOString(),
+              }),
+            ),
+          ]
+        : [];
+    return finiteSseBatchResponse(frames, options);
+  }
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   const pollIntervalMs = resolveInteractionPollInterval(options.pollIntervalMs);
   let lastSent = after;
@@ -793,6 +869,7 @@ export async function sseWorkspaceInteractionRevisionStream(
   let detachAbortListener = () => {};
   let closeMetrics = () => {};
   const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: options.connectionLifetimeMs,
     maxQueuedBytes: options.maxQueuedBytes ?? SESSION_EVENT_SSE_FRAME_MAX_BYTES,
     ...(options.stallTimeoutMs === undefined ? {} : { stallTimeoutMs: options.stallTimeoutMs }),
     onObservation: sseObservationReporter("workspace_interaction", options),
@@ -804,12 +881,10 @@ export async function sseWorkspaceInteractionRevisionStream(
     },
   });
   closeMetrics = observeSseConnection("workspace_interaction", after, options.observability);
-  stopReauthorization = startSseReauthorization(options, channel.stopped, (error) => {
-    channel.fail(retryableSseFailure("workspace interaction stream authorization failed", error));
-  });
+  stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
 
   const write = async (frame: string): Promise<boolean> => {
-    await options.reauthorize?.();
+    await reauthorizeSseOrClose(options, channel);
     const accepted = await channel.write(frame);
     if (accepted) lastWriteAt = Date.now();
     return accepted;
@@ -820,7 +895,10 @@ export async function sseWorkspaceInteractionRevisionStream(
       if (!(await write(": connected\n\n"))) return;
       for (;;) {
         if (stopRequested || signal.aborted || channel.stopped()) return;
-        const state = await getWorkspaceInteractionRevisionState(db, { accountId, workspaceId });
+        const state = await getWorkspaceInteractionRevisionState(db, {
+          accountId,
+          workspaceId,
+        });
         if (state.revision > lastSent) {
           const event = WorkspaceInteractionRevisionEvent.parse({
             workspaceId,
@@ -850,14 +928,7 @@ export async function sseWorkspaceInteractionRevisionStream(
     detachAbortListener = () => signal.removeEventListener("abort", abort);
   }
 
-  return new Response(channel.stream, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
-    },
-  });
+  return await sseHttpResponse(channel.stream, options);
 }
 
 function observeSseConnection(
@@ -918,7 +989,30 @@ async function replayWorkspaceControlEvents(
 
 class SseStreamStoppedError extends Error {}
 
+async function reauthorizeSseOrClose(
+  options: SseDeliveryOptions,
+  channel: ByteBoundedSseStream,
+): Promise<void> {
+  try {
+    await options.reauthorize?.();
+  } catch {
+    // Authorization loss is an expected fail-closed terminal condition, not a
+    // delivery fault. End the HTTP response cleanly so Bun and Chromium retire
+    // the HTTP/1 socket even if the initiating document is being replaced.
+    // No frame crosses the failed check; a still-live SDK may reconnect and is
+    // fenced again at request admission, while a destroyed realm cannot leave
+    // an errored response occupying the per-origin connection pool.
+    channel.close();
+    throw new SseStreamStoppedError();
+  }
+}
+
 export type SseDeliveryOptions = {
+  connectionLifetimeMs?: number | undefined;
+  /** Return a known-length batch instead of a chunked response. HTTP/1 only. */
+  finiteResponseMaxBytes?: number | undefined;
+  /** Browser transport classification for a finite response. */
+  finiteResponseMediaType?: "event-stream" | "http1-browser-batch" | undefined;
   maxQueuedBytes?: number;
   stallTimeoutMs?: number;
   heartbeatIntervalMs?: number;
@@ -930,6 +1024,146 @@ export type SseDeliveryOptions = {
   /** Exact selected actor emitted on the stream response for cross-tab fencing. */
   actorEpoch?: string | undefined;
 };
+
+export function browserSseDeliveryOptions(
+  transport: string | undefined,
+): Pick<
+  SseDeliveryOptions,
+  "connectionLifetimeMs" | "finiteResponseMaxBytes" | "finiteResponseMediaType"
+> {
+  return transport === "http1-bounded"
+    ? {
+        finiteResponseMaxBytes: HTTP1_BROWSER_SSE_BATCH_MAX_BYTES,
+        finiteResponseMediaType: "http1-browser-batch",
+      }
+    : {};
+}
+
+async function sseHttpResponse(
+  stream: ReadableStream<Uint8Array>,
+  options: SseDeliveryOptions,
+): Promise<Response> {
+  const maxBytes = options.finiteResponseMaxBytes;
+  let body: ReadableStream<Uint8Array> | ArrayBuffer = stream;
+  let contentLength: number | null = null;
+  if (maxBytes !== undefined) {
+    if (
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < SESSION_EVENT_SSE_FRAME_MAX_BYTES ||
+      maxBytes > HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
+    ) {
+      throw new RangeError(
+        `finite SSE batch limit must be between ${SESSION_EVENT_SSE_FRAME_MAX_BYTES} and ${HTTP1_BROWSER_SSE_BATCH_MAX_BYTES} bytes`,
+      );
+    }
+    body = await collectFiniteSseBatch(stream, maxBytes);
+    contentLength = body.byteLength;
+  }
+  return new Response(body, {
+    headers: {
+      // A bounded HTTP/1 poll carries the same SSE-framed bytes the SDK
+      // already parses, but it is an ordinary finite response at the browser
+      // transport boundary. Keeping `text/event-stream` here lets Chromium
+      // retain an orphaned fetch in its shared per-origin SSE pool after the
+      // initiating document is replaced, starving unrelated finite reads in
+      // every tab. HTTP/2 and other unbounded streams keep the standard media
+      // type; only the explicit `http1-bounded` fallback uses this vendor type.
+      "Content-Type":
+        contentLength !== null && options.finiteResponseMediaType === "http1-browser-batch"
+          ? `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`
+          : "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      // A known-length response is already terminal and leaves the HTTP/1
+      // socket reusable. Only a genuinely live SSE response needs an explicit
+      // close when its stream ends.
+      ...(contentLength === null
+        ? { Connection: "close" }
+        : { "Content-Length": String(contentLength) }),
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
+    },
+  });
+}
+
+function isHttp1BrowserBatch(options: SseDeliveryOptions): boolean {
+  return (
+    options.finiteResponseMediaType === "http1-browser-batch" &&
+    options.finiteResponseMaxBytes !== undefined
+  );
+}
+
+function finiteSseBatchResponse(frames: readonly string[], options: SseDeliveryOptions): Response {
+  const maxBytes = options.finiteResponseMaxBytes;
+  if (
+    maxBytes === undefined ||
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < SESSION_EVENT_SSE_FRAME_MAX_BYTES ||
+    maxBytes > HTTP1_BROWSER_SSE_BATCH_MAX_BYTES
+  ) {
+    throw new RangeError(
+      `finite SSE batch limit must be between ${SESSION_EVENT_SSE_FRAME_MAX_BYTES} and ${HTTP1_BROWSER_SSE_BATCH_MAX_BYTES} bytes`,
+    );
+  }
+  const encoder = new TextEncoder();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for (const frame of frames) {
+    const chunk = encoder.encode(frame);
+    if (chunk.byteLength > maxBytes) {
+      throw new RangeError(
+        `SSE frame cannot fit in the finite browser batch (${chunk.byteLength} > ${maxBytes} bytes)`,
+      );
+    }
+    if (length + chunk.byteLength > maxBytes) break;
+    chunks.push(chunk);
+    length += chunk.byteLength;
+  }
+  const body = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new Response(body, {
+    headers: {
+      "Content-Type": `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`,
+      "Cache-Control": "no-cache, no-transform",
+      "Content-Length": String(body.byteLength),
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
+    },
+  });
+}
+
+async function collectFiniteSseBatch(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<ArrayBuffer> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      // Each source chunk is one complete SSE frame. End before an overflowing
+      // frame so reconnect replay starts from the consumer's last whole cursor.
+      if (length + next.value.byteLength > maxBytes) {
+        await reader.cancel("finite SSE batch reached its byte limit");
+        break;
+      }
+      chunks.push(next.value);
+      length += next.value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer;
+}
 
 export type SessionSseDeliveryOptions = SseDeliveryOptions;
 

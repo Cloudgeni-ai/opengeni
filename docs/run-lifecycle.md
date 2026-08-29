@@ -1025,6 +1025,10 @@ original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
 workspace mutation admission.
+If that process's durable row already records exit or loss, a later model-visible
+`write_stdin` remains fenced before provider dispatch but returns the stored
+terminal exit/loss banner. It never labels a permanently dead handle as a
+retryable platform fault or calls the provider again.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
@@ -1293,6 +1297,14 @@ single in-flight model step is lost, the same bound as a crash. This is an
 explicit checkpoint/resume, not an automatic Temporal retry. A newer control
 revision, terminal state, or successor attempt wins instead of being
 overwritten.
+
+The shared worker process owns its own fatality policy. The pinned Agents SDK
+is patched so its MCP lifecycle queue settles every submitted command even when
+an internal error value is hostile, and its tracing provider does not register
+process-global `unhandledRejection` termination behavior. No SDK background
+promise may escape into the process boundary. The worker listener remains an
+observational last resort; a genuinely unhealthy worker stops polling and uses
+the normal drain path rather than letting a dependency call `process.exit(1)`.
 
 An active-route filesystem-root change uses the same durable same-logical-turn
 boundary. A machine-primary attempt never pre-leases home. Clearing its pointer

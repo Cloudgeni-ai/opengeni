@@ -6,6 +6,7 @@ import {
   type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability, type EventBus } from "@opengeni/events";
+import { githubAppBotIdentityWarnings } from "@opengeni/github";
 import type { Observability } from "@opengeni/observability";
 
 export type ReadinessCheckName = "db" | "nats" | "temporal";
@@ -45,12 +46,14 @@ export function createWorkerHttpHandler(
     if (url.pathname === "/healthz") {
       const state = lifecycle?.state();
       const ok = state !== "failed" && state !== "stopped";
+      const warnings = githubAppBotIdentityWarnings(settings);
       return Response.json(
         {
           service: settings.serviceName,
           environment: settings.environment,
           deploymentRevision: settings.deploymentRevision,
           ...(lifecycle ? { role: lifecycle.role, state } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
           ok,
         },
         { status: ok ? 200 : 503 },

@@ -474,6 +474,54 @@ describe("OpenGeniClient", () => {
     ]);
   });
 
+  test("route-owned finite reads forward one lifecycle AbortSignal", async () => {
+    const received: Array<{ path: string; signal: AbortSignal | undefined }> = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const signal = init?.signal ?? undefined;
+        received.push({ path: new URL(String(input)).pathname, signal });
+        return await new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const abort = new AbortController();
+    const settled = Promise.allSettled([
+      client.listTurns(WORKSPACE_ID, SESSION_ID, {
+        latestStarted: true,
+        signal: abort.signal,
+      }),
+      client.getComposerDraft(WORKSPACE_ID, SESSION_ID, { signal: abort.signal }),
+      client.getClientConfig({ signal: abort.signal }),
+      client.listSessionPage(WORKSPACE_ID, { limit: 12, signal: abort.signal }),
+      client.getWorkspaceModelCatalog(WORKSPACE_ID, { signal: abort.signal }),
+      client.getWorkspaceRealtimeModelCatalog(WORKSPACE_ID, { signal: abort.signal }),
+    ]);
+    abort.abort();
+
+    expect(received).toEqual([
+      { path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/turns`, signal: abort.signal },
+      {
+        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/composer-draft`,
+        signal: abort.signal,
+      },
+      { path: "/v1/config/client", signal: abort.signal },
+      { path: `/v1/workspaces/${WORKSPACE_ID}/sessions`, signal: abort.signal },
+      { path: `/v1/workspaces/${WORKSPACE_ID}/model-catalog`, signal: abort.signal },
+      { path: `/v1/workspaces/${WORKSPACE_ID}/realtime-model-catalog`, signal: abort.signal },
+    ]);
+    for (const result of await settled) {
+      expect(result).toEqual(
+        expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+      );
+    }
+  });
+
   test("submits one exact revision-fenced established-session draft", async () => {
     const response = {
       accepted: makeEvent(9),
@@ -600,6 +648,105 @@ describe("OpenGeniClient", () => {
     release();
     await Promise.all([...sessionReads, ...lineageReads, ...queueReads, ...goalReads]);
     expect(requests).toBe(4);
+  });
+
+  test("keeps a shared session read alive while another caller is still waiting", async () => {
+    let requests = 0;
+    let requestSignal: AbortSignal | undefined;
+    let resolveRequest!: (response: Response) => void;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (_input, init) => {
+        requests += 1;
+        requestSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((resolve) => {
+          resolveRequest = resolve;
+        });
+      },
+    });
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    const first = client.getSession(WORKSPACE_ID, SESSION_ID, { signal: firstAbort.signal });
+    const second = client.getSession(WORKSPACE_ID, SESSION_ID, { signal: secondAbort.signal });
+
+    firstAbort.abort();
+
+    await expect(first).rejects.toHaveProperty("name", "AbortError");
+    expect(requests).toBe(1);
+    expect(requestSignal?.aborted).toBe(false);
+    resolveRequest(jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID }));
+    expect((await second).id).toBe(SESSION_ID);
+    expect(requests).toBe(1);
+  });
+
+  test("aborts an abandoned shared session read and lets a later caller retry", async () => {
+    let requests = 0;
+    const requestSignals: AbortSignal[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (_input, init) => {
+        requests += 1;
+        const signal = init?.signal;
+        if (!signal) throw new Error("expected a native request signal");
+        requestSignals.push(signal);
+        if (requests === 1) {
+          return await new Promise<Response>((_resolve, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID });
+      },
+    });
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    const first = client.getSession(WORKSPACE_ID, SESSION_ID, { signal: firstAbort.signal });
+    const second = client.getSession(WORKSPACE_ID, SESSION_ID, { signal: secondAbort.signal });
+
+    firstAbort.abort();
+    expect(requestSignals[0]?.aborted).toBe(false);
+    secondAbort.abort();
+
+    expect(requestSignals[0]?.aborted).toBe(true);
+    expect(await Promise.allSettled([first, second])).toEqual([
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+    ]);
+    expect((await client.getSession(WORKSPACE_ID, SESSION_ID)).id).toBe(SESSION_ID);
+    expect(requests).toBe(2);
+    expect(requestSignals[1]?.aborted).toBe(false);
+  });
+
+  test("does not launch a queued fresh read after its only caller leaves", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        if (requests === 1) await initialGate;
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID });
+      },
+    });
+    const active = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const queuedAbort = new AbortController();
+    const queued = client.getSession(WORKSPACE_ID, SESSION_ID, {
+      fresh: true,
+      signal: queuedAbort.signal,
+    });
+
+    queuedAbort.abort();
+    await expect(queued).rejects.toHaveProperty("name", "AbortError");
+    releaseInitial();
+    await active;
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
   });
 
   test("replays a pre-settlement lineage start generation without restamping a late joiner", async () => {

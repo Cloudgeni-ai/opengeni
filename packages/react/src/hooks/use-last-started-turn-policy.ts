@@ -51,11 +51,17 @@ export function useLastStartedTurnPolicy(
     useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
 
-  const load = useCallback(async (): Promise<LastStartedTurnPolicy | null> => {
-    if (!sessionId) return null;
-    const turns = await client.listTurns(workspaceId, sessionId, { latestStarted: true });
-    return policyFromTurn(turns[0]);
-  }, [client, workspaceId, sessionId]);
+  const load = useCallback(
+    async (signal?: AbortSignal): Promise<LastStartedTurnPolicy | null> => {
+      if (!sessionId) return null;
+      const turns = await client.listTurns(workspaceId, sessionId, {
+        latestStarted: true,
+        signal,
+      });
+      return policyFromTurn(turns[0]);
+    },
+    [client, workspaceId, sessionId],
+  );
 
   const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,

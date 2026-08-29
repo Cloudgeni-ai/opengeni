@@ -55,6 +55,7 @@ import {
   type WorkerLifecycleState,
 } from "./http";
 import {
+  initializeWorkerOutcomeMetrics,
   normalizeTurnTaskQueueStats,
   observabilityEventLogger,
   startTurnCapacityMonitor,
@@ -86,6 +87,7 @@ import {
   type TurnWorkerMemoryPressureGuard,
 } from "./memory-pressure-guard";
 import { assertSandboxReaperActivityTimeout } from "./sandbox-reaper-timeout";
+import { installWorkerUnhandledRejectionBoundary } from "./unhandled-rejection-boundary";
 import {
   SANDBOX_REAPER_V2_WORKFLOW_ID,
   sandboxLifecycleTaskQueue,
@@ -219,6 +221,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   const observability =
     options.activityDependencies?.observability ??
     createObservability(settings, { component: `worker-${options.role}` });
+  initializeWorkerOutcomeMetrics(observability);
   if (options.role === "turn" && options.workflowBundle) {
     throw new Error("workflowBundle is valid only for the control worker role");
   }
@@ -1032,6 +1035,11 @@ export async function startWorker() {
   }
   const settings = getSettings();
   const observability = createObservability(settings, { component: `worker-${role}` });
+  // The Agents SDK also listens for unhandled rejections and exits the process.
+  // Keep detached SDK/transport promises observational here: durable turn
+  // activity boundaries own failures, while process exit causes cross-session
+  // lease loss for every turn assigned to this shared worker pod.
+  const disposeUnhandledRejectionBoundary = installWorkerUnhandledRejectionBoundary();
   const retryOptions = startupRetryOptions(settings);
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
@@ -1090,6 +1098,7 @@ export async function startWorker() {
     });
   } finally {
     await Promise.allSettled([bus?.close(), readinessDbClient.close(), dbClient.close()]);
+    disposeUnhandledRejectionBoundary();
   }
 }
 
