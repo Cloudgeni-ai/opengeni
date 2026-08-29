@@ -20,6 +20,7 @@ const withheldMigrationNames = [
   "0315_personal_github_repository_selection.sql",
   "0345_tenant_scoped_session_tenancy_fence.sql",
   "0374_session_event_cursors.sql",
+  "0379_session_event_raw_lane_activation.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
