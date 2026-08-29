@@ -1328,12 +1328,11 @@ async function expectAndConsumePageErrors(
   required: string[],
 ): Promise<void> {
   // A request terminal is delivered over Playwright independently from the
-  // renderer task that reports the corresponding page error. Close the
-  // complete correlation window for every accepted terminal, cross two renderer
-  // task boundaries, then check again for later evidence. This derives the
-  // wait from the same fail-closed time fence used by the matcher instead of an
-  // arbitrary delay, so delayed evidence is either present now or too late to
-  // be accepted and remains in the final strict ledger.
+  // renderer task that reports the corresponding page error. Wait until the
+  // evidence stream has been quiet across two renderer task boundaries before
+  // matching it. The matcher retains a separate, bounded lifecycle window for
+  // delayed WebKit callbacks; anything delivered after this checkpoint remains
+  // in the final strict ledger.
   let latestEvidenceAt = Number.NEGATIVE_INFINITY;
   while (true) {
     await settlePendingRequestFailureChecks(problems);
@@ -1343,7 +1342,7 @@ async function expectAndConsumePageErrors(
       ...problems.pageErrorEvidence.map(({ observedAt }) => observedAt),
     );
     const remainingCorrelationWindow =
-      latestEvidenceAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - performance.now();
+      latestEvidenceAt + WEBKIT_PAGE_ERROR_DELIVERY_QUIET_MS - performance.now();
     if (remainingCorrelationWindow > 0) await Bun.sleep(remainingCorrelationWindow);
     await page.evaluate(
       () =>
@@ -1359,7 +1358,7 @@ async function expectAndConsumePageErrors(
     );
     if (
       nextLatestEvidenceAt <= latestEvidenceAt &&
-      performance.now() >= nextLatestEvidenceAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+      performance.now() >= nextLatestEvidenceAt + WEBKIT_PAGE_ERROR_DELIVERY_QUIET_MS
     ) {
       break;
     }
@@ -1404,11 +1403,15 @@ function optionalWebKitReauthenticationReloadError(
     .slice(0, 1);
 }
 
-// One finite batch plus its reconnect grace separates identical bounded polls.
-// Keep the terminal/page-error fence inside that four-second grace so a loaded
-// WebKit renderer may deliver its callbacks in either order, while the next
-// request to the same URL cannot authorize stale evidence from the prior one.
-const WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS = 4_000;
+// One finite batch plus its reconnect grace establishes a quiet checkpoint for
+// callbacks already queued by the replaced document.
+const WEBKIT_PAGE_ERROR_DELIVERY_QUIET_MS = 4_000;
+// WebKit can retain a deliberately replaced document's native-fetch error
+// until well after Playwright has reported the exact request terminal. Keep
+// matching bounded to the same lifecycle phase and exact URL, but allow the
+// renderer's observed callback lag. A later checkpoint clears the phase
+// evidence, so this cannot authorize an error from another lifecycle step.
+const WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS = 30_000;
 
 function correlatedWebKitReauthenticationTerminalIndex(
   pageError: BrowserProblems["pageErrorEvidence"][number],
@@ -1420,14 +1423,19 @@ function correlatedWebKitReauthenticationTerminalIndex(
     );
   const pathnameAndSearch = match?.groups?.pathnameAndSearch;
   if (pathnameAndSearch === undefined) return null;
-  const matchingTerminalIndexes = acceptedRequestTerminals.flatMap((terminal, index) =>
-    terminal.responsePhase === "slot-revocation-reauthentication" &&
-    terminal.pathnameAndSearch === pathnameAndSearch &&
-    Math.abs(pageError.observedAt - terminal.observedAt) <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
-      ? [index]
-      : [],
-  );
-  return matchingTerminalIndexes.length === 1 ? matchingTerminalIndexes[0]! : null;
+  const matchingTerminalIndexes = acceptedRequestTerminals
+    .flatMap((terminal, index) => {
+      const distance = Math.abs(pageError.observedAt - terminal.observedAt);
+      return terminal.responsePhase === "slot-revocation-reauthentication" &&
+        terminal.pathnameAndSearch === pathnameAndSearch &&
+        distance <= WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS
+        ? [{ distance, index }]
+        : [];
+    })
+    .sort((left, right) => left.distance - right.distance || left.index - right.index);
+  const nearest = matchingTerminalIndexes[0];
+  if (!nearest || matchingTerminalIndexes[1]?.distance === nearest.distance) return null;
+  return nearest.index;
 }
 
 function optionalWebKitReauthenticationAccessControlPageError(
@@ -1439,24 +1447,26 @@ function optionalWebKitReauthenticationAccessControlPageError(
   // errors in addition to their request-cancellation events. Native-first
   // transport teardown can expose more than one of those errors, so require a
   // bijection: every page error must have exactly one same-phase, exact-URL
-  // failed-or-finished terminal inside the same bounded delivery window, and
+  // failed-or-finished terminal inside the bounded lifecycle window, and
   // no terminal may authorize a second error. Playwright delivers renderer
   // page errors and request terminals independently, so either can arrive first.
   // Duplicate, late, concurrent, or stale evidence keeps the strict ledger red.
-  const candidates = problems.pageErrorEvidence.flatMap((pageError) => {
-    const terminalIndex = correlatedWebKitReauthenticationTerminalIndex(
+  const available = problems.acceptedRequestTerminals.map((terminal, originalIndex) => ({
+    originalIndex,
+    terminal,
+  }));
+  const candidates: Array<{ terminalIndex: number; message: string }> = [];
+  for (const pageError of problems.pageErrorEvidence) {
+    const availableIndex = correlatedWebKitReauthenticationTerminalIndex(
       pageError,
-      problems.acceptedRequestTerminals,
+      available.map(({ terminal }) => terminal),
     );
-    return terminalIndex === null ? [] : [{ terminalIndex, message: pageError.message }];
-  });
-  const terminalIndexes = candidates.map(({ terminalIndex }) => terminalIndex);
-  if (
-    candidates.length !== problems.pageErrorEvidence.length ||
-    new Set(terminalIndexes).size !== terminalIndexes.length
-  ) {
-    return [];
+    if (availableIndex === null) return [];
+    const [matched] = available.splice(availableIndex, 1);
+    if (!matched) return [];
+    candidates.push({ terminalIndex: matched.originalIndex, message: pageError.message });
   }
+  const terminalIndexes = candidates.map(({ terminalIndex }) => terminalIndex);
   for (const terminalIndex of [...terminalIndexes].sort((left, right) => right - left)) {
     problems.acceptedRequestTerminals.splice(terminalIndex, 1);
   }
@@ -3047,7 +3057,7 @@ describe("provider-neutral browser account acceptance", () => {
       correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
-          observedAt: 150 + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS + 1,
+          observedAt: 150 + WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS + 1,
         },
       ]),
     ).toBeNull();
@@ -3055,8 +3065,14 @@ describe("provider-neutral browser account acceptance", () => {
       correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
         {
           ...acceptedWebKitCancellation,
-          observedAt: 150 - WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - 1,
+          observedAt: 150 - WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS - 1,
         },
+      ]),
+    ).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+        { ...acceptedWebKitCancellation, observedAt: 100 },
+        { ...acceptedWebKitCancellation, observedAt: 200, terminal: "finished" },
       ]),
     ).toBeNull();
     expect(
@@ -3068,7 +3084,7 @@ describe("provider-neutral browser account acceptance", () => {
           terminal: "finished",
         },
       ]),
-    ).toBeNull();
+    ).toBe(1);
     const consumableWebKitFailures = [acceptedWebKitCancellation];
     expect(
       optionalWebKitReauthenticationAccessControlPageError(
