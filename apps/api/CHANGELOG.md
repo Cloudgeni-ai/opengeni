@@ -1,5 +1,34 @@
 # @opengeni/api-router
 
+## 2.6.0
+
+### Minor Changes
+
+- 699477a: Restore autonomous agent Workspace Memory writes whenever workspace Memory is enabled. Agents can save and correct active facts, decisions, incidents, fixes, and outcomes independently of Learning mode while all existing Memory kinds remain retrieval-only through search. Autonomous learning may activate eligible concise Workspace instructions and focused Skills through their governed, auditable, undoable lifecycles; Review first keeps proposals inactive and Off creates no derived change.
+- ddce5cc: Allow scheduled generated sessions and nested workers to target an exact Connected Machine, and fail closed without leaving an unstarted generated session behind when that route cannot be established.
+- 132c8d3: Require self-hosted-only session defaults to resolve to a reachable Connected Machine. Keep the composer blocked when no eligible machine exists instead of submitting an unroutable session.
+
+### Patch Changes
+
+- Updated dependencies [699477a]
+- Updated dependencies [ec1aebc]
+- Updated dependencies [3ef2488]
+- Updated dependencies [ddce5cc]
+- Updated dependencies [132c8d3]
+- Updated dependencies [88b6b48]
+  - @opengeni/contracts@2.9.0
+  - @opengeni/core@2.6.0
+  - @opengeni/db@3.7.0
+  - @opengeni/runtime@1.5.0
+  - @opengeni/artifact-tool@0.3.12
+  - @opengeni/codemode@0.4.20
+  - @opengeni/config@0.22.3
+  - @opengeni/documents@0.8.10
+  - @opengeni/events@0.4.8
+  - @opengeni/github@0.6.5
+  - @opengeni/observability@0.8.12
+  - @opengeni/storage@0.2.113
+
 ## 2.5.4
 
 ### Patch Changes

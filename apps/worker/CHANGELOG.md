@@ -1,5 +1,32 @@
 # @opengeni/worker-bundle
 
+## 0.23.0
+
+### Minor Changes
+
+- ddce5cc: Allow scheduled generated sessions and nested workers to target an exact Connected Machine, and fail closed without leaving an unstarted generated session behind when that route cannot be established.
+
+### Patch Changes
+
+- 3ef2488: Coordinate immutable Rig setup once per exact sandbox lease epoch and provider instance while keeping credentials, repositories, and files turn-private.
+- Updated dependencies [699477a]
+- Updated dependencies [ec1aebc]
+- Updated dependencies [3ef2488]
+- Updated dependencies [ddce5cc]
+- Updated dependencies [132c8d3]
+- Updated dependencies [88b6b48]
+  - @opengeni/contracts@2.9.0
+  - @opengeni/core@2.6.0
+  - @opengeni/db@3.7.0
+  - @opengeni/runtime@1.5.0
+  - @opengeni/codemode@0.4.20
+  - @opengeni/config@0.22.3
+  - @opengeni/documents@0.8.10
+  - @opengeni/events@0.4.8
+  - @opengeni/github@0.6.5
+  - @opengeni/observability@0.8.12
+  - @opengeni/storage@0.2.113
+
 ## 0.22.12
 
 ### Patch Changes
