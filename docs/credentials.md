@@ -2,14 +2,17 @@
 
 Audience: integrators and operators. One page for every credential the system
 mints or accepts — what it is, who issues it, where it travels, and who may see
-it. If you are deciding *which* credential to use: API clients use an **API
-key**; hosts acting on behalf of their own users use a **delegated token**;
-everything else is machinery you receive from OpenGeni rather than choose.
+it. If you are deciding *which* credential to use: an external product backend
+uses an **organization API key**; hosts acting on behalf of their own users use
+a **delegated token**; everything else is machinery you receive from OpenGeni
+rather than choose. The canonical product boundary is in
+[`product-integration.md`](product-integration.md).
 
 | Credential | Prefix / transport | Issued by | Verified by | Lifetime | Intended holder |
 | --- | --- | --- | --- | --- | --- |
 | Deployment access key | `x-opengeni-access-key` header | Operator (env) | API perimeter middleware | Static | Ordinary callers and deployment-only surfaces of a key-gated deployment (coarse perimeter, not identity) |
-| Product API key | `ogk_…` bearer | Workspace member via `POST /v1/workspaces/:id/api-keys` | Hash lookup (stored hashed, shown once) | Until revoked | A product/backend calling the REST API for one workspace |
+| Organization API key | `ogk_…` bearer | Organization key administration via `POST /v1/organizations/:organizationId/api-keys` | Hash lookup (stored hashed, shown once) plus organization/workspace authorization | Until revoked | An external product backend calling organization-workspace routes; never a browser or Personal workspace |
+| Workspace API key | `ogk_…` bearer | Authorized caller via `POST /v1/workspaces/:workspaceId/api-keys` | Hash lookup plus exact workspace authorization | Until revoked | A backend or automation constrained to one organization workspace |
 | Delegated access token | `ogd_…` bearer; domain-bound `ogd2_…` when it asserts service provenance | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
 | Browser session-set authority | Opaque 43-character `HttpOnly`, `SameSite=Lax` cookie; hash-only at rest | Session-set API | Hash lookup plus CSRF, generation, actor-epoch, and exact-origin admission | 30-day idle / 180-day absolute | One managed browser installation; never browser JavaScript |
@@ -29,6 +32,14 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Signed storage URLs | Time-limited URL | API via object storage | Storage provider | Minutes | File upload/download without exposing storage credentials |
 
 Rules that hold across the table:
+
+- **Organization keys stay on the product server.** List, create, and revoke
+  them through the organization API-key control plane. The create response
+  shows the token once. An organization API key may be used only with
+  organization workspaces (wire `kind: "shared"`) authorized by its grant;
+  Personal workspaces are excluded. Store the token in a secret manager, map
+  product tenants to opaque workspace ids, and proxy browser operations through
+  the product backend. See [`product-integration.md`](product-integration.md).
 
 - **Managed browser slots do not expose provider credentials.** In `dual` and
   `broker`, a safe browser projection names bounded slot display metadata and one

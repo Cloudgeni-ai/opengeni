@@ -5,13 +5,18 @@ session lifecycle, and the streaming core — SSE event streaming with automatic
 reconnect, resume-by-sequence, gap backfill, and duplicate suppression — plus
 helpers for proxying the stream through your own API.
 
+For the complete product boundary—organization API keys, organization
+workspaces, Personal-workspace exclusion, tenant mapping, and external Skill
+ownership—start with the canonical
+[product integration guide](../../docs/product-integration.md).
+
 Zero runtime dependencies. Needs only WHATWG `fetch` and streams, so it runs in
 Node 18+, Bun, Deno, browsers, and edge runtimes.
 
-Browser clients may call the public API from any origin with an API key or
-other bearer credential. Browser cookies are accepted cross-origin only from
-operator-configured trusted origins; arbitrary embedding origins never receive
-credentialed CORS responses.
+Browser clients may call the public API from any origin with an explicitly safe
+bearer design, but an organization API key belongs on the product server.
+Browser cookies are accepted cross-origin only from operator-configured trusted
+origins; arbitrary embedding origins never receive credentialed CORS responses.
 
 ## Quick start
 
@@ -36,6 +41,48 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
   }
 }
 ```
+
+## Organization-backed product setup
+
+A multi-tenant product should hold one organization API key on its backend and
+idempotently map each product tenant to an OpenGeni organization workspace. The
+wire kind for an organization workspace is `"shared"`; Personal workspaces are
+excluded.
+
+```ts
+const client = new OpenGeniClient({
+  baseUrl: process.env.OPENGENI_API_BASE_URL!,
+  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
+});
+
+const organizationId = process.env.OPENGENI_ORGANIZATION_ID!;
+const { workspace, created } = await client.ensureWorkspace({
+  accountId: organizationId,
+  externalSource: "acme-product",
+  externalId: tenant.id,
+  name: tenant.displayName,
+});
+
+if (workspace.kind !== "shared") {
+  throw new Error("Product integrations require an organization workspace");
+}
+```
+
+The response is `{ workspace, created }`. Replays return the original nested
+workspace with `created: false`. For an organization key, `getAccessContext()`
+does not enumerate every workspace grant; call `listWorkspaces()` for the
+complete organization-workspace inventory.
+
+Organization key administration uses `listOrganizationApiKeys`,
+`createOrganizationApiKey`, and `deleteOrganizationApiKey`. The key token from a
+create response is shown once and must be stored in the backend's secret
+manager.
+
+The external backend also owns its Skill catalog. Load the selected definitions
+and pass them inline in `CreateSessionRequest.skills` for each product-created
+session. There is no organization-wide Skill registry or Skill inheritance in
+this integration contract. See the canonical guide for the complete route map,
+security boundary, and delivery checklist.
 
 For session lists, `deriveSessionDisplayTitle(session)` returns the durable
 agent/user title when available. While the automatic title is still pending, it
@@ -700,7 +747,7 @@ Every public endpoint group has typed methods:
 
 | Group | Methods |
 | --- | --- |
-| Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `getWorkspace`, `updateWorkspace` |
+| Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `ensureWorkspace`, `getWorkspace`, `updateWorkspace` |
 | Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
@@ -715,7 +762,7 @@ Every public endpoint group has typed methods:
 | API Integrations | `listIntegrationDefinitions`, `listApiIntegrations`, `previewApiIntegration`, `startApiIntegrationOAuth`, `installApiIntegration`, `previewApiIntegrationUninstall`, `uninstallApiIntegration`, `listIntegrationFacets`, `configureIntegrationFacet`, `pauseIntegrationFacet`, `resumeIntegrationFacet`, `removeIntegrationFacet`, `browseGoogleDriveFacetSource`, `saveGoogleDriveFacetSource` |
 | Remote Skills | `previewSkillImport`, `installSkill`, `previewSkillUninstall`, `uninstallSkill` |
 | GitHub | `getGitHubApp`, `githubConnectUrl`, `listGitHubRepositories`, `syncGitHubRepositories`, `createGitHubAppManifest` |
-| API keys | `listApiKeys`, `createApiKey`, `deleteApiKey` |
+| API keys | Workspace: `listApiKeys`, `createApiKey`, `deleteApiKey`; organization: `listOrganizationApiKeys`, `createOrganizationApiKey`, `deleteOrganizationApiKey` |
 | Billing | `getBilling`, `getBillingUsage`, `getBillingEntitlements`, `createBillingCheckout`, `createBillingPortalSession` |
 
 `listIntegrationDefinitions` returns safe Integration Definition metadata without any
@@ -756,8 +803,8 @@ readers. Official server builds expose `serverVersion` on `/healthz` and
 
 ## Proxy through your own API
 
-Keep your OpenGeni API key on your server and re-emit the stream to your own
-browser clients. The re-emitted wire format is identical to OpenGeni's SSE
+Keep your organization API key on your server and re-emit the stream to your
+own browser clients. The re-emitted wire format is identical to OpenGeni's SSE
 stream, so the browser side can consume it with this same SDK (or a plain
 `EventSource`), including resume via `?after=` / `Last-Event-ID`:
 

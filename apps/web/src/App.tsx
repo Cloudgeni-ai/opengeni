@@ -48,6 +48,7 @@ type OrganizationAdminSection =
   | "people"
   | "recovery"
   | "retention"
+  | "developer"
   | "billing";
 type WorkspaceSettingsSection =
   | "general"
@@ -423,6 +424,7 @@ const workspaceOrganizationRoute = createRoute({
       search.section === "people" ||
       search.section === "recovery" ||
       search.section === "retention" ||
+      search.section === "developer" ||
       search.section === "billing"
         ? search.section
         : undefined;

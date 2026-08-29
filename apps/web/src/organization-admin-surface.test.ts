@@ -5,6 +5,9 @@ const adminSource = await Bun.file(`${import.meta.dir}/components/organization-a
 const shellSource = await Bun.file(
   `${import.meta.dir}/components/settings/organization-settings-shell.tsx`,
 ).text();
+const apiKeySource = await Bun.file(
+  `${import.meta.dir}/components/organization-api-keys-section.tsx`,
+).text();
 const recoverySource = await Bun.file(
   `${import.meta.dir}/components/organization-recovery.tsx`,
 ).text();
@@ -20,11 +23,19 @@ const tenancyDocs = await Bun.file(
 ).text();
 
 describe("organization administration surface", () => {
-  test("routes accessible overview, knowledge, people, recovery, retention, and billing sections", () => {
+  test("routes accessible overview, knowledge, people, recovery, retention, developer, and billing sections", () => {
     expect(routeSource).toContain("<OrganizationSettingsShell");
     expect(shellSource).toContain('aria-label="Organization settings"');
     expect(shellSource).toContain('aria-current={selected ? "page" : undefined}');
-    for (const section of ["overview", "knowledge", "people", "recovery", "retention", "billing"]) {
+    for (const section of [
+      "overview",
+      "knowledge",
+      "people",
+      "recovery",
+      "retention",
+      "developer",
+      "billing",
+    ]) {
       expect(shellSource).toContain(`id: "${section}"`);
     }
     expect(routeSource).toContain('section === "knowledge"');
@@ -45,6 +56,29 @@ describe("organization administration surface", () => {
     expect(workspaceMembersSource).toContain("client.listWorkspaceMemberCandidates");
     expect(workspaceMembersSource).toContain("Search by name or email");
     expect(workspaceMembersSource).toContain("Add to workspace");
+  });
+
+  test("wires organization API keys and keeps billing usage account-wide", () => {
+    expect(routeSource).toContain('section === "developer"');
+    expect(routeSource).toContain("<LazyOrganizationApiKeysSection");
+    for (const method of [
+      "listOrganizationApiKeys",
+      "createOrganizationApiKey",
+      "deleteOrganizationApiKey",
+    ]) {
+      expect(routeSource).toContain(`client.${method}(`);
+    }
+    expect(routeSource).not.toContain("permissions: requestedPermissions");
+    expect(apiKeySource).toContain("Provision and manage all organization workspaces");
+    expect(apiKeySource).toContain(
+      "Organization API keys can access organization workspaces, never personal workspaces.",
+    );
+    expect(apiKeySource).toContain("Organization API Key Created");
+    expect(apiKeySource).not.toContain("fixedPermissions");
+    expect(apiKeySource).not.toContain('"workspace:read"');
+    expect(apiKeySource).toContain('aria-live="polite"');
+    expect(apiKeySource).toContain("props.deleteApiKey(apiKey.id)");
+    expect(routeSource).not.toContain("workspaceId: props.workspaceId");
   });
 
   test("uses only lifecycle APIs and never links a member personal workspace", () => {

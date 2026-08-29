@@ -3,6 +3,7 @@ import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts"
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import {
+  accountScopedApiKeyWorkspaceAuthority,
   hasLiteralPermission,
   hasPermission,
   requireAccessContext,
@@ -17,6 +18,26 @@ const grant = (permissions: AccessGrant["permissions"]): AccessGrant => ({
 });
 
 describe("literal high-trust permissions", () => {
+  test("API-key-shaped access contexts cannot forge account-scoped workspace authority", () => {
+    const accountId = "11111111-1111-4111-8111-111111111111";
+    expect(
+      accountScopedApiKeyWorkspaceAuthority({
+        mode: "managed",
+        subjectId: "api_key:forged",
+        accountGrants: [
+          {
+            accountId,
+            subjectId: "api_key:forged",
+            permissions: ["workspace:admin"],
+          },
+        ],
+        workspaceGrants: [],
+        defaultAccountId: accountId,
+        defaultWorkspaceId: null,
+      }),
+    ).toBeNull();
+  });
+
   test("malformed non-array permission values fail closed at the authorization predicate", () => {
     const malformedValues = ["workspace:admin", { includes: () => true }, null];
     for (const malformed of malformedValues) {

@@ -54,9 +54,9 @@ There are three product access modes:
 
 - `local`: local development bootstrap account/workspace, subject `dev`, broad permissions.
 - `configured`: self-hosted or embedded deployments using configured deployment keys or delegated bearer tokens from a parent product.
-- `managed`: OpenGeni owns email/password sign-up through Better Auth, workspaces, OpenGeni API keys, prepaid Stripe credits, usage, and limits.
+- `managed`: OpenGeni owns email/password sign-up through Better Auth, workspaces, organization and workspace API keys, prepaid Stripe credits, usage, and limits.
 
-The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. Ordinary clients send it as `x-opengeni-access-key`; product API keys and delegated tokens use `Authorization: Bearer ...`. Valid first-party delegated bearers can enter the `/v1` API without copying the static deployment key, then remain constrained by normal route authorization.
+The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. Ordinary clients send it as `x-opengeni-access-key`; organization API keys and delegated tokens use `Authorization: Bearer ...`. Valid first-party delegated bearers can enter the `/v1` API without copying the static deployment key, then remain constrained by normal route authorization.
 
 Do not expose a production deployment without a deliberate access mode, RLS-tested database role posture, rate limits, real model/sandbox credentials, and reviewed sandbox preparation policy. Sandbox preparation profiles and env allowlists can make host credentials available to agent sandboxes, so review `.env` before running live sessions.
 
@@ -128,7 +128,11 @@ Pair this README with the [CloudGeni Infrastructure Agents Guide](https://github
 The capability catalog lets operators see and enable packs, MCP tools, APIs, skills, and plugins for the same runtime. See [docs/capabilities.md](docs/capabilities.md) for the unified catalog and [docs/packs.md](docs/packs.md) for the marketing social daily analysis pack.
 
 For product integration, keep OpenGeni as a standalone service by default. Start
-with the [TypeScript SDK](packages/sdk/README.md), add the
+with the canonical [product integration guide](docs/product-integration.md): an
+external backend holds one organization API key, maps each product tenant to an
+organization workspace (wire `kind: "shared"`), excludes Personal workspaces,
+and passes its own selected Skills inline per session. Continue with the
+[TypeScript SDK](packages/sdk/README.md), add the
 [React surfaces](packages/react/README.md) the product needs, and use the
 [workbench guide](docs/embedding-workbench.md) only when exposing agent compute.
 The [`opengeni-client` skill](.agents/skills/opengeni-client/SKILL.md) gives

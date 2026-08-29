@@ -29,6 +29,39 @@ const architectureWorkspaceMapHeadings = [
   "### 6.3 Examples",
   "### 6.4 Rust agent and relay",
 ] as const;
+const productIntegrationPath = "docs/product-integration.md";
+const productIntegrationLinkConsumers = [
+  "README.md",
+  "docs/README.md",
+  "docs/credentials.md",
+  "docs/organization-tenancy.md",
+  "packages/sdk/README.md",
+  "examples/northstar-support/README.md",
+  ".agents/skills/opengeni/SKILL.md",
+  ".agents/skills/opengeni/references/client-integration.md",
+  ".agents/skills/opengeni-client/SKILL.md",
+  ".agents/skills/opengeni-client/references/product-integration-shapes.md",
+  ".agents/skills/opengeni-client/references/api-workflows.md",
+] as const;
+const productIntegrationRequiredTokens = [
+  "organization API key",
+  "organization workspace",
+  'kind: "shared"',
+  "Personal workspaces",
+  "`listOrganizationApiKeys`",
+  "`createOrganizationApiKey`",
+  "`deleteOrganizationApiKey`",
+  "`ensureWorkspace`",
+  "`GET /v1/organizations/:organizationId/api-keys`",
+  "`POST /v1/organizations/:organizationId/api-keys`",
+  "`DELETE /v1/organizations/:organizationId/api-keys/:apiKeyId`",
+  "`PUT /v1/workspaces/external`",
+  "accountId: organizationId",
+  "const { workspace, created } = await client.ensureWorkspace",
+  "an empty `workspaceGrants` array does not mean",
+  "`CreateSessionRequest.skills`",
+  "There is no organization-wide Skill registry or Skill inheritance",
+] as const;
 const pathReferencePattern =
   /^(?:apps|examples|packages|scripts|docs|deploy|agent|\.github|\.agents)\/[A-Za-z0-9_./-]+$/;
 const packageReferencePattern = /@opengeni\/[a-z0-9-]+/g;
@@ -61,6 +94,7 @@ const architectureText = await Bun.file(architecturePath)
   .text()
   .catch(() => "");
 checkArchitectureMap(architectureText, workspaceManifests, findings);
+await checkProductIntegrationFreshness(findings);
 
 if (findings.length > 0) {
   for (const finding of findings) {
@@ -70,6 +104,44 @@ if (findings.length > 0) {
 }
 
 console.log("Docs reference freshness and architecture map guards passed.");
+
+async function checkProductIntegrationFreshness(out: Finding[]): Promise<void> {
+  const canonicalText = await Bun.file(productIntegrationPath)
+    .text()
+    .catch(() => "");
+  if (!canonicalText) {
+    out.push({
+      file: productIntegrationPath,
+      line: 1,
+      token: productIntegrationPath,
+      reason: "canonical product integration guide is missing or unreadable",
+    });
+    return;
+  }
+
+  for (const token of productIntegrationRequiredTokens) {
+    if (canonicalText.includes(token)) continue;
+    out.push({
+      file: productIntegrationPath,
+      line: 1,
+      token,
+      reason: "canonical product integration contract is stale or incomplete",
+    });
+  }
+
+  for (const file of productIntegrationLinkConsumers) {
+    const text = await Bun.file(file)
+      .text()
+      .catch(() => "");
+    if (text.includes("product-integration.md")) continue;
+    out.push({
+      file,
+      line: 1,
+      token: productIntegrationPath,
+      reason: "required product integration consumer does not link the canonical guide",
+    });
+  }
+}
 
 async function listWorkspacePackages(packageFiles: string[]): Promise<Set<string>> {
   const names = new Set<string>();

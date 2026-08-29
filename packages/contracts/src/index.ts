@@ -2949,6 +2949,28 @@ export const CreateWorkspaceRequest = z.object({
 });
 export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequest>;
 
+export const EnsureWorkspaceRequest = z
+  .object({
+    accountId: z.string().uuid(),
+    externalSource: z.string().trim().min(1).max(200),
+    externalId: z.string().trim().min(1).max(1024),
+    name: z.string().trim().min(1).max(200),
+    slug: z.string().trim().min(1).max(200).optional(),
+    // White-label persona override for this workspace's agent. null/omitted uses
+    // the deployment default template.
+    agentInstructions: z.string().min(1).nullable().optional(),
+  })
+  .strict();
+export type EnsureWorkspaceRequest = z.infer<typeof EnsureWorkspaceRequest>;
+
+export const EnsureWorkspaceResponse = z
+  .object({
+    workspace: Workspace,
+    created: z.boolean(),
+  })
+  .strict();
+export type EnsureWorkspaceResponse = z.infer<typeof EnsureWorkspaceResponse>;
+
 export const UpdateWorkspaceRequest = z
   .object({
     name: z.string().min(1).optional(),
@@ -2990,6 +3012,15 @@ export const CreateApiKeyResponse = z.object({
   token: z.string().min(1),
 });
 export type CreateApiKeyResponse = z.infer<typeof CreateApiKeyResponse>;
+
+export const CreateOrganizationApiKeyRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    description: z.string().trim().min(1).max(500).optional(),
+    expiresAt: z.string().datetime({ offset: true }).optional(),
+  })
+  .strict();
+export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
 // row. `subjectId` is `user:<betterAuthUserId>` or `api_key:<id>`; the People

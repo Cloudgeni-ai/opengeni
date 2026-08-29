@@ -1,6 +1,8 @@
 import {
   AddWorkspaceMemberRequest,
   CreateWorkspaceRequest,
+  EnsureWorkspaceRequest,
+  EnsureWorkspaceResponse,
   ListWorkspaceMemberCandidatesResponse,
   ListWorkspaceMembersResponse,
   SetWorkspaceDefaultRigRequest,
@@ -24,6 +26,7 @@ import {
   allWorkspacePermissions,
   createWorkspace,
   deleteWorkspaceIfQuiescent,
+  ensureWorkspaceByExternalIdentity,
   getManagedUserProfilesByIds,
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
@@ -31,6 +34,7 @@ import {
   listWorkspaceMemberManagementCandidates,
   normalizeWorkspaceMembershipPermissions,
   listWorkspaceControlEvents,
+  listSharedWorkspacesForAccount,
   listWorkspacesForSubject,
   nestedPostgresSqlState,
   removeWorkspaceMember,
@@ -45,12 +49,14 @@ import {
   workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
+  WorkspaceExternalIdentityConflictError,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   getManagedAuthRequestActorEpoch,
+  accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
   requireAccessGrant,
@@ -119,6 +125,17 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
+    const accountScopedAuthority = accountScopedApiKeyWorkspaceAuthority(context);
+    if (
+      accountScopedAuthority &&
+      hasPermission(accountScopedAuthority.permissions, "workspace:read")
+    ) {
+      return c.json(
+        (await listSharedWorkspacesForAccount(deps.db, accountScopedAuthority.accountId)).map(
+          (workspace) => Workspace.parse(workspace),
+        ),
+      );
+    }
     const readableWorkspaceIds = [
       ...new Set(
         context.workspaceGrants
@@ -137,6 +154,33 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         Workspace.parse(workspace),
       ),
     );
+  });
+
+  app.put("/v1/workspaces/external", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const payload = EnsureWorkspaceRequest.parse(await c.req.json());
+    requireAccountPermission(context, payload.accountId, "workspace:create");
+    try {
+      const result = await ensureWorkspaceByExternalIdentity(deps.db, {
+        accountId: payload.accountId,
+        externalSource: payload.externalSource,
+        externalId: payload.externalId,
+        name: payload.name,
+        slug: payload.slug ?? null,
+        ...(payload.agentInstructions !== undefined
+          ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
+          : {}),
+      });
+      const response = EnsureWorkspaceResponse.parse(result);
+      return result.created ? c.json(response, 201) : c.json(response);
+    } catch (error) {
+      if (error instanceof WorkspaceExternalIdentityConflictError) {
+        throw new HTTPException(409, {
+          message: "external workspace identity is already in use",
+        });
+      }
+      throw error;
+    }
   });
 
   app.post("/v1/workspaces", async (c) => {

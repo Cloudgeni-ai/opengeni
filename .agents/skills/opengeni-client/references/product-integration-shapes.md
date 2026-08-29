@@ -5,6 +5,10 @@ standalone OpenGeni deployment. It is intentionally architecture-level. Verify
 exact methods and props against the installed `@opengeni/sdk` and
 `@opengeni/react` versions.
 
+When the OpenGeni repository is available, read `docs/product-integration.md`
+first. It is the canonical contract for organization API keys, organization
+workspaces, Personal-workspace exclusion, and external Skill ownership.
+
 ## The Common Architecture
 
 ```text
@@ -13,6 +17,9 @@ customer browser / mobile app
             | customer session, same-origin product API
             v
 customer backend / tenant boundary
+  - stores one organization API key
+  - maps product tenant -> organization workspace (wire kind "shared")
+  - stores/version-controls product Skills
             |
             | @opengeni/sdk, server-held OpenGeni credential
             v
@@ -28,6 +35,11 @@ skills selected in `CreateSessionRequest.skills` belong to the OpenGeni session
 it creates. Keep those layers separate: integration knowledge should not be
 copied into every runtime agent prompt, and runtime skills should not redefine
 the product's trust boundary.
+
+The external product is the runtime Skill source of truth. There is no
+organization-wide Skill registry or Skill inheritance in the product
+integration contract; selected Skills are sent inline for each product-created
+session.
 
 ## Decision Matrix
 
@@ -49,8 +61,14 @@ mounting the stock OpenGeni application.
 ### Product server
 
 - Authenticates its own user and enforces its own tenant/business permissions.
-- Maps that principal to one allowed OpenGeni workspace and allowed sessions.
-- Holds OpenGeni API keys or delegated credentials.
+- Maps that principal to one allowed OpenGeni organization workspace and
+  allowed sessions. Personal workspaces are excluded.
+- Holds the organization API key or delegated credentials.
+- Calls `ensureWorkspace` with the product tenant's stable external identity and
+  stores `result.workspace.id`; `result.created` distinguishes create from
+  idempotent replay.
+- Loads product-owned Skills and passes the selected definitions inline in
+  `CreateSessionRequest.skills` for each product-created session.
 - Calls `OpenGeniClient` and returns product-shaped responses.
 - Re-streams session SSE with `proxySessionEventStream` when the browser needs a
   live timeline.
@@ -63,7 +81,7 @@ mounting the stock OpenGeni application.
   auth boundary.
 - May use the SDK with a custom `fetch`/same-origin base URL.
 - May mount React hooks/components against a structural proxy client.
-- Never receives a privileged OpenGeni API key just because it renders an agent.
+- Never receives an organization API key just because it renders an agent.
 
 The browser may PUT file bytes directly to a short-lived signed object-storage
 URL returned by the SDK flow. That URL is scoped upload authority, not the

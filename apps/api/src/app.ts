@@ -1809,6 +1809,18 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/api-keys/:id",
   },
   {
+    pattern: /^\/v1\/organizations\/[^/]+\/api-keys$/,
+    label: "/v1/organizations/:organizationId/api-keys",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/api-keys\/[^/]+$/,
+    label: "/v1/organizations/:organizationId/api-keys/:id",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external$/,
+    label: "/v1/workspaces/external",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks$/,
     label: "/v1/workspaces/:workspaceId/scheduled-tasks",
   },
