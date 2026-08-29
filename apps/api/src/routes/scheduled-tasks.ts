@@ -22,6 +22,7 @@ import {
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   updateScheduledTaskForApi,
+  validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
@@ -156,6 +157,14 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         rigId: task.rigId,
         agentConfig: task.agentConfig,
         missingTargetStatus: 404,
+      });
+      await validateScheduledTaskMachineTarget({
+        settings,
+        db,
+        grant,
+        runMode: task.runMode,
+        agentConfig: task.agentConfig,
+        requireOnline: true,
       });
       await requireLimit(deps, {
         accountId: grant.accountId,

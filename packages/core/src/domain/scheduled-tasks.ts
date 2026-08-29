@@ -22,6 +22,8 @@ import {
   createScheduledTask,
   deleteScheduledTask,
   getConnectionMetadata,
+  getEnrollment,
+  getLiveEnrollmentConnection,
   getKnowledgeSourceForSyncAuthority,
   getNestedAgentDepthDeploymentPolicy,
   getRig,
@@ -29,6 +31,7 @@ import {
   getScheduledTaskIncludingDeletedForUpdate,
   getScheduledTaskPersonalConnectionDelegations,
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
+  getSandbox,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
   nestedPostgresSqlState,
@@ -164,6 +167,15 @@ export async function createValidatedScheduledTask(input: {
         rigId: input.payload.rigId,
         agentConfig,
       });
+  if (!knowledgeAction) {
+    await validateScheduledTaskMachineTarget({
+      settings: input.settings,
+      db: input.db,
+      grant: input.grant,
+      runMode: input.payload.runMode,
+      agentConfig,
+    });
+  }
   if (!knowledgeAction && input.payload.variableSetId) {
     await validateVariableSetAttachment(
       { settings: input.settings, db: input.db },
@@ -397,6 +409,81 @@ export async function validateScheduledTaskTarget(input: {
     });
   }
   return session;
+}
+
+export async function validateScheduledTaskMachineTarget(input: {
+  settings: Settings;
+  db: Database;
+  grant: AccessGrant;
+  runMode: ScheduledTask["runMode"];
+  agentConfig: ScheduledTaskAgentConfig;
+  requireOnline?: boolean;
+}): Promise<{
+  sandboxId: string;
+  enrollmentId: string;
+  sandboxOs: Session["sandboxOs"];
+} | null> {
+  const machineTarget = input.agentConfig.machineTarget;
+  if (!machineTarget) {
+    if (
+      input.runMode !== "existing_session" &&
+      (input.agentConfig.sandboxBackend ?? input.settings.sandboxBackend) === "selfhosted"
+    ) {
+      throw new HTTPException(422, {
+        message:
+          "self-hosted scheduled tasks require a Connected Machine; select a machine before saving",
+      });
+    }
+    return null;
+  }
+  if (input.runMode === "existing_session") {
+    throw new HTTPException(422, {
+      message: "machineTarget cannot be used with an existing-session target",
+    });
+  }
+  if (!input.settings.sandboxOwnershipEnabled || !input.settings.sandboxSelfhostedEnabled) {
+    throw new HTTPException(422, {
+      message: "Connected Machines are not enabled for scheduled tasks in this deployment",
+    });
+  }
+  const access = {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    subjectId: input.grant.subjectId,
+  };
+  const sandbox = await getSandbox(input.db, access, machineTarget.targetSandboxId);
+  if (!sandbox || sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
+    throw new HTTPException(422, {
+      message: "the selected Connected Machine is unavailable",
+    });
+  }
+  if (sandbox.scope === "user") {
+    throw new HTTPException(422, {
+      message:
+        "personal Connected Machines cannot run unattended schedules; select a workspace or organization machine",
+    });
+  }
+  const enrollment = input.requireOnline
+    ? await getLiveEnrollmentConnection(input.db, access, sandbox.enrollmentId)
+    : await getEnrollment(input.db, access, sandbox.enrollmentId);
+  if (!enrollment || enrollment.status !== "active") {
+    throw new HTTPException(422, {
+      message: input.requireOnline
+        ? "the selected Connected Machine is offline"
+        : "the selected Connected Machine is unavailable",
+    });
+  }
+  if (input.requireOnline && !enrollment.workspaceRoot) {
+    throw new HTTPException(422, {
+      message:
+        "the selected Connected Machine has not reported a workspace root; reconnect it with a current agent",
+    });
+  }
+  return {
+    sandboxId: sandbox.id,
+    enrollmentId: sandbox.enrollmentId,
+    sandboxOs: enrollment.os,
+  };
 }
 
 export function scheduledTaskForGrant(task: ScheduledTask, grant: AccessGrant): ScheduledTask {
@@ -791,6 +878,13 @@ export async function validatedScheduledTaskUpdate(input: {
         ? input.payload.variableSetId
         : input.existing.variableSetId,
     rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
+    agentConfig: update.agentConfig ?? input.existing.agentConfig,
+  });
+  await validateScheduledTaskMachineTarget({
+    settings: input.settings,
+    db: input.db,
+    grant: input.grant,
+    runMode: nextRunMode,
     agentConfig: update.agentConfig ?? input.existing.agentConfig,
   });
   if (

@@ -12,6 +12,7 @@ import { makeEvent, SESSION_ID, WORKSPACE_ID } from "./helpers";
 
 const ENVIRONMENT_ID = "33333333-3333-4333-8333-333333333333";
 const TASK_ID = "44444444-4444-4444-8444-444444444444";
+const SANDBOX_ID = "44444444-4444-4444-8444-444444444445";
 const FILE_ID = "55555555-5555-4555-8555-555555555555";
 const UPLOAD_ID = "66666666-6666-4666-8666-666666666666";
 const BASE_ID = "77777777-7777-4777-8777-777777777777";
@@ -716,6 +717,36 @@ describe("OpenGeniClient access + workspaces", () => {
 });
 
 describe("OpenGeniClient scheduled tasks", () => {
+  test("normalizes Connected Machine working directories before sending", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
+    await client.createScheduledTask(WORKSPACE_ID, {
+      name: "machine root",
+      schedule: { type: "interval", everySeconds: 3600 },
+      agentConfig: {
+        prompt: "check drift",
+        machineTarget: { targetSandboxId: SANDBOX_ID, workingDir: "   " },
+      },
+    });
+    await client.updateScheduledTask(WORKSPACE_ID, TASK_ID, {
+      agentConfig: {
+        prompt: "check drift",
+        machineTarget: { targetSandboxId: SANDBOX_ID, workingDir: "  repos/app  " },
+      },
+    });
+
+    expect(JSON.parse(requests[0]!.body!)).toMatchObject({
+      agentConfig: { machineTarget: { targetSandboxId: SANDBOX_ID } },
+    });
+    expect(JSON.parse(requests[0]!.body!).agentConfig.machineTarget).not.toHaveProperty(
+      "workingDir",
+    );
+    expect(JSON.parse(requests[1]!.body!)).toMatchObject({
+      agentConfig: {
+        machineTarget: { targetSandboxId: SANDBOX_ID, workingDir: "repos/app" },
+      },
+    });
+  });
+
   test("create, update, pause, resume, trigger, delete, and runs", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
     await client.createScheduledTask(WORKSPACE_ID, {

@@ -228,6 +228,50 @@ describe("scheduled task form projection", () => {
     });
   });
 
+  test("round-trips a Connected Machine target and never copies it to an existing session", () => {
+    const targetSandboxId = "77777777-7777-4777-8777-777777777777";
+    const task = scheduledTask();
+    task.agentConfig.machineTarget = {
+      targetSandboxId,
+      workingDir: "/home/me/repos/app",
+    };
+
+    const form = formStateFromScheduledTask(task);
+    expect(form).toMatchObject({
+      executionTarget: "machine",
+      machineSandboxId: targetSandboxId,
+      workingDir: "/home/me/repos/app",
+    });
+    expect(agentConfigFromFormState(form, task).machineTarget).toEqual({
+      targetSandboxId,
+      workingDir: "/home/me/repos/app",
+    });
+
+    expect(
+      agentConfigFromFormState(
+        {
+          ...form,
+          runMode: "existing_session",
+          targetSessionId: "88888888-8888-4888-8888-888888888888",
+        },
+        task,
+      ),
+    ).not.toHaveProperty("machineTarget");
+  });
+
+  test("defaults self-hosted deployments to the first Connected Machine", () => {
+    expect(
+      newScheduledTaskFormState(false, [], {
+        defaultSandboxBackend: "selfhosted",
+        defaultMachineSandboxId: "99999999-9999-4999-8999-999999999999",
+      }),
+    ).toMatchObject({
+      executionTarget: "machine",
+      sandboxBackend: "",
+      machineSandboxId: "99999999-9999-4999-8999-999999999999",
+    });
+  });
+
   test("maps clean cadence presets onto the exact supported schedule specs", () => {
     const initial = newScheduledTaskFormState(false);
     const hourly = applyScheduledTaskCadence(initial, "hourly");

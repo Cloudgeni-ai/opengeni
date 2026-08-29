@@ -1,6 +1,7 @@
 // Shared schedules for agent turns and deterministic knowledge-source syncs,
 // with honest per-run outcomes and no implied agent session for connector work.
 import { useNavigate } from "@tanstack/react-router";
+import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
 import {
   BotIcon,
   CalendarClockIcon,
@@ -54,6 +55,7 @@ import { ModelPicker } from "@/components/pickers";
 import { useAppContext } from "@/context";
 import { listViewState } from "@/lib/load-state";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   agentConfigFromFormState,
@@ -155,6 +157,7 @@ export function SchedulesRoute({
   const navigate = useNavigate();
   const client = context.client;
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
+  const fleet = useMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -189,6 +192,16 @@ export function SchedulesRoute({
   const canTargetSessions =
     hasWorkspacePermission(context.accessContext, workspaceId, "sessions:read") &&
     canReadSessionIds;
+  const scheduledMachines = useMemo(
+    () =>
+      fleet.machines.filter(
+        (machine) =>
+          machine.kind === "selfhosted" && !machine.isSessionGroup && machine.scope !== "user",
+      ),
+    [fleet.machines],
+  );
+  const defaultMachineSandboxId =
+    scheduledMachines.find((machine) => isMachineComputeSelectable(machine.state))?.sandboxId ?? "";
   // Honest list state: the initial fetch renders as loading and a failed load
   // as an error with retry, never as the "No scheduled tasks." empty state.
   const tasksView = listViewState({
@@ -394,6 +407,22 @@ export function SchedulesRoute({
       toast.error("Choose an existing session for this task");
       return;
     }
+    if (
+      form.runMode !== "existing_session" &&
+      form.executionTarget === "machine" &&
+      !form.machineSandboxId
+    ) {
+      toast.error("Choose a Connected Machine for this schedule");
+      return;
+    }
+    if (
+      form.runMode !== "existing_session" &&
+      form.executionTarget === "managed" &&
+      context.clientConfig.defaultSandboxBackend === "selfhosted"
+    ) {
+      toast.error("This deployment requires a Connected Machine for scheduled sessions");
+      return;
+    }
     setBusyTaskId("new");
     try {
       await client.createScheduledTask(workspaceId, {
@@ -425,6 +454,22 @@ export function SchedulesRoute({
     }
     if (form.runMode === "existing_session" && !form.targetSessionId) {
       toast.error("Choose an existing session for this task");
+      return;
+    }
+    if (
+      form.runMode !== "existing_session" &&
+      form.executionTarget === "machine" &&
+      !form.machineSandboxId
+    ) {
+      toast.error("Choose a Connected Machine for this schedule");
+      return;
+    }
+    if (
+      form.runMode !== "existing_session" &&
+      form.executionTarget === "managed" &&
+      context.clientConfig.defaultSandboxBackend === "selfhosted"
+    ) {
+      toast.error("This deployment requires a Connected Machine for scheduled sessions");
       return;
     }
     setBusyTaskId(task.id);
@@ -560,12 +605,18 @@ export function SchedulesRoute({
                 initialState={formStateFromScheduledTask(task, {
                   model: context.model,
                   reasoningEffort: context.reasoningEffort,
+                  defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
+                  defaultMachineSandboxId,
                 })}
                 submitLabel="Save changes"
                 busy={busyTaskId === task.id}
                 canAttachOpenGeniTool={canAttachOpenGeniTool}
                 canTargetSessions={canTargetSessions}
                 sessions={sessions}
+                machines={scheduledMachines}
+                machinesLoading={fleet.loading}
+                machinesError={fleet.error}
+                defaultSandboxBackend={context.clientConfig.defaultSandboxBackend ?? "modal"}
                 modelRows={modelCatalog.rows}
                 modelsLoading={modelCatalog.loading}
                 modelsError={modelCatalog.error}
@@ -630,10 +681,14 @@ export function SchedulesRoute({
                 ? recurringSessionTaskFormState(recurringSourceSessionId, canAttachOpenGeniTool, {
                     model: context.model,
                     reasoningEffort: context.reasoningEffort,
+                    defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
+                    defaultMachineSandboxId,
                   })
                 : newScheduledTaskFormState(canAttachOpenGeniTool, [], {
                     model: context.model,
                     reasoningEffort: context.reasoningEffort,
+                    defaultSandboxBackend: context.clientConfig.defaultSandboxBackend,
+                    defaultMachineSandboxId,
                   })
             }
             submitLabel="Create scheduled task"
@@ -641,6 +696,10 @@ export function SchedulesRoute({
             canAttachOpenGeniTool={canAttachOpenGeniTool}
             canTargetSessions={canTargetSessions}
             sessions={sessions}
+            machines={scheduledMachines}
+            machinesLoading={fleet.loading}
+            machinesError={fleet.error}
+            defaultSandboxBackend={context.clientConfig.defaultSandboxBackend ?? "modal"}
             modelRows={modelCatalog.rows}
             modelsLoading={modelCatalog.loading}
             modelsError={modelCatalog.error}
@@ -1170,6 +1229,10 @@ function ScheduledTaskForm(props: {
   canAttachOpenGeniTool: boolean;
   canTargetSessions: boolean;
   sessions: Session[];
+  machines: MachineView[];
+  machinesLoading: boolean;
+  machinesError: Error | null;
+  defaultSandboxBackend: NonNullable<ScheduledTask["agentConfig"]["sandboxBackend"]>;
   modelRows: PickerModelRow[];
   modelsLoading: boolean;
   modelsError: string | null;
@@ -1188,6 +1251,24 @@ function ScheduledTaskForm(props: {
     setForm((current) => ({ ...current, [key]: value }));
   };
   const selectedSession = props.sessions.find((session) => session.id === form.targetSessionId);
+  const selectedMachine = props.machines.find(
+    (machine) => machine.sandboxId === form.machineSandboxId,
+  );
+  useEffect(() => {
+    if (
+      form.runMode === "existing_session" ||
+      form.executionTarget !== "machine" ||
+      form.machineSandboxId
+    ) {
+      return;
+    }
+    const firstSelectable = props.machines.find((machine) =>
+      isMachineComputeSelectable(machine.state),
+    );
+    if (firstSelectable) {
+      setForm((current) => ({ ...current, machineSandboxId: firstSelectable.sandboxId }));
+    }
+  }, [form.executionTarget, form.machineSandboxId, form.runMode, props.machines]);
   const selectedModel = findPickerRow(props.modelRows, form.model);
   const reasoningLabel =
     form.reasoningEffort === "xhigh"
@@ -1306,7 +1387,87 @@ function ScheduledTaskForm(props: {
               ))}
             </Select>
           </div>
-        ) : null}
+        ) : (
+          <div className="grid gap-3 rounded-lg border border-border bg-surface/40 p-3">
+            <div className="grid gap-1.5">
+              <Label>Execution</Label>
+              <Select
+                value={form.executionTarget}
+                disabled={props.busy}
+                onChange={(event) =>
+                  update(
+                    "executionTarget",
+                    event.target.value as ScheduledTaskFormState["executionTarget"],
+                  )
+                }
+              >
+                <option value="managed" disabled={props.defaultSandboxBackend === "selfhosted"}>
+                  Managed sandbox
+                  {props.defaultSandboxBackend === "selfhosted" ? " (not configured)" : ""}
+                </option>
+                <option value="machine">Connected machine</option>
+              </Select>
+              <p className="text-2xs text-fg-subtle">
+                {form.executionTarget === "machine"
+                  ? "Each generated chat is attached to this machine before its first turn."
+                  : "Each generated chat starts in the deployment's managed sandbox."}
+              </p>
+            </div>
+            {form.executionTarget === "machine" ? (
+              <>
+                <div className="grid gap-1.5">
+                  <Label>Machine</Label>
+                  <Select
+                    value={form.machineSandboxId}
+                    disabled={props.busy || props.machinesLoading}
+                    onChange={(event) => update("machineSandboxId", event.target.value)}
+                  >
+                    <option value="">
+                      {props.machinesLoading ? "Loading machines…" : "Choose a machine"}
+                    </option>
+                    {form.machineSandboxId && !selectedMachine ? (
+                      <option value={form.machineSandboxId} disabled>
+                        The selected machine is unavailable
+                      </option>
+                    ) : null}
+                    {props.machines.map((machine) => (
+                      <option
+                        key={machine.sandboxId}
+                        value={machine.sandboxId}
+                        disabled={!isMachineComputeSelectable(machine.state)}
+                      >
+                        {machine.name}
+                        {machine.os ? ` · ${machine.os}/${machine.arch}` : ""}
+                        {machine.state !== "online" ? ` (${machine.state})` : ""}
+                      </option>
+                    ))}
+                  </Select>
+                  {props.machinesError ? (
+                    <p className="text-2xs text-status-failed">
+                      Connected Machines could not be loaded. Refresh and try again.
+                    </p>
+                  ) : props.machines.length === 0 && !props.machinesLoading ? (
+                    <p className="text-2xs text-fg-subtle">
+                      No workspace or organization Connected Machines are available.
+                    </p>
+                  ) : null}
+                </div>
+                <div className="grid gap-1.5">
+                  <Label>Working directory (optional)</Label>
+                  <Input
+                    value={form.workingDir}
+                    disabled={props.busy}
+                    onChange={(event) => update("workingDir", event.target.value)}
+                    placeholder="Machine root, or /home/me/repos/project"
+                  />
+                  <p className="text-2xs text-fg-subtle">
+                    Absolute, or relative to the machine&apos;s reported workspace root.
+                  </p>
+                </div>
+              </>
+            ) : null}
+          </div>
+        )}
         <div className="grid gap-1.5">
           <Label>When a run is already active</Label>
           <Select

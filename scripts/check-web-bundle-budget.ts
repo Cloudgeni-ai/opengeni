@@ -346,6 +346,11 @@ const budgets = {
   // Advance the policy-derived raw envelope to 2,189 KiB and gzip to 615 KiB,
   // retaining 1,539 raw bytes and the established 1.5-KiB compressed platform-
   // skew allowance. Every unrelated cap remains fixed.
+  // Scheduled Connected Machine targeting adds the typed SDK projection used
+  // by unattended runs plus client-side path normalization. The exact
+  // Linux/x64 Bun 1.4 graph measures 2,242,670 raw bytes. Advance only the
+  // policy-derived raw envelope while gzip, file-count, initial, per-file,
+  // lazy-chunk, and CSS caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
