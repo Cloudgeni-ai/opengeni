@@ -816,6 +816,13 @@ dependencies. `@opengeni/runtime` owns provider-neutral agent construction,
 model input/output handling, tool execution, progressive disclosure, and the
 sandbox interface.
 
+The embedding process—not the Agents SDK—owns process-global rejection and
+termination policy. SDK background lifecycle work must settle an owned promise;
+it may not detach a rejecting task or install an `unhandledRejection` handler
+that exits the shared worker. The worker's global rejection listener is a
+last-resort observational boundary, while deliberate restart remains an
+OpenGeni drain-and-checkpoint decision.
+
 The worker supplies frozen authority and durable sinks. Runtime must not invent
 tenancy or persistence authority from its in-memory agent context.
 

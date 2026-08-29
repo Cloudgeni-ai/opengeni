@@ -4,7 +4,11 @@ import type { RemoveEnrollmentResponse } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { MachineRemovalBlockNotice, moveDependentSessionsToDefault } from "./machines";
+import {
+  MachineRemovalBlockNotice,
+  copyToClipboard,
+  moveDependentSessionsToDefault,
+} from "./machines";
 
 const blocked: RemoveEnrollmentResponse = {
   revoked: false,
@@ -128,5 +132,31 @@ describe("connected machine removal conflict", () => {
 
     await act(async () => root.unmount());
     container.remove();
+  });
+});
+
+describe("connected machine command copy", () => {
+  test("falls back when the Clipboard API is unavailable on private HTTP", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+    const copied: string[] = [];
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: (command: string) => {
+        if (command === "copy") {
+          copied.push(document.querySelector("textarea")?.value ?? "");
+          return true;
+        }
+        return false;
+      },
+    });
+
+    await expect(copyToClipboard("curl https://example.test/install", "Copied")).resolves.toBe(
+      true,
+    );
+    expect(copied).toEqual(["curl https://example.test/install"]);
+    expect(document.querySelector("textarea")).toBeNull();
   });
 });

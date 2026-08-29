@@ -51,25 +51,29 @@ export function useSession(
   const nextReadGeneration = useRef(0);
   const beginRead = options.beginRead;
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
-  const load = useCallback(async () => {
-    if (!sessionId) {
-      return null;
-    }
-    let readGeneration = 0;
-    const fetched = await client.getSession(workspaceId, sessionId, {
-      fresh: true,
-      onRequestStart: () => {
-        readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
-      },
-    });
-    // A fresh server read supersedes any optimistic/event-driven override.
-    setOverride(null);
-    return {
-      session: fetched,
-      revision: ++nextReadRevision.current,
-      readGeneration,
-    };
-  }, [beginRead, client, workspaceId, sessionId]);
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!sessionId) {
+        return null;
+      }
+      let readGeneration = 0;
+      const fetched = await client.getSession(workspaceId, sessionId, {
+        fresh: true,
+        signal,
+        onRequestStart: () => {
+          readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
+        },
+      });
+      // A fresh server read supersedes any optimistic/event-driven override.
+      setOverride(null);
+      return {
+        session: fetched,
+        revision: ++nextReadRevision.current,
+        readGeneration,
+      };
+    },
+    [beginRead, client, workspaceId, sessionId],
+  );
   const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled,

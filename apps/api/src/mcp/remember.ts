@@ -11,7 +11,7 @@ import {
   type RememberLane,
 } from "@opengeni/contracts";
 import { RememberError, createRememberRouter } from "@opengeni/core";
-import type { Database } from "@opengeni/db";
+import { PreferenceRegistryStableKeyConflictError, type Database } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
@@ -120,9 +120,20 @@ export function registerRememberTools(input: RegisterRememberToolsInput): void {
           : lane === "instruction_policy"
             ? { ...base, lane, target: request.target }
             : { ...base, lane, subject: request.subject ?? content.slice(0, 80) };
-      return input.json(
-        await router.remember({ attempt: input.attempt, request: rememberRequest }),
-      );
+      try {
+        return input.json(
+          await router.remember({ attempt: input.attempt, request: rememberRequest }),
+        );
+      } catch (error) {
+        if (error instanceof PreferenceRegistryStableKeyConflictError) {
+          return input.json({
+            status: "not_remembered",
+            code: "preference_stable_key_conflict",
+            message: error.message,
+          });
+        }
+        throw error;
+      }
     },
   );
 

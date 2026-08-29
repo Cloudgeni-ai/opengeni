@@ -58,7 +58,11 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { sseWorkspaceInteractionRevisionStream, sseWorkspaceLiveStream } from "../http/sse";
+import {
+  browserSseDeliveryOptions,
+  sseWorkspaceInteractionRevisionStream,
+  sseWorkspaceLiveStream,
+} from "../http/sse";
 import { observeInterventionMutation } from "../interaction-metrics";
 
 export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -74,6 +78,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
       nonnegativeSafeIntegerQuery(context, "interactionAfter", 0),
       context.req.raw.signal,
       {
+        ...browserSseDeliveryOptions(context.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(context.req.raw) ?? undefined,
         reauthorize: async () => {
@@ -99,6 +104,7 @@ export function registerInteractionResourceRoutes(app: Hono, deps: ApiRouteDeps)
       after,
       context.req.raw.signal,
       {
+        ...browserSseDeliveryOptions(context.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(context.req.raw) ?? undefined,
         reauthorize: async () => {

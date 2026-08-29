@@ -376,6 +376,276 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
+  test("restores reconciled authority when the initiating surface fence rejects", async () => {
+    const before = projection();
+    let mutationAttempts = 0;
+    let reconciliationAttempts = 0;
+    let rejectFence = true;
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => before,
+        reconcileSessionSetAuthority: async () => {
+          reconciliationAttempts += 1;
+          return before;
+        },
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          return projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (rejectFence && transition.from?.selectedSlotId === SLOT_A && transition.to === null) {
+          rejectFence = false;
+          throw new Error("host fence failed");
+        }
+      },
+    );
+    transitions.length = 0;
+    const initialReconciliationAttempts = reconciliationAttempts;
+
+    await expect(actRun(() => accounts.current.selectSlot(SLOT_B))).rejects.toThrow(
+      "host fence failed",
+    );
+    await flush();
+
+    expect(mutationAttempts).toBe(0);
+    // Recovery first discovers the current authority, then confirms it again
+    // after the host has restored the actor-owned surface.
+    expect(reconciliationAttempts - initialReconciliationAttempts).toBe(2);
+    expect(transitions).toHaveLength(2);
+    expect(transitions[0]).toMatchObject({ from: before, to: null });
+    expect(transitions[1]).toMatchObject({ from: null, to: before });
+    expect(accounts.current.projection).toEqual(before);
+    expect(accounts.current.phase).toBe("recoverable_error");
+    expect(accounts.current.hasPendingTransition).toBe(true);
+    await accounts.unmount();
+  });
+
+  test("restores from neutral authority when refresh supersedes the initiating fence", async () => {
+    const before = projection();
+    let mutationAttempts = 0;
+    let announceFenceStarted!: () => void;
+    let releaseFence!: () => void;
+    const fenceStarted = new Promise<void>((resolve) => {
+      announceFenceStarted = resolve;
+    });
+    const fenceRelease = new Promise<void>((resolve) => {
+      releaseFence = resolve;
+    });
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => before,
+        reconcileSessionSetAuthority: async () => before,
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          return projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (transition.from?.selectedSlotId === SLOT_A && transition.to === null) {
+          announceFenceStarted();
+          await fenceRelease;
+        }
+      },
+    );
+    transitions.length = 0;
+
+    let selection!: Promise<boolean>;
+    await act(async () => {
+      selection = accounts.current.selectSlot(SLOT_B);
+      await fenceStarted;
+    });
+    expect(accounts.current.projection).toBeNull();
+    expect(accounts.current.phase).toBe("loading");
+
+    await act(async () => {
+      expect(await accounts.current.refresh()).toEqual(before);
+    });
+    await act(async () => {
+      releaseFence();
+      expect(await selection).toBe(false);
+    });
+
+    expect(mutationAttempts).toBe(0);
+    expect(transitions).toHaveLength(2);
+    expect(transitions[0]).toMatchObject({ from: before, to: null });
+    expect(transitions[1]).toMatchObject({ kind: "cross_tab", from: null, to: before });
+    expect(accounts.current.projection).toEqual(before);
+    expect(accounts.current.phase).toBe("ready");
+    await accounts.unmount();
+  });
+
+  test("reconciles authority when invalidation supersedes a pre-mutation fence", async () => {
+    const before = projection();
+    const replacement = projection({
+      generation: "2",
+      actorEpoch: "2",
+      selectedSlotId: SLOT_B,
+    });
+    let current = before;
+    let mutationAttempts = 0;
+    let announceFenceStarted!: () => void;
+    const fenceStarted = new Promise<void>((resolve) => {
+      announceFenceStarted = resolve;
+    });
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => current,
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          return replacement;
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (transition.from === before && transition.to === null) {
+          announceFenceStarted();
+          if (!transition.signal.aborted) {
+            await new Promise<void>((resolve) =>
+              transition.signal.addEventListener("abort", () => resolve(), { once: true }),
+            );
+          }
+        }
+      },
+    );
+    transitions.length = 0;
+
+    let selection!: Promise<boolean>;
+    await act(async () => {
+      selection = accounts.current.selectSlot(SLOT_B);
+      await fenceStarted;
+    });
+    expect(accounts.current.projection).toBeNull();
+
+    current = replacement;
+    expect(await actRun(() => accounts.current.invalidateActor())).toEqual(replacement);
+    expect(await actRun(async () => await selection)).toBe(false);
+
+    expect(mutationAttempts).toBe(0);
+    expect(accounts.current.projection).toEqual(replacement);
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.hasPendingTransition).toBe(false);
+    expect(transitions.at(-1)).toMatchObject({
+      kind: "cross_tab",
+      from: null,
+      to: replacement,
+    });
+    await accounts.unmount();
+  });
+
+  test("does not dispatch a mutation superseded during the peer-hold yield", async () => {
+    const before = projection();
+    const replacement = projection({
+      generation: "2",
+      actorEpoch: "2",
+      selectedSlotId: SLOT_B,
+    });
+    let current = before;
+    let mutationAttempts = 0;
+    let settleInvalidation!: (value: ManagedAuthSessionSetProjection | null) => void;
+    const invalidationSettled = new Promise<ManagedAuthSessionSetProjection | null>((resolve) => {
+      settleInvalidation = resolve;
+    });
+    let accounts!: Awaited<ReturnType<typeof renderAccounts>>;
+    accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => current,
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          return replacement;
+        },
+      }),
+      async (transition) => {
+        if (transition.from === before && transition.to === null) {
+          current = replacement;
+          setTimeout(() => {
+            void accounts.current.invalidateActor().then(settleInvalidation);
+          }, 0);
+        }
+      },
+    );
+
+    expect(await actRun(() => accounts.current.selectSlot(SLOT_B))).toBe(false);
+    expect(await actRun(async () => await invalidationSettled)).toEqual(replacement);
+
+    expect(mutationAttempts).toBe(0);
+    expect(accounts.current.projection).toEqual(replacement);
+    expect(accounts.current.phase).toBe("ready");
+    await accounts.unmount();
+  });
+
+  test("reconciles an invalidation that supersedes post-mutation host settlement", async () => {
+    const before = projection();
+    const replacement = projection({
+      generation: "2",
+      actorEpoch: "2",
+      selectedSlotId: SLOT_B,
+    });
+    let current = before;
+    let mutationAttempts = 0;
+    let announceSettlementStarted!: () => void;
+    const settlementStarted = new Promise<void>((resolve) => {
+      announceSettlementStarted = resolve;
+    });
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => current,
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          current = replacement;
+          return replacement;
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (
+          transition.kind === "select" &&
+          transition.from === null &&
+          transition.to === replacement
+        ) {
+          announceSettlementStarted();
+          if (!transition.signal.aborted) {
+            await new Promise<void>((resolve) =>
+              transition.signal.addEventListener("abort", () => resolve(), { once: true }),
+            );
+          }
+        }
+      },
+    );
+    transitions.length = 0;
+
+    let selection!: Promise<boolean>;
+    await act(async () => {
+      selection = accounts.current.selectSlot(SLOT_B);
+      await settlementStarted;
+    });
+    expect(accounts.current.projection).toBeNull();
+    expect(accounts.current.phase).toBe("loading");
+
+    expect(await actRun(() => accounts.current.invalidateActor())).toEqual(replacement);
+    expect(await actRun(async () => await selection)).toBe(true);
+
+    expect(mutationAttempts).toBe(1);
+    expect(accounts.current.projection).toEqual(replacement);
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.hasPendingTransition).toBe(false);
+    expect(transitions.at(-1)).toMatchObject({
+      kind: "cross_tab",
+      from: null,
+      to: replacement,
+    });
+    await accounts.unmount();
+  });
+
   test("lets logout-all own settlement when its SSE actor-loss signal arrives concurrently", async () => {
     const before = projection({ generation: "4", actorEpoch: "3" });
     const empty = projection({ selectedSlotId: null, slotIds: [] });
@@ -409,7 +679,7 @@ describe("BrowserAccountsProvider", () => {
       logout = accounts.current.logoutAll();
       await postStarted;
     });
-    expect(accounts.current.phase).toBe("committing");
+    expect(accounts.current.phase).toBe("loading");
 
     await act(async () => {
       expect(await accounts.current.invalidateActor()).toBeNull();
@@ -707,7 +977,7 @@ describe("BrowserAccountsProvider", () => {
           },
         }),
         async (transition) => {
-          if (transition.from !== null && transition.to?.selectedSlotId === SLOT_B) {
+          if (transition.to?.selectedSlotId === SLOT_B) {
             await transitionSettled;
           }
         },
@@ -784,6 +1054,7 @@ describe("BrowserAccountsProvider", () => {
 
     let current = projection();
     const peerTransitions: BrowserAccountTransition[] = [];
+    const initiatorTransitions: BrowserAccountTransition[] = [];
     let peer: Awaited<ReturnType<typeof renderAccounts>> | null = null;
     let initiator: Awaited<ReturnType<typeof renderAccounts>> | null = null;
     try {
@@ -800,6 +1071,7 @@ describe("BrowserAccountsProvider", () => {
           getSessionSet: async () => current,
           selectLoginSlot: async () => {
             expect(peerTransitions.at(-1)?.to).toBeNull();
+            expect(initiatorTransitions.at(-1)?.to).toBeNull();
             current = projection({
               generation: "2",
               actorEpoch: "2",
@@ -808,13 +1080,17 @@ describe("BrowserAccountsProvider", () => {
             return current;
           },
         }),
-        async () => undefined,
+        async (transition) => {
+          initiatorTransitions.push(transition);
+        },
         "accounts-precommit-hold-test",
       );
+      initiatorTransitions.length = 0;
 
       expect(await actRun(() => initiator!.current.selectSlot(SLOT_B))).toBe(true);
       await flush();
       expect(peerTransitions[0]?.to).toBeNull();
+      expect(initiatorTransitions[0]?.to).toBeNull();
       expect(peer.current.projection?.selectedSlotId).toBe(SLOT_B);
       expect(peer.current.projection?.actorEpoch).toBe("2");
     } finally {
@@ -1113,8 +1389,8 @@ describe("BrowserAccountsProvider", () => {
     expect(await actRun(() => accounts.current.selectSlot(SLOT_A))).toBe(true);
     expect(accounts.current.projection?.actorEpoch).toBe("3");
     expect(accounts.current.projection?.selectedSlotId).toBe(SLOT_B);
-    expect(transitionCount).toBe(initialTransitions);
-    expect(readCount).toBe(3);
+    expect(transitionCount).toBe(initialTransitions + 2);
+    expect(readCount).toBe(4);
     await accounts.unmount();
   });
 

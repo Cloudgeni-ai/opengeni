@@ -602,6 +602,54 @@ describe("Company Brain learning-policy router: evaluator and activation wiring"
     });
   });
 
+  test("automatic returns and replays the durable receipt without waiting for notification", async () => {
+    const notifications: string[] = [];
+    const neverSettles = new Promise<never>(() => undefined);
+    const router = createCompanyBrainLearningPolicyRouter({
+      db: {} as Database,
+      async learningPolicySnapshot() {
+        return policySnapshot("automatic");
+      },
+      async authority() {
+        return receiptFor(preferenceRequest);
+      },
+      async evaluate() {
+        return decisionReceipt({ outcome: "automatic", automaticEligible: true });
+      },
+      async activate() {
+        return activationReceipt();
+      },
+      async notifyActivation(input) {
+        notifications.push(input.receipt.id);
+        return await neverSettles;
+      },
+    });
+
+    const settlesWithin = async <T>(promise: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("durable receipt waited for notification settlement")),
+              500,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
+    const first = await settlesWithin(router.write({ attempt, request: preferenceRequest }));
+    const replay = await settlesWithin(router.write({ attempt, request: preferenceRequest }));
+
+    expect(first.decision).toBe("activated");
+    expect(replay).toEqual(first);
+    expect(notifications).toEqual([ACTIVATION_ID, ACTIVATION_ID]);
+  });
+
   test("automatic without eligibility keeps the proposal for human review", async () => {
     let activations = 0;
     const router = createCompanyBrainLearningPolicyRouter({

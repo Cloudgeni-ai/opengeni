@@ -11,6 +11,8 @@ import {
   discoverGitHubInstallationBindingCandidates,
   envLinesFromGitHubManifestConversion,
   githubAppBotIdentity,
+  githubAppBotIdentityWarnings,
+  GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING,
   githubOAuthAuthorizeUrl,
   normalizeGitHubAppPrivateKey,
   openPersonalGitHubGitBrokerClaims,
@@ -187,6 +189,35 @@ describe("GitHub app manifest helpers", () => {
       name: "opengeni[bot]",
       email: "12345+opengeni[bot]@users.noreply.github.com",
     });
+  });
+
+  test("warns only when a configured workspace App cannot supply stable git identity", () => {
+    expect(githubAppBotIdentityWarnings({} as any)).toEqual([]);
+    expect(
+      githubAppBotIdentityWarnings({
+        githubClientId: "configured-client",
+      } as any),
+    ).toEqual([GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING]);
+    expect(
+      githubAppBotIdentityWarnings({
+        githubClientId: "configured-client",
+        githubAppId: "12345",
+        githubAppSlug: "opengeni",
+      } as any),
+    ).toEqual([]);
+    expect(
+      githubAppBotIdentityWarnings({
+        githubClientId: "configured-client",
+        gitAuthorName: "OpenGeni",
+        gitAuthorEmail: "bot@opengeni.dev",
+      } as any),
+    ).toEqual([]);
+    expect(
+      githubAppBotIdentityWarnings({
+        githubClientId: "configured-client",
+        gitAuthorName: "OpenGeni",
+      } as any),
+    ).toEqual([GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING]);
   });
 
   test("proves exact personal-account ownership with a fresh GitHub user authorization", async () => {
