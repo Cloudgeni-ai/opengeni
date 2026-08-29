@@ -376,6 +376,53 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
+  test("restores reconciled authority when the initiating surface fence rejects", async () => {
+    const before = projection();
+    let mutationAttempts = 0;
+    let reconciliationAttempts = 0;
+    let rejectFence = true;
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => before,
+        reconcileSessionSetAuthority: async () => {
+          reconciliationAttempts += 1;
+          return before;
+        },
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          return projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (rejectFence && transition.from?.selectedSlotId === SLOT_A && transition.to === null) {
+          rejectFence = false;
+          throw new Error("host fence failed");
+        }
+      },
+    );
+    transitions.length = 0;
+    const initialReconciliationAttempts = reconciliationAttempts;
+
+    await expect(actRun(() => accounts.current.selectSlot(SLOT_B))).rejects.toThrow(
+      "host fence failed",
+    );
+    await flush();
+
+    expect(mutationAttempts).toBe(0);
+    // Recovery first discovers the current authority, then confirms it again
+    // after the host has restored the actor-owned surface.
+    expect(reconciliationAttempts - initialReconciliationAttempts).toBe(2);
+    expect(transitions).toHaveLength(2);
+    expect(transitions[0]).toMatchObject({ from: before, to: null });
+    expect(transitions[1]).toMatchObject({ from: null, to: before });
+    expect(accounts.current.projection).toEqual(before);
+    expect(accounts.current.phase).toBe("recoverable_error");
+    expect(accounts.current.hasPendingTransition).toBe(true);
+    await accounts.unmount();
+  });
+
   test("lets logout-all own settlement when its SSE actor-loss signal arrives concurrently", async () => {
     const before = projection({ generation: "4", actorEpoch: "3" });
     const empty = projection({ selectedSlotId: null, slotIds: [] });

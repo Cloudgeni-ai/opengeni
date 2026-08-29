@@ -417,6 +417,11 @@ export function BrowserAccountsProvider({
           const controller = new AbortController();
           transitionAbortRef.current = controller;
           setPhase("loading");
+          // The host can synchronously clear its actor surface before its
+          // transition promise later rejects. From this point on, every
+          // failure must reconcile and restore authority even though the
+          // account mutation has not started yet.
+          initiatingActorFenced = true;
           await onActorTransition({
             kind: pending.kind,
             from: current,
@@ -424,7 +429,6 @@ export function BrowserAccountsProvider({
             signal: controller.signal,
           });
           if (controller.signal.aborted || sequenceRef.current !== sequence) return false;
-          initiatingActorFenced = true;
           // Yield one task after the secret-free hold so queued BroadcastChannel
           // delivery can fence peers before the network mutation starts.
           await yieldToCrossTabActorHold();
