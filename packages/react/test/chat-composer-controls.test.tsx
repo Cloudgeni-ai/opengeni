@@ -237,6 +237,22 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(spy.sends).toEqual(["send"]);
   });
 
+  test("a disabled send button can explain the exact route-level blocker", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const sendTitle =
+      "This workspace-visible chat uses an Only me Variable Set. Confirm private credential use below before sending.";
+    mounted = await renderComponent(
+      <ChatComposer composer={{ ...composer(spy), canSend: false }} messages={{ sendTitle }} />,
+    );
+    const send = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Send message"]',
+    );
+    expect(send?.disabled).toBe(true);
+    expect(send?.getAttribute("data-og-tip")).toBe(sendTitle);
+    await act(async () => send?.click());
+    expect(spy.sends).toEqual([]);
+  });
+
   test("inherited Pause names and links every blocker while keeping one primary Resume", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     const parentId = "33333333-3333-4333-8333-333333333333";
