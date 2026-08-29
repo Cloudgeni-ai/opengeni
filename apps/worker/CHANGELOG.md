@@ -1,5 +1,26 @@
 # @opengeni/worker-bundle
 
+## 0.22.12
+
+### Patch Changes
+
+- 3c75347: Keep Agents SDK MCP lifecycle failures inside owned promises and reserve shared-worker process termination policy for OpenGeni.
+- 237ef39: Keep detached SDK and transport promise rejections from restarting shared worker pods and causing cross-session lease loss.
+- da6708a: Keep detached duplicates of already-handled MCP lifecycle failures from restarting turn workers.
+- Updated dependencies [3c75347]
+- Updated dependencies [551cead]
+- Updated dependencies [06460ae]
+- Updated dependencies [227c54c]
+- Updated dependencies [06fda28]
+- Updated dependencies [499cc48]
+- Updated dependencies [37faec3]
+  - @opengeni/runtime@1.4.6
+  - @opengeni/db@3.6.3
+  - @opengeni/core@2.5.7
+  - @opengeni/github@0.6.4
+  - @opengeni/documents@0.8.9
+  - @opengeni/events@0.4.7
+
 ## 0.22.11
 
 ### Patch Changes
