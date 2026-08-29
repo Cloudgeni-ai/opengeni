@@ -3,7 +3,12 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { sessionUsesVariableSet, VariableSetCard } from "./variable-sets";
+import {
+  normalizeVariableNameInput,
+  variableNameError,
+  sessionUsesVariableSet,
+  VariableSetCard,
+} from "./variable-sets";
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
 import type { Session, WorkspaceVariableSet } from "@/types";
 
@@ -39,7 +44,42 @@ const VARIABLE_SET: WorkspaceVariableSet = {
   updatedAt: "2026-07-28T00:00:00.000Z",
 };
 
+async function setInputValue(element: HTMLInputElement, value: string): Promise<void> {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element), "value")?.set?.call(
+      element,
+      value,
+    );
+    const reactPropsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+    const onChange = reactPropsKey
+      ? (
+          element as unknown as Record<
+            string,
+            { onChange?: (event: { target: HTMLInputElement }) => void }
+          >
+        )[reactPropsKey]?.onChange
+      : undefined;
+    if (onChange) onChange({ target: element });
+    else element.dispatchEvent(new Event("input", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
 describe("Variable Sets credential-autofill boundaries", () => {
+  test("normalizes friendly labels into portable environment names", () => {
+    expect(normalizeVariableNameInput("test-key")).toBe("TEST_KEY");
+    expect(normalizeVariableNameInput("  service token  ")).toBe("SERVICE_TOKEN");
+    expect(normalizeVariableNameInput("api.key/value")).toBe("API_KEY_VALUE");
+  });
+
+  test("explains names reserved by the sandbox before submission", () => {
+    expect(variableNameError("HOME")).toBe("HOME is reserved. Choose another name.");
+    expect(variableNameError("OPENGENI_TOKEN")).toBe(
+      "Names beginning with OPENGENI_ are reserved. Choose another name.",
+    );
+    expect(variableNameError("MY_APP_TOKEN")).toBeNull();
+  });
+
   test("uses the complete ordered session selection before the legacy singular fallback", () => {
     const lowerPrecedenceId = "variable-set-low";
     const higherPrecedenceId = "variable-set-high";
@@ -145,9 +185,30 @@ describe("Variable Sets credential-autofill boundaries", () => {
         );
       });
 
+      const manageButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Manage variables for staging"]',
+      );
+      const editButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Edit details for staging"]',
+      );
+      expect(manageButton?.textContent?.trim()).toBe("Manage variables");
+      expect(editButton?.textContent?.trim()).toBe("Edit details");
+
+      await act(async () => {
+        editButton!.click();
+      });
+      expect(container.querySelector('[aria-label="Variable set name"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Variable set description"]')).not.toBeNull();
+      expect(container.querySelector('form[aria-label="Add variable to staging"]')).toBeNull();
+
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.trim() === "Cancel")!
+          .click();
+      });
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
           .click();
       });
 
@@ -207,6 +268,70 @@ describe("Variable Sets credential-autofill boundaries", () => {
     }
   });
 
+  test("shows and submits the normalized environment name instead of a backend 422", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const writes: Array<{ name: string; value: string }> = [];
+
+    try {
+      await act(async () => {
+        root.render(
+          <VariableSetCard
+            workspaceId="workspace-1"
+            variableSet={VARIABLE_SET}
+            attachedSessions={[]}
+            attachedTasks={[]}
+            attachmentsUnknown={false}
+            mutating={false}
+            canWriteSet={true}
+            canWriteSecrets={true}
+            canReadSecrets={true}
+            revealEpoch={0}
+            onUpdate={async () => VARIABLE_SET}
+            onDelete={async () => true}
+            onReadVariable={async () => null}
+            onSetVariable={async (name, value) => {
+              writes.push({ name, value });
+              return {};
+            }}
+            onDeleteVariable={async () => true}
+          />,
+        );
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
+          .click();
+      });
+
+      const name = container.querySelector<HTMLInputElement>('[aria-label="New variable name"]')!;
+      const value = container.querySelector<HTMLInputElement>('[aria-label="New variable value"]')!;
+      await setInputValue(name, "1test-key");
+      await setInputValue(value, "secret-value");
+      const submit = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Add variable",
+      )!;
+      expect(name.value).toBe("1test-key");
+      expect(container.textContent).toContain("Start the name with a letter");
+      expect(submit.disabled).toBeTrue();
+
+      await setInputValue(name, "test-key");
+
+      expect(name.value).toBe("test-key");
+      expect(container.textContent).toContain("Saved as TEST_KEY");
+      expect(submit.disabled).toBeFalse();
+      await act(async () => {
+        submit.click();
+        await Promise.resolve();
+      });
+      expect(writes).toEqual([{ name: "TEST_KEY", value: "secret-value" }]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("reveals and copies only on demand, then clears plaintext on hide and refresh", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -258,7 +383,7 @@ describe("Variable Sets credential-autofill boundaries", () => {
       await renderCard(0);
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
           .click();
       });
       expect(container.textContent).not.toContain(exact);
@@ -287,7 +412,7 @@ describe("Variable Sets credential-autofill boundaries", () => {
       expect(container.textContent).not.toContain(exact);
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
           .click();
       });
       expect(container.textContent).not.toContain(exact);
@@ -335,13 +460,13 @@ describe("Variable Sets credential-autofill boundaries", () => {
       });
       await act(async () => {
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Show variables for staging"]')!
+          .querySelector<HTMLButtonElement>('button[aria-label="Manage variables for staging"]')!
           .click();
       });
       expect(container.querySelector('[aria-label="Reveal variable API_TOKEN"]')).toBeNull();
       expect(container.querySelector('[aria-label="Rotate variable API_TOKEN"]')).toBeNull();
       expect(container.querySelector('[aria-label="Delete variable API_TOKEN"]')).toBeNull();
-      expect(container.querySelector('[aria-label="Edit variable set"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Edit details for staging"]')).toBeNull();
       expect(container.querySelector('form[aria-label="Add variable to staging"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());

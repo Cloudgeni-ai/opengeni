@@ -1,5 +1,9 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type { AccessGrant, VariableSet } from "@opengeni/contracts";
+import {
+  variableSetVariableNameReservation,
+  type AccessGrant,
+  type VariableSet,
+} from "@opengeni/contracts";
 import { getVariableSet, recordAuditEvent, type Database } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { requirePermission } from "../access";
@@ -11,40 +15,8 @@ export const MAX_VARIABLES_PER_ENVIRONMENT = 100;
 // collectGitIdentityEnvironment) plus loader/startup-injection vectors. These
 // can never be set as variable set variables, so the run-scoped
 // git auth block and git identity always win without silent collisions.
-const reservedExactNames = new Set([
-  "HOME",
-  "PATH",
-  "SHELL",
-  "USER",
-  "LOGNAME",
-  "TMPDIR",
-  "IFS",
-  "ENV",
-  "BASH_ENV",
-  "NODE_OPTIONS",
-  "PYTHONPATH",
-  "PYTHONSTARTUP",
-  "PERL5OPT",
-  "PERL5LIB",
-  "GH_TOKEN",
-  "GITHUB_TOKEN",
-  "GITLAB_TOKEN",
-  "AZURE_DEVOPS_EXT_PAT",
-  "GIT_ASKPASS",
-  "GIT_TERMINAL_PROMPT",
-]);
-
-const reservedPrefixes = [
-  "OPENGENI_",
-  "GIT_CONFIG_",
-  "GIT_AUTHOR_",
-  "GIT_COMMITTER_",
-  "LD_",
-  "DYLD_",
-];
-
 export function assertAllowedVariableSetVariableName(name: string): void {
-  if (reservedExactNames.has(name) || reservedPrefixes.some((prefix) => name.startsWith(prefix))) {
+  if (variableSetVariableNameReservation(name)) {
     throw new HTTPException(422, {
       message: `reserved variable set variable name / reserved environment variable name: ${name}`,
     });

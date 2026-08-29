@@ -7662,6 +7662,48 @@ export const VariableSetVariableName = z
   .max(128);
 export type VariableSetVariableName = z.infer<typeof VariableSetVariableName>;
 
+export const VARIABLE_SET_RESERVED_EXACT_NAMES = [
+  "HOME",
+  "PATH",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "IFS",
+  "ENV",
+  "BASH_ENV",
+  "NODE_OPTIONS",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PERL5OPT",
+  "PERL5LIB",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GITLAB_TOKEN",
+  "AZURE_DEVOPS_EXT_PAT",
+  "GIT_ASKPASS",
+  "GIT_TERMINAL_PROMPT",
+] as const;
+
+export const VARIABLE_SET_RESERVED_PREFIXES = [
+  "OPENGENI_",
+  "GIT_CONFIG_",
+  "GIT_AUTHOR_",
+  "GIT_COMMITTER_",
+  "LD_",
+  "DYLD_",
+] as const;
+
+export function variableSetVariableNameReservation(
+  name: string,
+): { kind: "exact" | "prefix"; value: string } | null {
+  if ((VARIABLE_SET_RESERVED_EXACT_NAMES as readonly string[]).includes(name)) {
+    return { kind: "exact", value: name };
+  }
+  const prefix = VARIABLE_SET_RESERVED_PREFIXES.find((candidate) => name.startsWith(candidate));
+  return prefix ? { kind: "prefix", value: prefix } : null;
+}
+
 function withVariableSetIdAlias<T extends z.ZodRawShape>(
   shape: T,
   options: { rejectKeys?: readonly string[] } = {},
