@@ -722,7 +722,7 @@ export async function lockSessionEventWriteRows(
 
   const sessionIds = [...new Set(input.sessionIds ?? [])].sort();
   const sessionLock = input.sessionLock ?? "no_key_update";
-  const sessions =
+  let sessions =
     sessionIds.length > 0
       ? await db
           .select()
@@ -758,6 +758,24 @@ export async function lockSessionEventWriteRows(
     throw new SessionControlInvariantError(
       `Session event cursor lock set was incomplete for workspace ${input.workspaceId}`,
     );
+  }
+  if (sessionLock === "key_share" && sessions.length > 0) {
+    // KEY SHARE is intentionally compatible with a semantic writer's NO KEY
+    // UPDATE. If that writer reached the cursor first it may have committed a
+    // control/authority/session-state change after our initial identity read.
+    // Re-read only after owning the cursor so the attempt fence evaluates the
+    // latest committed session state while later semantic writers wait here.
+    sessions = await db
+      .select()
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          inArray(schema.sessions.id, sessionIds),
+        ),
+      )
+      .orderBy(schema.sessions.id)
+      .for("key share");
   }
   const canonicalSessions = sessions.map((session, index) => {
     const cursor = cursors[index]!;

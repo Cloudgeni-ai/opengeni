@@ -67931,6 +67931,12 @@ const SESSION_EVENT_RAW_DELTA_TYPE_SET: ReadonlySet<string> = new Set(
   SESSION_EVENT_RAW_DELTA_TYPES,
 );
 
+export function sessionEventRawLaneEnabled(
+  value = process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED,
+): boolean {
+  return !["0", "false", "off", "disabled"].includes(value?.trim().toLowerCase() ?? "");
+}
+
 /** Raw streaming fragments advance the durable sequence, not monitoring activity. */
 function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }>): boolean {
   return inputs.some((input) => !SESSION_EVENT_RAW_DELTA_TYPE_SET.has(input.type));
@@ -68615,6 +68621,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
     eventCount: inputs.length,
   };
   const initiallyAdvancesActivity = sessionEventTypesAdvanceActivity(inputs);
+  const rawLaneEnabled = sessionEventRawLaneEnabled();
   const persistence = {
     stage: "session_events.append_for_turn_attempt",
     eventTypes,
@@ -68656,7 +68663,8 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                     turnId,
                     executionGeneration,
                     attemptId,
-                    sessionLock: activityGateOpen ? "no_key_update" : "key_share",
+                    sessionLock:
+                      activityGateOpen || !rawLaneEnabled ? "no_key_update" : "key_share",
                   }),
                 (fenceResult) => (fenceResult.allowed ? "ok" : "rejected"),
               );
@@ -68782,7 +68790,8 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                 };
               });
               const advancesActivity = sessionEventTypesAdvanceActivity(values);
-              if (!advancesActivity) {
+              const rawLaneIsolated = !advancesActivity && rawLaneEnabled;
+              if (rawLaneIsolated) {
                 // Migration 0378 keeps legacy SQL writers fail-closed while
                 // allowing this exact cursor-owned raw range to avoid a
                 // per-row compatibility lookup. The AFTER statement trigger
@@ -68855,7 +68864,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                 observer,
                 { ...phaseInput, phase: "sequence_update" },
                 async () =>
-                  advancesActivity
+                  advancesActivity || !rawLaneIsolated
                     ? await tx
                         .update(schema.sessions)
                         .set({ lastSequence: sequence, updatedAt: now })
@@ -68866,7 +68875,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                           ),
                         )
                     : undefined,
-                () => (advancesActivity ? "ok" : "projection_skipped"),
+                () => (rawLaneIsolated ? "projection_skipped" : "ok"),
               );
               return {
                 events: inserted.map(mapEvent),

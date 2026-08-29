@@ -11,6 +11,16 @@ describe("migration 0378 session event raw lane activation", () => {
     const source = await Bun.file(migrationUrl).text();
 
     expect(source).toStartWith("-- deployment-mode: maintenance");
+    expect(source.match(/FROM pg_stat_activity/gu)).toHaveLength(2);
+    expect(source).toContain("requires an explicit application database role list");
+    expect(source).toContain("LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain("LOCK TABLE session_event_cursors IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain("LOCK TABLE session_events IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain("ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY");
+    expect(source).toContain("ALTER TABLE session_event_cursors NO FORCE ROW LEVEL SECURITY");
+    expect(source).toContain("ALTER TABLE session_events NO FORCE ROW LEVEL SECURITY");
+    expect(source).toContain("LEFT JOIN session_event_cursors cursor");
+    expect(source).toContain("cursor.last_sequence IS NULL");
     expect(source).toContain(
       "session event raw-lane activation refused because cursor parity failed",
     );
@@ -26,7 +36,10 @@ describe("migration 0378 session event raw lane activation", () => {
     expect(source).not.toContain("pg_catalog.greatest");
     expect(source).not.toMatch(/\bGREATEST\s*\(/u);
     expect(source).toContain("NEW.last_sequence := current_sequence");
-    expect(source.match(/SET search_path = pg_catalog, %I, pg_temp/gu)).toHaveLength(3);
+    expect(source).toContain("CREATE CONSTRAINT TRIGGER sessions_event_projection_cursor_guard");
+    expect(source).toContain("DEFERRABLE INITIALLY DEFERRED");
+    expect(source).toContain("session event compatibility projection is ahead of its cursor");
+    expect(source.match(/SET search_path = pg_catalog, %I, pg_temp/gu)).toHaveLength(4);
     for (const eventType of SESSION_EVENT_RAW_DELTA_TYPES) {
       expect(source.match(new RegExp(`'${eventType.replaceAll(".", "\\.")}'`, "gu"))).toHaveLength(
         2,

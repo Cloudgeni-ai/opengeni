@@ -128,6 +128,8 @@ refresh the compatibility projection, and attempts to regress that projection
 are clamped to the cursor. Accepted raw exact-attempt batches hold only a
 session identity `FOR KEY SHARE`, then the cursor/turn/attempt suffix; rejected
 late raw input rolls back and retries through the semantic activity gate.
+Set `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` to retain cursor allocation
+while restoring the pre-cutover wide session lock/update path for rollback.
 
 ### Phase D: contract
 

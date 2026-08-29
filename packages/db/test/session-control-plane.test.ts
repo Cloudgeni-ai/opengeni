@@ -1595,6 +1595,22 @@ describe("clean session control plane", () => {
     expect(BigInt(attemptSemantic.activityRevision)).toBeGreaterThan(
       BigInt(attemptBefore.activityRevision),
     );
+    const rawAfterSemantic = await appendSessionEventsForTurnAttempt(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      turn!.id,
+      turn!.executionGeneration,
+      attemptId,
+      [rawDeltas()[0]!],
+    );
+    expect(rawAfterSemantic.accepted).toBeTrue();
+    expect((await activity(attempt.grant.workspaceId!, attempt.session.id)).lastSequence).toBe(
+      attemptSemantic.lastSequence,
+    );
+    expect(
+      (await getSession(client.db, attempt.grant.workspaceId!, attempt.session.id))?.lastSequence,
+    ).toBe(attemptSemantic.lastSequence + 1);
 
     const grouped = await fixture();
     await setBaseline(grouped.grant.workspaceId!, grouped.session.id);
@@ -1610,6 +1626,23 @@ describe("clean session control plane", () => {
       updatedAt: baseline,
       activityRevision: groupedBefore.activityRevision,
     });
+    await appendSessionEventToSandboxGroup(
+      client.db,
+      grouped.grant.workspaceId!,
+      grouped.session.sandboxGroupId,
+      { type: "session.title_set", payload: { title: "semantic group event" } },
+    );
+    const groupedSemantic = await activity(grouped.grant.workspaceId!, grouped.session.id);
+    const [groupedCursor] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${grouped.grant.workspaceId!}
+        and session_id = ${grouped.session.id}`;
+    expect(groupedSemantic.lastSequence).toBe(groupedBefore.lastSequence + 2);
+    expect(groupedCursor?.lastSequence).toBe(groupedSemantic.lastSequence);
+    expect(
+      (await getSession(client.db, grouped.grant.workspaceId!, grouped.session.id))?.lastSequence,
+    ).toBe(groupedSemantic.lastSequence);
 
     const updated = await fixture();
     await setBaseline(updated.grant.workspaceId!, updated.session.id);

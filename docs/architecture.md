@@ -118,6 +118,10 @@ live fanout, and backfill from Postgres whenever a sequence gap appears. A NATS
 restart may interrupt live delivery or machine reachability, but it must not
 erase session history or queued obligations.
 
+The raw isolation route has an operational rollback switch:
+`OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
+validation active while restoring wide-session locking and compatibility writes.
+
 Interactive commands acknowledge their durable transaction. NATS publication
 and immediate Temporal signalling are replayable follow-up work. Never make a
 committed command depend on a successful best-effort fanout.

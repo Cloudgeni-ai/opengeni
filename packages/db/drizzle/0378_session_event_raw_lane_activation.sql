@@ -6,6 +6,91 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+DO $session_event_raw_lane_writer_drain_before_lock$
+DECLARE
+  configured_roles_text text := nullif(
+    current_setting('opengeni.migration_application_roles', true), ''
+  );
+  configured_roles jsonb;
+BEGIN
+  IF configured_roles_text IS NULL THEN
+    RAISE EXCEPTION
+      '0378 session event raw-lane activation requires an explicit application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  BEGIN
+    configured_roles := configured_roles_text::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION
+      '0378 session event raw-lane activation received a malformed application database role list'
+      USING ERRCODE = '55000';
+  END;
+  IF jsonb_typeof(configured_roles) <> 'array'
+    OR jsonb_array_length(configured_roles) NOT BETWEEN 1 AND 16
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(configured_roles) AS roles(value)
+      WHERE jsonb_typeof(value) <> 'string'
+        OR btrim(value #>> '{}') = ''
+        OR octet_length(value #>> '{}') > 63
+    )
+    OR (
+      SELECT count(*) FROM jsonb_array_elements_text(configured_roles)
+    ) <> (
+      SELECT count(DISTINCT value)
+      FROM jsonb_array_elements_text(configured_roles) AS roles(value)
+    )
+  THEN
+    RAISE EXCEPTION
+      '0378 session event raw-lane activation received an invalid application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0378 session event raw-lane activation requires all configured OpenGeni application database sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$session_event_raw_lane_writer_drain_before_lock$;
+
+LOCK TABLE sessions IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE session_event_cursors IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE session_events IN ACCESS EXCLUSIVE MODE;
+
+DO $session_event_raw_lane_writer_drain_after_lock$
+DECLARE
+  configured_roles jsonb := current_setting(
+    'opengeni.migration_application_roles', false
+  )::jsonb;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0378 session event raw-lane activation requires all configured OpenGeni application database sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$session_event_raw_lane_writer_drain_after_lock$;
+
+-- The migration owner must inspect the complete FORCE-RLS inventory. These
+-- toggles are transaction-local in effect: any failed parity proof rolls the
+-- whole migration back with FORCE still enabled.
+ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_event_cursors NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_events NO FORCE ROW LEVEL SECURITY;
+
 DO $session_event_cursor_activation_parity$
 DECLARE
   mismatch record;
@@ -19,7 +104,7 @@ BEGIN
     COALESCE(MAX(event.sequence), 0)::integer AS event_sequence
   INTO mismatch
   FROM sessions session
-  JOIN session_event_cursors cursor
+  LEFT JOIN session_event_cursors cursor
     ON cursor.account_id = session.account_id
    AND cursor.workspace_id = session.workspace_id
    AND cursor.session_id = session.id
@@ -28,7 +113,8 @@ BEGIN
    AND event.workspace_id = session.workspace_id
    AND event.session_id = session.id
   GROUP BY session.id, session.last_sequence, cursor.last_sequence
-  HAVING COUNT(event.sequence)::integer <> cursor.last_sequence
+  HAVING cursor.last_sequence IS NULL
+    OR COUNT(event.sequence)::integer <> cursor.last_sequence
     OR cursor.last_sequence <> COALESCE(MAX(event.sequence), 0)::integer
     OR (
       cursor.last_sequence = 0
@@ -57,6 +143,10 @@ BEGIN
   END IF;
 END
 $session_event_cursor_activation_parity$;
+
+ALTER TABLE session_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_event_cursors FORCE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
 
 CREATE FUNCTION normalize_legacy_session_event_sequence_from_cursor()
 RETURNS trigger
@@ -158,6 +248,43 @@ BEGIN
   RETURN NEW;
 END
 $prevent_session_event_projection_regression$;
+
+CREATE FUNCTION assert_session_event_projection_not_ahead()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path FROM CURRENT
+AS $assert_session_event_projection_not_ahead$
+DECLARE
+  current_sequence integer;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM sessions session
+    WHERE session.account_id = NEW.account_id
+      AND session.workspace_id = NEW.workspace_id
+      AND session.id = NEW.id
+  ) THEN
+    RETURN NULL;
+  END IF;
+  SELECT cursor.last_sequence
+  INTO current_sequence
+  FROM session_event_cursors cursor
+  WHERE cursor.account_id = NEW.account_id
+    AND cursor.workspace_id = NEW.workspace_id
+    AND cursor.session_id = NEW.id;
+  IF NOT FOUND OR NEW.last_sequence > current_sequence THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '55000',
+      MESSAGE = 'session event compatibility projection is ahead of its cursor',
+      DETAIL = pg_catalog.format(
+        'session_id=%s session=%s cursor=%s',
+        NEW.id,
+        NEW.last_sequence,
+        current_sequence
+      );
+  END IF;
+  RETURN NULL;
+END
+$assert_session_event_projection_not_ahead$;
 
 CREATE OR REPLACE FUNCTION advance_session_event_cursors_for_inserted_events()
 RETURNS trigger
@@ -286,6 +413,12 @@ BEGIN
     target_schema
   );
   EXECUTE pg_catalog.format(
+    'ALTER FUNCTION %I.assert_session_event_projection_not_ahead() '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema,
+    target_schema
+  );
+  EXECUTE pg_catalog.format(
     'ALTER FUNCTION %I.advance_session_event_cursors_for_inserted_events() '
       || 'SET search_path = pg_catalog, %I, pg_temp',
     target_schema,
@@ -296,6 +429,7 @@ $session_event_raw_lane_function_paths$;
 
 REVOKE ALL ON FUNCTION normalize_legacy_session_event_sequence_from_cursor() FROM PUBLIC;
 REVOKE ALL ON FUNCTION prevent_session_event_projection_regression() FROM PUBLIC;
+REVOKE ALL ON FUNCTION assert_session_event_projection_not_ahead() FROM PUBLIC;
 REVOKE ALL ON FUNCTION advance_session_event_cursors_for_inserted_events() FROM PUBLIC;
 
 CREATE TRIGGER session_events_normalize_legacy_cursor_sequence
@@ -307,3 +441,9 @@ CREATE TRIGGER sessions_prevent_event_projection_regression
 BEFORE UPDATE OF last_sequence ON sessions
 FOR EACH ROW
 EXECUTE FUNCTION prevent_session_event_projection_regression();
+
+CREATE CONSTRAINT TRIGGER sessions_event_projection_cursor_guard
+AFTER INSERT OR UPDATE OF last_sequence ON sessions
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION assert_session_event_projection_not_ahead();

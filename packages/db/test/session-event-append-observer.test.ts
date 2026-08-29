@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   observeSessionEventAppendPhase,
   sessionEventAppendClass,
+  sessionEventRawLaneEnabled,
   type SessionEventAppendPhaseObservation,
 } from "../src/index";
 
@@ -39,5 +40,13 @@ describe("session event append phase observer", () => {
         observation,
       ),
     ).not.toThrow();
+  });
+
+  test("keeps raw isolation enabled by default with an explicit rollback switch", () => {
+    expect(sessionEventRawLaneEnabled(undefined)).toBeTrue();
+    expect(sessionEventRawLaneEnabled("true")).toBeTrue();
+    for (const disabled of ["0", "false", "off", "disabled", " FALSE "]) {
+      expect(sessionEventRawLaneEnabled(disabled)).toBeFalse();
+    }
   });
 });
