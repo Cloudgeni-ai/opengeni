@@ -197,6 +197,7 @@ export function BrowserAccountsProvider({
     expectedGeneration: string;
   } | null>(null);
   const pendingCommitSequenceRef = useRef<number | null>(null);
+  const pendingServerMutationSequenceRef = useRef<number | null>(null);
   const invalidatedDuringPendingCommitRef = useRef(false);
   const sequenceRef = useRef(0);
   const transitionAbortRef = useRef<AbortController | null>(null);
@@ -400,6 +401,7 @@ export function BrowserAccountsProvider({
       pending.expectedGeneration = expectedGeneration;
       const sequence = ++sequenceRef.current;
       pendingCommitSequenceRef.current = sequence;
+      pendingServerMutationSequenceRef.current = null;
       invalidatedDuringPendingCommitRef.current = false;
       pendingRef.current = pending;
       setPhase("committing");
@@ -434,7 +436,9 @@ export function BrowserAccountsProvider({
           // Yield one task after the secret-free hold so queued BroadcastChannel
           // delivery can fence peers before the network mutation starts.
           await yieldToCrossTabActorHold();
+          if (controller.signal.aborted || sequenceRef.current !== sequence) return false;
         }
+        pendingServerMutationSequenceRef.current = sequence;
         let accepted: ManagedAuthSessionSetProjection;
         try {
           accepted = await pending.execute(expectedGeneration);
@@ -510,6 +514,9 @@ export function BrowserAccountsProvider({
         return await fail(caught, pending.kind);
       } finally {
         if (changesActor) publishActorRelease(pending.operationId);
+        if (pendingServerMutationSequenceRef.current === sequence) {
+          pendingServerMutationSequenceRef.current = null;
+        }
         if (pendingCommitSequenceRef.current === sequence) {
           pendingCommitSequenceRef.current = null;
           invalidatedDuringPendingCommitRef.current = false;
@@ -563,10 +570,23 @@ export function BrowserAccountsProvider({
   );
 
   const invalidateActor = useCallback(async () => {
-    if (pendingCommitSequenceRef.current !== null) {
+    const pendingCommitSequence = pendingCommitSequenceRef.current;
+    if (
+      pendingCommitSequence !== null &&
+      pendingServerMutationSequenceRef.current === pendingCommitSequence
+    ) {
       invalidatedDuringPendingCommitRef.current = true;
       await beginNeutralActorInvalidation(projectionRef.current);
       return null;
+    }
+    // An authority hint that arrives while the initiating host fence is still
+    // pending supersedes the not-yet-dispatched mutation. Reconcile it here;
+    // otherwise aborting that fence makes executePending return early while no
+    // operation remains to restore the neutral actor surface.
+    if (pendingCommitSequence !== null) {
+      pendingCommitSequenceRef.current = null;
+      pendingServerMutationSequenceRef.current = null;
+      invalidatedDuringPendingCommitRef.current = false;
     }
     const sequence = ++sequenceRef.current;
     const before = projectionRef.current;
