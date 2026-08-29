@@ -74,6 +74,7 @@ import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
 import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-cleanup";
+import { workspaceDeleteObserver } from "../workspace-delete-observability";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   CODEX_REALTIME_MODEL_ID,
@@ -481,9 +482,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     // session/lease before checking runtime quiescence, then returns the exact
     // external schedules removed by the cascade. A racing cold->warm transition
     // can therefore never erase the only provider/capture ownership receipt.
+    const deleteObserver = workspaceDeleteObserver(deps.observability, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
     const deleted = await deleteWorkspaceIfQuiescent(deps.db, {
       accountId: grant.accountId,
       workspaceId,
+      ...(deleteObserver ? { observer: deleteObserver } : {}),
     });
     if (deleted.status === "not_found") {
       throw new HTTPException(404, { message: "workspace not found" });

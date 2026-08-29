@@ -2970,6 +2970,57 @@ export type DeleteWorkspaceIfQuiescentResult =
         | "live_sandboxes";
     };
 
+export type WorkspaceDeletePhase =
+  | "transaction"
+  | "lifecycle_lock"
+  | "account_workspace_lock"
+  | "session_fence"
+  | "runtime_ownership"
+  | "external_cleanup"
+  | "variable_set_detach"
+  | "cascade";
+
+export type WorkspaceDeleteOutcome = DeleteWorkspaceIfQuiescentResult["status"] | "ok" | "error";
+
+export type WorkspaceDeleteInventoryKind =
+  | "workspaces"
+  | "sessions"
+  | "live_attempts"
+  | "active_video_generations"
+  | "active_background_commands"
+  | "sandbox_leases"
+  | "sandbox_holders"
+  | "unsettled_sandbox_admissions"
+  | "active_retained_processes"
+  | "open_ptys"
+  | "temporal_schedules";
+
+export type WorkspaceDeleteObservation = {
+  phase: WorkspaceDeletePhase;
+  outcome: WorkspaceDeleteOutcome;
+  durationSeconds: number;
+  inventory?: Partial<Record<WorkspaceDeleteInventoryKind, number>>;
+};
+
+export type WorkspaceDeleteObserver = {
+  onPhase?: (observation: WorkspaceDeleteObservation) => void;
+};
+
+function observeWorkspaceDeletePhase(
+  observer: WorkspaceDeleteObserver | undefined,
+  observation: WorkspaceDeleteObservation,
+): void {
+  try {
+    observer?.onPhase?.(observation);
+  } catch {
+    // Telemetry must never alter deletion authority or transaction outcome.
+  }
+}
+
+function workspaceDeletePhaseDuration(startedAt: number): number {
+  return Math.max(0, (performance.now() - startedAt) / 1_000);
+}
+
 async function lockBackgroundCommandWorkspaceLifecycle(
   tx: Database,
   workspaceIds: string[],
@@ -2999,10 +3050,11 @@ async function lockBackgroundCommandWorkspaceLifecycle(
  */
 export async function deleteWorkspaceIfQuiescent(
   db: Database,
-  input: { accountId: string; workspaceId: string },
+  input: { accountId: string; workspaceId: string; observer?: WorkspaceDeleteObserver },
 ): Promise<DeleteWorkspaceIfQuiescentResult> {
+  const transactionStartedAt = performance.now();
   try {
-    return await withRlsContext(
+    const result = await withRlsContext(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (scopedDb) =>
@@ -3012,15 +3064,29 @@ export async function deleteWorkspaceIfQuiescent(
           // session/attempt or retained-process locks. Taking the exclusive
           // prefix first prevents parent-FK deletion from deadlocking with an
           // already-started cross-workspace adoption.
+          const lifecycleLockStartedAt = performance.now();
           await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "update");
+          observeWorkspaceDeletePhase(input.observer, {
+            phase: "lifecycle_lock",
+            outcome: "ok",
+            durationSeconds: workspaceDeletePhaseDuration(lifecycleLockStartedAt),
+          });
 
+          const accountWorkspaceLockStartedAt = performance.now();
           const [account] = await tx
             .select({ id: schema.managedAccounts.id })
             .from(schema.managedAccounts)
             .where(eq(schema.managedAccounts.id, input.accountId))
             .for("update")
             .limit(1);
-          if (!account) return { status: "not_found" as const };
+          if (!account) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "account_workspace_lock",
+              outcome: "not_found",
+              durationSeconds: workspaceDeletePhaseDuration(accountWorkspaceLockStartedAt),
+            });
+            return { status: "not_found" as const };
+          }
 
           const accountWorkspaces = await tx
             .select({ id: schema.workspaces.id })
@@ -3028,12 +3094,31 @@ export async function deleteWorkspaceIfQuiescent(
             .where(eq(schema.workspaces.accountId, input.accountId))
             .for("update");
           if (!accountWorkspaces.some((workspace) => workspace.id === input.workspaceId)) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "account_workspace_lock",
+              outcome: "not_found",
+              durationSeconds: workspaceDeletePhaseDuration(accountWorkspaceLockStartedAt),
+              inventory: { workspaces: accountWorkspaces.length },
+            });
             return { status: "not_found" as const };
           }
           if (accountWorkspaces.length <= 1) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "account_workspace_lock",
+              outcome: "only_workspace",
+              durationSeconds: workspaceDeletePhaseDuration(accountWorkspaceLockStartedAt),
+              inventory: { workspaces: accountWorkspaces.length },
+            });
             return { status: "only_workspace" as const };
           }
+          observeWorkspaceDeletePhase(input.observer, {
+            phase: "account_workspace_lock",
+            outcome: "ok",
+            durationSeconds: workspaceDeletePhaseDuration(accountWorkspaceLockStartedAt),
+            inventory: { workspaces: accountWorkspaces.length },
+          });
 
+          const sessionFenceStartedAt = performance.now();
           const sessions = await tx
             .select({ id: schema.sessions.id, status: schema.sessions.status })
             .from(schema.sessions)
@@ -3049,6 +3134,12 @@ export async function deleteWorkspaceIfQuiescent(
                 session.status === "waiting_capacity",
             )
           ) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "session_fence",
+              outcome: "active_sessions",
+              durationSeconds: workspaceDeletePhaseDuration(sessionFenceStartedAt),
+              inventory: { sessions: sessions.length },
+            });
             return { status: "active_sessions" as const };
           }
 
@@ -3065,9 +3156,22 @@ export async function deleteWorkspaceIfQuiescent(
             )
             .for("update", { noWait: true });
           if (liveAttempts.length > 0) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "session_fence",
+              outcome: "active_sessions",
+              durationSeconds: workspaceDeletePhaseDuration(sessionFenceStartedAt),
+              inventory: { sessions: sessions.length, live_attempts: liveAttempts.length },
+            });
             return { status: "active_sessions" as const };
           }
+          observeWorkspaceDeletePhase(input.observer, {
+            phase: "session_fence",
+            outcome: "ok",
+            durationSeconds: workspaceDeletePhaseDuration(sessionFenceStartedAt),
+            inventory: { sessions: sessions.length, live_attempts: liveAttempts.length },
+          });
 
+          const runtimeOwnershipStartedAt = performance.now();
           // A paid asynchronous video operation owns provider recovery outside
           // the originating turn. Cascading its row would lose the only stable
           // job/idempotency identity and could strand an already-paid result.
@@ -3089,6 +3193,12 @@ export async function deleteWorkspaceIfQuiescent(
             )
             .for("update", { noWait: true });
           if (activeVideoGenerations.length > 0) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "runtime_ownership",
+              outcome: "active_video_generations",
+              durationSeconds: workspaceDeletePhaseDuration(runtimeOwnershipStartedAt),
+              inventory: { active_video_generations: activeVideoGenerations.length },
+            });
             return { status: "active_video_generations" as const };
           }
 
@@ -3101,6 +3211,15 @@ export async function deleteWorkspaceIfQuiescent(
             ) as "activeCount"
           `);
           if (Number(backgroundCommands?.activeCount ?? 0) > 0) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "runtime_ownership",
+              outcome: "active_background_commands",
+              durationSeconds: workspaceDeletePhaseDuration(runtimeOwnershipStartedAt),
+              inventory: {
+                active_video_generations: activeVideoGenerations.length,
+                active_background_commands: Number(backgroundCommands?.activeCount ?? 0),
+              },
+            });
             return { status: "active_background_commands" as const };
           }
 
@@ -3133,6 +3252,12 @@ export async function deleteWorkspaceIfQuiescent(
                 lease.providerDeadlineAt !== null,
             )
           ) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "runtime_ownership",
+              outcome: "live_sandboxes",
+              durationSeconds: workspaceDeletePhaseDuration(runtimeOwnershipStartedAt),
+              inventory: { sandbox_leases: leases.length },
+            });
             return { status: "live_sandboxes" as const };
           }
 
@@ -3145,6 +3270,12 @@ export async function deleteWorkspaceIfQuiescent(
             .where(eq(schema.sandboxLeaseHolders.workspaceId, input.workspaceId))
             .for("update", { noWait: true });
           if (holders.length > 0) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "runtime_ownership",
+              outcome: "live_sandboxes",
+              durationSeconds: workspaceDeletePhaseDuration(runtimeOwnershipStartedAt),
+              inventory: { sandbox_leases: leases.length, sandbox_holders: holders.length },
+            });
             return { status: "live_sandboxes" as const };
           }
           const unsettledAdmissions = await tx
@@ -3158,6 +3289,16 @@ export async function deleteWorkspaceIfQuiescent(
             )
             .for("update", { noWait: true });
           if (unsettledAdmissions.length > 0) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "runtime_ownership",
+              outcome: "live_sandboxes",
+              durationSeconds: workspaceDeletePhaseDuration(runtimeOwnershipStartedAt),
+              inventory: {
+                sandbox_leases: leases.length,
+                sandbox_holders: holders.length,
+                unsettled_sandbox_admissions: unsettledAdmissions.length,
+              },
+            });
             return { status: "live_sandboxes" as const };
           }
           const activeProcesses = await tx
@@ -3171,6 +3312,12 @@ export async function deleteWorkspaceIfQuiescent(
             )
             .for("update", { noWait: true });
           if (activeProcesses.length > 0) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "runtime_ownership",
+              outcome: "live_sandboxes",
+              durationSeconds: workspaceDeletePhaseDuration(runtimeOwnershipStartedAt),
+              inventory: { active_retained_processes: activeProcesses.length },
+            });
             return { status: "live_sandboxes" as const };
           }
           const openPtys = await tx
@@ -3184,9 +3331,30 @@ export async function deleteWorkspaceIfQuiescent(
             )
             .for("update", { noWait: true });
           if (openPtys.length > 0) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "runtime_ownership",
+              outcome: "live_sandboxes",
+              durationSeconds: workspaceDeletePhaseDuration(runtimeOwnershipStartedAt),
+              inventory: { open_ptys: openPtys.length },
+            });
             return { status: "live_sandboxes" as const };
           }
+          observeWorkspaceDeletePhase(input.observer, {
+            phase: "runtime_ownership",
+            outcome: "ok",
+            durationSeconds: workspaceDeletePhaseDuration(runtimeOwnershipStartedAt),
+            inventory: {
+              active_video_generations: activeVideoGenerations.length,
+              active_background_commands: Number(backgroundCommands?.activeCount ?? 0),
+              sandbox_leases: leases.length,
+              sandbox_holders: holders.length,
+              unsettled_sandbox_admissions: unsettledAdmissions.length,
+              active_retained_processes: activeProcesses.length,
+              open_ptys: openPtys.length,
+            },
+          });
 
+          const externalCleanupStartedAt = performance.now();
           const schedules = await tx
             .select({
               temporalScheduleId: schema.scheduledTasks.temporalScheduleId,
@@ -3243,11 +3411,18 @@ export async function deleteWorkspaceIfQuiescent(
               ${input.workspaceId}::uuid
             )
           `);
+          observeWorkspaceDeletePhase(input.observer, {
+            phase: "external_cleanup",
+            outcome: "ok",
+            durationSeconds: workspaceDeletePhaseDuration(externalCleanupStartedAt),
+            inventory: { temporal_schedules: schedules.length },
+          });
           // Variable-set attachment guards intentionally prevent deleting a set
           // while any session still selects it. A workspace cascade owns both
           // sides, so detach those selections through the activity gate before
           // deleting the parent. Finalize the gate inside this transaction: the
           // workspace activity counter disappears with the parent cascade.
+          const variableSetDetachStartedAt = performance.now();
           await withRestoredSessionActivityRlsContext(
             tx,
             { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -3267,6 +3442,12 @@ export async function deleteWorkspaceIfQuiescent(
                 );
             },
           );
+          observeWorkspaceDeletePhase(input.observer, {
+            phase: "variable_set_detach",
+            outcome: "ok",
+            durationSeconds: workspaceDeletePhaseDuration(variableSetDetachStartedAt),
+          });
+          const cascadeStartedAt = performance.now();
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -3276,7 +3457,19 @@ export async function deleteWorkspaceIfQuiescent(
               ),
             )
             .returning({ id: schema.workspaces.id });
-          if (deleted.length !== 1) return { status: "not_found" as const };
+          if (deleted.length !== 1) {
+            observeWorkspaceDeletePhase(input.observer, {
+              phase: "cascade",
+              outcome: "not_found",
+              durationSeconds: workspaceDeletePhaseDuration(cascadeStartedAt),
+            });
+            return { status: "not_found" as const };
+          }
+          observeWorkspaceDeletePhase(input.observer, {
+            phase: "cascade",
+            outcome: "deleted",
+            durationSeconds: workspaceDeletePhaseDuration(cascadeStartedAt),
+          });
           return {
             status: "deleted" as const,
             temporalScheduleCleanups: temporalScheduleCleanups.map((cleanup) => ({
@@ -3286,6 +3479,12 @@ export async function deleteWorkspaceIfQuiescent(
           };
         }),
     );
+    observeWorkspaceDeletePhase(input.observer, {
+      phase: "transaction",
+      outcome: result.status,
+      durationSeconds: workspaceDeletePhaseDuration(transactionStartedAt),
+    });
+    return result;
   } catch (error) {
     // The parent workspace lock deliberately blocks new FK children. Never wait
     // on a child row owned by a transaction that may itself be waiting for that
@@ -3299,13 +3498,24 @@ export async function deleteWorkspaceIfQuiescent(
         "code" in current &&
         (current as { code?: unknown }).code === "55P03"
       ) {
-        return { status: "live_sandboxes" };
+        const result = { status: "live_sandboxes" as const };
+        observeWorkspaceDeletePhase(input.observer, {
+          phase: "transaction",
+          outcome: result.status,
+          durationSeconds: workspaceDeletePhaseDuration(transactionStartedAt),
+        });
+        return result;
       }
       current =
         typeof current === "object" && "cause" in current
           ? (current as { cause?: unknown }).cause
           : undefined;
     }
+    observeWorkspaceDeletePhase(input.observer, {
+      phase: "transaction",
+      outcome: "error",
+      durationSeconds: workspaceDeletePhaseDuration(transactionStartedAt),
+    });
     throw error;
   }
 }

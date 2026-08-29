@@ -626,6 +626,7 @@ describe("turn exact-content boundaries", () => {
   test("retains intentional screenshot and view-image outputs, not incidental action frames", () => {
     expect(toolCallProducesRetainableSessionImage("computer_screenshot")).toBe(true);
     expect(toolCallProducesRetainableSessionImage("view_image")).toBe(true);
+    expect(toolCallProducesRetainableSessionImage("interaction__computer_observe")).toBe(true);
     expect(toolCallProducesRetainableSessionImage("computer_click")).toBe(false);
     expect(toolCallProducesRetainableSessionImage("computer_scroll")).toBe(false);
   });

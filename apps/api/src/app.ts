@@ -1633,6 +1633,11 @@ const routeLabelPatterns: Array<{
       "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/targets\/[^/]+\/screenshot$/,
+    label:
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/screenshot",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/operations\/[^/]+$/,
     label:
       "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/operations/:operationId",

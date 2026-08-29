@@ -94,6 +94,30 @@ describe("retained computer screenshots", () => {
     });
   });
 
+  test("extracts bounded MCP image blocks from managed computer observations", () => {
+    const event = {
+      type: "run_item_stream_event",
+      item: {
+        id: "output-observe-1",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-observe-1", id: "output-observe-1" },
+        output: {
+          content: [
+            { type: "text", text: "observation" },
+            { type: "image", data: Buffer.from(JPEG).toString("base64"), mimeType: "image/jpeg" },
+          ],
+        },
+      },
+    };
+    expect(sdkEventContainsInlineImage(event)).toBe(true);
+    expect(typedScreenshotFromSdkEvent(event)).toEqual({
+      callId: "call-observe-1",
+      toolOutputId: "output-observe-1",
+      bytes: JPEG,
+      mediaType: "image/jpeg",
+    });
+  });
+
   test("retains the common JPEG and WebP formats returned by the Agents SDK view_image tool", () => {
     for (const [mediaType, bytes, extension] of [
       ["image/jpeg", JPEG, "jpg"],
