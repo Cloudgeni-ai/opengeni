@@ -83,6 +83,12 @@ is a write-destination receipt only; it does not select context, freeze a
 logical-turn snapshot, or overlap the permission-first selector's context
 receipt ownership.
 
+A new operation that selects a workspace preference stable key already owned by
+another proposal returns the bounded `preference_stable_key_conflict` tool
+outcome. The database adapter maps the collision to the preference registry's
+domain error before the MCP surface renders it, so SQL text and parameters are
+never part of the public failure.
+
 Migration `0255_company_brain_governed_write_proposals.sql` broadens the
 historically named onboarding-proposal validator without changing its table. A
 Knowledge-backed instruction draft is admitted only when its provenance source

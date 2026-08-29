@@ -16,6 +16,7 @@ import {
   listTaskNotes,
   listCompanyBrainKnowledgeProposals,
   nestedPostgresSqlState,
+  PreferenceRegistryStableKeyConflictError,
   replaceTaskNote,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
@@ -652,6 +653,26 @@ describe("task-tree notes PostgreSQL authority", () => {
     } finally {
       await app.end();
     }
+
+    const conflictingPreferenceNote = await createTaskNote(client.db, {
+      ...claims(attempt),
+      operationId: crypto.randomUUID(),
+      kind: "decision",
+      text: "Use the existing implementation tracking preference.",
+      expiresInDays: 7,
+    });
+    await expect(
+      writeCompanyBrainGovernedProposal(client.db, {
+        ...preferenceInput,
+        request: {
+          ...preferenceInput.request,
+          operationId: crypto.randomUUID(),
+          noteId: conflictingPreferenceNote.note.id,
+          normalizedKey: "implementation-linear-conflict",
+          stableKey: preferenceInput.request.stableKey,
+        },
+      }),
+    ).rejects.toBeInstanceOf(PreferenceRegistryStableKeyConflictError);
 
     const instructionText = "Never place secret values in public logs.";
     const instructionNote = await createTaskNote(client.db, {
