@@ -1046,7 +1046,7 @@ describe("BrowserControlClient", () => {
     }
   });
 
-  test("placement controller execs do not inherit a session working directory", async () => {
+  test("managed placement controller execs use the provider-valid workspace root", async () => {
     const workdirs: Array<string | undefined> = [];
     const placement = await localPlacement({ fakeControllerStartup: true });
     const inner = placement.session.exec!;
@@ -1058,7 +1058,47 @@ describe("BrowserControlClient", () => {
       adminToken: `ogb_${"a".repeat(48)}`,
     });
     expect(workdirs.length).toBeGreaterThan(0);
-    expect(workdirs.every((workdir) => workdir === "/tmp")).toBe(true);
+    expect(workdirs.every((workdir) => workdir === "/workspace")).toBe(true);
+  });
+
+  test("connected placement controller execs retain the native tmp cwd", async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        if (request.headers.get("authorization") !== `Bearer ${adminToken}`) {
+          return failure(401, "permission_denied", "no authority");
+        }
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const workdirs: Array<string | undefined> = [];
+    const placement = await localPlacement();
+    const inner = placement.session.exec!;
+    placement.session.exec = async (args) => {
+      workdirs.push(args.workdir);
+      return await inner(args);
+    };
+    placement.session.ensureBrowserControl = async () => ({
+      port: server.port,
+      sidecarGeneration: "native-sidecar-1",
+    });
+    try {
+      const provisioned = await provisionBrowserControlClient(placement.session, {
+        adminToken,
+        nativeAuthority: {
+          scopeId: `workspace:attached:${randomUUID()}`,
+          scopeGeneration: "connection-1",
+        },
+      });
+      expect(await provisioned.client.addAllowedOrigins(["https://app.opengeni.test"])).toEqual([
+        "https://app.opengeni.test",
+      ]);
+      expect(workdirs.length).toBeGreaterThan(0);
+      expect(workdirs.every((workdir) => workdir === "/tmp")).toBe(true);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("uses agent-supervised sidecar and typed browser relay on connected machines", async () => {

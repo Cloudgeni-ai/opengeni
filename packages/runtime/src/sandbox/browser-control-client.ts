@@ -80,10 +80,8 @@ import {
 } from "./stream-port";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
-// Controller I/O uses absolute paths under /tmp. Never inherit the session
-// working directory: a missing cwd makes spawn fail with ENOENT before curl
-// can talk to the machine-local sidecar.
-const PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
+const MANAGED_PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
+const NATIVE_PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
 export const BROWSER_CONTROL_ADMIN_TOKEN_FILE = "/tmp/opengeni-browserd/authority/admin-token";
 const COMMAND_OK = "OPENGENI_BROWSER_CONTROL_CLIENT_OK";
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
@@ -158,6 +156,16 @@ export type BrowserControlPlacementSession = {
   ) => Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }>;
   finalizeOpStreamOps?: () => Promise<void>;
 };
+
+/** Controller I/O uses absolute private paths under /tmp, so its cwd carries
+ * no data authority. Connected Machines need a native /tmp cwd because their
+ * session directory may disappear; managed sandboxes must use /workspace
+ * because provider exec confines workdir to the workspace root. */
+function placementControllerWorkdir(session: BrowserControlPlacementSession): string {
+  return session.ensureBrowserControl
+    ? NATIVE_PLACEMENT_CONTROLLER_WORKDIR
+    : MANAGED_PLACEMENT_CONTROLLER_WORKDIR;
+}
 
 export type PlacementBrowserSessionReference = {
   browserSessionId: string;
@@ -2138,13 +2146,13 @@ async function writePrivateFile(
   const started = session.exec
     ? await session.exec({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: 250,
         maxOutputTokens: 2_000,
       })
     : await session.execCommand!({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: 250,
         maxOutputTokens: 2_000,
       });
@@ -2188,13 +2196,13 @@ async function runChecked(
   const result = session.exec
     ? await session.exec({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: bounded,
         maxOutputTokens: 2_000,
       })
     : await session.execCommand!({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: bounded,
         maxOutputTokens: 2_000,
       });
@@ -2213,14 +2221,14 @@ async function runBestEffort(
     if (session.exec) {
       await session.exec({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: 15_000,
         maxOutputTokens: 100,
       });
     } else if (session.execCommand) {
       await session.execCommand({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: 15_000,
         maxOutputTokens: 100,
       });
@@ -2312,13 +2320,13 @@ async function runPrivateReadCommand(
   const result = session.exec
     ? await session.exec({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: bounded,
         maxOutputTokens,
       })
     : await session.execCommand!({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: bounded,
         maxOutputTokens,
       });
