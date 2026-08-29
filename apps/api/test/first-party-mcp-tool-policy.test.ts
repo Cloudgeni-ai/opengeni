@@ -15,6 +15,7 @@ import { INTERACTION_ATTEMPT_TOOL_NAMES } from "@opengeni/runtime";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { listSessionDiscoverySummaries } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { buildFilesMcpServer } from "../src/mcp/files";
@@ -100,6 +101,24 @@ function registeredToolNames(server: unknown): string[] {
   )
     .filter((name) => !name.startsWith("__opengeni_empty_"))
     .sort();
+}
+
+function registeredToolInputSchema(
+  server: unknown,
+  name: string,
+): {
+  safeParse(value: unknown): { success: boolean };
+} {
+  const schema = (
+    server as {
+      _registeredTools?: Record<
+        string,
+        { inputSchema?: { safeParse(value: unknown): { success: boolean } } }
+      >;
+    }
+  )._registeredTools?.[name]?.inputSchema;
+  if (!schema) throw new Error(`MCP tool input schema not registered: ${name}`);
+  return schema;
 }
 
 async function callRegisteredTool(
@@ -190,6 +209,23 @@ describe("first-party MCP tool visibility policy", () => {
       callRegisteredTool(server, "sessions_list", { query: "permission-scoped" }),
     ).rejects.toThrow("work discovery is disabled");
     expect(databaseTouches).toBe(0);
+  });
+
+  test("MCP discovery counts Unicode code points in the shared normalization path", async () => {
+    const routeDeps = deps();
+    routeDeps.settings = testSettings({ workDiscoveryEnabled: true });
+    const server = buildOpenGeniMcpServer(routeDeps, grant(["sessions:read"], ["sessions_list"]));
+
+    expect(
+      registeredToolInputSchema(server, "sessions_list").safeParse({ query: "😀".repeat(200) })
+        .success,
+    ).toBe(true);
+    await expect(
+      listSessionDiscoverySummaries({} as never, workspaceId, {
+        limit: 1,
+        query: "😀".repeat(201),
+      }),
+    ).rejects.toThrow("sessions_list query must be at most 200 characters");
   });
 
   test("ordinary omission excludes connector tools while explicit authorized selection stays exact", () => {

@@ -51,7 +51,6 @@ import {
   WORK_CLAIM_DISCOVERY_LIMIT,
   WORK_CLAIM_NAMESPACE_MAX_BYTES,
   WORK_CLAIM_VERSION_VALUE_MAX_BYTES,
-  WORK_DISCOVERY_QUERY_MAX_CHARS,
   WORK_DISCOVERY_RECENT_HOURS_MAX,
   WorkClaimSubjectType,
   type WorkClaimSubjectFilter,
@@ -4412,7 +4411,7 @@ function registerWorkspaceOrchestrationTools(
           includeLastMessage: z4.boolean().optional(),
           orderBy: z4.enum(["createdAt", "updatedAt", "relevance"]).optional(),
           updatedAfter: z4.string().max(64).optional(),
-          query: z4.string().max(WORK_DISCOVERY_QUERY_MAX_CHARS).optional(),
+          query: z4.string().optional(),
           statuses: z4
             .array(
               z4.enum([
