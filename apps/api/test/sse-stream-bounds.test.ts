@@ -106,6 +106,9 @@ mock.module("@opengeni/db", () => ({
 }));
 
 const {
+  browserSseDeliveryOptions,
+  createByteBoundedSseStream,
+  HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE,
   sseSessionStream,
   sseWorkspaceControlStream,
   sseWorkspaceInteractionRevisionStream,
@@ -116,9 +119,171 @@ afterAll(() => {
   mock.restore();
 });
 
+test("HTTP/1 browsers select finite polling while HTTP/2 streams remain long-lived", async () => {
+  expect(browserSseDeliveryOptions("http1-bounded")).toEqual({
+    finiteResponseMaxBytes: 512 * 1024,
+    finiteResponseMediaType: "http1-browser-batch",
+  });
+  expect(browserSseDeliveryOptions(undefined)).toEqual({});
+  expect(browserSseDeliveryOptions("h2")).toEqual({});
+
+  let stopped = 0;
+  const channel = createByteBoundedSseStream({
+    connectionLifetimeMs: 10,
+    onStop: () => {
+      stopped += 1;
+    },
+  });
+  await expect(channel.stream.getReader().read()).resolves.toEqual({
+    done: true,
+    value: undefined,
+  });
+  expect(stopped).toBe(1);
+});
+
+test("HTTP/1 browser fallback returns a fully framed finite SSE batch", async () => {
+  interactionRevisionState = {
+    revision: 3,
+    updatedAt: new Date("2026-08-10T00:00:03.000Z"),
+  };
+  const response = await sseWorkspaceInteractionRevisionStream(
+    fakeDb as never,
+    "00000000-0000-4000-8000-000000000010",
+    WORKSPACE_ID,
+    1,
+    new AbortController().signal,
+    {
+      ...browserSseDeliveryOptions("http1-bounded"),
+      connectionLifetimeMs: 10,
+      finiteResponseMaxBytes: 96 * 1024,
+      pollIntervalMs: 100,
+      heartbeatIntervalMs: 1_000,
+    },
+  );
+  const bytes = await response.arrayBuffer();
+  expect(response.headers.get("content-type")).toBe(
+    `${HTTP1_BROWSER_SSE_BATCH_CONTENT_TYPE}; charset=utf-8`,
+  );
+  expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
+  expect(response.headers.get("connection")).toBeNull();
+  expect(new TextDecoder().decode(bytes)).toContain('"sequence":3');
+});
+
+test("HTTP/1 browser fallback reads a finite durable snapshot without opening subscriptions", async () => {
+  durableEvents = [event(1), event(2)];
+  durableControlEvents = [controlEvent(1), controlEvent(2)];
+  interactionRevisionState = {
+    revision: 3,
+    updatedAt: new Date("2026-08-10T00:00:03.000Z"),
+  };
+  const bus = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("finite browser polling must not access the live event bus");
+      },
+    },
+  ) as EventBus;
+  const options = browserSseDeliveryOptions("http1-bounded");
+  const [sessionResponse, liveResponse] = await Promise.all([
+    sseSessionStream(
+      fakeDb as never,
+      bus,
+      WORKSPACE_ID,
+      SESSION_ID,
+      0,
+      new AbortController().signal,
+      options,
+    ),
+    sseWorkspaceLiveStream(
+      fakeDb as never,
+      bus,
+      "00000000-0000-4000-8000-000000000010",
+      WORKSPACE_ID,
+      0,
+      0,
+      new AbortController().signal,
+      options,
+    ),
+  ]);
+  const sessionBody = await sessionResponse.text();
+  const liveBody = await liveResponse.text();
+  expect(sessionBody).toContain('"sequence":1');
+  expect(sessionBody).toContain('"coalescedUntil":2');
+  expect(liveBody).toContain('"sequence":1');
+  expect(liveBody).toContain('"sequence":2');
+  expect(liveBody).toContain('"sequence":3');
+  expect(sessionResponse.headers.get("connection")).toBeNull();
+  expect(liveResponse.headers.get("connection")).toBeNull();
+});
+
+test("finite durable snapshots stop on whole frames and resume without gaps", async () => {
+  durableEvents = Array.from({ length: 100 }, (_, index) =>
+    titleEvent(index + 1, `${index + 1}:${"x".repeat(8_000)}`),
+  );
+  const options = browserSseDeliveryOptions("http1-bounded");
+  const first = await sseSessionStream(
+    fakeDb as never,
+    {} as EventBus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    options,
+  );
+  const firstText = await first.text();
+  const firstSequences = [...firstText.matchAll(/^id: (\d+)$/gmu)].map((match) => Number(match[1]));
+  expect(firstSequences.length).toBeGreaterThan(0);
+  expect(firstSequences.length).toBeLessThan(durableEvents.length);
+  expect(Number(first.headers.get("content-length"))).toBeLessThanOrEqual(512 * 1024);
+  expect(firstText.endsWith("\n\n")).toBe(true);
+
+  const lastFirstSequence = firstSequences.at(-1)!;
+  const second = await sseSessionStream(
+    fakeDb as never,
+    {} as EventBus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    lastFirstSequence,
+    new AbortController().signal,
+    options,
+  );
+  const secondSequences = [...(await second.text()).matchAll(/^id: (\d+)$/gmu)].map((match) =>
+    Number(match[1]),
+  );
+  expect(secondSequences[0]).toBe(lastFirstSequence + 1);
+  expect(secondSequences.at(-1)).toBe(durableEvents.length);
+});
+
+test("an unrelated finite SSE response keeps the standard media type", async () => {
+  interactionRevisionState = {
+    revision: 4,
+    updatedAt: new Date("2026-08-10T00:00:04.000Z"),
+  };
+  const response = await sseWorkspaceInteractionRevisionStream(
+    fakeDb as never,
+    "00000000-0000-4000-8000-000000000010",
+    WORKSPACE_ID,
+    3,
+    new AbortController().signal,
+    {
+      connectionLifetimeMs: 10,
+      finiteResponseMaxBytes: 96 * 1024,
+      pollIntervalMs: 100,
+      heartbeatIntervalMs: 1_000,
+    },
+  );
+  await response.arrayBuffer();
+  expect(response.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
+  expect(response.headers.get("content-length")).not.toBeNull();
+});
+
 test("workspace interaction SSE projects only the newest durable revision", async () => {
   interactionRevisionReads = 0;
-  interactionRevisionState = { revision: 3, updatedAt: new Date("2026-08-10T00:00:03.000Z") };
+  interactionRevisionState = {
+    revision: 3,
+    updatedAt: new Date("2026-08-10T00:00:03.000Z"),
+  };
   const controller = new AbortController();
   const response = await sseWorkspaceInteractionRevisionStream(
     fakeDb as never,
@@ -128,11 +293,16 @@ test("workspace interaction SSE projects only the newest durable revision", asyn
     controller.signal,
     { pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
   );
+  expect(response.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
+  expect(response.headers.get("connection")).toBe("close");
   const reader = response.body!.getReader();
   expect(await readSequences(reader, 1)).toEqual([3]);
 
   // Intermediate revisions are cursor noise; the stream may deliver 7 directly.
-  interactionRevisionState = { revision: 7, updatedAt: new Date("2026-08-10T00:00:07.000Z") };
+  interactionRevisionState = {
+    revision: 7,
+    updatedAt: new Date("2026-08-10T00:00:07.000Z"),
+  };
   expect(await readSequences(reader, 1)).toEqual([7]);
   expect(interactionRevisionReads).toBeGreaterThanOrEqual(2);
 
@@ -143,7 +313,10 @@ test("workspace interaction SSE projects only the newest durable revision", asyn
 test("workspace live SSE carries both durable domains over one response", async () => {
   durableControlEvents = [controlEvent(2)];
   durableControlReads.length = 0;
-  interactionRevisionState = { revision: 7, updatedAt: new Date("2026-08-10T00:00:07.000Z") };
+  interactionRevisionState = {
+    revision: 7,
+    updatedAt: new Date("2026-08-10T00:00:07.000Z"),
+  };
   const controller = new AbortController();
   const response = await sseWorkspaceLiveStream(
     fakeDb as never,
@@ -190,7 +363,11 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
     queuedBytes: number;
   }> = [];
   const counters: Array<{ name: string; labels?: Record<string, unknown> }> = [];
-  const gauges: Array<{ name: string; labels?: Record<string, unknown>; value: number }> = [];
+  const gauges: Array<{
+    name: string;
+    labels?: Record<string, unknown>;
+    value: number;
+  }> = [];
   const observability = {
     incrementCounter: (input: { name: string; labels?: Record<string, unknown> }) =>
       counters.push(input),
@@ -233,7 +410,10 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
 
   // The non-reading connection cannot hold up a sibling subscription.
   expect(fastEvents.map((candidate) => candidate.sequence)).toEqual([1]);
-  expect(fastEvents[0]?.payload).toMatchObject({ text: "12", coalescedUntil: 2 });
+  expect(fastEvents[0]?.payload).toMatchObject({
+    text: "12",
+    coalescedUntil: 2,
+  });
   expect(released).toEqual([]);
 
   await waitFor(() => released.length === 1);
@@ -291,7 +471,10 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
   const resumedReader = resumed.body!.getReader();
   const resumedEvents = await readSessionEvents(resumedReader, 1);
   expect(resumedEvents.map((candidate) => candidate.sequence)).toEqual([1]);
-  expect(resumedEvents[0]?.payload).toMatchObject({ text: "12", coalescedUntil: 2 });
+  expect(resumedEvents[0]?.payload).toMatchObject({
+    text: "12",
+    coalescedUntil: 2,
+  });
 
   await resumedReader.cancel();
   await fastReader.cancel();
@@ -475,7 +658,7 @@ test("idle session stream count does not multiply durable reads on heartbeat", a
   await Promise.all(readers.map(async (reader) => await reader.cancel()));
 });
 
-test("a session stream fails closed before its first frame when host authorization is revoked", async () => {
+test("a session stream closes cleanly before its first frame when host authorization is revoked", async () => {
   durableEvents = [];
   durableReads.length = 0;
   let released = 0;
@@ -501,12 +684,15 @@ test("a session stream fails closed before its first frame when host authorizati
     },
   );
   const reader = response.body!.getReader();
-  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+  await expect(reader.read()).resolves.toEqual({
+    done: true,
+    value: undefined,
+  });
   expect(reauthorizations).toBe(1);
   expect(released).toBe(1);
 });
 
-test("rechecks current authority and suppresses a live event after revocation", async () => {
+test("rechecks current authority and closes before a live event after revocation", async () => {
   durableEvents = [];
   durableReads.length = 0;
   let allowed = true;
@@ -537,8 +723,12 @@ test("rechecks current authority and suppresses a live event after revocation", 
   const reader = response.body!.getReader();
   expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
   allowed = false;
+  durableEvents = [event(1)];
   publish?.([event(1)]);
-  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+  await expect(reader.read()).resolves.toEqual({
+    done: true,
+    value: undefined,
+  });
 });
 
 test("emits the selected actor epoch and closes before a cross-tab actor event", async () => {
@@ -574,8 +764,12 @@ test("emits the selected actor epoch and closes before a cross-tab actor event",
   const reader = response.body!.getReader();
   expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
   currentEpoch = "8";
+  durableEvents = [event(1)];
   publish?.([event(1)]);
-  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+  await expect(reader.read()).resolves.toEqual({
+    done: true,
+    value: undefined,
+  });
 });
 
 test("every long-lived SSE surface closes when its current workspace authority is revoked", async () => {
@@ -615,10 +809,16 @@ test("every long-lived SSE surface closes when its current workspace authority i
       { ...revoked(), pollIntervalMs: 100 },
     ),
   ]);
+  for (const response of responses) {
+    expect(response.headers.get("connection")).toBe("close");
+  }
   const readers = responses.map((response) => response.body!.getReader());
   await Promise.all(
     readers.map(async (reader) => {
-      await expect(reader.read()).rejects.toBeInstanceOf(Error);
+      await expect(reader.read()).resolves.toEqual({
+        done: true,
+        value: undefined,
+      });
     }),
   );
 });
@@ -627,7 +827,11 @@ test("workspace-control SSE uses the same one-frame stall bound", async () => {
   durableControlEvents = [controlEvent(1), controlEvent(2)];
   durableControlReads.length = 0;
   let released = 0;
-  const observations: Array<{ reason: string; queuedFrames: number; queuedBytes: number }> = [];
+  const observations: Array<{
+    reason: string;
+    queuedFrames: number;
+    queuedBytes: number;
+  }> = [];
   const bus = {
     subscribeWorkspaceControl: async () => () => {
       released += 1;

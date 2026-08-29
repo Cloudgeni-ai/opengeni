@@ -1,5 +1,12 @@
 # @opengeni/db
 
+## 3.6.3
+
+### Patch Changes
+
+- 551cead: Return durable retained-process exit or loss results to shell tools instead of rendering a retryable platform fault for an already-terminal command handle.
+- 06fda28: Return bounded stable-key conflict outcomes for governed preference proposals instead of exposing persistence query details.
+
 ## 3.6.2
 
 ### Patch Changes

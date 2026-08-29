@@ -16,6 +16,7 @@ import {
   type MetricSample,
   type MetricWindow,
 } from "@opengeni/react/machines";
+import { copyTextToClipboard } from "@opengeni/react/clipboard";
 import { usePageLiveActivity } from "@opengeni/react";
 import {
   ArrowLeftIcon,
@@ -52,17 +53,15 @@ import {
 import { useAppContext } from "@/context";
 import type { MachineView } from "@opengeni/react/machines";
 
-/** Copy to the clipboard and toast the outcome — clipboard access can be denied
- *  (permissions, insecure context), so failures surface instead of vanishing. */
-async function copyToClipboard(text: string, successMessage: string) {
-  try {
-    await navigator.clipboard.writeText(text);
+/** Copy to the clipboard and toast the outcome. The shared helper falls back to
+ *  a temporary textarea when private HTTP origins cannot use navigator.clipboard. */
+export async function copyToClipboard(text: string, successMessage: string) {
+  if (await copyTextToClipboard(text)) {
     toast.success(successMessage);
     return true;
-  } catch {
-    toast.error("Couldn't copy to the clipboard", { description: "Copy it manually instead." });
-    return false;
   }
+  toast.error("Couldn't copy to the clipboard", { description: "Copy it manually instead." });
+  return false;
 }
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {

@@ -283,6 +283,19 @@ body {
   }
 }
 
+/* HTTP/1 streams intentionally cycle to free the browser-wide connection
+   pool. Hide only the healthy sub-second handoff; a stalled reconnect appears. */
+.og-connection-pill-reconnect {
+  visibility: hidden;
+  animation: connection-pill-reveal 0s 1.5s forwards;
+}
+
+@keyframes connection-pill-reveal {
+  to {
+    visibility: visible;
+  }
+}
+
 .pending-dot {
   animation: pending-dot 1.2s infinite ease-in-out both;
 }

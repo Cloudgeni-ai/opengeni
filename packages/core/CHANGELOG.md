@@ -1,5 +1,26 @@
 # @opengeni/core
 
+## 2.5.7
+
+### Patch Changes
+
+- 06460ae: Return governed-learning activation receipts before optional Slack publication settles, so exact retries recover durable outcomes even when notification dispatch stalls.
+- Updated dependencies [3c75347]
+- Updated dependencies [551cead]
+- Updated dependencies [06fda28]
+- Updated dependencies [499cc48]
+- Updated dependencies [37faec3]
+  - @opengeni/runtime@1.4.6
+  - @opengeni/db@3.6.3
+  - @opengeni/documents@0.8.9
+  - @opengeni/events@0.4.7
+
+## 2.5.6
+
+### Patch Changes
+
+- @opengeni/runtime@1.4.5
+
 ## 2.5.5
 
 ### Patch Changes

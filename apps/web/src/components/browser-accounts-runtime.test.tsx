@@ -175,7 +175,7 @@ describe("signed-out browser account recovery", () => {
       expect(selections[0]?.expectedGeneration).toBe("2");
       expect(transitions.length).toBeGreaterThanOrEqual(1);
       const selectionTransition = transitions.at(-1);
-      expect(selectionTransition?.from?.selectedSlotId).toBeNull();
+      expect(selectionTransition?.from).toBeNull();
       expect(selectionTransition?.to?.selectedSlotId).toBe(SLOT_ID);
     } finally {
       await act(async () => root.unmount());
@@ -219,7 +219,7 @@ describe("signed-out browser account recovery", () => {
             client={client}
             broadcastChannelName={null}
             onActorTransition={async (transition) => {
-              if (transition.from?.selectedSlotId === null && transition.to?.selectedSlotId) {
+              if (transition.to?.selectedSlotId) {
                 await selectionSettled;
               }
             }}
