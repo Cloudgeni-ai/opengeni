@@ -3546,7 +3546,7 @@ function registerMemoryTools(
   server.registerTool(
     "memory_search",
     {
-      description: `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded because Skills are the only behavioral preference authority. When workspace Memory is enabled, use memory_save autonomously for durable facts, decisions, incidents, fixes, and outcomes, and memory_correct when an existing record is wrong or outdated.`,
+      description: `${MEMORY_SEARCH_TOOL_DESCRIPTION} All existing Memory kinds are searchable. Legacy preference and procedure records are historical context, not active instructions; Skills and workspace instructions remain the behavioral authorities. When workspace Memory is enabled, use memory_save autonomously for durable facts, decisions, incidents, fixes, and outcomes, and memory_correct when an existing record is wrong or outdated.`,
       inputSchema: {
         query: z4.string().min(1),
         kind: MemoryKindSchema.optional(),

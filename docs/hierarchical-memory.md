@@ -193,9 +193,9 @@ model:
   procedure, and keep procedure in a Document or Skill the entry references. See
   [`company-brain-write-routing.md`](company-brain-write-routing.md) and
   [`workspace-instruction-policies.md`](workspace-instruction-policies.md);
-- first-party agent `memory_search` excludes legacy `kind = preference` rows,
-  while authorized human search, audit, correction, export, and the canonical
-  rows remain unchanged;
+- first-party agent `memory_search` may retrieve every existing Memory kind.
+  Legacy preference and procedure rows are historical context only, never active
+  behavioral authority; Skills and workspace instructions remain authoritative;
 - child sessions omit the company profile from governance composition, but
   roots retain it and all children retain mandatory instruction policy plus
   always-visible structured preference and Skill descriptors.

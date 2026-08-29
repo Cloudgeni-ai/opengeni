@@ -2453,16 +2453,15 @@ describe("DB integration", () => {
     // untouched and still reachable through search.
     expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
 
-    // Candidate containment removes the broad block and legacy preference-kind
-    // records only from agent retrieval. The canonical row remains available
-    // through the human/audit search path, so rollback and correction are safe.
+    // Retrieval-only removes the broad block, but all legacy Memory kinds remain
+    // explicitly searchable as non-authoritative historical context.
     await dbClient.db.execute(dbSql`
       update workspaces
       set settings = settings || '{"memoryPromptMode":"retrieval_only"}'::jsonb
       where id = ${grant.workspaceId}::uuid
     `);
     expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
-    const containedAgentSearch = await searchWorkspaceMemories(
+    const agentSearch = await searchWorkspaceMemories(
       dbClient.db,
       grant.workspaceId,
       {
@@ -2473,7 +2472,9 @@ describe("DB integration", () => {
       },
       memoryEmbedder,
     );
-    expect(containedAgentSearch).toEqual([]);
+    expect(agentSearch.map((result) => result.memory.text)).toContain(
+      "Prefer Terraform for infra.",
+    );
     const humanAuditSearch = await searchWorkspaceMemories(
       dbClient.db,
       grant.workspaceId,

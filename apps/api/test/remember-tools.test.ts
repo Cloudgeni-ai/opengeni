@@ -168,6 +168,11 @@ describe("remember MCP tools", () => {
       `Keep a Skill under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters`,
     );
     expect(description).toContain("one-sentence descriptor");
+    expect(description).toContain(
+      "eligible Skill or workspace instruction may activate immediately",
+    );
+    expect(description).toContain("Under Review first, it remains inactive");
+    expect(description).toContain("Off creates no governed change");
     expect(description).toContain("materializes its exact approved text into Memory");
     expect(description).toContain("`memory_search` retrieval");
   });

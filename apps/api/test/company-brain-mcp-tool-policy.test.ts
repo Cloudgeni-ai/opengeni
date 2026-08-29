@@ -72,7 +72,10 @@ describe("Company Brain first-party MCP policy", () => {
     try {
       const tools = (await client.listTools()).tools;
       expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
-        "Skills are the only behavioral preference authority",
+        "All existing Memory kinds are searchable",
+      );
+      expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
+        "historical context, not active instructions",
       );
       expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
         "use memory_save autonomously",

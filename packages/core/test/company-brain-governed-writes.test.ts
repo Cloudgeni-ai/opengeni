@@ -686,7 +686,7 @@ describe("Company Brain learning-policy router: evaluator and activation wiring"
     });
   });
 
-  test("automatic never activates mandatory instruction policy by default", async () => {
+  test("automatic activates eligible instruction policy by default through its lifecycle", async () => {
     const instructionRequest: CompanyBrainGovernedWriteRequest = {
       kind: "propose_instruction_policy",
       operationId: OPERATION_ID,
@@ -712,22 +712,23 @@ describe("Company Brain learning-policy router: evaluator and activation wiring"
       },
       async activate() {
         activations += 1;
-        return activationReceipt();
+        return { ...(activationReceipt() as object), destination: "instruction_policy" } as never;
       },
     });
     const result = await router.write({ attempt, request: instructionRequest });
-    expect(activations).toBe(0);
-    expect(result.decision).toBe("activation_requested");
+    expect(activations).toBe(1);
+    expect(result.decision).toBe("activated");
     expect(result.learning?.automaticEligible).toBe(true);
     expect(result.activation).toMatchObject({
       requested: true,
-      activated: false,
-      boundary: "human_activation_required",
+      activated: true,
+      boundary: "activated",
+      destination: "instruction_policy",
     });
 
-    const optedIn = createCompanyBrainLearningPolicyRouter({
+    const explicitlyRestricted = createCompanyBrainLearningPolicyRouter({
       db: {} as Database,
-      automaticDestinations: ["preference", "instruction_policy"],
+      automaticDestinations: ["preference"],
       async learningPolicySnapshot() {
         return policySnapshot("automatic");
       },
@@ -742,10 +743,10 @@ describe("Company Brain learning-policy router: evaluator and activation wiring"
         return { ...(activationReceipt() as object), destination: "instruction_policy" } as never;
       },
     });
-    const activated = await optedIn.write({ attempt, request: instructionRequest });
+    const restricted = await explicitlyRestricted.write({ attempt, request: instructionRequest });
     expect(activations).toBe(1);
-    expect(activated.decision).toBe("activated");
-    expect(activated.activation.destination).toBe("instruction_policy");
+    expect(restricted.decision).toBe("activation_requested");
+    expect(restricted.activation.boundary).toBe("human_activation_required");
   });
 
   test("evaluation and activation failures never discard the durable proposal", async () => {

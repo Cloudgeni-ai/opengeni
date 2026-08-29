@@ -351,7 +351,7 @@ describe("remember router (real PostgreSQL)", () => {
     ).rejects.toThrow();
   }, 180_000);
 
-  test("mandatory rules always need the human even under automatic; knowledge needs it too; off blocks", async () => {
+  test("automatic activates eligible rules; reviewed knowledge needs the human; off blocks", async () => {
     if (!shared || !client) return;
     const automatic = await fixture("automatic");
     const router = createRememberRouter({ db: client.db });
@@ -365,10 +365,11 @@ describe("remember router (real PostgreSQL)", () => {
         reason: "The user said this is a hard rule.",
       },
     });
-    expect(rule.status).toBe("confirmation_required");
-    if (rule.status === "confirmation_required") {
+    expect(rule.status).toBe("activated");
+    if (rule.status === "activated") {
       expect(rule.learning?.automaticEligible).toBe(true);
-      expect(rule.humanInput.questions[0]!.prompt).toContain("mandatory workspace rule");
+      expect(rule.activation.destination).toBe("instruction_policy");
+      expect(rule.activation.authorityKind).toBe("automatic");
     }
     const fact = await router.remember({
       attempt: automatic.attempt,

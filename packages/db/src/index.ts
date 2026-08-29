@@ -14374,11 +14374,6 @@ export async function searchWorkspaceMemories(
     eq(schema.knowledgeMemories.workspaceId, workspaceId),
     inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
   ];
-  if (input.agentPromptMode === "retrieval_only") {
-    // Legacy preference-kind rows remain canonical and human-searchable, but
-    // they are observations rather than structured preference authority.
-    baseConditions.push(ne(schema.knowledgeMemories.kind, "preference"));
-  }
   if (input.kind) {
     baseConditions.push(eq(schema.knowledgeMemories.kind, input.kind));
   }
