@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 3.2.1
+
+### Patch Changes
+
+- fd05df1: Cancel abandoned session detail, lineage, and goal reads after their final mounted consumer leaves while preserving shared reads for consumers that are still active.
+- 7988c84: Fence the initiating browser tab before account-changing mutations and cancel abandoned session-page, draft, turn-policy, model-catalog, and realtime-catalog reads without interrupting remaining shared consumers.
+- Updated dependencies [fd05df1]
+- Updated dependencies [7988c84]
+  - @opengeni/sdk@3.2.1
+
 ## 3.2.0
 
 ### Patch Changes

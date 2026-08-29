@@ -1,5 +1,15 @@
 # @opengeni/worker-bundle
 
+## 0.22.11
+
+### Patch Changes
+
+- f13d721: Record durable worker-death recovery and exhaustion outcomes, alert on release-owned turn-worker restarts and crash loops, and surface alert, scrape, probe, restart, and recovery health at the top of the runtime dashboard.
+- becd349: Return browser HTTP/1 event streams as capped, known-length batches so multiple tabs cannot retain ambiguous streaming requests and starve ordinary API reads.
+- 34a05ca: Deliver browser HTTP/1 events as immediate, vendor-typed snapshots read from the durable event store, without opening a timed live subscription or closing the reusable socket. Preserve cursor-based replay while preventing replaced documents from starving ordinary API reads across tabs and account changes.
+  - @opengeni/runtime@1.4.5
+  - @opengeni/core@2.5.6
+
 ## 0.22.10
 
 ### Patch Changes

@@ -1,5 +1,13 @@
 # @opengeni/runtime
 
+## 1.4.5
+
+### Patch Changes
+
+- Updated dependencies [fd05df1]
+- Updated dependencies [7988c84]
+  - @opengeni/sdk@3.2.1
+
 ## 1.4.4
 
 ### Patch Changes
