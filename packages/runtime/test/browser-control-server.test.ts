@@ -56,10 +56,10 @@ describe("browser control server placement lifecycle", () => {
   });
 
   test("launches through structured exec and parses the exact readiness marker", async () => {
-    const commands: Array<{ cmd: string; yieldTimeMs?: number }> = [];
+    const commands: Array<{ cmd: string; workdir?: string; yieldTimeMs?: number }> = [];
     const result = await ensureBrowserControlServer(
       {
-        exec: async (args: { cmd: string; yieldTimeMs?: number }) => {
+        exec: async (args: { cmd: string; workdir?: string; yieldTimeMs?: number }) => {
           commands.push(args);
           return {
             exitCode: 0,
@@ -74,6 +74,7 @@ describe("browser control server placement lifecycle", () => {
       marker: "OPENGENI_BROWSERD_UP port=7682 (already)",
     });
     expect(commands).toHaveLength(1);
+    expect(commands[0]?.workdir).toBe("/workspace");
     expect(commands[0]?.yieldTimeMs).toBe(60_000);
   });
 
@@ -118,14 +119,18 @@ describe("browser control server placement lifecycle", () => {
   });
 
   test("tears down through the available provider command surface", async () => {
-    const commands: string[] = [];
+    const commands: Array<{ cmd: string; workdir?: string }> = [];
     await tearDownBrowserControlServer({
-      execCommand: async ({ cmd }: { cmd: string }) => {
-        commands.push(cmd);
+      execCommand: async (args: { cmd: string; workdir?: string }) => {
+        commands.push(args);
         return "OPENGENI_BROWSERD_DOWN";
       },
     });
-    expect(commands).toEqual(["/usr/local/bin/opengeni-browserd-down"]);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({
+      cmd: "/usr/local/bin/opengeni-browserd-down",
+      workdir: "/workspace",
+    });
   });
 
   test("rejects relative token paths and non-origin allowlist entries", () => {
