@@ -64,8 +64,9 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
     const request = beginLoad();
     void request.promise;
     return () => {
-      request.requestAbort.abort();
-      if (requestAbortRef.current === request.requestAbort) requestAbortRef.current = null;
+      const currentRequestAbort = requestAbortRef.current;
+      currentRequestAbort?.abort();
+      if (requestAbortRef.current === currentRequestAbort) requestAbortRef.current = null;
     };
   }, [beginLoad]);
 
