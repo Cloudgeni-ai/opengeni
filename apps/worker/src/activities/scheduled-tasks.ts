@@ -29,6 +29,7 @@ import {
   createSession,
   createSessionWithIdempotencyKeyResult,
   enqueueSessionWorkflowWakeIfRunnable,
+  failScheduledGeneratedSessionRoute,
   getScheduledTask,
   getScheduledTaskRunAcceptedExecution,
   getScheduledTaskRunByProducerKey,
@@ -1004,7 +1005,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 reasoningEffort,
                 latencyMode: "standard",
                 sandboxBackend,
-                sandboxOs: "linux",
+                sandboxOs,
                 variableSetId: task.variableSetId ?? null,
                 rigId: frozenRigId,
                 rigVersionId: frozenRigVersionId,
@@ -1111,6 +1112,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 );
               }
             }
+            session = await seedScheduledGeneratedSessionRoute({
+              db: dispatchDb,
+              bus,
+              settings,
+              task,
+              runId: run.id,
+              session,
+              deferPublications,
+              deferredEvents,
+            });
             let workflowId: string;
             if (alertOccurrence) {
               const started = await initializeSessionStartAtomically(dispatchDb, {
@@ -1571,7 +1582,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           acceptedExecution: dispatchOutcome.acceptedExecution,
         });
       }
-      if (dispatchOutcome.kind === "blocked") return dispatchOutcome.result;
       for (const deferred of deferredEvents) {
         await publishDurableSessionEvents(
           bus,
@@ -1580,6 +1590,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           deferred.events,
         );
       }
+      if (dispatchOutcome.kind === "blocked") return dispatchOutcome.result;
       const result = dispatchOutcome.result;
       if (wakeSessionWorkflow && result.workflowWakeRevision !== null) {
         await wakeSessionWorkflow({
@@ -1805,6 +1816,74 @@ async function recordScheduledTaskFiredUsage(
   });
 }
 
+async function seedScheduledGeneratedSessionRoute(input: {
+  db: Database;
+  bus: ControlActivityServices["bus"];
+  settings: ControlActivityServices["settings"];
+  task: ScheduledTask;
+  runId: string;
+  session: Awaited<ReturnType<typeof createSession>>;
+  deferPublications: boolean;
+  deferredEvents: Array<{
+    sessionId: string;
+    events: Awaited<ReturnType<typeof appendSessionEvents>>;
+  }>;
+}): Promise<Awaited<ReturnType<typeof createSession>>> {
+  const target = input.task.agentConfig.machineTarget;
+  if (!target) return input.session;
+  const seeded = await swapActiveSandbox(
+    {
+      db: input.db,
+      settings: input.settings,
+      bus: input.bus,
+    },
+    {
+      accountId: input.task.accountId,
+      workspaceId: input.task.workspaceId,
+      sessionId: input.session.id,
+      sessionBackend: input.session.sandboxBackend,
+      sessionGroupId: input.session.sandboxGroupId,
+    },
+    target.targetSandboxId,
+    target.workingDir ?? null,
+  );
+  if (seeded.swapped) {
+    return await requireSession(input.db, input.task.workspaceId, input.session.id);
+  }
+
+  const failed = await failScheduledGeneratedSessionRoute(input.db, {
+    accountId: input.task.accountId,
+    workspaceId: input.task.workspaceId,
+    taskId: input.task.id,
+    runId: input.runId,
+    sessionId: input.session.id,
+    error: "scheduled_machine_unavailable",
+  });
+  if (failed.action === "advanced") {
+    throw new Error(
+      `scheduled run advanced to ${failed.status} while its Connected Machine route was being established`,
+    );
+  }
+  if (failed.events.length > 0) {
+    if (input.deferPublications) {
+      input.deferredEvents.push({ sessionId: input.session.id, events: failed.events });
+    } else {
+      await publishDurableSessionEvents(
+        input.bus,
+        input.task.workspaceId,
+        input.session.id,
+        failed.events,
+      );
+    }
+  }
+  const error =
+    failed.action === "terminal" ? (failed.error ?? "scheduled_run_terminal") : failed.error;
+  throw new ScheduledRunTerminalAuthorityError(
+    error,
+    seeded.reason ?? "scheduled Connected Machine target is unavailable",
+  );
+}
+
 async function recoverBoundScheduledTaskDispatch(input: {
   db: Database;
   bus: ControlActivityServices["bus"];
@@ -1984,30 +2063,17 @@ async function recoverBoundScheduledTaskDispatch(input: {
       sessionId: session.id,
     });
   }
-  if (generatedSession && task.agentConfig.machineTarget) {
-    const seeded = await swapActiveSandbox(
-      {
-        db: input.db,
-        settings: input.settings,
-        bus: input.bus,
-      },
-      {
-        accountId: task.accountId,
-        workspaceId: task.workspaceId,
-        sessionId: session.id,
-        sessionBackend: session.sandboxBackend,
-        sessionGroupId: session.sandboxGroupId,
-      },
-      task.agentConfig.machineTarget.targetSandboxId,
-      task.agentConfig.machineTarget.workingDir ?? null,
-    );
-    if (!seeded.swapped) {
-      throw new ScheduledRunTerminalAuthorityError(
-        "scheduled_machine_unavailable",
-        seeded.reason ?? "scheduled Connected Machine target is unavailable",
-      );
-    }
-    session = await requireSession(input.db, task.workspaceId, session.id);
+  if (generatedSession) {
+    session = await seedScheduledGeneratedSessionRoute({
+      db: input.db,
+      bus: input.bus,
+      settings: input.settings,
+      task,
+      runId: input.run.id,
+      session,
+      deferPublications: false,
+      deferredEvents: [],
+    });
   }
   if (session.status === "cancelled") {
     await markScheduledTaskRunSkippedIfQueued(input.db, {
