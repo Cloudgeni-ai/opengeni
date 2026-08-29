@@ -3,6 +3,7 @@
 // session start. Generic reads are metadata-only; an explicitly permissioned
 // and audited endpoint reveals one value on demand.
 import { useVariableSets, useScheduledTasks, useWorkspaceSessions } from "@opengeni/react";
+import { variableSetVariableNameReservation } from "@opengeni/contracts";
 import { Link } from "@tanstack/react-router";
 import {
   BoxIcon,
@@ -56,13 +57,18 @@ export function normalizeVariableNameInput(value: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
-function variableNameError(value: string): string | null {
+export function variableNameError(value: string): string | null {
   if (!value) return null;
   if (value.length > VARIABLE_NAME_MAX_LENGTH) return "Use 128 characters or fewer.";
   if (!/^[A-Z]/.test(value)) return "Start the name with a letter.";
   if (!VARIABLE_NAME_PATTERN.test(value)) {
     return "Use letters, numbers, and underscores only.";
   }
+  const reservation = variableSetVariableNameReservation(value);
+  if (reservation?.kind === "prefix") {
+    return `Names beginning with ${reservation.value} are reserved. Choose another name.`;
+  }
+  if (reservation) return `${reservation.value} is reserved. Choose another name.`;
   return null;
 }
 

@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import {
   normalizeVariableNameInput,
+  variableNameError,
   sessionUsesVariableSet,
   VariableSetCard,
 } from "./variable-sets";
@@ -69,6 +70,14 @@ describe("Variable Sets credential-autofill boundaries", () => {
     expect(normalizeVariableNameInput("test-key")).toBe("TEST_KEY");
     expect(normalizeVariableNameInput("  service token  ")).toBe("SERVICE_TOKEN");
     expect(normalizeVariableNameInput("api.key/value")).toBe("API_KEY_VALUE");
+  });
+
+  test("explains names reserved by the sandbox before submission", () => {
+    expect(variableNameError("HOME")).toBe("HOME is reserved. Choose another name.");
+    expect(variableNameError("OPENGENI_TOKEN")).toBe(
+      "Names beginning with OPENGENI_ are reserved. Choose another name.",
+    );
+    expect(variableNameError("MY_APP_TOKEN")).toBeNull();
   });
 
   test("uses the complete ordered session selection before the legacy singular fallback", () => {
