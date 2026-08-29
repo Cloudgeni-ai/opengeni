@@ -15,14 +15,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0378 session event raw-lane activation requires an explicit application database role list'
+      '0379 session event raw-lane activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0378 session event raw-lane activation received a malformed application database role list'
+      '0379 session event raw-lane activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -41,7 +41,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0378 session event raw-lane activation received an invalid application database role list'
+      '0379 session event raw-lane activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -53,7 +53,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0378 session event raw-lane activation requires all configured OpenGeni application database sessions to be stopped'
+      '0379 session event raw-lane activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -78,7 +78,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0378 session event raw-lane activation requires all configured OpenGeni application database sessions to be stopped'
+      '0379 session event raw-lane activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END

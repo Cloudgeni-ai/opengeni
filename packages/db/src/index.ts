@@ -68792,7 +68792,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               const advancesActivity = sessionEventTypesAdvanceActivity(values);
               const rawLaneIsolated = !advancesActivity && rawLaneEnabled;
               if (rawLaneIsolated) {
-                // Migration 0378 keeps legacy SQL writers fail-closed while
+                // Migration 0379 keeps legacy SQL writers fail-closed while
                 // allowing this exact cursor-owned raw range to avoid a
                 // per-row compatibility lookup. The AFTER statement trigger
                 // still validates and advances the range atomically.

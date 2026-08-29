@@ -454,9 +454,9 @@ organization membership table, `workspaces`, and `workspace_memberships`. A
 live listed session rejects the cutover with SQLSTATE `55000`. After commit,
 never restart a pre-0348 image; remain in maintenance and fix forward.
 
-### Session-event raw-lane cutover (0378)
+### Session-event raw-lane cutover (0379)
 
-`0378_session_event_raw_lane_activation.sql` moves accepted raw exact-attempt
+`0379_session_event_raw_lane_activation.sql` moves accepted raw exact-attempt
 appends off the wide `sessions` row while retaining cursor allocation, exact
 turn/attempt fencing, and semantic state/event atomicity. Old API readers expose
 `sessions.last_sequence`, and old SQL writers allocate from that projection, so
@@ -466,7 +466,7 @@ the cutover is drained rather than rolling:
 2. supply the exact runtime login list through
    `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`;
 3. prove those roles have zero other sessions in `pg_stat_activity`;
-4. apply 0378 from the exact new image and require it in `schema_migrations`;
+4. apply 0379 from the exact new image and require it in `schema_migrations`;
 5. start only that image generation and require readiness before reopening
    admission.
 
@@ -478,7 +478,7 @@ cursor. A deferred constraint keeps that projection from leading after commit.
 For a forward application rollback, set
 `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false`: the current image keeps cursor
 validation active but restores wide-session locking and raw compatibility
-writes. Do not restart a pre-0378 image after isolated raw traffic until the
+writes. Do not restart a pre-0379 image after isolated raw traffic until the
 session projection has been synchronized to every cursor under maintenance.
 
 Two operator-visible consequences follow the commit. `POST /v1/organizations`

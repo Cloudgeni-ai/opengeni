@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { SESSION_EVENT_RAW_DELTA_TYPES } from "@opengeni/contracts";
 
 const migrationUrl = new URL(
-  "../drizzle/0378_session_event_raw_lane_activation.sql",
+  "../drizzle/0379_session_event_raw_lane_activation.sql",
   import.meta.url,
 );
 
-describe("migration 0378 session event raw lane activation", () => {
+describe("migration 0379 session event raw lane activation", () => {
   test("cuts over under maintenance with legacy rebasing and semantic-only projection", async () => {
     const source = await Bun.file(migrationUrl).text();
 
