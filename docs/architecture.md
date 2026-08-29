@@ -322,7 +322,6 @@ offline-machine fallback; deployments configured with only `none` or
 
 Canonical: `packages/runtime/src/sandbox/selfhosted/`,
 `apps/worker/src/activities/agent-turn/sandbox-establish.ts`,
-`packages/core/src/domain/sessions.ts`,
 `packages/core/src/domain/scheduled-tasks.ts`,
 `apps/worker/src/activities/scheduled-tasks.ts`,
 `agent/proto/opengeni_agent.proto`, [`connected-machines.md`](connected-machines.md),
