@@ -1052,6 +1052,25 @@ describe("useTurnQueue", () => {
 });
 
 describe("useSessionLineage", () => {
+  test("cancels its lineage read when the hook unmounts", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      getSessionLineage: async (_workspaceId, _sessionId, options) => {
+        requestSignal = options?.signal;
+        return await new Promise(() => {});
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(requestSignal?.aborted).toBe(false);
+    await hook.unmount();
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   test("captures a shared causal generation when each lineage request starts", async () => {
     let releaseInitial: (() => void) | null = null;
     let nextGeneration = 70;
@@ -1325,6 +1344,25 @@ describe("useSessionLineage", () => {
 });
 
 describe("useGoal", () => {
+  test("cancels its goal read when the hook unmounts", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      getGoal: async (_workspaceId, _sessionId, options) => {
+        requestSignal = options?.signal;
+        return await new Promise(() => {});
+      },
+    });
+    const hook = await renderHook(
+      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(requestSignal?.aborted).toBe(false);
+    await hook.unmount();
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   test("exposes the goal with its autonomy counters", async () => {
     const goal = fakeGoal({ autoContinuations: 7, noProgressStreak: 2 });
     const client = fakeClient({ getGoal: async () => goal });

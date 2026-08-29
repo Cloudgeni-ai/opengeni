@@ -84,6 +84,25 @@ describe("useSession", () => {
     await hook.unmount();
   });
 
+  test("cancels its session detail read when the hook unmounts", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      getSession: async (_workspaceId, _sessionId, requestOptions) => {
+        requestSignal = requestOptions?.signal;
+        return await new Promise<Session>(() => {});
+      },
+    });
+    const hook = await renderHook(
+      () => useSession(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      undefined,
+    );
+    await flush();
+
+    expect(requestSignal?.aborted).toBe(false);
+    await hook.unmount();
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   test("captures shared causality when a queued fresh detail GET actually starts", async () => {
     let requests = 0;
     let releaseActive!: () => void;
