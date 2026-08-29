@@ -45,8 +45,9 @@ Migration `0268_governed_learning_decision_receipts.sql` adds the deterministic 
 
 Migration `0269_governed_learning_activation_controller.sql` adds the separate
 controller that consumes one final `automatic` receipt. The learning-policy
-router invokes it for eligible **preference** decisions; instruction-policy
-decisions are recorded but keep a human activation boundary. Migration 0272 adds
+router invokes it for eligible **preference and instruction-policy** decisions,
+revalidating and activating only through the destination-owned lifecycle.
+Migration 0272 adds
 the sibling `activate_human_confirmed_learning_decision`, used by the explicit
 `remember_confirm` tool: it activates a `suggest`/`automatic`/`confidence`
 receipt only after the exact initiating human answered the bound
@@ -110,6 +111,14 @@ and governed-change undo remain API/SDK operations on the `/learning` routes
 with no web UI. Rollback and undo remain destination-native compensating
 lifecycle operations rather than history mutation.
 
+Workspace Memory is deliberately outside this policy. When the separate
+`memoryEnabled` workspace setting is true, exact live agent attempts may use
+`memory_save` and `memory_correct` autonomously in every Learning mode. Learning
+mode continues to govern derived Skills and instruction proposals, not the
+shared agent Memory mechanism. Autonomous may activate an eligible Skill or
+instruction through the destination-owned lifecycle; Review first leaves the
+proposal inactive for human review; Off creates no durable derived change.
+
 Destination ownership remains:
 
 - Documents/RAG: evidence and retrieval only.
@@ -121,7 +130,8 @@ Destination ownership remains:
 
 The controller deliberately does not implement:
 
-- automatic Memory or company-profile mutation;
+- Memory mutation through the learning controller (agent Memory writes use the
+  separate `memoryEnabled` gate) or company-profile mutation;
 - Personal or Organization scope expansion;
 - explicit session command/tool integration;
 - runtime prompt composition or automatic snapshot installation;

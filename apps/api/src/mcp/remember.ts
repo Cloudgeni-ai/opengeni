@@ -59,7 +59,7 @@ const laneFields = {
 /**
  * Explicit user-directed remember. Content becomes exact task-note evidence,
  * promotion runs through the frozen workspace learning policy, and activation
- * is either automatic (preference under Automatic mode) or requires exactly one
+ * is either automatic (Skill or instruction under Automatic mode) or requires exactly one
  * bound human confirmation through the built-in `request_human_input` tool.
  * Tool input cannot select scope beyond the workspace, active authority, or
  * another learning-policy source.
@@ -70,9 +70,9 @@ export function registerRememberTools(input: RegisterRememberToolsInput): void {
     "remember",
     {
       description:
-        "Durably remember something the user explicitly asked to keep for this workspace. Route by purpose: lane=knowledge for a fact, decision, incident, bug fix, or outcome that should become searchable Memory; lane=preference creates a Skill for reusable conditional how-to guidance; lane=instruction_policy is only for a universal always/never rule that should apply to nearly every task. " +
-        `Write the instruction lane as the shortest complete rule, at most ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters and normally 1-3 imperative sentences, with no numbered steps, examples, rationale, or restated defaults. Keep a Skill under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters; only its one-sentence descriptor is composed and the full instructions are retrieved on demand. Do not copy one item into multiple lanes. ` +
-        "Under Automatic learning a Skill may activate immediately; otherwise the receipt returns status=confirmation_required with the exact `humanInput` payload: call `request_human_input` with it verbatim, then call `remember_confirm` with the returned requestId. Workspace instructions and Memory always need that confirmation. Do not use this for facts you merely inferred; use knowledge_propose or task notes for those. Confirmed lane=knowledge content keeps its reviewed claim provenance and materializes its exact approved text into Memory for later `memory_search` retrieval.",
+        "Create governed durable knowledge, a Skill, or a mandatory workspace instruction. When the agent-only memory_save tool is available, use it instead for ordinary durable facts, decisions, incidents, bug fixes, and confirmed outcomes; those Memory writes are autonomous and independent of Learning mode. Use lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge; lane=preference creates a Skill for reusable conditional how-to guidance; lane=instruction_policy is only for a universal always/never rule that should apply to nearly every task. " +
+        `Write the instruction lane as the shortest complete rule, at most ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters and normally 1-3 imperative sentences, with no numbered steps, examples, rationale, or restated defaults. Keep a Skill under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters with one clear trigger and outcome, only the necessary steps, checks, and exceptions, and a one-sentence descriptor. Do not copy one item into multiple lanes. ` +
+        "Under Autonomous learning, an eligible Skill or workspace instruction may activate immediately through its governed lifecycle. Under Review first, it remains inactive and the receipt returns status=confirmation_required with the exact `humanInput` payload: call `request_human_input` with it verbatim, then call `remember_confirm` with the returned requestId. Off creates no governed change. Reviewed Knowledge always needs confirmation. Do not use lane=knowledge for facts you merely inferred; use memory_save when available, otherwise knowledge_propose or task notes. Confirmed lane=knowledge content keeps its reviewed claim provenance and materializes its exact approved text into Memory for later `memory_search` retrieval.",
       inputSchema: {
         lane: z.enum(["preference", "instruction_policy", "knowledge"]),
         ...laneFields,

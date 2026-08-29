@@ -198,6 +198,13 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
+Workspace Memory is the autonomous agent-retention lane: when the workspace
+Memory toggle is enabled, exact live agent attempts save and correct active
+facts, decisions, incidents, fixes, and outcomes without consulting Learning
+mode. It remains retrieval-only model context through `memory_search`; it is
+not a Skill, mandatory instruction, organization profile, or reviewed Knowledge
+claim.
+
 Accepted conversation and tool content is preserved at its canonical boundary;
 OpenGeni does not centrally rewrite arbitrary text because it resembles a
 credential. Configured secrets are a separate concern: they are encrypted at

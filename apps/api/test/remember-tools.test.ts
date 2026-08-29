@@ -150,9 +150,13 @@ describe("remember MCP tools", () => {
     expect(h.remembers[2]).toMatchObject({ request: { lane: "knowledge", subject: "Acme" } });
   });
 
-  test("the tool description states the prompt cost and the shape of a durable rule", () => {
+  test("the tool description separates autonomous Memory from governed durable changes", () => {
     const description = harness().configs.get("remember")?.description ?? "";
-    expect(description).toContain("lane=knowledge for a fact, decision, incident, bug fix");
+    expect(description).toContain("use it instead for ordinary durable facts");
+    expect(description).toContain("independent of Learning mode");
+    expect(description).toContain(
+      "lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge",
+    );
     expect(description).toContain("lane=preference creates a Skill");
     expect(description).toContain("lane=instruction_policy is only for a universal");
     expect(description).toContain(
@@ -164,6 +168,11 @@ describe("remember MCP tools", () => {
       `Keep a Skill under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters`,
     );
     expect(description).toContain("one-sentence descriptor");
+    expect(description).toContain(
+      "eligible Skill or workspace instruction may activate immediately",
+    );
+    expect(description).toContain("Under Review first, it remains inactive");
+    expect(description).toContain("Off creates no governed change");
     expect(description).toContain("materializes its exact approved text into Memory");
     expect(description).toContain("`memory_search` retrieval");
   });

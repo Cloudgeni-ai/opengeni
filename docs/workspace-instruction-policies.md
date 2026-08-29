@@ -316,12 +316,15 @@ prompts consistent with:
 - prefer several small rules over one long one, each a separate revision;
 - keep procedure in a Document or Skill and have the rule reference it.
 
-A preference is bounded for a different reason, and the wording matters because
+A Skill is bounded for a different reason, and the wording matters because
 the naive one is wrong: shortening a preference's content does **not** shrink any
 prompt. Only its short title and description descriptors are composed; the full
 content stays behind the exact attempt's retrieval handle. Its length is
 therefore retrieval cost rather than standing prompt cost, which is why it gets
-more room than a rule rather than less. The Knowledge lane keeps the wider
+more room than a rule rather than less. A Skill should state one trigger and
+outcome and include only necessary prerequisites, executable steps, verification,
+and important failure handling; background, repetition, generic advice, and
+decorative examples are omitted, and unrelated workflows are split. The Knowledge lane keeps the wider
 `REMEMBER_CONTENT_MAX_CHARS` (4,000) ceiling because it is retrieval evidence and
 never joins the always-composed prefix.
 

@@ -93,7 +93,8 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
     <section className="rounded-lg border border-border bg-surface p-4">
       <h2 className="text-sm font-semibold text-fg">Learning & autonomy</h2>
       <p className="mt-1 text-xs leading-5 text-fg-muted">
-        Controls derived durable changes. Knowledge ingestion and retrieval stay separate.
+        Controls derived Skills and workspace instructions. Agent Memory follows the separate
+        Workspace memory toggle.
       </p>
       <fieldset className="mt-4 grid gap-2 sm:grid-cols-3" disabled={!canEdit || saving}>
         <legend className="sr-only">Workspace learning mode</legend>

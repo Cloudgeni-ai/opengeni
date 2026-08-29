@@ -7741,9 +7741,13 @@ describe("API component integration", () => {
       const memoryTools = (await prepared.mcpServers[0]!.listTools())
         .map((tool) => tool.name)
         .sort();
-      // Memory V1 writes are retired: selecting them by name does not register
-      // them, and the stored opt-out does not bring them back.
-      expect(memoryTools).toEqual(["opengeni__memory_search"]);
+      // The stored legacy prompt-mode value is ignored. Workspace Memory itself
+      // is enabled, so the exact live agent attempt receives autonomous writes.
+      expect(memoryTools).toEqual([
+        "opengeni__memory_correct",
+        "opengeni__memory_save",
+        "opengeni__memory_search",
+      ]);
     } finally {
       await prepared?.close().catch(() => undefined);
       server.stop(true);

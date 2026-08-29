@@ -162,9 +162,11 @@ portable authority.
   purpose, recipient, retention behavior, or additional owner field.
 
 Docs MCP also has a `memory_search`, but it is the curated documents surface, not
-the first-party turn tool. It now reads both `active` and `approved` memory records
-so the curated lane and Workspace Memory V1 share the same agent-visible set;
-`memory_propose` still writes `proposed` records for human review.
+the first-party turn tool. It reads both `active` and `approved` memory records
+so reviewed Knowledge and autonomous Workspace Memory share the same
+agent-visible retrieval set; `memory_propose` still writes `proposed` records
+for human review, while first-party `memory_save` / `memory_correct` are enabled
+only by the separate workspace Memory toggle.
 
 Rules of thumb:
 

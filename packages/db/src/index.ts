@@ -13707,6 +13707,7 @@ export type CorrectWorkspaceMemoryInput = {
   reason?: string | undefined;
   replacementText?: string | undefined;
   sessionId?: string | null | undefined;
+  origin?: WorkspaceMemoryOrigin | undefined;
 };
 
 export type CorrectWorkspaceMemoryResult = {
@@ -13946,10 +13947,16 @@ export async function saveWorkspaceMemory(
             eq(schema.knowledgeMemories.id, replacesFullId),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("update");
       if (!row) {
         throw new Error(
           `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
+        );
+      }
+      if (input.origin === "agent" && row.status !== "active") {
+        throw new Error(
+          `Autonomous Memory can replace only active agent-writable records; memory "${row.id}" has status "${row.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
         );
       }
       replacesRow = row;
@@ -14256,10 +14263,16 @@ export async function correctWorkspaceMemory(
             eq(schema.knowledgeMemories.id, fullId),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("update");
     });
     if (!old) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    if (input.origin === "agent" && old.status !== "active") {
+      throw new Error(
+        `Autonomous Memory can correct only active agent-writable records; memory "${old.id}" has status "${old.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
+      );
     }
     const result = await saveWorkspaceMemory(
       db,
@@ -14271,7 +14284,7 @@ export async function correctWorkspaceMemory(
         pinned: old.pinned,
         replacesId: old.id,
         sessionId: input.sessionId ?? null,
-        origin: "agent",
+        origin: input.origin,
       },
       embedder,
     );
@@ -14304,9 +14317,15 @@ export async function correctWorkspaceMemory(
           eq(schema.knowledgeMemories.id, fullId),
         ),
       )
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (!existing) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    if (input.origin === "agent" && existing.status !== "active") {
+      throw new Error(
+        `Autonomous Memory can archive only active agent-writable records; memory "${existing.id}" has status "${existing.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
+      );
     }
     const correctionReason = cleanDbString(input.reason);
     const [archived] = await scopedDb
@@ -14355,11 +14374,6 @@ export async function searchWorkspaceMemories(
     eq(schema.knowledgeMemories.workspaceId, workspaceId),
     inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
   ];
-  if (input.agentPromptMode === "retrieval_only") {
-    // Legacy preference-kind rows remain canonical and human-searchable, but
-    // they are observations rather than structured preference authority.
-    baseConditions.push(ne(schema.knowledgeMemories.kind, "preference"));
-  }
   if (input.kind) {
     baseConditions.push(eq(schema.knowledgeMemories.kind, input.kind));
   }

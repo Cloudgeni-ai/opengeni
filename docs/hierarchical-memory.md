@@ -12,11 +12,11 @@ to model context; it does not adopt the final scoped selector or write router.
 Agent Knowledge is not one generic storage destination. Agents and user-facing
 creation flows apply these boundaries:
 
-- a specific fact, decision, incident, bug fix, or confirmed outcome that a user
-  asks to remember uses `remember lane=knowledge`. It enters the governed
-  scoped-Knowledge review lifecycle; after the initiating human confirms the
-  exact text, that text is materialized as an active `knowledge_memories` record
-  and can be found later through `memory_search` and the Memory UI;
+- a specific fact, decision, incident, bug fix, or confirmed outcome uses
+  `memory_save` whenever workspace Memory is enabled. The exact live agent
+  attempt writes it immediately as an active `knowledge_memories` record,
+  independently of workspace Learning mode, and future agents can find it
+  through `memory_search` and the Memory UI;
 - reusable conditional how-to guidance belongs in a Skill backed by the
   structured preference authority;
 - an unconditional rule that every agent must follow belongs in Workspace
@@ -25,13 +25,16 @@ creation flows apply these boundaries:
 The same material should not be copied across these authorities. A Workspace
 instruction may tell agents to search for related incidents, while the incident
 itself remains Memory and the reusable investigation method remains a Skill.
-Generic model-facing Memory write tools remain retired. `remember lane=knowledge`
-is the narrow exception: its claim review and exact human confirmation authorize
-one exact idempotent write through the confirmation-to-Memory materialization
-receipt. Its dedicated namespace prevents generic normalized deduplication from
-substituting other text, and replay retains the same Memory id after archival,
-with claim, evidence,
-Task-note, and confirmation receipt ids retained as metadata.
+`memory_save` and `memory_correct` are agent-only autonomous tools exposed only
+when workspace Memory is enabled. They do not activate a Skill, instruction,
+company profile, or reviewed Knowledge claim. `remember lane=knowledge` remains
+the narrower reviewed fallback when autonomous Memory is unavailable and a user
+explicitly requests reviewed workspace knowledge; its confirmation-to-Memory
+receipt preserves exact approved text and provenance. Autonomous correction and
+supersession may target only `active` agent-writable Memory; `approved`
+human-reviewed Knowledge remains under its review lifecycle. Expiring findings,
+ownership, blockers, artifacts, and handoffs that should be visible only inside
+one root session tree belong in Task notes, not shared Workspace Memory.
 
 ## Data model
 
@@ -177,9 +180,10 @@ model:
 - composition is always `retrieval_only`: no standing pinned/recency block is
   injected into any agent prompt. An agent reads the store through
   `memory_search` when it needs it, rather than receiving it unbidden;
-- durable agent writes go through `remember` (explicit user-directed) and
-  task-note promotion (the agent's own findings). The Memory V1 agent writes
-  `memory_save` and `memory_correct` are retired; `memory_search` remains.
+- durable agent Memory writes go directly through `memory_save` and
+  `memory_correct` whenever `memoryEnabled` is true. These exact-attempt writes
+  are always autonomous and do not consult the workspace Learning mode;
+  `memory_search` remains the retrieval path.
   Agent-authored durable text is bounded by the destination it lands in, on every
   surface that reaches it including task-note promotion: 600 characters for a
   mandatory workspace rule (composed verbatim into the prompt of every session it
@@ -189,9 +193,9 @@ model:
   procedure, and keep procedure in a Document or Skill the entry references. See
   [`company-brain-write-routing.md`](company-brain-write-routing.md) and
   [`workspace-instruction-policies.md`](workspace-instruction-policies.md);
-- first-party agent `memory_search` excludes legacy `kind = preference` rows,
-  while authorized human search, audit, correction, export, and the canonical
-  rows remain unchanged;
+- first-party agent `memory_search` may retrieve every existing Memory kind.
+  Legacy preference and procedure rows are historical context only, never active
+  behavioral authority; Skills and workspace instructions remain authoritative;
 - child sessions omit the company profile from governance composition, but
   roots retain it and all children retain mandatory instruction policy plus
   always-visible structured preference and Skill descriptors.

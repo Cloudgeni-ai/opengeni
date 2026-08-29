@@ -45,9 +45,8 @@ export type CompanyBrainGovernedWriteRouterOptions = {
   activate?: typeof activateGovernedLearningDecision;
   /**
    * Destinations the router may activate automatically from a final eligible
-   * decision. Defaults to preferences only: mandatory instruction policy keeps
-   * requiring human-authoritative activation even under `automatic`, so its
-   * decision receipt is recorded but the inactive draft stays for review.
+   * decision. Defaults to Skills and instruction policy. Both still pass
+   * through the evaluator and destination-owned activation lifecycle.
    */
   automaticDestinations?: ReadonlyArray<GovernedLearningActivationDestination>;
   /**
@@ -64,7 +63,7 @@ export type CompanyBrainGovernedWriteRouterOptions = {
 };
 
 export const DEFAULT_AUTOMATIC_LEARNING_DESTINATIONS: ReadonlyArray<GovernedLearningActivationDestination> =
-  ["preference"];
+  ["preference", "instruction_policy"];
 
 /**
  * Start a non-authoritative post-activation notification without making the
@@ -163,9 +162,8 @@ function classifyLearningFailure(
  * snapshot. `suggest` records the content-free decision receipt only. Under
  * `automatic`, a final `automaticEligible` receipt is handed to the activation
  * controller, which revalidates current authority and applies the change only
- * through the destination-owned lifecycle. By default only preferences may
- * activate automatically; mandatory instruction policy always keeps a human
- * activation boundary. Evaluation or activation failure
+ * through the destination-owned lifecycle. Eligible Skills and instruction
+ * policies may activate automatically. Evaluation or activation failure
  * never rolls back the durable proposal; it is reported as a bounded
  * `learningFailure` and the proposal remains for human review.
  */

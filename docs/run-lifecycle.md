@@ -417,9 +417,10 @@ projection of legacy workspace instructions in one immutable turn-context
 snapshot. The first exact attempt creates a content-free selection receipt that
 binds that snapshot to the accepted logical turn. Its default `retrieval_only`
 (migration 0271; absent settings resolve to it) removes
-the broad Memory V1 working-set block and
-legacy preference-kind agent retrieval; canonical rows and human surfaces are
-unchanged. The former `legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
+the broad Memory V1 working-set block. Every existing Memory kind remains
+available through explicit agent search; legacy preference and procedure rows
+are historical context rather than behavioral authority. The former
+`legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
 omits it and retains mandatory instruction policy plus the always-visible
 structured preference and configured Skill descriptors. At the ordinary model
 request boundary, metadata-only telemetry records the exact attempt, existing

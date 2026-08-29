@@ -57,8 +57,8 @@ export const AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE =
   "A Skill is durable Agent Knowledge that agents retrieve on demand, so its length is " +
   "retrieval cost rather than standing prompt cost: only its short title and description are composed into " +
   `every session prompt. Keep it under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters: state the ` +
-  "preference plainly, no numbered procedure and no examples. Put procedure in a Document or Skill and " +
-  "reference it instead.";
+  "trigger and outcome plainly, include only the necessary procedure, checks, and exceptions, and remove " +
+  "background, repeated guidance, and decorative examples.";
 
 export const AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE =
   "Organization identity and mission are mandatory prompt context in every root session across the " +
@@ -84,10 +84,17 @@ export const AGENT_AUTHORED_REMEMBER_CONTENT_TOO_LONG_MESSAGE =
  * preference*. Deliberately not reused for the company profile, which is a
  * descriptive profile rather than an instruction and needs its own wording.
  */
-export const AGENT_AUTHORED_DURABLE_TEXT_STYLE =
-  "Durable text is prompt cost, not a place to be thorough: write one imperative statement in 1-3 sentences, " +
-  "with no numbered steps, no examples, no rationale and no restating of defaults. Prefer several small entries " +
-  "over one long one, and keep procedure in a Document or Skill that the rule references instead of inlining it.";
+export const AGENT_AUTHORED_INSTRUCTION_POLICY_STYLE =
+  "Write the shortest complete imperative rule in 1-3 sentences, with no numbered procedure, examples, " +
+  "rationale, or restated defaults. Split unrelated rules, and move conditional procedure into a Skill.";
+
+export const AGENT_AUTHORED_SKILL_STYLE =
+  "Write one focused Skill with a clear trigger and outcome. Include only the prerequisites, necessary steps, " +
+  "verification, and important failure handling an agent needs to execute it; omit background, repetition, " +
+  "generic advice, and decorative examples. Split unrelated workflows into separate Skills.";
+
+/** @deprecated Use the destination-specific instruction or Skill style. */
+export const AGENT_AUTHORED_DURABLE_TEXT_STYLE = AGENT_AUTHORED_INSTRUCTION_POLICY_STYLE;
 
 /**
  * Actionable over-budget message including the text the caller actually sent,
