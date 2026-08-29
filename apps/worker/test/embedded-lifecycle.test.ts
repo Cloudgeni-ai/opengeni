@@ -413,6 +413,7 @@ describe("embedded worker lifecycle contract", () => {
       [
         ...[
           "company_profile_activation_events",
+          "company_profile_agent_automatic_activation_receipts",
           "company_profile_agent_confirmation_receipts",
           "company_profile_agent_proposal_receipts",
           "company_profile_heads",
@@ -428,6 +429,8 @@ describe("embedded worker lifecycle contract", () => {
           "knowledge_source_sync_states",
           "knowledge_sources",
           "managed_accounts",
+          "organization_company_profile_agent_policies",
+          "organization_company_profile_agent_policy_events",
           "organization_invitation_binding_events",
           "organization_membership_invitations",
           "organization_membership_lifecycle_events",

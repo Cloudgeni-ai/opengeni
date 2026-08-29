@@ -356,6 +356,7 @@ export function OrgSettingsRoute({
   );
   const accountGrant =
     context.accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
+  const canManageCompanyProfileAgentPolicy = accountGrant?.role === "owner";
   const canManageOrganizationApiKeys = hasAccountPermission(
     context.accessContext,
     accountId,
@@ -612,7 +613,14 @@ export function OrgSettingsRoute({
             />
             {canManageOrganizationKnowledge ? (
               <>
-                <OrganizationCompanyProfileAgentPolicy workspaceId={workspaceId} />
+                {canManageCompanyProfileAgentPolicy ? (
+                  <OrganizationCompanyProfileAgentPolicy workspaceId={workspaceId} />
+                ) : (
+                  <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
+                    Agent-managed organization identity is owner-only. Ask an organization owner to
+                    change this mode.
+                  </p>
+                )}
                 <OrganizationKnowledgePrompt workspaceId={workspaceId} />
               </>
             ) : (

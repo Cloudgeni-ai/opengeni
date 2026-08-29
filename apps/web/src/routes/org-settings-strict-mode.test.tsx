@@ -13,6 +13,7 @@ const accountId = "account-strict";
 const workspaceId = "workspace-strict";
 const timestamp = "2026-08-20T10:00:00.000Z";
 const toastError = mock((_message: string) => undefined);
+let accountRole: "owner" | "admin" = "owner";
 
 const getBilling = mock(async () => ({
   mode: "stripe" as const,
@@ -102,7 +103,9 @@ const context = {
       {
         accountId,
         subjectId: "user:strict-owner",
-        role: "owner" as const,
+        get role(): "owner" | "admin" {
+          return accountRole;
+        },
         permissions: ["account:admin", "billing:read", "billing:manage", "api_keys:manage"],
       },
     ],
@@ -310,5 +313,32 @@ describe("organization billing StrictMode ownership", () => {
 
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  test("does not load the owner-only agent identity policy for an account administrator", async () => {
+    getCompanyProfileAgentPolicy.mockClear();
+    accountRole = "admin";
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <OrgSettingsRoute workspaceId={workspaceId} section="knowledge" />
+          </StrictMode>,
+        );
+      });
+      await flush();
+
+      expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
+      expect(container.textContent).not.toContain("Agent-managed organization identity mode");
+      expect(container.textContent).toContain("Agent-managed organization identity is owner-only");
+    } finally {
+      accountRole = "owner";
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 });

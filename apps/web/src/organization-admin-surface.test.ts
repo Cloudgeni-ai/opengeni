@@ -44,6 +44,7 @@ describe("organization administration surface", () => {
     expect(routeSource).toContain("OrganizationKnowledgePrompt");
     expect(routeSource).toContain("OrganizationCompanyProfileAgentPolicy");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
+    expect(routeSource).toContain('accountGrant?.role === "owner"');
     expect(routeSource).toContain('"account:admin"');
     expect(routeSource).toContain("client.getCompanyProfileAgentPolicy(");
     expect(routeSource).toContain("client.updateCompanyProfileAgentPolicy(");

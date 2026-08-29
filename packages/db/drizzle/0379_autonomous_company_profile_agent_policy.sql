@@ -117,12 +117,17 @@ SELECT pg_catalog.set_config(
   'opengeni.company_profile_agent_policy_lifecycle',
   'company_profile_agent_policy', true
 );
+-- Migrations run as the non-bypass table owner without tenant GUCs. Relax
+-- FORCE only for this owner-visible backfill; the runtime role remains
+-- policy-bound, and the migration transaction restores FORCE before commit.
+ALTER TABLE organization_company_profile_agent_policies NO FORCE ROW LEVEL SECURITY;
 INSERT INTO organization_company_profile_agent_policies (
   account_id, mode, version, updated_by_membership_id, updated_at
 )
 SELECT account.id, 'suggest', 0, NULL, account.created_at
 FROM managed_accounts account
 ON CONFLICT (account_id) DO NOTHING;
+ALTER TABLE organization_company_profile_agent_policies FORCE ROW LEVEL SECURITY;
 
 CREATE FUNCTION get_company_profile_agent_policy(
   p_account_id uuid,
