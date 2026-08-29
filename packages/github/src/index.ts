@@ -944,6 +944,42 @@ export function githubAppBotIdentity(settings: Settings): { name: string; email:
   };
 }
 
+export const GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING =
+  "github_app_bot_identity_unavailable" as const;
+
+/**
+ * Non-secret health posture for the stable sandbox Git identity. API-direct
+ * attach and worker-turn startup must add the same identity keys. A complete
+ * deployment-level author identity is sufficient because committer values
+ * default to it; otherwise a partially configured workspace GitHub App must
+ * surface that its bot identity cannot be derived.
+ */
+export function githubAppBotIdentityWarnings(
+  settings: Settings,
+): Array<typeof GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING> {
+  const workspaceAppConfigured = [
+    settings.githubAppId,
+    settings.githubClientId,
+    settings.githubClientSecret,
+    settings.githubAppSlug,
+    settings.githubWebhookSecret,
+    settings.githubAppPrivateKey,
+  ].some((value) => typeof value === "string" && value.trim().length > 0);
+  const explicitGitIdentityConfigured =
+    typeof settings.gitAuthorName === "string" &&
+    settings.gitAuthorName.trim().length > 0 &&
+    typeof settings.gitAuthorEmail === "string" &&
+    settings.gitAuthorEmail.trim().length > 0;
+  if (
+    !workspaceAppConfigured ||
+    explicitGitIdentityConfigured ||
+    githubAppBotIdentity(settings) !== null
+  ) {
+    return [];
+  }
+  return [GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING];
+}
+
 async function createGitHubAppJwt(settings: GitHubAppSigningSettings): Promise<string> {
   const privateKey = normalizeGitHubAppPrivateKey(settings.githubAppPrivateKey ?? "");
   const appId = settings.githubAppId?.trim();
