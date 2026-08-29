@@ -3353,7 +3353,13 @@ export async function connectMcpServersInBatches(
             ...(options.connectTimeoutMs === undefined
               ? {}
               : { connectTimeoutMs: options.connectTimeoutMs }),
-            connectInParallel: true,
+            // OpenGeni already bounds lifecycle work in batches. The Agents SDK
+            // parallel path additionally starts a detached `void drain()` task;
+            // a best-effort server rejection can escape that task as a process-
+            // level unhandled rejection even though the session records and
+            // degrades the failed server. Keep lifecycle ownership on the
+            // awaited serial path inside each bounded batch.
+            connectInParallel: false,
             strict: options.strict,
           }),
         );
