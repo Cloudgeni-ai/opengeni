@@ -333,6 +333,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     workspaceId: string,
   ): Promise<SessionRouteDeps> => ({
     ...deps,
+    catalogSourceSettings: settings,
     settings: (await resolveWorkspaceCatalogSettings(db, settings, { accountId, workspaceId }))
       .settings,
   });

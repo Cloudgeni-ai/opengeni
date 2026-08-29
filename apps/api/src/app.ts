@@ -228,11 +228,16 @@ export async function resolveWorkspaceMcpRouteDeps(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
 ): Promise<ApiRouteDeps> {
-  const resolvedCatalog = await resolveWorkspaceCatalogSettings(routeDeps.db, routeDeps.settings, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-  });
-  return { ...routeDeps, settings: resolvedCatalog.settings };
+  const catalogSourceSettings = routeDeps.catalogSourceSettings ?? routeDeps.settings;
+  const resolvedCatalog = await resolveWorkspaceCatalogSettings(
+    routeDeps.db,
+    catalogSourceSettings,
+    {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+    },
+  );
+  return { ...routeDeps, catalogSourceSettings, settings: resolvedCatalog.settings };
 }
 
 export function createAppComposition(deps: AppDependencies): {

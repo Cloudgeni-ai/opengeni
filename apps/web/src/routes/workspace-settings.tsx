@@ -545,7 +545,8 @@ export function WorkspaceSettingsRoute({
             />
             <AiGatewayConnectionCard
               workspaceId={workspaceId}
-              canManage={canManageConnections}
+              canManageConnection={canManageConnections}
+              canManageCustomModels={canRename}
               onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
             />
           </>

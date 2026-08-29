@@ -1063,10 +1063,12 @@ async function withCatalogSettings(
   deps: ApiRouteDeps,
   grant: Pick<AccessGrant, "accountId" | "workspaceId">,
 ): Promise<ApiRouteDeps> {
+  const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
   return {
     ...deps,
+    catalogSourceSettings,
     settings: (
-      await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+      await resolveWorkspaceCatalogSettings(deps.db, catalogSourceSettings, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
       })

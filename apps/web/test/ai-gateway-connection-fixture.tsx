@@ -102,7 +102,8 @@ function Fixture() {
         <AiGatewayConnectionCardWithClient
           client={clientRef.current}
           workspaceId={workspaceId}
-          canManage
+          canManageConnection
+          canManageCustomModels
           onConnectionChange={() => setReceipt((current) => ({ ...current, changed: true }))}
         />
       </section>

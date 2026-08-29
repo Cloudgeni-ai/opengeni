@@ -130,6 +130,13 @@ export type ManagedEmailTransport = {
 
 export type AppDependencies = {
   settings: Settings;
+  /**
+   * Original deployment settings when `settings` is already overlaid with a
+   * deployment/workspace catalog snapshot. Model-bearing request adapters set
+   * this marker so core admission never feeds a synthetic reviewed provider
+   * back through deployment validation.
+   */
+  catalogSourceSettings?: Settings;
   db: Database;
   /**
    * Host-composed editable artifact engine. Standalone startup binds the same
@@ -246,7 +253,12 @@ export type ApiRouteDeps = AppDependencies & {
  */
 export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
-  "settings" | "db" | "bus" | "sessionAuthorization" | "schedulePromptPostCommit"
+  | "settings"
+  | "catalogSourceSettings"
+  | "db"
+  | "bus"
+  | "sessionAuthorization"
+  | "schedulePromptPostCommit"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

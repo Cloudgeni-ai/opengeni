@@ -5,7 +5,7 @@ import {
   resolveModelProvider,
 } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { resolveCatalogSettings, type ApiRouteDeps } from "@opengeni/core";
+import { createSessionForRequest, resolveCatalogSettings, type ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createConnection,
@@ -79,7 +79,11 @@ beforeAll(async () => {
     settings,
     db: client.db,
     bus: {} as never,
-    workflowClient: {} as never,
+    workflowClient: {
+      signalUserMessage: async () => undefined,
+      wakeSessionWorkflow: async () => undefined,
+      requestSessionWorkflowWakeDispatch: async () => undefined,
+    } as never,
     managedAuth: null,
   } satisfies AppDependencies);
   publicApp = composition.app;
@@ -210,6 +214,32 @@ describe("workspace Gateway custom model API", () => {
       cost: "workspace",
     });
 
+    const inheritedSession = await createSession(client!.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Inherited policy-check fixture",
+      resources: [],
+      metadata: {},
+      model: productModelId,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const inheritedChild = await createSessionForRequest(
+      publicRouteDeps!,
+      {
+        ...grant,
+        metadata: { ...(grant.metadata ?? {}), sessionId: inheritedSession.id },
+      },
+      grant.workspaceId,
+      {
+        initialMessage: "Inherit the parent custom Gateway model",
+        resources: [],
+        sandboxBackend: "none",
+      },
+    );
+    expect(inheritedChild.model).toBe(productModelId);
+
     const session = await createSession(client!.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -245,17 +275,6 @@ describe("workspace Gateway custom model API", () => {
     expect(blockedSend.status).toBe(422);
     expect(await blockedSend.text()).toContain("not allowed by this workspace's model policy");
 
-    const inheritedSession = await createSession(client!.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "Inherited policy-check fixture",
-      resources: [],
-      metadata: {},
-      model: productModelId,
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-    });
     const blockedInheritedSend = await publicApp.request(
       `http://x/v1/workspaces/${grant.workspaceId}/sessions/${inheritedSession.id}/events`,
       {
@@ -294,6 +313,50 @@ describe("workspace Gateway custom model API", () => {
     });
     expect(removed.status).toBe(204);
     expect((await (await request("/gateway-custom-models")).json()).models).toEqual([]);
+
+    const missingModelIdempotencyKey = crypto.randomUUID();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const missingCreate = await publicApp.request(
+        `http://x/v1/workspaces/${grant.workspaceId}/sessions`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(["sessions:create"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            initialMessage: "Missing custom model must be a policy error",
+            resources: [],
+            model: productModelId,
+            sandboxBackend: "none",
+            idempotencyKey: missingModelIdempotencyKey,
+          }),
+        },
+      );
+      expect(missingCreate.status).toBe(422);
+      expect(await missingCreate.text()).toContain(productModelId);
+    }
+
+    const switchedAfterDelete = await publicApp.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${inheritedSession.id}/events`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(["sessions:control"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: crypto.randomUUID(),
+          payload: {
+            text: "switch away from the removed custom model",
+            resources: [],
+            model: settings.openaiModel,
+          },
+        }),
+      },
+    );
+    expect(switchedAfterDelete.status).toBe(202);
   });
 
   test("enforces the transactional per-workspace custom-model bound", async () => {

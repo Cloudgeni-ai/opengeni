@@ -3,7 +3,6 @@ import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-  resolveModelProvider,
   resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
@@ -1531,26 +1530,21 @@ export function resolveSessionCreateVisibility(input: {
 }
 
 async function resolveWorkspaceModelBoundarySettings(
-  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  deps: Pick<ApiRouteDeps, "db" | "settings" | "catalogSourceSettings">,
   grant: AccessGrant,
   workspaceId: string,
   modelIds: readonly (string | null | undefined)[],
 ): Promise<Settings> {
+  if (deps.catalogSourceSettings) {
+    // The adapter already resolved one exact workspace catalog snapshot for
+    // this request. Re-resolving from that overlaid snapshot would feed the
+    // synthetic workspace Gateway provider back through deployment validation.
+    return deps.settings;
+  }
   const workspaceModelIds = modelIds.filter(
     (modelId): modelId is string =>
       typeof modelId === "string" && modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX),
   );
-  if (
-    workspaceModelIds.length > 0 &&
-    workspaceModelIds.every((modelId) => resolveModelProvider(deps.settings, modelId) !== undefined)
-  ) {
-    // Stock HTTP/MCP adapters already pass a workspace-resolved settings
-    // snapshot. Re-resolving code mode would feed its synthetic brokered
-    // workspace provider back through deployment validation and turn a normal
-    // policy denial into a 500. Direct core callers with only env settings have
-    // no such model yet and continue into the canonical resolver below.
-    return deps.settings;
-  }
   const needsWorkspaceResolution =
     deps.settings.modelCatalogSource === "database" || workspaceModelIds.length > 0;
   if (!needsWorkspaceResolution) return deps.settings;
@@ -1576,14 +1570,17 @@ export async function createSessionForRequestWithOutcome(
       message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
     });
   }
-  const settings = await resolveWorkspaceModelBoundarySettings(
-    unresolvedDeps,
-    grant,
-    workspaceId,
-    [payload.model],
-  );
-  const deps =
-    settings === unresolvedDeps.settings ? unresolvedDeps : { ...unresolvedDeps, settings };
+  let settings = await resolveWorkspaceModelBoundarySettings(unresolvedDeps, grant, workspaceId, [
+    payload.model,
+  ]);
+  let deps =
+    settings === unresolvedDeps.settings
+      ? unresolvedDeps
+      : {
+          ...unresolvedDeps,
+          catalogSourceSettings: unresolvedDeps.catalogSourceSettings ?? unresolvedDeps.settings,
+          settings,
+        };
   const { db, bus, workflowClient, objectStorage } = deps;
   const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
   if (payload.visibility === "private" && !grant.metadata?.["sessionId"]) {
@@ -1687,6 +1684,22 @@ export async function createSessionForRequestWithOutcome(
     throw new HTTPException(403, {
       message: "caller attempt does not belong to the parent session",
     });
+  }
+  const inheritedModel = parentCallingTurn?.model ?? parentSession?.model ?? settings.openaiModel;
+  const effectiveModelId = payload.model ?? inheritedModel;
+  const effectiveCatalogSettings = await resolveWorkspaceModelBoundarySettings(
+    deps,
+    grant,
+    workspaceId,
+    [effectiveModelId],
+  );
+  if (effectiveCatalogSettings !== settings) {
+    deps = {
+      ...deps,
+      catalogSourceSettings: deps.catalogSourceSettings ?? settings,
+      settings: effectiveCatalogSettings,
+    };
+    settings = effectiveCatalogSettings;
   }
   let effectiveGoal = payload.goal;
   if (parentSession && payload.goal) {
@@ -1898,8 +1911,7 @@ export async function createSessionForRequestWithOutcome(
   // managers: falling back to the deployment model would silently move a child
   // onto the OpenGeni-credits billing path. Legacy session-bound grants without
   // exact attempt claims fall back to the parent session's persisted defaults.
-  const inheritedModel = parentCallingTurn?.model ?? parentSession?.model ?? settings.openaiModel;
-  const model = canonicalConfiguredModel(settings, payload.model ?? inheritedModel);
+  const model = canonicalConfiguredModel(settings, effectiveModelId);
   if (model === null || model === undefined) {
     throw new Error("effective session model unexpectedly resolved to null");
   }
@@ -2604,7 +2616,7 @@ export async function acceptSessionUserMessageWithOutcome(
   interruptionCount: number;
   replay: boolean;
 }> {
-  const { settings, db, bus, workflowClient, objectStorage } = deps;
+  const { db, bus, workflowClient, objectStorage } = deps;
   const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   await requireSessionAuthorization(deps, grant, {
     sessionId,
@@ -2622,6 +2634,16 @@ export async function acceptSessionUserMessageWithOutcome(
   // turn's effective model (a follow-up turn inherits the session's model). A
   // pure read with no side effects.
   const existingSession = await requireSession(db, workspaceId, sessionId);
+  const settings = await resolveWorkspaceModelBoundarySettings(deps, grant, workspaceId, [
+    input.model ?? existingSession.model,
+  ]);
+  if (settings !== deps.settings) {
+    deps = {
+      ...deps,
+      catalogSourceSettings: deps.catalogSourceSettings ?? deps.settings,
+      settings,
+    };
+  }
   const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
   const effectiveModel =
     canonicalConfiguredModel(settings, requestedModel ?? existingSession.model) ?? null;

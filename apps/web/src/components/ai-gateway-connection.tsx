@@ -42,7 +42,8 @@ function isGatewayConnection(connection: ConnectionMetadata): boolean {
 
 type AiGatewayConnectionCardProps = {
   workspaceId: string;
-  canManage: boolean;
+  canManageConnection: boolean;
+  canManageCustomModels: boolean;
   onConnectionChange?: (() => void) | undefined;
 };
 
@@ -89,7 +90,7 @@ export function AiGatewayConnectionCardWithClient(
       null
     );
   }, [connections]);
-  const connected = props.canManage ? connection?.status === "active" : readOnlyConnected;
+  const connected = props.canManageConnection ? connection?.status === "active" : readOnlyConnected;
   const modelSlugValid =
     modelSlug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
     /^[!-{}-~]+$/.test(modelSlug);
@@ -119,14 +120,14 @@ export function AiGatewayConnectionCardWithClient(
   const refresh = useCallback(async () => {
     const customModelsRequestGeneration = ++customModelsRequestGenerationRef.current;
     const [connectionResult, modelsResult] = await Promise.allSettled([
-      props.canManage
+      props.canManageConnection
         ? client.listConnections(props.workspaceId)
         : client.getWorkspaceModelCatalog(props.workspaceId),
       client.listWorkspaceGatewayCustomModels(props.workspaceId),
     ]);
     if (!activeRef.current) return;
     if (connectionResult.status === "fulfilled") {
-      if (props.canManage) {
+      if (props.canManageConnection) {
         setConnections(connectionResult.value as ConnectionMetadata[]);
       } else {
         setReadOnlyConnected(
@@ -161,7 +162,7 @@ export function AiGatewayConnectionCardWithClient(
       }
       setCustomModelsLoaded(true);
     }
-  }, [client, props.canManage, props.workspaceId]);
+  }, [client, props.canManageConnection, props.workspaceId]);
 
   useEffect(() => {
     void refresh();
@@ -282,10 +283,12 @@ export function AiGatewayConnectionCardWithClient(
     }
   }
 
-  // This is an admin-only opt-in. Non-admins only need to see it when the
-  // workspace already connected one; the model picker exposes the usable rail.
+  // Hide an empty card only when the caller can manage neither the credential
+  // nor custom models. Read-only members still see an existing connection or
+  // catalog, and either management authority can reach its own controls.
   if (
-    !props.canManage &&
+    !props.canManageConnection &&
+    !props.canManageCustomModels &&
     loaded &&
     customModelsLoaded &&
     !error &&
@@ -319,7 +322,7 @@ export function AiGatewayConnectionCardWithClient(
           using OpenGeni credits.
         </p>
         {error ? <p className="text-xs text-destructive">{error}</p> : null}
-        {props.canManage ? (
+        {props.canManageConnection ? (
           <>
             <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
               <Input
@@ -362,7 +365,7 @@ export function AiGatewayConnectionCardWithClient(
           </>
         ) : (
           <p className="text-xs text-fg-subtle">
-            Workspace admins manage this Vercel AI Gateway connection.
+            Members with connection-management access manage this Vercel AI Gateway connection.
           </p>
         )}
 
@@ -384,7 +387,7 @@ export function AiGatewayConnectionCardWithClient(
             </span>
           </div>
 
-          {props.canManage ? (
+          {props.canManageCustomModels ? (
             <div className="grid gap-1.5">
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                 <Input
@@ -455,7 +458,7 @@ export function AiGatewayConnectionCardWithClient(
                         : "Waiting for a Gateway connection"}
                     </p>
                   </div>
-                  {props.canManage ? (
+                  {props.canManageCustomModels ? (
                     <Button
                       ref={(node) => {
                         if (node) removeButtonRefs.current.set(model.id, node);

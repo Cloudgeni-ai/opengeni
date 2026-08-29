@@ -83,7 +83,11 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-async function renderCard(canManage = true, onConnectionChange = mock(() => {})) {
+async function renderCard(
+  canManageConnection = true,
+  onConnectionChange = mock(() => {}),
+  canManageCustomModels = canManageConnection,
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -91,7 +95,8 @@ async function renderCard(canManage = true, onConnectionChange = mock(() => {}))
     root.render(
       <AiGatewayConnectionCard
         workspaceId="workspace-a"
-        canManage={canManage}
+        canManageConnection={canManageConnection}
+        canManageCustomModels={canManageCustomModels}
         onConnectionChange={onConnectionChange}
       />,
     );
@@ -250,11 +255,23 @@ describe("AiGatewayConnectionCard custom models", () => {
     const root = createRoot(container);
     try {
       await act(async () => {
-        root.render(<AiGatewayConnectionCard workspaceId="workspace-a" canManage />);
+        root.render(
+          <AiGatewayConnectionCard
+            workspaceId="workspace-a"
+            canManageConnection
+            canManageCustomModels
+          />,
+        );
         await flush();
       });
       await act(async () => {
-        root.render(<AiGatewayConnectionCard workspaceId="workspace-b" canManage />);
+        root.render(
+          <AiGatewayConnectionCard
+            workspaceId="workspace-b"
+            canManageConnection
+            canManageCustomModels
+          />,
+        );
         await flush();
       });
       expect(container.textContent).toContain("workspace-b/model");
@@ -290,7 +307,8 @@ describe("AiGatewayConnectionCard custom models", () => {
         root.render(
           <AiGatewayConnectionCard
             workspaceId="workspace-a"
-            canManage
+            canManageConnection
+            canManageCustomModels
             onConnectionChange={onConnectionChange}
           />,
         );
@@ -311,7 +329,8 @@ describe("AiGatewayConnectionCard custom models", () => {
         root.render(
           <AiGatewayConnectionCard
             workspaceId="workspace-b"
-            canManage
+            canManageConnection
+            canManageCustomModels
             onConnectionChange={onConnectionChange}
           />,
         );
@@ -344,6 +363,56 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(container.textContent).toContain("Ready through Your Gateway");
       expect(container.querySelector("input")).toBeNull();
       expect(container.querySelector('button[aria-label^="Remove "]')).toBeNull();
+      expect(listConnections).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps connection controls separate from workspace-admin model controls", async () => {
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
+      models: [customModel("deepseek/deepseek-v3.2")],
+    }));
+    const { container, root } = await renderCard(
+      true,
+      mock(() => {}),
+      false,
+    );
+
+    try {
+      expect(container.querySelector('input[type="password"]')).not.toBeNull();
+      expect(
+        container.querySelector('input[aria-label="Vercel AI Gateway model slug"]'),
+      ).toBeNull();
+      expect(container.querySelector('button[aria-label^="Remove "]')).toBeNull();
+      expect(listConnections).toHaveBeenCalledWith("workspace-a");
+      expect(getWorkspaceModelCatalog).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("lets workspace admins curate models without connection-write authority", async () => {
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
+      models: [customModel("deepseek/deepseek-v3.2")],
+    }));
+    const { container, root } = await renderCard(
+      false,
+      mock(() => {}),
+      true,
+    );
+
+    try {
+      expect(container.querySelector('input[type="password"]')).toBeNull();
+      expect(
+        container.querySelector('input[aria-label="Vercel AI Gateway model slug"]'),
+      ).not.toBeNull();
+      expect(
+        container.querySelector('button[aria-label="Remove deepseek/deepseek-v3.2"]'),
+      ).not.toBeNull();
+      expect(getWorkspaceModelCatalog).toHaveBeenCalledWith("workspace-a");
       expect(listConnections).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
