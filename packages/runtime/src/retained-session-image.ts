@@ -24,10 +24,7 @@ export function withRetainableSessionImageOutputHook(
 ): Tool<unknown>[] {
   if (!hook) return tools;
   return tools.map((capabilityTool) => {
-    if (
-      capabilityTool.type !== "function" ||
-      (capabilityTool.name !== "view_image" && capabilityTool.name !== "computer_screenshot")
-    ) {
+    if (capabilityTool.type !== "function" || capabilityTool.name !== "view_image") {
       return capabilityTool;
     }
     const invoke = capabilityTool.invoke;
