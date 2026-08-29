@@ -1484,7 +1484,8 @@ function logoutAllActorFenceResponseProblem(
 ): string | null {
   const expectedWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}`;
   const isSessionList =
-    response.pathname === `${expectedWorkspacePrefix}/sessions` && response.search === "";
+    response.pathname === `${expectedWorkspacePrefix}/sessions` &&
+    exactLogoutAllSessionListSearch(response.search);
   const isBoundedLiveStream =
     response.pathname === `${expectedWorkspacePrefix}/live-events/stream` &&
     exactBoundedWorkspaceLiveStreamSearch(response.search);
@@ -1504,6 +1505,32 @@ function logoutAllActorFenceResponseProblem(
   return exactShape && exactTiming
     ? null
     : `unexpected logout-all actor fence: ${JSON.stringify({ input, response })}`;
+}
+
+function exactLogoutAllSessionListSearch(search: string): boolean {
+  // Retain the pre-page API shape during a rolling upgrade. The current rail
+  // owns exactly three finite session pages: active roots, archived roots, and
+  // the complete pins projection. Reject cursors, searches, duplicate keys,
+  // and every other query rather than treating any session-list 401 as benign.
+  if (search === "") return true;
+  const params = new URLSearchParams(search);
+  const keys = [...params.keys()];
+  if (new Set(keys).size !== keys.length) return false;
+  const exactSingleton = (name: string, value: string): boolean => {
+    const values = params.getAll(name);
+    return values.length === 1 && values[0] === value;
+  };
+  if (!exactSingleton("view", "page")) return false;
+  const isActiveRoots =
+    keys.length === 3 && exactSingleton("limit", "50") && exactSingleton("parentSessionId", "null");
+  const isArchivedRoots =
+    keys.length === 4 &&
+    exactSingleton("limit", "50") &&
+    exactSingleton("parentSessionId", "null") &&
+    exactSingleton("archivedOnly", "true");
+  const isPins =
+    keys.length === 3 && exactSingleton("limit", "1") && exactSingleton("pinsOnly", "true");
+  return isActiveRoots || isArchivedRoots || isPins;
 }
 
 function exactBoundedWorkspaceLiveStreamSearch(search: string): boolean {
@@ -1536,18 +1563,20 @@ async function expectAndConsumeLogoutAllActorFenceResponses(
     workspaceId: string;
   },
 ): Promise<void> {
-  // A sibling tab can dispatch its current session-list read or one bounded
-  // event poll immediately before the accepted logout rotates the shared
-  // HttpOnly authority. The API must fence that exact old-actor request with
-  // 401; a browser may deliver the response instead of a cancellation. Keep
-  // the optional race strict by actor, phase, path, transport, method, status,
-  // and acceptance window, and leave every other 401 in the final ledger.
+  // A sibling tab can dispatch one of the rail's three finite session pages or
+  // one bounded event poll immediately before the accepted logout rotates the
+  // shared HttpOnly authority. The API must fence that exact old-actor request
+  // with 401; a browser may deliver the response instead of a cancellation.
+  // Keep the optional race strict by actor, phase, path/query, transport,
+  // method, status, and acceptance window, and leave every other 401 in the
+  // final ledger.
   await page.waitForTimeout(1_000);
   const validationInput = { ...input, settledAt: performance.now() };
-  expect(problems.actorFenceResponses.length).toBeLessThanOrEqual(2);
-  expect(new Set(problems.actorFenceResponses.map(({ pathname }) => pathname)).size).toBe(
-    problems.actorFenceResponses.length,
-  );
+  expect(problems.actorFenceResponses.length).toBeLessThanOrEqual(4);
+  expect(
+    new Set(problems.actorFenceResponses.map(({ pathname, search }) => `${pathname}${search}`))
+      .size,
+  ).toBe(problems.actorFenceResponses.length);
   for (const response of problems.actorFenceResponses) {
     expect(logoutAllActorFenceResponseProblem(response, validationInput)).toBeNull();
   }
@@ -3582,6 +3611,16 @@ describe("provider-neutral browser account acceptance", () => {
         logoutAllFenceInput,
       ),
     ).toBeNull();
+    for (const search of [
+      "?view=page&limit=50&parentSessionId=null",
+      "?view=page&limit=50&parentSessionId=null&archivedOnly=true",
+      "?view=page&limit=1&pinsOnly=true",
+      "?pinsOnly=true&limit=1&view=page",
+    ]) {
+      expect(
+        logoutAllActorFenceResponseProblem({ ...logoutAllFence, search }, logoutAllFenceInput),
+      ).toBeNull();
+    }
     for (const invalid of [
       { ...logoutAllFence, actorEpoch: "new-actor" },
       { ...logoutAllFence, dispatchPhase: "signed-out-settled" },
@@ -3589,6 +3628,23 @@ describe("provider-neutral browser account acceptance", () => {
       { ...logoutAllFence, method: "POST" },
       { ...logoutAllFence, pathname: "/v1/workspaces" },
       { ...logoutAllFence, search: "?view=page" },
+      { ...logoutAllFence, search: "?view=page&limit=25&parentSessionId=null" },
+      {
+        ...logoutAllFence,
+        search: "?view=page&limit=50&parentSessionId=null&archivedOnly=false",
+      },
+      {
+        ...logoutAllFence,
+        search: "?view=page&limit=50&parentSessionId=null&cursor=opaque",
+      },
+      {
+        ...logoutAllFence,
+        search: "?view=page&limit=50&parentSessionId=null&search=tenant",
+      },
+      {
+        ...logoutAllFence,
+        search: "?view=page&view=page&limit=50&parentSessionId=null",
+      },
       {
         ...logoutAllFence,
         pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
