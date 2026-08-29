@@ -530,8 +530,7 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
       ),
     ).rejects.toMatchObject({
       status: 422,
-      message:
-        "self-hosted execution runs on a Connected Machine, but no machine was selected or inherited; connect the parent session to a machine or provide machineTarget",
+      message: "selfhosted sessions require targetSandboxId; select an online Connected Machine",
     });
   }, 60_000);
 

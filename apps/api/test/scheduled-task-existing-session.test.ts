@@ -210,7 +210,7 @@ describe("scheduled Connected Machine targeting", () => {
     scope: "workspace" as const,
     status: "active" as const,
     os: "linux" as const,
-    workspaceRoot: "/home/test/workspaces",
+    workspaceRoot: "/srv/opengeni/workspaces",
   } as db.EnrollmentRecord;
 
   test("rejects targetless self-hosted generated sessions before database access", async () => {

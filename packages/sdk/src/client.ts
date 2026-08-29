@@ -705,6 +705,29 @@ export type FinalizeTranscriptionRecordingInput = {
   signal?: AbortSignal | undefined;
 };
 
+function normalizeScheduledTaskMachineTarget<
+  T extends CreateScheduledTaskRequest | UpdateScheduledTaskRequest,
+>(request: T): T {
+  if (!("agentConfig" in request) || !request.agentConfig?.machineTarget) {
+    return request;
+  }
+  const { workingDir, ...machineTarget } = request.agentConfig.machineTarget;
+  if (workingDir === undefined) {
+    return request;
+  }
+  const normalizedWorkingDir = workingDir.trim();
+  return {
+    ...request,
+    agentConfig: {
+      ...request.agentConfig,
+      machineTarget: {
+        ...machineTarget,
+        ...(normalizedWorkingDir ? { workingDir: normalizedWorkingDir } : {}),
+      },
+    },
+  };
+}
+
 /**
  * Typed client for the OpenGeni public API. Framework-agnostic: only needs
  * WHATWG `fetch` + streams, so it runs in Node 18+, Bun, Deno, browsers, and
@@ -4944,7 +4967,7 @@ export class OpenGeniClient {
     return await this.requestJson<ScheduledTask>(
       "POST",
       `/v1/workspaces/${workspaceId}/scheduled-tasks`,
-      request,
+      normalizeScheduledTaskMachineTarget(request),
     );
   }
 
@@ -4956,7 +4979,7 @@ export class OpenGeniClient {
     return await this.requestJson<ScheduledTask>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`,
-      request,
+      normalizeScheduledTaskMachineTarget(request),
     );
   }
 
