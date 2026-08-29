@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 1.4.6
+
+### Patch Changes
+
+- 3c75347: Keep Agents SDK MCP lifecycle failures inside owned promises and reserve shared-worker process termination policy for OpenGeni.
+- 551cead: Return durable retained-process exit or loss results to shell tools instead of rendering a retryable platform fault for an already-terminal command handle.
+- 499cc48: Keep MCP lifecycle work on the awaited SDK path so optional server failures cannot leak from detached parallel workers.
+- 37faec3: Replace the Agents SDK default batch trace exporter with OpenGeni's in-process preparation processor.
+
 ## 1.4.5
 
 ### Patch Changes
