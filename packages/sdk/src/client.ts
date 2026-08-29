@@ -1606,7 +1606,7 @@ export class OpenGeniClient {
   async listTurns(
     workspaceId: string,
     sessionId: string,
-    options: { limit?: number; latestStarted?: boolean } = {},
+    options: { limit?: number; latestStarted?: boolean; signal?: AbortSignal | undefined } = {},
   ): Promise<SessionTurn[]> {
     return await this.requestJson<SessionTurn[]>(
       "GET",
@@ -1616,13 +1616,19 @@ export class OpenGeniClient {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
         ...(options.latestStarted ? { latestStarted: "1" } : {}),
       },
+      { signal: options.signal },
     );
   }
 
   /** Newest turn that durably emitted `turn.started`, or null before any admission. */
-  async getLatestStartedTurn(workspaceId: string, sessionId: string): Promise<SessionTurn | null> {
+  async getLatestStartedTurn(
+    workspaceId: string,
+    sessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SessionTurn | null> {
     const turns = await this.listTurns(workspaceId, sessionId, {
       latestStarted: true,
+      signal: options.signal,
     });
     return turns[0] ?? null;
   }
@@ -2196,10 +2202,16 @@ export class OpenGeniClient {
     );
   }
 
-  async getComposerDraft(workspaceId: string, sessionId: string): Promise<ComposerDraft> {
+  async getComposerDraft(
+    workspaceId: string,
+    sessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComposerDraft> {
     return await this.requestSessionCommand<ComposerDraft>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
+      undefined,
+      options,
     );
   }
 
@@ -3927,8 +3939,14 @@ export class OpenGeniClient {
    * expected to authenticate. Drives a composer's model picker without prior
    * knowledge of the host setup; safe to call before any auth is established.
    */
-  async getClientConfig(): Promise<ClientConfig> {
-    const config = await this.requestJson<ClientConfig>("GET", "/v1/config/client");
+  async getClientConfig(options: OpenGeniRequestOptions = {}): Promise<ClientConfig> {
+    const config = await this.requestJson<ClientConfig>(
+      "GET",
+      "/v1/config/client",
+      undefined,
+      {},
+      options,
+    );
     if (config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
       throw new OpenGeniApiContractMismatchError(
         OPENGENI_API_CONTRACT_REVISION,
@@ -3939,10 +3957,16 @@ export class OpenGeniClient {
   }
 
   /** Authenticated model definitions plus workspace-specific selectability. */
-  async getWorkspaceModelCatalog(workspaceId: string): Promise<WorkspaceModelCatalogResponse> {
+  async getWorkspaceModelCatalog(
+    workspaceId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<WorkspaceModelCatalogResponse> {
     return await this.requestJson<WorkspaceModelCatalogResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/model-catalog`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -3969,10 +3993,14 @@ export class OpenGeniClient {
   /** Authenticated realtime voice models and credential readiness. */
   async getWorkspaceRealtimeModelCatalog(
     workspaceId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<WorkspaceRealtimeModelCatalogResponse> {
     return await this.requestJson<WorkspaceRealtimeModelCatalogResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/realtime-model-catalog`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -7170,14 +7198,20 @@ export class OpenGeniClient {
   }
 
   /** Contract-checked JSON transport shared by opt-in typed SDK clients. */
-  private async requestSessionCommand<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async requestSessionCommand<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<T> {
     return await this.requestJson<T>(
       method,
       path,
       body,
       {},
       {
-        timeoutMs: this.sessionCommandTimeoutMs,
+        signal: options.signal,
+        timeoutMs: options.timeoutMs ?? this.sessionCommandTimeoutMs,
       },
     );
   }

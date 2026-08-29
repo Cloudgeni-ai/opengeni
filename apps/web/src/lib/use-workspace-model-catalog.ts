@@ -1,5 +1,5 @@
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppContext } from "@/context";
 import { projectPickerRows, sortPickerRows, type PickerModelRow } from "@/lib/model-policy";
@@ -18,60 +18,56 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
   const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
   const [loading, setLoading] = useState(Boolean(workspaceId));
   const [error, setError] = useState<string | null>(null);
+  const requestAbortRef = useRef<AbortController | null>(null);
 
-  const refresh = useCallback(async () => {
-    if (!workspaceId) {
-      setModels([]);
-      setLoading(false);
-      setError(null);
-      return;
-    }
-    setLoading(true);
-    try {
-      const response = await client.getWorkspaceModelCatalog(workspaceId);
-      setModels(response.models);
-      setError(null);
-    } catch (caught) {
-      setModels([]);
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setLoading(false);
-    }
-  }, [client, workspaceId]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
+  const load = useCallback(
+    async (requestAbort: AbortController): Promise<void> => {
       if (!workspaceId) {
-        if (!cancelled) {
-          setModels([]);
-          setLoading(false);
-          setError(null);
-        }
+        setModels([]);
+        setLoading(false);
+        setError(null);
+        if (requestAbortRef.current === requestAbort) requestAbortRef.current = null;
         return;
       }
       setLoading(true);
       try {
-        const response = await client.getWorkspaceModelCatalog(workspaceId);
-        if (!cancelled) {
-          setModels(response.models);
-          setError(null);
-        }
+        const response = await client.getWorkspaceModelCatalog(workspaceId, {
+          signal: requestAbort.signal,
+        });
+        if (requestAbort.signal.aborted) return;
+        setModels(response.models);
+        setError(null);
       } catch (caught) {
-        if (!cancelled) {
-          setModels([]);
-          setError(caught instanceof Error ? caught.message : String(caught));
-        }
+        if (requestAbort.signal.aborted) return;
+        setModels([]);
+        setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+        if (!requestAbort.signal.aborted) setLoading(false);
+        if (requestAbortRef.current === requestAbort) requestAbortRef.current = null;
       }
-    })();
+    },
+    [client, workspaceId],
+  );
+
+  const beginLoad = useCallback(() => {
+    requestAbortRef.current?.abort();
+    const requestAbort = new AbortController();
+    requestAbortRef.current = requestAbort;
+    return { requestAbort, promise: load(requestAbort) };
+  }, [load]);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    await beginLoad().promise;
+  }, [beginLoad]);
+
+  useEffect(() => {
+    const request = beginLoad();
+    void request.promise;
     return () => {
-      cancelled = true;
+      request.requestAbort.abort();
+      if (requestAbortRef.current === request.requestAbort) requestAbortRef.current = null;
     };
-  }, [client, workspaceId]);
+  }, [beginLoad]);
 
   const rows = useMemo(() => sortPickerRows(projectPickerRows(models)), [models]);
 

@@ -105,7 +105,12 @@ const REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES = 64;
 type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike & SessionRealtimeClientLike;
 
 type RealtimeModelCatalogCacheEntry =
-  | { state: "loading"; promise: Promise<RealtimeModelOption[]> }
+  | {
+      state: "loading";
+      promise: Promise<RealtimeModelOption[]>;
+      controller: AbortController;
+      consumers: number;
+    }
   | { state: "ready"; models: RealtimeModelOption[]; expiresAt: number };
 
 // Scope advisory availability to the exact client object and workspace. The
@@ -166,19 +171,26 @@ function pruneRealtimeModelCatalogCache(
 function loadRealtimeModelCatalog(
   client: RealtimeControllerClient,
   workspaceId: string,
+  signal?: AbortSignal,
 ): Promise<RealtimeModelOption[]> | null {
   const load = client.getWorkspaceRealtimeModelCatalog;
   if (!load) return null;
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException("Request aborted", "AbortError"));
+  }
   const now = Date.now();
   const cache = realtimeModelCatalogCacheFor(client);
   const entry = cache.get(workspaceId);
-  if (entry?.state === "loading") return entry.promise;
+  if (entry?.state === "loading" && !entry.controller.signal.aborted) {
+    return consumeRealtimeModelCatalog(entry, signal);
+  }
   if (entry?.state === "ready" && entry.expiresAt > now) return Promise.resolve(entry.models);
   if (entry) cache.delete(workspaceId);
   pruneRealtimeModelCatalogCache(cache, now);
 
+  const controller = new AbortController();
   const promise = load
-    .call(client, workspaceId)
+    .call(client, workspaceId, { signal: controller.signal })
     .then((response) => response.models.map(toRealtimeModelOption))
     .then((models) => {
       const current = cache.get(workspaceId);
@@ -197,8 +209,43 @@ function loadRealtimeModelCatalog(
       if (current?.state === "loading" && current.promise === promise) cache.delete(workspaceId);
       throw error;
     });
-  cache.set(workspaceId, { state: "loading", promise });
-  return promise;
+  const loading: RealtimeModelCatalogCacheEntry & { state: "loading" } = {
+    state: "loading",
+    promise,
+    controller,
+    consumers: 0,
+  };
+  cache.set(workspaceId, loading);
+  return consumeRealtimeModelCatalog(loading, signal);
+}
+
+function consumeRealtimeModelCatalog(
+  entry: RealtimeModelCatalogCacheEntry & { state: "loading" },
+  signal?: AbortSignal,
+): Promise<RealtimeModelOption[]> {
+  entry.consumers += 1;
+  return new Promise((resolve, reject) => {
+    let released = false;
+    const release = (abandoned: boolean) => {
+      if (released) return;
+      released = true;
+      entry.consumers = Math.max(0, entry.consumers - 1);
+      if (abandoned && entry.consumers === 0) {
+        entry.controller.abort(
+          signal?.reason ?? new DOMException("Request abandoned", "AbortError"),
+        );
+      }
+    };
+    const onAbort = () => {
+      release(true);
+      reject(signal?.reason ?? new DOMException("Request aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void entry.promise.then(resolve, reject).finally(() => {
+      signal?.removeEventListener("abort", onAbort);
+      release(false);
+    });
+  });
 }
 
 export type SessionRealtimeControllerFactory = (
@@ -550,6 +597,7 @@ export function useRealtimeModelSelection(options: {
 
   useEffect(() => {
     let disposed = false;
+    const requestAbort = new AbortController();
     const applyCatalog = (models: RealtimeModelOption[]) => {
       catalogScopeRef.current = { client, workspaceId, source: "cache" };
       setCatalog(models);
@@ -570,7 +618,7 @@ export function useRealtimeModelSelection(options: {
       }
       return;
     }
-    const loading = loadRealtimeModelCatalog(client, workspaceId);
+    const loading = loadRealtimeModelCatalog(client, workspaceId, requestAbort.signal);
     if (!loading) return;
     void loading
       .then((models) => {
@@ -580,6 +628,7 @@ export function useRealtimeModelSelection(options: {
       .catch(() => undefined);
     return () => {
       disposed = true;
+      requestAbort.abort();
     };
   }, [client, workspaceId]);
 

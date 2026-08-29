@@ -409,7 +409,7 @@ describe("BrowserAccountsProvider", () => {
       logout = accounts.current.logoutAll();
       await postStarted;
     });
-    expect(accounts.current.phase).toBe("committing");
+    expect(accounts.current.phase).toBe("loading");
 
     await act(async () => {
       expect(await accounts.current.invalidateActor()).toBeNull();
@@ -707,7 +707,7 @@ describe("BrowserAccountsProvider", () => {
           },
         }),
         async (transition) => {
-          if (transition.from !== null && transition.to?.selectedSlotId === SLOT_B) {
+          if (transition.to?.selectedSlotId === SLOT_B) {
             await transitionSettled;
           }
         },
@@ -784,6 +784,7 @@ describe("BrowserAccountsProvider", () => {
 
     let current = projection();
     const peerTransitions: BrowserAccountTransition[] = [];
+    const initiatorTransitions: BrowserAccountTransition[] = [];
     let peer: Awaited<ReturnType<typeof renderAccounts>> | null = null;
     let initiator: Awaited<ReturnType<typeof renderAccounts>> | null = null;
     try {
@@ -800,6 +801,7 @@ describe("BrowserAccountsProvider", () => {
           getSessionSet: async () => current,
           selectLoginSlot: async () => {
             expect(peerTransitions.at(-1)?.to).toBeNull();
+            expect(initiatorTransitions.at(-1)?.to).toBeNull();
             current = projection({
               generation: "2",
               actorEpoch: "2",
@@ -808,13 +810,17 @@ describe("BrowserAccountsProvider", () => {
             return current;
           },
         }),
-        async () => undefined,
+        async (transition) => {
+          initiatorTransitions.push(transition);
+        },
         "accounts-precommit-hold-test",
       );
+      initiatorTransitions.length = 0;
 
       expect(await actRun(() => initiator!.current.selectSlot(SLOT_B))).toBe(true);
       await flush();
       expect(peerTransitions[0]?.to).toBeNull();
+      expect(initiatorTransitions[0]?.to).toBeNull();
       expect(peer.current.projection?.selectedSlotId).toBe(SLOT_B);
       expect(peer.current.projection?.actorEpoch).toBe("2");
     } finally {
@@ -1113,8 +1119,8 @@ describe("BrowserAccountsProvider", () => {
     expect(await actRun(() => accounts.current.selectSlot(SLOT_A))).toBe(true);
     expect(accounts.current.projection?.actorEpoch).toBe("3");
     expect(accounts.current.projection?.selectedSlotId).toBe(SLOT_B);
-    expect(transitionCount).toBe(initialTransitions);
-    expect(readCount).toBe(3);
+    expect(transitionCount).toBe(initialTransitions + 2);
+    expect(readCount).toBe(4);
     await accounts.unmount();
   });
 

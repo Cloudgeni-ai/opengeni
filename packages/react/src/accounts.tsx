@@ -262,6 +262,7 @@ export function BrowserAccountsProvider({
       sequence: number,
       publish: boolean,
       authorityResetConfirmed = false,
+      initiatingSurfaceFenced = false,
     ): Promise<ManagedAuthSessionSetProjection | null> => {
       let source = from;
       let target = accepted;
@@ -272,7 +273,7 @@ export function BrowserAccountsProvider({
           throw new Error("Browser account response regressed the accepted actor epoch");
         }
       }
-      if (sameSelectedActor(source, target)) {
+      if (!initiatingSurfaceFenced && sameSelectedActor(source, target)) {
         setProjection(target);
         setPhase("ready");
         setError(null);
@@ -287,7 +288,13 @@ export function BrowserAccountsProvider({
         // and abort old-actor work throughout that entire window.
         if (publish) publishActorHint(target);
         setPhase("loading");
-        await onActorTransition({ kind, from: source, to: target, signal: controller.signal });
+        await onActorTransition({
+          kind,
+          from: initiatingSurfaceFenced ? null : source,
+          to: target,
+          signal: controller.signal,
+        });
+        initiatingSurfaceFenced = false;
         if (controller.signal.aborted || sequenceRef.current !== sequence) return null;
         if (!target) {
           setProjection(null);
@@ -398,16 +405,30 @@ export function BrowserAccountsProvider({
       setPhase("committing");
       setError(null);
       const changesActor = pending.changesActor(current);
-      if (changesActor) {
-        // Peers must hide and abort the old actor before this request can be
-        // accepted. Yielding one task after the secret-free hold lets queued
-        // BroadcastChannel delivery run before the network mutation starts;
-        // a peer that was already dispatching remains an ordinary pre-commit
-        // in-flight request and is still fenced by the server epoch.
-        publishActorHold(pending.operationId, current);
-        await yieldToCrossTabActorHold();
-      }
+      let initiatingActorFenced = false;
       try {
+        if (changesActor) {
+          // Every tab, including the initiator, must hide and abort the old actor
+          // before this request can be accepted. Otherwise a response-lost
+          // logout can leave the initiating route alive long enough for its
+          // event stream to reconnect with the newly revoked cookie.
+          publishActorHold(pending.operationId, current);
+          transitionAbortRef.current?.abort();
+          const controller = new AbortController();
+          transitionAbortRef.current = controller;
+          setPhase("loading");
+          await onActorTransition({
+            kind: pending.kind,
+            from: current,
+            to: null,
+            signal: controller.signal,
+          });
+          if (controller.signal.aborted || sequenceRef.current !== sequence) return false;
+          initiatingActorFenced = true;
+          // Yield one task after the secret-free hold so queued BroadcastChannel
+          // delivery can fence peers before the network mutation starts.
+          await yieldToCrossTabActorHold();
+        }
         let accepted: ManagedAuthSessionSetProjection;
         try {
           accepted = await pending.execute(expectedGeneration);
@@ -429,7 +450,11 @@ export function BrowserAccountsProvider({
           if (sequenceRef.current !== sequence) return false;
         }
         pendingRef.current = null;
-        if (!authorityResetConfirmed && sameSelectedActor(current, accepted)) {
+        if (
+          !initiatingActorFenced &&
+          !authorityResetConfirmed &&
+          sameSelectedActor(current, accepted)
+        ) {
           setProjection(accepted);
           setPhase("ready");
           setError(null);
@@ -441,10 +466,41 @@ export function BrowserAccountsProvider({
             sequence,
             true,
             authorityResetConfirmed,
+            initiatingActorFenced,
           );
         }
         return true;
       } catch (caught) {
+        if (initiatingActorFenced) {
+          let authorityRestored = false;
+          try {
+            const restored = await client.reconcileSessionSetAuthority();
+            if (sequenceRef.current !== sequence) return false;
+            await settleActorTransition(
+              pending.kind,
+              current,
+              restored,
+              sequence,
+              false,
+              true,
+              true,
+            );
+            if (sequenceRef.current !== sequence) return false;
+            authorityRestored = true;
+          } catch {
+            // If authority itself cannot be reconciled, retain the existing
+            // fail-closed provider error path and its manual retry surface.
+          }
+          if (authorityRestored) {
+            // Restore transport provenance before retaining the existing
+            // fail-closed retry surface. The retry screen keeps tenant data
+            // hidden, while refresh can safely reveal this reconciled actor.
+            const restoredError = accountError(caught);
+            setError(restoredError);
+            setPhase("recoverable_error");
+            throw restoredError;
+          }
+        }
         return await fail(caught, pending.kind);
       } finally {
         if (changesActor) publishActorRelease(pending.operationId);
@@ -454,7 +510,15 @@ export function BrowserAccountsProvider({
         }
       }
     },
-    [client, fail, inspectBlockers, publishActorHold, publishActorRelease, settleActorTransition],
+    [
+      client,
+      fail,
+      inspectBlockers,
+      onActorTransition,
+      publishActorHold,
+      publishActorRelease,
+      settleActorTransition,
+    ],
   );
 
   const refresh = useCallback(async () => {
