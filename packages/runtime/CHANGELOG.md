@@ -1,5 +1,24 @@
 # @opengeni/runtime
 
+## 1.5.0
+
+### Minor Changes
+
+- 699477a: Restore autonomous agent Workspace Memory writes whenever workspace Memory is enabled. Agents can save and correct active facts, decisions, incidents, fixes, and outcomes independently of Learning mode while all existing Memory kinds remain retrieval-only through search. Autonomous learning may activate eligible concise Workspace instructions and focused Skills through their governed, auditable, undoable lifecycles; Review first keeps proposals inactive and Off creates no derived change.
+
+### Patch Changes
+
+- ec1aebc: Use the provider-valid workspace root for managed Browser and Computer controller commands while preserving the native `/tmp` cwd for Connected Machines.
+- 3ef2488: Coordinate immutable Rig setup once per exact sandbox lease epoch and provider instance while keeping credentials, repositories, and files turn-private.
+- Updated dependencies [699477a]
+- Updated dependencies [ddce5cc]
+- Updated dependencies [132c8d3]
+- Updated dependencies [88b6b48]
+  - @opengeni/contracts@2.9.0
+  - @opengeni/sdk@3.3.0
+  - @opengeni/codemode@0.4.20
+  - @opengeni/config@0.22.3
+
 ## 1.4.6
 
 ### Patch Changes
