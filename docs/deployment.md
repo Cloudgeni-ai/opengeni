@@ -153,6 +153,12 @@ API uses it when serving the installer, so an enrolled machine downloads the
 agent version baked into this deployment and connects back to that same external
 HTTPS origin rather than falling back to either public default.
 
+HTTPS/WSS is the supported private-edge posture. The web bootstrap retains a
+cryptographically random UUID compatibility path so a private HTTP origin can
+render the core workspace UI and useful diagnostics instead of crashing, but
+that fallback does not make HTTP feature-complete: browsers still withhold APIs
+used by voice, clipboard, and encrypted browser-side artifact operations.
+
 For a tailnet-only deployment, `OPENGENI_AUTH_REQUIRED=false` and
 `OPENGENI_PRODUCT_ACCESS_MODE=local` mean there is no shared deployment access
 key; tailnet membership is the outer access boundary. Internal database, NATS,
