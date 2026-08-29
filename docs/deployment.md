@@ -2207,6 +2207,14 @@ Service endpoints:
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
+API and worker health responses include the non-fatal warning
+`github_app_bot_identity_unavailable` when that process has partial workspace
+GitHub App configuration, cannot derive the App bot identity, and has no
+complete `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` fallback. Compare
+the warning across API and worker processes: a difference means attach and turn
+startup would declare different stable Git identity environment keys. The
+warning never includes provider credentials and does not change liveness.
+
 Useful settings:
 
 - `OPENGENI_OBSERVABILITY_STRUCTURED_LOGS=true` for JSON logs.
