@@ -165,6 +165,31 @@ function queueSnapshot(
 }
 
 describe("useWorkspaceSessions", () => {
+  test("unmount aborts its native session-page read", async () => {
+    let nativeSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        nativeSignal = options?.signal;
+        return await new Promise<SessionListResponse>((_resolve, reject) => {
+          nativeSignal?.addEventListener(
+            "abort",
+            () => reject(nativeSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(nativeSignal?.aborted).toBe(false);
+
+    await hook.unmount();
+    expect(nativeSignal?.aborted).toBe(true);
+  });
+
   test("forwards pins-only mode without changing the historical visible-row projection", async () => {
     const pinned = { id: "pin-only", pinned: true } as never;
     let observedPinsOnly = false;

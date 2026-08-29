@@ -1151,6 +1151,8 @@ export class OpenGeniClient {
       pinsOnly?: boolean;
       /** Return archived root chats instead of the active session list. */
       archivedOnly?: boolean;
+      /** Stop this caller's finite page read when its owning route is abandoned. */
+      signal?: AbortSignal | undefined;
     } = {},
   ): Promise<SessionListResponse> {
     const search = options.search?.trim();
@@ -1168,6 +1170,7 @@ export class OpenGeniClient {
           ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
           ...(options.archivedOnly ? { archivedOnly: "true" } : {}),
         },
+        { signal: options.signal },
       );
     } catch (error) {
       if (error instanceof OpenGeniApiError && error.status === 410) {

@@ -498,6 +498,7 @@ describe("OpenGeniClient", () => {
       }),
       client.getComposerDraft(WORKSPACE_ID, SESSION_ID, { signal: abort.signal }),
       client.getClientConfig({ signal: abort.signal }),
+      client.listSessionPage(WORKSPACE_ID, { limit: 12, signal: abort.signal }),
       client.getWorkspaceModelCatalog(WORKSPACE_ID, { signal: abort.signal }),
       client.getWorkspaceRealtimeModelCatalog(WORKSPACE_ID, { signal: abort.signal }),
     ]);
@@ -510,6 +511,7 @@ describe("OpenGeniClient", () => {
         signal: abort.signal,
       },
       { path: "/v1/config/client", signal: abort.signal },
+      { path: `/v1/workspaces/${WORKSPACE_ID}/sessions`, signal: abort.signal },
       { path: `/v1/workspaces/${WORKSPACE_ID}/model-catalog`, signal: abort.signal },
       { path: `/v1/workspaces/${WORKSPACE_ID}/realtime-model-catalog`, signal: abort.signal },
     ]);
