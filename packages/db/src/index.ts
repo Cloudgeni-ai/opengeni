@@ -58590,12 +58590,40 @@ export async function claimSessionWorkForAttempt(
           ) {
             if (input.attachPendingUpdatesToRunningAttempt) {
               const now = new Date();
-              const pendingEventSequenceBeforeOrAt =
+              let pendingEventSequenceBeforeOrAt =
                 parsedDispatch.attempt?.pendingUpdateBoundarySequence;
               if (pendingEventSequenceBeforeOrAt === undefined) {
-                throw new SessionControlInvariantError(
-                  `Running turn ${activeTurn.id} has no pending-update attempt boundary`,
-                );
+                // During a rolling deploy, an old worker can claim this resume
+                // before dispatch metadata includes the new boundary, then a
+                // new worker can retry the same exact running attempt. The
+                // durable response event is the conservative compatibility
+                // fence: it includes input already pending before the response
+                // without consuming input that arrived after the user resumed.
+                const [legacyResumeTrigger] = await tx
+                  .select({
+                    sequence: schema.sessionEvents.sequence,
+                    type: schema.sessionEvents.type,
+                  })
+                  .from(schema.sessionEvents)
+                  .where(
+                    and(
+                      eq(schema.sessionEvents.workspaceId, workspaceId),
+                      eq(schema.sessionEvents.sessionId, sessionId),
+                      eq(schema.sessionEvents.id, parsedDispatch.attempt!.triggerEventId),
+                    ),
+                  )
+                  .limit(1);
+                if (
+                  !legacyResumeTrigger ||
+                  !["user.approvalDecision", "user.humanInputResponse"].includes(
+                    legacyResumeTrigger.type,
+                  )
+                ) {
+                  throw new SessionControlInvariantError(
+                    `Running turn ${activeTurn.id} has no pending-update attempt boundary`,
+                  );
+                }
+                pendingEventSequenceBeforeOrAt = legacyResumeTrigger.sequence;
               }
               const xaiSnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
                 activeTurn.xaiProviderAccountAuthoritySnapshot,

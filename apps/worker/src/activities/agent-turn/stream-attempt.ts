@@ -239,6 +239,16 @@ export type TurnStreamAttemptDeps = {
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
 };
 
+export async function attachPendingUpdatesBeforePreparingModelInput(input: {
+  shouldAttach: boolean;
+  attachPendingUpdates: () => Promise<boolean>;
+  prepareModelInput: () => Promise<void>;
+}): Promise<boolean> {
+  if (input.shouldAttach && !(await input.attachPendingUpdates())) return false;
+  await input.prepareModelInput();
+  return true;
+}
+
 export async function runTurnStreamAttempt(
   deps: TurnStreamAttemptDeps,
 ): Promise<RunAgentTurnResult> {
@@ -1556,13 +1566,15 @@ export async function runTurnStreamAttempt(
     return claimedResult({ status: "requires_action" });
   }
   if (
-    (trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse") &&
-    !(await attachPendingUpdatesAfterOpenSuffix())
+    !(await attachPendingUpdatesBeforePreparingModelInput({
+      shouldAttach:
+        trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse",
+      attachPendingUpdates: attachPendingUpdatesAfterOpenSuffix,
+      prepareModelInput: prepareRunAttemptInput,
+    }))
   ) {
     return claimedResult({ status: "cancelled" });
   }
-
-  await prepareRunAttemptInput();
   let retriedAfterCompaction = false;
   while (true) {
     try {

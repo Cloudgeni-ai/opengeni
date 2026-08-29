@@ -480,6 +480,15 @@ describe("durable structured human input", () => {
     ]);
     expect(JSON.stringify(history.at(-1)?.item)).toContain("FOLLOWUP-ACK");
 
+    // Simulate an exact-attempt retry across a rolling deployment: the old
+    // worker claimed the resume before pendingUpdateBoundarySequence existed.
+    // Re-entry must remain idempotent and must not consume post-response input.
+    await shared.admin`
+      update session_turns
+      set metadata = metadata #- '{dispatchAttempt,pendingUpdateBoundarySequence}'
+      where workspace_id = ${frozen.grant.workspaceId!}
+        and id = ${resumed.turn.id}
+    `;
     const replayed = await claimSessionWorkForAttempt(client.db, frozen.grant.workspaceId!, {
       ...resumedInput,
       attachPendingUpdatesToRunningAttempt: true,

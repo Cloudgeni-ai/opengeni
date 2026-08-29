@@ -140,6 +140,7 @@ import {
 } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
+import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
 
@@ -175,12 +176,32 @@ describe("approval RunState materialization boundary", () => {
     const suffixAt = source.indexOf(
       "const openSuffixResume = await settleOpenSuffixResumeIfNeeded",
     );
-    const attachAt = source.indexOf("await attachPendingUpdatesAfterOpenSuffix()", suffixAt);
-    const prepareAt = source.indexOf("await prepareRunAttemptInput()", attachAt);
+    const preparationAt = source.indexOf(
+      "await attachPendingUpdatesBeforePreparingModelInput",
+      suffixAt,
+    );
+    const history = ["function_call", "function_call_result"];
+    const eligiblePendingInput = ["PRE-BOUNDARY"];
+    const laterPendingInput = "NEXT-TURN-ONLY";
+    let modelInput: string[] = [];
+
+    const prepared = await attachPendingUpdatesBeforePreparingModelInput({
+      shouldAttach: true,
+      attachPendingUpdates: async () => {
+        history.push(...eligiblePendingInput.splice(0));
+        return true;
+      },
+      prepareModelInput: async () => {
+        modelInput = [...history];
+      },
+    });
 
     expect(suffixAt).toBeGreaterThan(-1);
-    expect(attachAt).toBeGreaterThan(suffixAt);
-    expect(prepareAt).toBeGreaterThan(attachAt);
+    expect(preparationAt).toBeGreaterThan(suffixAt);
+    expect(prepared).toBe(true);
+    expect(modelInput).toEqual(["function_call", "function_call_result", "PRE-BOUNDARY"]);
+    expect(modelInput.filter((item) => item === "PRE-BOUNDARY")).toHaveLength(1);
+    expect(modelInput).not.toContain(laterPendingInput);
   });
 
   test("approval and human-input resume require open-suffix rows", async () => {
