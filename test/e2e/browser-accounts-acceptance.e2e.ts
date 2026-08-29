@@ -3102,7 +3102,12 @@ describe("provider-neutral browser account acceptance", () => {
       },
       {
         ...documentReplacementRetirement,
-        pathname: "/v1/workspaces/another-workspace/sessions/session-id/lineage",
+        pathname:
+          "/v1/workspaces/another-workspace/sessions/00000000-0000-4000-8000-000000000002/lineage",
+      },
+      {
+        ...documentReplacementRetirement,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/not-a-uuid/lineage",
       },
       {
         ...documentReplacementRetirement,
@@ -3265,6 +3270,7 @@ describe("provider-neutral browser account acceptance", () => {
       { ...logoutAllFence, responsePhase: "signed-out-settled" },
       { ...logoutAllFence, method: "POST" },
       { ...logoutAllFence, pathname: "/v1/workspaces" },
+      { ...logoutAllFence, search: "?view=page" },
       {
         ...logoutAllFence,
         pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
@@ -3288,7 +3294,7 @@ describe("provider-neutral browser account acceptance", () => {
       {
         ...logoutAllFence,
         pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000002/live-events/stream",
-        search: "?transport=http1-bounded",
+        search: "?controlAfter=12&interactionAfter=34&transport=http1-bounded",
       },
       { ...logoutAllFence, status: 403 },
       { ...logoutAllFence, endedAt: 199 },
