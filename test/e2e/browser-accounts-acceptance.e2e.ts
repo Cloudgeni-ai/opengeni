@@ -553,20 +553,35 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
     input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash ||
     (input.requestSessionSetAuthorityHash === null &&
       new Set(["second-tab-bootstrap", "cross-tab-select-race"]).has(input.dispatchPhase));
-  return (
-    new Set(["GET", "HEAD"]).has(input.method) &&
+  const oldWorkspaceActorRead =
     input.actorEpoch !== null &&
     input.actorEpoch !== input.confirmedActorEpoch &&
+    input.pathname.startsWith(exactOldWorkspacePrefix);
+  // During the direct select race Chromium can also leave the pre-selection
+  // neutral session-set projection without any terminal event. It has no actor
+  // epoch to compare, so bind it instead to the exact path, direct-race phase,
+  // unchanged HttpOnly authority, pre-acceptance start, accepted select, and a
+  // positive dispatch from the confirmed actor on this same page.
+  const neutralPreSelectionRead =
+    input.actorEpoch === null &&
+    input.dispatchPhase === "cross-tab-select-race" &&
+    input.pathname === "/v1/auth/session-set";
+  const authorityMatchesScope = neutralPreSelectionRead
+    ? input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash
+    : requestAuthorityMatches;
+  return (
+    new Set(["GET", "HEAD"]).has(input.method) &&
     !input.responseSeen &&
-    input.pathname.startsWith(exactOldWorkspacePrefix) &&
+    (oldWorkspaceActorRead || neutralPreSelectionRead) &&
     input.currentSessionSetAuthorityHash !== null &&
-    requestAuthorityMatches &&
+    authorityMatchesScope &&
     input.acceptedActorTransitions.some(
       (transition) =>
         transition.path === "/v1/auth/session-set/select" &&
         transition.actorEpoch === input.confirmedActorEpoch &&
         transition.sessionSetAuthorityHash === input.currentSessionSetAuthorityHash &&
         transition.acceptedAt <= input.confirmedAt &&
+        (!neutralPreSelectionRead || input.startedAt <= transition.acceptedAt) &&
         input.actorDispatches.some(
           (dispatch) =>
             dispatch.actorEpoch === input.confirmedActorEpoch &&
@@ -932,6 +947,7 @@ function observeBrowser(page: Page): BrowserProblems {
     const failure = request.failure()?.errorText ?? "unknown";
     const responsePhase = problems.phase;
     const failedUrl = new URL(request.url());
+    const wasRetiredFiniteRead = problems.retiredFiniteReadTombstones.has(request);
     problems.activeStreams.delete(request);
     problems.retiredFiniteReadTombstones.delete(request);
     // A failed finite read is terminal whether expected or not. Remove it from
@@ -976,6 +992,22 @@ function observeBrowser(page: Page): BrowserProblems {
       if (problem !== null) {
         problems.failedRequests.push(problem);
       } else {
+        if (wasRetiredFiniteRead) {
+          // A late failed terminal proves the retired read produced no
+          // response, but it still has to pass the complete cancellation
+          // ledger above. Record that strict disposition instead of silently
+          // treating the tombstone as a broad failure exemption.
+          problems.retirementChecks.push(
+            JSON.stringify({
+              dispatchPhase: dispatch?.phase ?? "unknown",
+              failure,
+              method: request.method(),
+              pathname: failedUrl.pathname,
+              responsePhase,
+              result: "retired-read-cancelled-with-strict-evidence",
+            }),
+          );
+        }
         problems.acceptedRequestTerminals.push({
           observedAt: failedAt,
           pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
@@ -3193,6 +3225,49 @@ describe("provider-neutral browser account acceptance", () => {
         startedAt: 225,
       }),
     ).toBe(true);
+    const neutralPreSelectionRetirement = {
+      ...retirement,
+      actorEpoch: null,
+      dispatchPhase: "cross-tab-select-race",
+      pathname: "/v1/auth/session-set",
+      startedAt: 100,
+    } satisfies FiniteReadRetirementInput;
+    expect(finiteReadMayRetireAfterActorTransition(neutralPreSelectionRetirement)).toBe(true);
+    for (const invalid of [
+      { ...neutralPreSelectionRetirement, method: "POST" },
+      { ...neutralPreSelectionRetirement, actorEpoch: "old-actor-epoch" },
+      {
+        ...neutralPreSelectionRetirement,
+        dispatchPhase: "late-old-epoch-setup-beta-to-alpha",
+      },
+      { ...neutralPreSelectionRetirement, pathname: "/v1/auth/session-set/select" },
+      { ...neutralPreSelectionRetirement, requestSessionSetAuthorityHash: null },
+      {
+        ...neutralPreSelectionRetirement,
+        requestSessionSetAuthorityHash: "b".repeat(64),
+      },
+      { ...neutralPreSelectionRetirement, responseSeen: true },
+      { ...neutralPreSelectionRetirement, startedAt: 201 },
+      { ...neutralPreSelectionRetirement, confirmedAt: 199 },
+      { ...neutralPreSelectionRetirement, actorDispatches: [] },
+      {
+        ...neutralPreSelectionRetirement,
+        actorDispatches: [{ actorEpoch: "new-actor-epoch", startedAt: 99 }],
+      },
+      {
+        ...neutralPreSelectionRetirement,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "new-actor-epoch",
+            path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "a".repeat(64),
+          },
+        ],
+      },
+    ]) {
+      expect(finiteReadMayRetireAfterActorTransition(invalid)).toBe(false);
+    }
 
     const documentReplacementRetirement = {
       actorEpoch: "current-actor-epoch",
