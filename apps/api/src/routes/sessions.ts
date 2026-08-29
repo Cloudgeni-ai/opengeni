@@ -3202,12 +3202,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // Human take-control: when the desktop is available + this policy is on
       // (default), the cell is mode "interactive" — the noVNC viewer drives :0
       // (x11vnc runs without -viewonly). Off → mode "read-only" (client disables
-      // take-control). Independent of the agent's computerUseReadOnly.
+      // take-control). Agent interaction uses managed ComputerSession tools.
       desktopInteractive: settings.sandboxDesktopInteractive,
-      // P4.3 computer-use: the agent drives the active display; availability
-      // tracks the desktop tier + a desktop-capable backend.
-      computerUseEnabled: settings.computerUseEnabled,
-      computerUseReadOnly: settings.computerUseReadOnly,
       // Graceful degrade when scoped stream credentials cannot be minted.
       streamTokenSecretAvailable: !streamTokenDegraded(settings),
       desktopAcknowledged: acknowledged,

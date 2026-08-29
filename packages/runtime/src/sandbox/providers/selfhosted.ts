@@ -6,8 +6,8 @@
 //
 // M3 ships the REAL `SelfhostedSandboxClient`: its `create()`/`resume()` return a
 // `SelfhostedSession` presenting the structural surface (`exec`/`readFile`/
-// `writeFile`/`resolveExposedPort`/`serializeSessionState`) that Channel-A, the
-// viewer, and computer-use consume unchanged — backed by a `ControlRpc` seam
+// `writeFile`/`resolveExposedPort`/`serializeSessionState`) that Channel-A and the
+// viewer consume unchanged — backed by a `ControlRpc` seam
 // (request/reply encoded via `@opengeni/agent-proto`) instead of a provider SDK.
 // `serializeSessionState`/`deserializeSessionState` round-trip `{agentId}` ONLY:
 // resume = re-address the live subject, never a cold re-create (the machine is

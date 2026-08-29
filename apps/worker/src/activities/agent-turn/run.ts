@@ -124,7 +124,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       billingState,
       sandboxState,
       renewals,
-      recordingState,
       eventing,
       workspaceRefs,
       providerTurn,
@@ -222,7 +221,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       activityContext,
       sandboxRotationController,
       sandboxState,
-      recordingState,
       eventing,
       attempt,
     });
@@ -230,9 +228,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       requireResolvedSandboxForMutation,
       runWorkspaceMutationForSandbox,
       stopLeaseHeartbeat,
-      abandonActiveRecording,
       flushRuntimeBatcher,
-      maybeStartOnTurnRecording,
       finalizeTurnOpStreamOps,
     } = sandboxRuntime;
 
@@ -308,7 +304,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         db,
         bus,
         runtime,
-        objectStorage,
         observability,
         entitlements,
         wakeSessionWorkflow,
@@ -320,13 +315,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attempt,
         billingState,
         sandboxState,
-        recordingState,
         eventing,
         leases,
         media,
         claimedResult,
         acknowledgeLostAttemptOwnership,
-        abandonActiveRecording,
       });
       if ("exit" in claimed) return claimed.exit;
       if (!eventing.publish || !eventing.settle) {
@@ -1114,8 +1107,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         eventing,
         attempt,
         sandboxState,
-        recordingState,
-        maybeStartOnTurnRecording,
         providerTurn,
         media,
         leases,
@@ -1530,14 +1521,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attempt,
         sandboxState,
         renewals,
-        recordingState,
         eventing,
         providerTurn,
         workspaceRefs,
         runWorkspaceMutationForSandbox,
         requireResolvedSandboxForMutation,
         stopLeaseHeartbeat,
-        abandonActiveRecording,
         turnCompletionMemoryCollector,
       });
     }

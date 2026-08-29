@@ -12,11 +12,9 @@ import {
   type CanonicalTurnStartupMilestoneReceipt,
   type ClaimSessionWorkForAttemptInput,
   type SessionTurnForExecution,
-  type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { deliverChildRequiresActionToParent } from "../parent-wake";
-import { deleteRecordingArtifacts } from "@opengeni/runtime";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
   resolveTurnExecutionPolicyV1,
@@ -49,7 +47,6 @@ import {
   recordTurnStartupMilestone,
   turnLifecycleMetricsFor,
 } from "../../observability-metrics";
-import { prepareRecordingForSettlement, type ActiveRecording } from "../recording";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
@@ -68,7 +65,6 @@ import type {
   BillingState,
   ClaimedResult,
   EventingState,
-  RecordingState,
   SandboxRuntimeState,
   TurnControlState,
 } from "./turn-context";
@@ -79,7 +75,6 @@ export type ClaimTurnDeps = {
   db: ActivityServices["db"];
   bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
-  objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
   entitlements: ActivityServices["entitlements"];
   wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
@@ -91,13 +86,11 @@ export type ClaimTurnDeps = {
   attempt: AttemptIdentityState;
   billingState: BillingState;
   sandboxState: SandboxRuntimeState;
-  recordingState: RecordingState;
   eventing: EventingState;
   leases: ReturnType<typeof createTurnCredentialLeases>;
   media: ReturnType<typeof createTurnMediaArtifacts>;
   claimedResult: ClaimedResult;
   acknowledgeLostAttemptOwnership: () => void;
-  abandonActiveRecording: (reason: string, disposition?: "failed" | "discard") => Promise<void>;
 };
 
 export type ClaimTurnOk = {
@@ -145,7 +138,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     db,
     bus,
     runtime,
-    objectStorage,
     observability,
     entitlements,
     wakeSessionWorkflow,
@@ -157,13 +149,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     attempt,
     billingState,
     sandboxState,
-    recordingState,
     eventing,
     leases,
     media,
     claimedResult,
     acknowledgeLostAttemptOwnership,
-    abandonActiveRecording,
   } = deps;
 
   const validatePendingSystemUpdateAuthority: NonNullable<
@@ -429,40 +419,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     return appended;
   };
   eventing.settle = async (inputSettlement) => {
-    const attemptClosing = [
-      "completed",
-      "failed",
-      "cancelled",
-      "superseded",
-      "requires_action",
-    ].includes(inputSettlement.turnStatus);
-    const recordingForSettlement =
-      attemptClosing && recordingState.activeRecording && sandboxState.resolvedSandbox
-        ? (recordingState.activeRecording as ActiveRecording)
-        : null;
-    const preparedRecording = recordingForSettlement
-      ? await prepareRecordingForSettlement({
-          settings,
-          objectStorage,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          active: recordingForSettlement,
-          session: sandboxState.resolvedSandbox!.established.session,
-          didComputerUse: recordingState.didComputerUse,
-        })
-      : null;
-    let recordingMutation: SessionTurnRecordingSettlement | undefined;
-    if (preparedRecording) {
-      const mutation = preparedRecording.mutation;
-      recordingMutation =
-        mutation.action === "discard"
-          ? mutation
-          : {
-              ...mutation,
-              producerId,
-              producerSeq: ++producerSeq,
-            };
-    }
     const compactionRequestFailure = inputSettlement.consumeRequestedCompactionFailure
       ? {
           reason: "summarization_failed" as const,
@@ -495,7 +451,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       activeTurnId: inputSettlement.activeTurnId,
       events: inputs,
       ...(runState ? { runState } : {}),
-      ...(recordingMutation ? { recording: recordingMutation } : {}),
       ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
     });
     if (result.action === "stale") {
@@ -507,31 +462,12 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       // TurnAttemptFencedError. If ownership was lost for an unrelated
       // reason, allowUninterrupted makes the receipt transaction a no-op.
       acknowledgeLostAttemptOwnership();
-      if (recordingForSettlement) {
-        await abandonActiveRecording(
-          "recording settlement lost attempt ownership",
-          preparedRecording?.mutation.action === "discard" ? "discard" : "failed",
-        );
-      }
       control.activityStatus = "cancelled";
       control.turnMetricOutcome = "cancelled";
       return false;
     }
     recordCanonicalStartupMilestones(result.canonicalStartupMilestones);
     turnLifecycleMetricsFor(observability).progress(attempt.turnId!);
-    if (recordingForSettlement && preparedRecording) {
-      if (result.recordingMutationApplied) {
-        recordingState.activeRecording = null;
-        if (preparedRecording.deleteArtifactsAfterCommit) {
-          await deleteRecordingArtifacts(
-            sandboxState.resolvedSandbox!.established.session,
-            recordingForSettlement.proc,
-          );
-        }
-      } else {
-        await abandonActiveRecording("recording row was unavailable during turn settlement");
-      }
-    }
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
     if (inputSettlement.turnStatus === "requires_action") {
       // The settlement transaction committed the parent's child_requires_action

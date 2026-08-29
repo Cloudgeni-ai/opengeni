@@ -1,15 +1,13 @@
-// @opengeni/runtime/sandbox — the recording loop (P4.3).
+// @opengeni/runtime/sandbox — explicit desktop recording primitives.
 //
 // ffmpeg x11grab on :0 → mp4/webm artifact on the box → direct scoped PUT to
-// object storage → recording.available. The "agent films itself proving the fix"
-// loop: ffmpeg reads exactly the :0 framebuffer the agent's computer-use draws to
-// and the human watches over Channel B (zero projection).
+// object storage → recording.available. ffmpeg reads exactly the :0 framebuffer
+// watched over Channel B (zero projection).
 //
 // These are PLAIN functions over a live, externally-owned session handle — NO
 // Temporal, NO worker RPC, NO actor. They live in the agent-loop-free leaf so the
-// SAME process that already holds the resumed-by-id box (the agent turn's own
-// activity for an on-turn recording, or the API in-process for an off-turn/manual
-// finalize) authorizes a direct box-to-storage upload. Recording bytes never
+// SAME process that already holds the resumed-by-id box for an explicit manual or
+// on-verify capture authorizes a direct box-to-storage upload. Recording bytes never
 // enter worker memory or a Temporal payload (F10).
 //
 // ── Adversarial-review fixes folded in (module 05 §Adversarial) ──────────────

@@ -61,7 +61,6 @@ import {
   clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
   completedToolCallFromSdkEvent,
-  computerToolModeForTurn,
   createCompactionModelUsageEventState,
   createModelResponseEventState,
   createTurnSandboxProvisioner,
@@ -116,7 +115,6 @@ import {
   shouldPrefetchManagedSandbox,
   shouldDeferNonEagerToolPreparation,
   shouldRecoverCompactionProviderFailure,
-  shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
   shouldStartPeriodicWorkspaceSnapshot,
   stableHumanInputRequestId,
@@ -2695,64 +2693,6 @@ describe("sandbox artifact runtime admission", () => {
         production: true,
       }).available,
     ).toBe(false);
-  });
-});
-
-describe("on-turn recording gate (selfhosted machines have no in-box capture plumbing)", () => {
-  const base: Parameters<typeof shouldStartOnTurnRecording>[0] = {
-    recordingEnabled: true,
-    desktopEnabled: true,
-    establishedBackendId: "modal",
-    effectiveBackend: undefined,
-  };
-
-  test("modal cloud box: records (unchanged behavior)", () => {
-    expect(shouldStartOnTurnRecording({ ...base })).toBe(true);
-  });
-
-  test("selfhosted EFFECTIVE backend: does NOT start recording (no recording.started emitted)", () => {
-    // The machine-primary turn establishes the SelfhostedSession (backendId
-    // "selfhosted", which is desktop-capable), so the desktop-capable check alone
-    // would over-trigger. The effective-backend gate is what suppresses it.
-    expect(
-      shouldStartOnTurnRecording({
-        ...base,
-        establishedBackendId: "selfhosted",
-        effectiveBackend: "selfhosted",
-      }),
-    ).toBe(false);
-  });
-
-  test("modal-home session swapped ONTO a machine: skips (gate is the effective backend, not home)", () => {
-    // Home backend is a cloud box (established could even still read modal in the
-    // degraded no-enrollment edge), but the ACTIVE pointer resolves selfhosted —
-    // recording must skip.
-    expect(
-      shouldStartOnTurnRecording({
-        ...base,
-        establishedBackendId: "modal",
-        effectiveBackend: "selfhosted",
-      }),
-    ).toBe(false);
-  });
-
-  test("machine-home turn degraded back to its cloud group box: records (effective backend undefined)", () => {
-    expect(
-      shouldStartOnTurnRecording({
-        ...base,
-        establishedBackendId: "modal",
-        effectiveBackend: undefined,
-      }),
-    ).toBe(true);
-  });
-
-  test("recording disabled by policy: skips regardless of backend", () => {
-    expect(shouldStartOnTurnRecording({ ...base, recordingEnabled: false })).toBe(false);
-    expect(shouldStartOnTurnRecording({ ...base, desktopEnabled: false })).toBe(false);
-  });
-
-  test("headless / non-desktop established backend: skips (existing static feasibility gate holds)", () => {
-    expect(shouldStartOnTurnRecording({ ...base, establishedBackendId: "none" })).toBe(false);
   });
 });
 
@@ -5418,62 +5358,6 @@ describe("transient provider error classifier", () => {
     const payload = agentRunFailurePayload(cap);
     expect(payload.retryable).toBe(false);
     expect(payload.code).toBe("codex_usage_limit_reached");
-  });
-});
-
-// The worker is the ONE place provider identity is authoritative, so it derives the
-// EXPLICIT computer-use tool transport there instead of letting the runtime string-sniff
-// the model instance's constructor name. This seam pins the provider→mode mapping.
-describe("computerToolModeForTurn (explicit computer-use transport derivation)", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi, image = true) =>
-    ({
-      provider: { kind, api },
-      configured: { capabilities: { inputModalities: image ? ["text", "image"] : ["text"] } },
-    }) as Parameters<typeof computerToolModeForTurn>[0];
-
-  test("codex-subscription → function-image", () => {
-    // api is irrelevant once kind is codex-subscription — image input wins.
-    expect(computerToolModeForTurn(resolved("codex-subscription", "responses"))).toBe(
-      "function-image",
-    );
-    expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
-  });
-
-  test("a chat-wire provider cannot receive screenshot tool results as images → disabled", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("disabled");
-  });
-
-  test("a registry responses provider → function-image", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("function-image");
-  });
-
-  test("any text-only model → disabled before provider transport selection", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "responses", false))).toBe("disabled");
-    expect(computerToolModeForTurn(resolved("codex-subscription", "responses", false))).toBe(
-      "disabled",
-    );
-    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses", false))).toBe(
-      "disabled",
-    );
-  });
-
-  test("Gateway Responses vision models use computer_* function tools", () => {
-    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
-      "function-image",
-    );
-    expect(computerToolModeForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
-      "function-image",
-    );
-  });
-
-  test("SuperGrok Responses vision models use computer_* function tools", () => {
-    expect(computerToolModeForTurn(resolved("xai-subscription", "responses"))).toBe(
-      "function-image",
-    );
-  });
-
-  test("the LEGACY global-client fallback (resolveTurnModel → null) → function-image", () => {
-    expect(computerToolModeForTurn(null)).toBe("function-image");
   });
 });
 

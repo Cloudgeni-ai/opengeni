@@ -873,8 +873,8 @@ const SettingsSchema = z.object({
   // cell advertises mode "interactive" — the noVNC viewer can drive mouse+keyboard
   // into :0 (x11vnc runs without -viewonly). Turn it OFF for a genuinely read-only
   // deployment: the cell reports mode "read-only" and the client disables the
-  // "Take control" affordance. Independent of computerUseReadOnly (the AGENT
-  // driver); this gates the HUMAN viewer plane.
+  // "Take control" affordance. This gates the HUMAN viewer plane; agent
+  // interaction is authorized through managed ComputerSession tools.
   sandboxDesktopInteractive: EnvBoolean.default(true),
   // REAL PTY terminal toggle (P5.t): gates the ttyd pty-ws plane (7681) the API
   // mints over the SAME tunnel as the desktop. Defaults ON — the interactive
@@ -888,13 +888,7 @@ const SettingsSchema = z.object({
   // down→up restart. Defaults match the proven spike geometry (1280x800).
   streamResolutionWidth: z.coerce.number().int().positive().default(1280),
   streamResolutionHeight: z.coerce.number().int().positive().default(800),
-  // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
-  // scrot). Gated by sandboxDesktopEnabled + a desktop-capable backend in
-  // buildAgentCapabilities; computerUseReadOnly:false is the agent-driver default
-  // (it must click/type — the human viewer plane is the read-only one).
-  computerUseEnabled: EnvBoolean.default(true),
-  computerUseReadOnly: EnvBoolean.default(false),
-  // P4.3 recording loop: ffmpeg x11grab of :0 → mp4/webm → @opengeni/storage.
+  // Recording loop: ffmpeg x11grab of :0 → mp4/webm → @opengeni/storage.
   // recordingMaxBytes caps the in-memory finalize buffer (≤ storage single-PUT);
   // recordingMaxSeconds is the ffmpeg -t hard ceiling (bounds a multi-day turn).
   recordingEnabled: EnvBoolean.default(true),
@@ -2511,8 +2505,6 @@ export function getSettings(): Settings {
     sandboxTerminalEnabled: optional("OPENGENI_SANDBOX_TERMINAL_ENABLED"),
     streamResolutionWidth: optional("OPENGENI_STREAM_RESOLUTION_WIDTH"),
     streamResolutionHeight: optional("OPENGENI_STREAM_RESOLUTION_HEIGHT"),
-    computerUseEnabled: optional("OPENGENI_COMPUTER_USE_ENABLED"),
-    computerUseReadOnly: optional("OPENGENI_COMPUTER_USE_READONLY"),
     recordingEnabled: optional("OPENGENI_RECORDING_ENABLED"),
     workspaceCaptureEnabled: optional("OPENGENI_WORKSPACE_CAPTURE"),
     recordingDefaultCodec: optional("OPENGENI_RECORDING_DEFAULT_CODEC"),

@@ -732,13 +732,13 @@ export function rewriteComputerCallsToActionsOnly(body: unknown): boolean {
  * WHY THIS IS SAFE (empty = failure, never an intentional blank). Post-af289e3 the
  * intentional-blank cases carry a NON-empty data URI already: agents-core's
  * tool-approval-rejection screenshot is its own non-empty 1×1 placeholder, and the
- * SandboxComputer action-timeout now warn+returns to a REAL screenshot rather than an
+ * The retired desktop adapter's action-timeout path returned a real screenshot rather than an
  * empty output. So an EMPTY image_url at this seam is unambiguously a capture/interact
  * FAILURE — the error card is the correct substitution for every empty case, and this
  * function never touches a non-empty (real screenshot OR intentional blank) output.
  *
  * The failure REASON (permission denied / null image / timeout / display down) is not
- * on the card; it is logged worker-side by `NativeDesktopComputer.screenshot()`.
+ * on the card; legacy producers logged it worker-side before the adapter was retired.
  *
  * Mutates `body` in place (the caller has already JSON.parsed a private copy).
  * Returns `true` iff at least one image_url was replaced.

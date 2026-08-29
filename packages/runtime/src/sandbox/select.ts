@@ -37,18 +37,12 @@ export interface NegotiationContext {
    * is "interactive" — the noVNC viewer can drive mouse+keyboard into :0 (the box's
    * x11vnc runs without -viewonly). When false the cell reports mode "read-only"
    * and the client disables the "Take control" affordance (a genuinely read-only
-   * deployment). Independent of `computerUseReadOnly`, which gates the AGENT
-   * driver, not the human viewer plane. Defaults to true so a caller that never
-   * threads it (e.g. headless tests) still gets the interactive plane when the
-   * desktop is available.
+   * deployment). Agent interaction is authorized separately through managed
+   * ComputerSession tools. Defaults to true so a caller that never threads it
+   * (e.g. headless tests) still gets the interactive plane when the desktop is
+   * available.
    */
   desktopInteractive?: boolean;
-  /** The deployment computer-use toggle (settings.computerUseEnabled). The agent
-   *  drives :0 via xdotool/scrot; availability tracks desktop. Defaults to true. */
-  computerUseEnabled?: boolean;
-  /** Whether the agent computer-use driver is gated to no-op input
-   *  (settings.computerUseReadOnly). v1 default false (the agent clicks/types). */
-  computerUseReadOnly?: boolean;
   /**
    * Whether a scoped-stream-token secret is resolvable (stream-token availability contract). When desktop
    * is enabled but this is false (no streamTokenSecret AND no delegationSecret),
@@ -384,7 +378,7 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     if (osReason) {
       return {
         available: false,
-        modes: [] as ("manual" | "on-turn" | "on-verify")[],
+        modes: [] as ("manual" | "on-verify")[],
         codecs: [] as ("h264-mp4" | "vp9-webm")[],
         reason: osReason,
       };
@@ -392,7 +386,7 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     if (!cap.available) {
       return {
         available: false,
-        modes: [] as ("manual" | "on-turn" | "on-verify")[],
+        modes: [] as ("manual" | "on-verify")[],
         codecs: [] as ("h264-mp4" | "vp9-webm")[],
         reason:
           descriptor.tier === "headless"
@@ -404,44 +398,26 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     if (!ctx.desktopEnabled) {
       return {
         available: false,
-        modes: [] as ("manual" | "on-turn" | "on-verify")[],
+        modes: [] as ("manual" | "on-verify")[],
         codecs: [] as ("h264-mp4" | "vp9-webm")[],
         reason: "disabled_by_policy" as const,
       };
     }
     return {
       available: true,
-      modes: ["manual", "on-turn", "on-verify"] as ("manual" | "on-turn" | "on-verify")[],
+      modes: ["manual", "on-verify"] as ("manual" | "on-verify")[],
       codecs: ["h264-mp4", "vp9-webm"] as ("h264-mp4" | "vp9-webm")[],
       reason: null,
     };
   })();
 
-  const computerUse = (() => {
-    // The agent computer-use driver requires the same desktop image (X stack) as
-    // the pixel plane: it drives :0 with xdotool/scrot. Availability == desktop-
-    // capable backend && desktopEnabled && computerUseEnabled. Degradation is a
-    // value, never silent (an unavailable cell carries a reason).
-    const desktopCapable = descriptor.capabilities.DesktopStream.available;
-    const readOnly = ctx.computerUseReadOnly ?? false;
-    if (osReason) {
-      return { available: false, readOnly, reason: osReason };
-    }
-    if (!desktopCapable) {
-      return {
-        available: false,
-        readOnly,
-        reason:
-          descriptor.tier === "headless"
-            ? ("tier_headless" as const)
-            : ("backend_unsupported" as const),
-      };
-    }
-    if (!ctx.desktopEnabled || ctx.computerUseEnabled === false) {
-      return { available: false, readOnly, reason: "disabled_by_policy" as const };
-    }
-    return { available: true, readOnly, reason: null };
-  })();
+  // Compatibility cell only. New agent interaction is exposed through the
+  // managed ComputerSession tool family, never this legacy capability flag.
+  const computerUse = {
+    available: false,
+    readOnly: true,
+    reason: "disabled_by_policy" as const,
+  };
 
   return {
     sessionId: ctx.sessionId,
