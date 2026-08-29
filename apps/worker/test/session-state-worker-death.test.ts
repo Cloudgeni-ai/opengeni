@@ -5,6 +5,7 @@ const fakeDb = {};
 const publishedEvents: unknown[] = [];
 const recoveryCalls: unknown[] = [];
 const parentWakeCalls: unknown[] = [];
+const recoveryMetricCalls: unknown[] = [];
 let recoveryResult:
   | { action: "unclaimed"; events: [] }
   | { action: "recovering"; turnId: string; redispatches: number; events: any[] }
@@ -39,6 +40,9 @@ function makeActivities() {
         parentWakeCalls.push(args);
       }),
       recordTurnsQueuedGauge: mock(() => undefined),
+      recordWorkerDeathRecoveryMetrics: mock((...args: unknown[]) => {
+        recoveryMetricCalls.push(args[1]);
+      }),
     },
   );
 }
@@ -58,6 +62,7 @@ describe("recoverDispatch: exact attempt ownership fence", () => {
     recoveryCalls.length = 0;
     publishedEvents.length = 0;
     parentWakeCalls.length = 0;
+    recoveryMetricCalls.length = 0;
     recoveryResult = {
       action: "recovering",
       turnId: "turn-1",
@@ -80,20 +85,24 @@ describe("recoverDispatch: exact attempt ownership fence", () => {
     ]);
     expect(publishedEvents).toEqual([{ id: "recovery-1", type: "turn.recovery.requested" }]);
     expect(parentWakeCalls).toHaveLength(0);
+    expect(recoveryMetricCalls).toEqual([{ outcome: "recovering", timeoutType: "HEARTBEAT" }]);
   });
 
   test("preserves schedule-to-start as the sole typed unclaimed recovery", async () => {
     recoveryCalls.length = 0;
     publishedEvents.length = 0;
+    recoveryMetricCalls.length = 0;
     recoveryResult = { action: "unclaimed", events: [] };
     expect(await runRecovery("SCHEDULE_TO_START")).toEqual({ action: "unclaimed" });
     expect(recoveryCalls).toEqual([expect.objectContaining({ timeoutType: "SCHEDULE_TO_START" })]);
     expect(publishedEvents).toHaveLength(0);
+    expect(recoveryMetricCalls).toHaveLength(0);
   });
 
   test("delegates terminal, missing, or successor ownership classification atomically", async () => {
     recoveryCalls.length = 0;
     publishedEvents.length = 0;
+    recoveryMetricCalls.length = 0;
     recoveryResult = {
       action: "stale",
       events: [],
@@ -103,12 +112,14 @@ describe("recoverDispatch: exact attempt ownership fence", () => {
     expect(await runRecovery()).toEqual({ action: "stale" });
     expect(recoveryCalls).toHaveLength(1);
     expect(publishedEvents).toHaveLength(0);
+    expect(recoveryMetricCalls).toHaveLength(0);
   });
 
   test("exhaustion is already terminal and wakes the parent once", async () => {
     recoveryCalls.length = 0;
     publishedEvents.length = 0;
     parentWakeCalls.length = 0;
+    recoveryMetricCalls.length = 0;
     recoveryResult = {
       action: "exceeded",
       turnId: "turn-1",
@@ -125,5 +136,6 @@ describe("recoverDispatch: exact attempt ownership fence", () => {
     expect(parentWakeCalls[0]).toEqual(
       expect.arrayContaining(["workspace-1", "session-1", "turn-1"]),
     );
+    expect(recoveryMetricCalls).toEqual([{ outcome: "exhausted", timeoutType: "HEARTBEAT" }]);
   });
 });

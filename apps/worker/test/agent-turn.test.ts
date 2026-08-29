@@ -739,15 +739,35 @@ describe("turn exact-content boundaries", () => {
     const source = await Bun.file(
       new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
     ).text();
+    const streamCompletionAuthority = source.indexOf(
+      "await assertSuccessfulAgentStreamCompletion({",
+    );
+    const postCompactionRecovery = source.indexOf(
+      "throw new PostCompactionContinuationEmptyError();",
+      streamCompletionAuthority,
+    );
+    const cancelledStreamGuard = source.indexOf(
+      "assertAgentStreamNotCancelled(eventing.stream.cancelled);",
+      postCompactionRecovery,
+    );
+    const interruptionPath = source.indexOf(
+      "if (eventing.stream.interruptions.length > 0)",
+      cancelledStreamGuard,
+    );
     const completionPath = source.indexOf(
-      'const finalOutput = String(eventing.stream.finalOutput ?? "");',
+      "String(requireAgentStreamFinalOutput(eventing.stream.finalOutput))",
+      interruptionPath,
     );
     const mandatoryBarrier = source.indexOf(
       "await historySink.reconcileConversationTruth({ requireDurable: true });",
       completionPath,
     );
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
-    expect(completionPath).toBeGreaterThan(-1);
+    expect(streamCompletionAuthority).toBeGreaterThan(-1);
+    expect(postCompactionRecovery).toBeGreaterThan(streamCompletionAuthority);
+    expect(cancelledStreamGuard).toBeGreaterThan(postCompactionRecovery);
+    expect(interruptionPath).toBeGreaterThan(cancelledStreamGuard);
+    expect(completionPath).toBeGreaterThan(interruptionPath);
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
 
@@ -963,6 +983,33 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
         reason: "worker_shutdown",
       }),
     ).toBeNull();
+  });
+
+  test("settles native tool_search identity retained only in providerData", () => {
+    const callId = "call_native_search_1";
+    const call = {
+      id: "tsc_provider_item_1",
+      type: "tool_search_call",
+      status: "in_progress",
+      arguments: { query: "mail" },
+      providerData: { call_id: callId, execution: "client" },
+    };
+    const result = interruptedToolCallResult({
+      callType: "tool_search_call",
+      callId,
+      callItem: call,
+      reason: "worker_shutdown",
+    });
+
+    expect(result).toEqual({
+      type: "tool_search_output",
+      providerData: { call_id: callId, execution: "client" },
+      status: "incomplete",
+      tools: [],
+    });
+    const pair = [call, result!] as Array<Record<string, unknown>>;
+    expect(ModelItem.array().parse(pair)).toEqual(pair);
+    expect(sanitizeHistoryItemsForModel(pair)).toEqual(pair);
   });
 
   test("never persists a function_call_result whose function_call was pruned mid-batch", () => {

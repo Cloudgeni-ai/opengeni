@@ -1,5 +1,35 @@
 # @opengeni/react
 
+## 3.2.1
+
+### Patch Changes
+
+- fd05df1: Cancel abandoned session detail, lineage, and goal reads after their final mounted consumer leaves while preserving shared reads for consumers that are still active.
+- 7988c84: Fence the initiating browser tab before account-changing mutations and cancel abandoned session-page, draft, turn-policy, model-catalog, and realtime-catalog reads without interrupting remaining shared consumers.
+- f499d32: Reconcile browser account authority when an invalidation supersedes the initiating fence or post-mutation host settlement, prevent stale dispatch after the peer-hold yield, and discard superseded retry commands.
+- Updated dependencies [fd05df1]
+- Updated dependencies [7988c84]
+  - @opengeni/sdk@3.2.1
+
+## 3.2.0
+
+### Patch Changes
+
+- 80d7594: Show a bounded, sensitive-safe opening-prompt preview while a session's durable automatic title is still pending, then yield automatically to the semantic agent title or a human rename.
+- Updated dependencies [595939e]
+- Updated dependencies [80d7594]
+  - @opengeni/sdk@3.2.0
+
+## 3.1.1
+
+### Patch Changes
+
+- ff4af61: Promote a normal human Send to Steer-equivalent replacement when an active session is waiting for human action, cancelling the stale decision surface and placing the conversational message directly in chat.
+- 0bbaee2: Harden live and historical session timelines: preserve reader ownership through cumulative pointer movement and animated layout shrink, keep bidirectional history windows density-bounded and compact-cursor correct, schedule large window swaps without blocking the browser, and prevent unmatched tool outputs from settling unrelated calls.
+- Updated dependencies [17d253b]
+- Updated dependencies [c116379]
+  - @opengeni/sdk@3.1.1
+
 ## 3.1.0
 
 ### Patch Changes

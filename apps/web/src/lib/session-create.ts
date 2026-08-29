@@ -310,6 +310,9 @@ export function buildCreateSessionRequest(
           personalResourceAttachment: input.submission.personalResourceAttachment,
         }
       : {}),
+    ...(input.submission.connectionAuthorities
+      ? { connectionAuthorities: input.submission.connectionAuthorities }
+      : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.channelId ? { channelId: input.channelId } : {}),

@@ -66,7 +66,11 @@ import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
-import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
+import {
+  RepositoryContextMenuBody,
+  RepositoryContextPicker,
+  type RepositoryContextPickerProps,
+} from "@/components/repository-picker";
 import { SelectedVariableSetList } from "@/components/session/selected-variable-set-list";
 import { Button } from "@/components/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
@@ -93,7 +97,10 @@ import {
 import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
-import { isMachineComputeSelectable } from "@/lib/machine-selectability";
+import {
+  isMachineComputeSelectable,
+  resolveSelectableMachineSandboxId,
+} from "@/lib/machine-selectability";
 import {
   effortOptionsForModel,
   findPickerRow,
@@ -642,9 +649,27 @@ function SessionsIndexRouteContent({
       persistedToolPolicy,
     ],
   );
+  useEffect(() => {
+    if (
+      context.selectedPersonalGitHubRepoIds.size > 0 &&
+      !context.personalGitHubAuthority &&
+      context.personalGitHubCatalogReady
+    ) {
+      void context.ensurePersonalGitHubAuthority(workspaceId);
+    }
+  }, [
+    context,
+    context.ensurePersonalGitHubAuthority,
+    context.personalGitHubAuthority,
+    context.personalGitHubCatalogReady,
+    context.selectedPersonalGitHubRepoIds.size,
+    workspaceId,
+  ]);
   const hydrateResources = useLatestCallback((resources: NewSessionDraftEditable["resources"]) =>
     rehydrateRepositoryResources(resources, context.githubRepos, {
       catalogReady: context.githubCatalogReady,
+      personalRepositories: context.personalGitHubRepositories,
+      personalCatalogReady: context.personalGitHubCatalogReady,
     }),
   );
   const setModel = context.setModel;
@@ -654,6 +679,8 @@ function SessionsIndexRouteContent({
   const setManualRepos = context.setManualRepos;
   const setSelectedRepoIds = context.setSelectedRepoIds;
   const setSelectedRepoRefs = context.setSelectedRepoRefs;
+  const setSelectedPersonalGitHubRepoIds = context.setSelectedPersonalGitHubRepoIds;
+  const setSelectedPersonalGitHubRepoRefs = context.setSelectedPersonalGitHubRepoRefs;
   const githubRepos = context.githubRepos;
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
@@ -683,6 +710,8 @@ function SessionsIndexRouteContent({
       setManualRepos(repositorySelection.manualRepos);
       setSelectedRepoIds(repositorySelection.selectedRepoIds);
       setSelectedRepoRefs(repositorySelection.selectedRepoRefs);
+      setSelectedPersonalGitHubRepoIds(repositorySelection.selectedPersonalRepoIds);
+      setSelectedPersonalGitHubRepoRefs(repositorySelection.selectedPersonalRepoRefs);
     },
     [
       setManualRepos,
@@ -692,6 +721,8 @@ function SessionsIndexRouteContent({
       setSelectedCapabilityToolIds,
       setSelectedRepoIds,
       setSelectedRepoRefs,
+      setSelectedPersonalGitHubRepoIds,
+      setSelectedPersonalGitHubRepoRefs,
       githubRepos,
       defaultFirstPartyMcpTools,
       defaultSandboxBackend,
@@ -1130,6 +1161,7 @@ function SessionsIndexRouteContent({
                       repositories: {
                         selectedCount:
                           context.selectedRepoIds.size +
+                          context.selectedPersonalGitHubRepoIds.size +
                           context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
                         disabled: busy || newSessionDraft.loading,
                         panel: (
@@ -1548,7 +1580,7 @@ function workspaceRepositoryPickerProps(
   context: ReturnType<typeof useAppContext>,
   workspaceId: string,
   disabled: boolean,
-) {
+): RepositoryContextPickerProps {
   return {
     setupMode:
       context.githubStatus?.setupMode ??
@@ -1559,6 +1591,11 @@ function workspaceRepositoryPickerProps(
     linkUrl: context.githubStatus?.linkUrl ?? null,
     installations: context.githubStatus?.installations ?? [],
     repositories: context.githubRepos,
+    personalGitHubStatus: context.personalGitHubStatus,
+    personalGitHubRepositories: context.personalGitHubRepositories,
+    selectedPersonalGitHubRepoIds: context.selectedPersonalGitHubRepoIds,
+    selectedPersonalGitHubRepoRefs: context.selectedPersonalGitHubRepoRefs,
+    personalGitHubBusy: context.personalGitHubBusy,
     groups: context.repositoryGroups,
     selectedRepoIds: context.selectedRepoIds,
     selectedRepoRefs: context.selectedRepoRefs,
@@ -1570,7 +1607,20 @@ function workspaceRepositoryPickerProps(
     pending: context.busy || disabled,
     repoBusy: context.repoBusy,
     githubAppBusy: context.githubAppBusy,
-    onRefresh: () => context.refreshGitHub(workspaceId, undefined, { sync: true }),
+    onRefresh: async () => {
+      await Promise.all([
+        context.refreshGitHub(workspaceId, undefined, { sync: true }),
+        context.refreshPersonalGitHub(workspaceId),
+      ]);
+    },
+    onConnectPersonalGitHub: () => void context.connectPersonalGitHub(workspaceId),
+    onTogglePersonalGitHubRepo: (repository) =>
+      void context.togglePersonalGitHubRepository(workspaceId, repository),
+    onPersonalGitHubRefChange: (repositoryId: string, ref: string) =>
+      context.setSelectedPersonalGitHubRepoRefs((current) => ({
+        ...current,
+        [repositoryId]: ref,
+      })),
     onToggleRepo: context.toggleGitHubRepository,
     onRefChange: (repoId: number, ref: string) =>
       context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref })),
@@ -1689,7 +1739,8 @@ function ComputeTargetControl(props: {
   // the composer, so a stale draft must not keep forcing a sandbox type.
   useEffect(() => {
     if (selfhostedPrimary && draft.compute.kind === "sandbox") {
-      const firstSelectable = machines.find((machine) => isMachineComputeSelectable(machine.state));
+      const firstSelectableId = resolveSelectableMachineSandboxId(machines, null);
+      const firstSelectable = machines.find((machine) => machine.sandboxId === firstSelectableId);
       onChange({
         ...draft,
         compute: {
@@ -1716,7 +1767,8 @@ function ComputeTargetControl(props: {
       draft.compute.kind === "machine" &&
       selectedMachineSandboxId === null
     ) {
-      const firstSelectable = machines.find((machine) => isMachineComputeSelectable(machine.state));
+      const firstSelectableId = resolveSelectableMachineSandboxId(machines, null);
+      const firstSelectable = machines.find((machine) => machine.sandboxId === firstSelectableId);
       if (firstSelectable) {
         onChange({
           ...draft,
@@ -1737,9 +1789,14 @@ function ComputeTargetControl(props: {
       !fleet.loading &&
       draft.compute.kind === "machine" &&
       selectedMachineSandboxId !== null &&
-      !machines.some((machine) => machine.sandboxId === selectedMachineSandboxId)
+      !machines.some(
+        (machine) =>
+          machine.sandboxId === selectedMachineSandboxId &&
+          isMachineComputeSelectable(machine.state),
+      )
     ) {
-      const fallback = machines.find((machine) => isMachineComputeSelectable(machine.state));
+      const fallbackId = resolveSelectableMachineSandboxId(machines, selectedMachineSandboxId);
+      const fallback = machines.find((machine) => machine.sandboxId === fallbackId);
       onChange({
         ...draft,
         compute: fallback
@@ -1752,7 +1809,9 @@ function ComputeTargetControl(props: {
                 fallback.sandboxId,
               ),
             }
-          : { kind: "sandbox", backend: "" },
+          : selfhostedPrimary
+            ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
+            : { kind: "sandbox", backend: "" },
       });
       return;
     }

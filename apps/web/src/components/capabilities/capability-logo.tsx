@@ -16,11 +16,14 @@ export function CapabilityLogo({
   name,
   size = "md",
   className,
+  fallback,
 }: {
   src: string | null;
   name: string;
   size?: "sm" | "md" | "lg";
   className?: string;
+  /** Optional reviewed initials for named products; catalog rows derive them from the name. */
+  fallback?: string;
 }) {
   const [failed, setFailed] = useState(false);
   // A new src (e.g. switching the sheet to another item) gets a fresh attempt.
@@ -53,7 +56,7 @@ export function CapabilityLogo({
           onError={() => setFailed(true)}
         />
       ) : (
-        <span>{capabilityMonogram(name)}</span>
+        <span>{fallback ?? capabilityMonogram(name)}</span>
       )}
     </span>
   );

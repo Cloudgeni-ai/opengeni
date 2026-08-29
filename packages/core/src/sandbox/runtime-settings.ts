@@ -4,6 +4,7 @@ import {
   type RigVersion,
   type Session,
   type SandboxBackend,
+  type SandboxOs,
 } from "@opengeni/contracts";
 import {
   getRigVersion,
@@ -17,6 +18,37 @@ import {
   rigProviderImageMatchesDefinition,
   rigProviderImageProviderBindingKeyHash,
 } from "../rigs/provider-images";
+
+export type ManagedSessionGroupBackend = Exclude<SandboxBackend, "none" | "selfhosted">;
+
+/**
+ * Resolve the provider backend behind a session's synthetic managed group.
+ *
+ * A machine-home session keeps `selfhosted` as its durable policy while a
+ * non-null active pointer selects the enrolled machine. Clearing that pointer
+ * is an explicit switch to the deployment's managed group, so API readiness,
+ * viewer attachment, Channel-A, and worker turns must all select the same
+ * provider. Deployments configured with `none` or `selfhosted` have no managed
+ * fallback to expose.
+ */
+export function managedSessionGroupBackend(
+  deploymentBackend: SandboxBackend,
+  sessionBackend: SandboxBackend,
+): ManagedSessionGroupBackend | null {
+  if (sessionBackend === "none") return null;
+  const backend = sessionBackend === "selfhosted" ? deploymentBackend : sessionBackend;
+  return backend === "none" || backend === "selfhosted" ? null : backend;
+}
+
+/** A machine-home row carries the machine's host OS; its managed group uses the
+ * platform's canonical managed-sandbox OS instead. Ordinary sessions preserve
+ * their explicitly selected OS. */
+export function managedSessionGroupOs(
+  sessionBackend: SandboxBackend,
+  sessionOs: SandboxOs,
+): SandboxOs {
+  return sessionBackend === "selfhosted" ? "linux" : sessionOs;
+}
 
 /** Pre-V2 Packs are the sole compatibility path where a Pack can still own a
  * sandbox image. V2 installations select a Rig instead. Keep this predicate at

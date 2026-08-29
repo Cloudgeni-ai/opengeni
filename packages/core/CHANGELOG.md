@@ -1,5 +1,66 @@
 # @opengeni/core
 
+## 2.5.7
+
+### Patch Changes
+
+- 06460ae: Return governed-learning activation receipts before optional Slack publication settles, so exact retries recover durable outcomes even when notification dispatch stalls.
+- Updated dependencies [3c75347]
+- Updated dependencies [551cead]
+- Updated dependencies [06fda28]
+- Updated dependencies [499cc48]
+- Updated dependencies [37faec3]
+  - @opengeni/runtime@1.4.6
+  - @opengeni/db@3.6.3
+  - @opengeni/documents@0.8.9
+  - @opengeni/events@0.4.7
+
+## 2.5.6
+
+### Patch Changes
+
+- @opengeni/runtime@1.4.5
+
+## 2.5.5
+
+### Patch Changes
+
+- 595939e: Add managed Google and GitHub sign-in through fenced browser session-set transactions, server-side OAuth state, provider-aware canonical login bindings, and isolated popup UI flows.
+- 246b71f: Route explicit Connected Machine-to-session sandbox switches through the deployment's managed backend consistently across fleet projection, readiness, viewers, direct operations, worker manifests, and turns.
+- Updated dependencies [595939e]
+- Updated dependencies [8dc432d]
+- Updated dependencies [c705de3]
+- Updated dependencies [e4655a7]
+- Updated dependencies [95d3971]
+- Updated dependencies [80d7594]
+  - @opengeni/config@0.22.2
+  - @opengeni/contracts@2.8.0
+  - @opengeni/db@3.6.2
+  - @opengeni/runtime@1.4.4
+  - @opengeni/documents@0.8.8
+  - @opengeni/storage@0.2.112
+  - @opengeni/events@0.4.6
+  - @opengeni/observability@0.8.11
+
+## 2.5.4
+
+### Patch Changes
+
+- 17d253b: Complete personal GitHub identity support across managed, self-hosted, and local modes. Add a compact connect-and-repository UI, exact local-human authority persistence, Docker-safe credential brokering, durable child and goal propagation, and reviewed GitHub tools for pull-request reviews and merges without exposing provider tokens to agents.
+- c116379: Improve organization and workspace administration with compact people management, workspace-admin member controls, personal integration and Codex subscription setup, clearer permission presets, consistent connector presentation, and organization-scoped resource navigation.
+- Updated dependencies [17d253b]
+- Updated dependencies [ff4af61]
+- Updated dependencies [c116379]
+- Updated dependencies [c116379]
+  - @opengeni/config@0.22.1
+  - @opengeni/db@3.6.1
+  - @opengeni/runtime@1.4.3
+  - @opengeni/contracts@2.7.1
+  - @opengeni/documents@0.8.7
+  - @opengeni/storage@0.2.111
+  - @opengeni/events@0.4.5
+  - @opengeni/observability@0.8.10
+
 ## 2.5.3
 
 ### Patch Changes

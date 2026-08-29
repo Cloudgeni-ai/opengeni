@@ -14,9 +14,21 @@ export function wholeKibEnvelope(
   return Math.ceil((measuredBytes + minimumHeadroomBytes) / KIB) * KIB;
 }
 
-/** Exact embedded-client plus attachment-preview Linux/x64 Bun 1.3.14 direct-session measurement. */
-export const DIRECT_SESSION_RAW_MEASUREMENT = 2_200_819;
+/** Exact personal-GitHub plus current-main Linux/x64 Bun 1.4 measurement. */
+export const DIRECT_SESSION_RAW_MEASUREMENT = 2_219_469;
 export const DIRECT_SESSION_RAW_BUDGET = wholeKibEnvelope(DIRECT_SESSION_RAW_MEASUREMENT);
+
+/** Exact timeline-hardening plus its reviewed main Linux/x64 Bun 1.4 measurement. */
+export const TIMELINE_HARDENING_MERGE_TREE_RAW_MEASUREMENT = 2_201_700;
+export const TIMELINE_HARDENING_MERGE_TREE_RAW_BUDGET = wholeKibEnvelope(
+  TIMELINE_HARDENING_MERGE_TREE_RAW_MEASUREMENT,
+);
+
+/** Exact timeline-hardening plus current-main Linux/x64 Bun 1.4 measurement. */
+export const TIMELINE_HARDENING_CURRENT_MAIN_RAW_MEASUREMENT = 2_222_765;
+export const TIMELINE_HARDENING_CURRENT_MAIN_RAW_BUDGET = wholeKibEnvelope(
+  TIMELINE_HARDENING_CURRENT_MAIN_RAW_MEASUREMENT,
+);
 
 /** Exact version-frozen release-source Linux/x64 Bun 1.4 workload measurement. */
 export const VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT = 2_205_043;
@@ -30,14 +42,44 @@ export const WORK_DISCOVERY_MERGE_TREE_RAW_BUDGET = wholeKibEnvelope(
   WORK_DISCOVERY_MERGE_TREE_RAW_MEASUREMENT,
 );
 
-/** Exact 0.23.12 homeserver backport with private-HTTP and Variable Set naming fixes. */
-export const HOMESERVER_VARIABLE_NAME_UX_RAW_MEASUREMENT = 2_207_929;
-export const HOMESERVER_VARIABLE_NAME_UX_RAW_BUDGET = wholeKibEnvelope(
-  HOMESERVER_VARIABLE_NAME_UX_RAW_MEASUREMENT,
+/** Exact workspace-member administration Linux/x64 Bun 1.4 merge-tree measurement. */
+export const WORKSPACE_MEMBER_ADMINISTRATION_RAW_MEASUREMENT = 2_210_226;
+export const WORKSPACE_MEMBER_ADMINISTRATION_RAW_BUDGET = wholeKibEnvelope(
+  WORKSPACE_MEMBER_ADMINISTRATION_RAW_MEASUREMENT,
+);
+
+/** Exact workspace-member administration plus protected-main Linux/x64 Bun 1.4 measurement. */
+export const WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT = 2_224_726;
+export const WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_BUDGET = wholeKibEnvelope(
+  WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_MEASUREMENT,
+);
+
+/** Exact managed-social-sign-in current-main merge-tree measurement. */
+export const MANAGED_SOCIAL_SIGN_IN_MERGE_TREE_RAW_MEASUREMENT = 2_226_468;
+export const MANAGED_SOCIAL_SIGN_IN_MERGE_TREE_RAW_BUDGET = wholeKibEnvelope(
+  MANAGED_SOCIAL_SIGN_IN_MERGE_TREE_RAW_MEASUREMENT,
+);
+
+/** Exact browser-owned HTTP/1 stream-lifetime Linux/x64 Bun 1.4 measurement. */
+export const HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT = 2_237_456;
+export const HTTP1_BROWSER_STREAMS_RAW_BUDGET = wholeKibEnvelope(
+  HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT,
+);
+
+/** Exact abandoned session-read cancellation Linux/x64 Bun 1.4 measurement. */
+export const SESSION_READ_CANCELLATION_RAW_MEASUREMENT = 2_239_997;
+export const SESSION_READ_CANCELLATION_RAW_BUDGET = wholeKibEnvelope(
+  SESSION_READ_CANCELLATION_RAW_MEASUREMENT,
 );
 export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   DIRECT_SESSION_RAW_BUDGET,
+  TIMELINE_HARDENING_MERGE_TREE_RAW_BUDGET,
+  TIMELINE_HARDENING_CURRENT_MAIN_RAW_BUDGET,
   VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET,
   WORK_DISCOVERY_MERGE_TREE_RAW_BUDGET,
-  HOMESERVER_VARIABLE_NAME_UX_RAW_BUDGET,
+  WORKSPACE_MEMBER_ADMINISTRATION_RAW_BUDGET,
+  WORKSPACE_MEMBER_ADMINISTRATION_CURRENT_MAIN_RAW_BUDGET,
+  MANAGED_SOCIAL_SIGN_IN_MERGE_TREE_RAW_BUDGET,
+  HTTP1_BROWSER_STREAMS_RAW_BUDGET,
+  SESSION_READ_CANCELLATION_RAW_BUDGET,
 );

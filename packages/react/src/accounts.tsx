@@ -197,6 +197,7 @@ export function BrowserAccountsProvider({
     expectedGeneration: string;
   } | null>(null);
   const pendingCommitSequenceRef = useRef<number | null>(null);
+  const pendingServerMutationSequenceRef = useRef<number | null>(null);
   const invalidatedDuringPendingCommitRef = useRef(false);
   const sequenceRef = useRef(0);
   const transitionAbortRef = useRef<AbortController | null>(null);
@@ -262,6 +263,7 @@ export function BrowserAccountsProvider({
       sequence: number,
       publish: boolean,
       authorityResetConfirmed = false,
+      initiatingSurfaceFenced = false,
     ): Promise<ManagedAuthSessionSetProjection | null> => {
       let source = from;
       let target = accepted;
@@ -272,7 +274,7 @@ export function BrowserAccountsProvider({
           throw new Error("Browser account response regressed the accepted actor epoch");
         }
       }
-      if (sameSelectedActor(source, target)) {
+      if (!initiatingSurfaceFenced && sameSelectedActor(source, target)) {
         setProjection(target);
         setPhase("ready");
         setError(null);
@@ -287,7 +289,13 @@ export function BrowserAccountsProvider({
         // and abort old-actor work throughout that entire window.
         if (publish) publishActorHint(target);
         setPhase("loading");
-        await onActorTransition({ kind, from: source, to: target, signal: controller.signal });
+        await onActorTransition({
+          kind,
+          from: initiatingSurfaceFenced ? null : source,
+          to: target,
+          signal: controller.signal,
+        });
+        initiatingSurfaceFenced = false;
         if (controller.signal.aborted || sequenceRef.current !== sequence) return null;
         if (!target) {
           setProjection(null);
@@ -393,21 +401,44 @@ export function BrowserAccountsProvider({
       pending.expectedGeneration = expectedGeneration;
       const sequence = ++sequenceRef.current;
       pendingCommitSequenceRef.current = sequence;
+      pendingServerMutationSequenceRef.current = null;
       invalidatedDuringPendingCommitRef.current = false;
       pendingRef.current = pending;
       setPhase("committing");
       setError(null);
       const changesActor = pending.changesActor(current);
-      if (changesActor) {
-        // Peers must hide and abort the old actor before this request can be
-        // accepted. Yielding one task after the secret-free hold lets queued
-        // BroadcastChannel delivery run before the network mutation starts;
-        // a peer that was already dispatching remains an ordinary pre-commit
-        // in-flight request and is still fenced by the server epoch.
-        publishActorHold(pending.operationId, current);
-        await yieldToCrossTabActorHold();
-      }
+      let initiatingActorFenced = false;
       try {
+        if (changesActor) {
+          // Every tab, including the initiator, must hide and abort the old actor
+          // before this request can be accepted. Otherwise a response-lost
+          // logout can leave the initiating route alive long enough for its
+          // event stream to reconnect with the newly revoked cookie.
+          publishActorHold(pending.operationId, current);
+          transitionAbortRef.current?.abort();
+          const controller = new AbortController();
+          transitionAbortRef.current = controller;
+          projectionRef.current = null;
+          setProjection(null);
+          setPhase("loading");
+          // The host can synchronously clear its actor surface before its
+          // transition promise later rejects. From this point on, every
+          // failure must reconcile and restore authority even though the
+          // account mutation has not started yet.
+          initiatingActorFenced = true;
+          await onActorTransition({
+            kind: pending.kind,
+            from: current,
+            to: null,
+            signal: controller.signal,
+          });
+          if (controller.signal.aborted || sequenceRef.current !== sequence) return false;
+          // Yield one task after the secret-free hold so queued BroadcastChannel
+          // delivery can fence peers before the network mutation starts.
+          await yieldToCrossTabActorHold();
+          if (controller.signal.aborted || sequenceRef.current !== sequence) return false;
+        }
+        pendingServerMutationSequenceRef.current = sequence;
         let accepted: ManagedAuthSessionSetProjection;
         try {
           accepted = await pending.execute(expectedGeneration);
@@ -429,7 +460,22 @@ export function BrowserAccountsProvider({
           if (sequenceRef.current !== sequence) return false;
         }
         pendingRef.current = null;
-        if (!authorityResetConfirmed && sameSelectedActor(current, accepted)) {
+        // The server response and any invalidation reconciliation are now
+        // authoritative. Release commit ownership before host settlement so a
+        // later invalidation starts its own reconciliation instead of relying
+        // on the already-consumed check above.
+        if (pendingServerMutationSequenceRef.current === sequence) {
+          pendingServerMutationSequenceRef.current = null;
+        }
+        if (pendingCommitSequenceRef.current === sequence) {
+          pendingCommitSequenceRef.current = null;
+          invalidatedDuringPendingCommitRef.current = false;
+        }
+        if (
+          !initiatingActorFenced &&
+          !authorityResetConfirmed &&
+          sameSelectedActor(current, accepted)
+        ) {
           setProjection(accepted);
           setPhase("ready");
           setError(null);
@@ -441,20 +487,62 @@ export function BrowserAccountsProvider({
             sequence,
             true,
             authorityResetConfirmed,
+            initiatingActorFenced,
           );
         }
         return true;
       } catch (caught) {
+        if (initiatingActorFenced) {
+          let authorityRestored = false;
+          try {
+            const restored = await client.reconcileSessionSetAuthority();
+            if (sequenceRef.current !== sequence) return false;
+            await settleActorTransition(
+              pending.kind,
+              current,
+              restored,
+              sequence,
+              false,
+              true,
+              true,
+            );
+            if (sequenceRef.current !== sequence) return false;
+            authorityRestored = true;
+          } catch {
+            // If authority itself cannot be reconciled, retain the existing
+            // fail-closed provider error path and its manual retry surface.
+          }
+          if (authorityRestored) {
+            // Restore transport provenance before retaining the existing
+            // fail-closed retry surface. The retry screen keeps tenant data
+            // hidden, while refresh can safely reveal this reconciled actor.
+            const restoredError = accountError(caught);
+            setError(restoredError);
+            setPhase("recoverable_error");
+            throw restoredError;
+          }
+        }
         return await fail(caught, pending.kind);
       } finally {
         if (changesActor) publishActorRelease(pending.operationId);
+        if (pendingServerMutationSequenceRef.current === sequence) {
+          pendingServerMutationSequenceRef.current = null;
+        }
         if (pendingCommitSequenceRef.current === sequence) {
           pendingCommitSequenceRef.current = null;
           invalidatedDuringPendingCommitRef.current = false;
         }
       }
     },
-    [client, fail, inspectBlockers, publishActorHold, publishActorRelease, settleActorTransition],
+    [
+      client,
+      fail,
+      inspectBlockers,
+      onActorTransition,
+      publishActorHold,
+      publishActorRelease,
+      settleActorTransition,
+    ],
   );
 
   const refresh = useCallback(async () => {
@@ -493,10 +581,24 @@ export function BrowserAccountsProvider({
   );
 
   const invalidateActor = useCallback(async () => {
-    if (pendingCommitSequenceRef.current !== null) {
+    const pendingCommitSequence = pendingCommitSequenceRef.current;
+    if (
+      pendingCommitSequence !== null &&
+      pendingServerMutationSequenceRef.current === pendingCommitSequence
+    ) {
       invalidatedDuringPendingCommitRef.current = true;
       await beginNeutralActorInvalidation(projectionRef.current);
       return null;
+    }
+    // An authority hint that arrives while the initiating host fence is still
+    // pending supersedes the not-yet-dispatched mutation. Reconcile it here;
+    // otherwise aborting that fence makes executePending return early while no
+    // operation remains to restore the neutral actor surface.
+    if (pendingCommitSequence !== null) {
+      pendingCommitSequenceRef.current = null;
+      pendingServerMutationSequenceRef.current = null;
+      invalidatedDuringPendingCommitRef.current = false;
+      pendingRef.current = null;
     }
     const sequence = ++sequenceRef.current;
     const before = projectionRef.current;

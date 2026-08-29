@@ -64,6 +64,27 @@ export function managedSandboxOwnershipForTurn(
   };
 }
 
+/**
+ * Bind backend-aware runtime settings to the route that will actually execute.
+ *
+ * A machine-home turn keeps `selfhosted` as its durable policy. After an
+ * explicit clear-to-default, however, both the ownership-inverted path and the
+ * legacy SDK-owned path must construct manifests and clients for the resolved
+ * managed group backend. Machine-primary and ordinary session routes preserve
+ * their existing settings object.
+ */
+export function sandboxSettingsForRoute(input: {
+  runSettings: Settings;
+  machinePrimary: boolean;
+  groupBoxBackend: Settings["sandboxBackend"];
+}): Settings {
+  return input.runSettings.sandboxBackend === "selfhosted" &&
+    !input.machinePrimary &&
+    input.groupBoxBackend !== "selfhosted"
+    ? { ...input.runSettings, sandboxBackend: input.groupBoxBackend }
+    : input.runSettings;
+}
+
 /** A sandboxless home still establishes an explicitly attached Connected Machine. */
 export function shouldEstablishSandboxForTurn(
   sandboxOwnershipEnabled: boolean,

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDb, createSession } from "@opengeni/db";
+import { createDb, createSession, updateSessionTitleWithEvent } from "@opengeni/db";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
   acquireSharedTestDatabase,
@@ -42,6 +43,7 @@ const CURRENT_TITLE =
   "a deliberately long title that must remain visible and truncate independently";
 
 type HeaderFixture = {
+  accountId: string;
   workspaceId: string;
   sessionId: string;
   parentSessionId: string;
@@ -56,6 +58,7 @@ describe("responsive production session header", () => {
   let apiBaseUrl: string;
   let webBaseUrl: string;
   let fixture: HeaderFixture;
+  let bus: MemoryEventBus;
 
   beforeAll(async () => {
     const acquired = await acquireSharedTestDatabase("session-header-browser");
@@ -64,6 +67,7 @@ describe("responsive production session header", () => {
     }
     shared = acquired;
     dbClient = createDb(shared.appUrl);
+    bus = new MemoryEventBus();
     const app = createApp({
       settings: testSettings({
         databaseUrl: shared.appUrl,
@@ -71,7 +75,7 @@ describe("responsive production session header", () => {
         delegationSecret: undefined,
       }),
       db: dbClient.db,
-      bus: new MemoryEventBus(),
+      bus,
       workflowClient,
     });
     api = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 120, fetch: app.fetch });
@@ -157,6 +161,7 @@ describe("responsive production session header", () => {
         });
       }
       fixture = {
+        accountId: workspace.accountId,
         workspaceId,
         sessionId: parent.id,
         parentSessionId: parent.parentSessionId!,
@@ -345,6 +350,70 @@ describe("responsive production session header", () => {
         fullPage: true,
         animations: "disabled",
       });
+    } finally {
+      await context.close();
+    }
+  }, 30_000);
+
+  test("an untouched provisional rename cannot overwrite a semantic title arriving mid-edit", async () => {
+    const openingPrompt = "Inspect provisional session naming in the browser";
+    const semanticTitle = "Automatic Session Naming";
+    const created = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: openingPrompt,
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const context = await configuredContext(browser, {
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(sessionUrl({ ...fixture, sessionId: created.id }));
+
+      const titleButton = page.locator("header button[title$='click to rename']");
+      await titleButton.waitFor();
+      expect((await titleButton.textContent())?.trim()).toBe(openingPrompt);
+      await titleButton.click();
+
+      const editor = page.locator("header input[aria-label='Session title']");
+      await editor.waitFor();
+      expect(await editor.inputValue()).toBe(openingPrompt);
+
+      const updated = await updateSessionTitleWithEvent(dbClient.db, {
+        workspaceId: fixture.workspaceId,
+        sessionId: created.id,
+        title: semanticTitle,
+        source: "agent",
+      });
+      expect(updated.updated).toBe(true);
+      expect(updated.events).toHaveLength(1);
+      await publishDurableSessionEvents(bus, fixture.workspaceId, created.id, updated.events);
+
+      await editor.waitFor({ state: "visible" });
+      await waitFor(
+        async () => (await editor.getAttribute("data-session-title-current")) === semanticTitle,
+        { timeoutMs: 10_000 },
+      );
+      expect(await editor.inputValue()).toBe(openingPrompt);
+
+      await editor.blur();
+      await waitFor(async () => (await titleButton.textContent())?.trim() === semanticTitle, {
+        timeoutMs: 10_000,
+      });
+
+      const [row] = await shared.admin<Array<{ title: string | null; titleSource: string | null }>>`
+        select title, title_source as "titleSource"
+        from sessions
+        where workspace_id = ${fixture.workspaceId} and id = ${created.id}`;
+      expect(row).toEqual({ title: semanticTitle, titleSource: "agent" });
+      expect(pageErrors.get(context)).toEqual([]);
     } finally {
       await context.close();
     }

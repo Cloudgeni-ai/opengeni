@@ -339,16 +339,13 @@ function Harness() {
     if (syncCachedPrefetch || syncCachedUnderfill) {
       return createOlderHistoryLoadReceipt((markCommitted) => {
         const call = ++loadCallsRef.current;
-        flushSync(() => {
-          setLoadCalls(call);
-          if (call === 1) {
-            markCommitted();
-            setItems((current) =>
-              syncCachedUnderfill ? [userMessage(499)] : [userMessage(499), ...current],
-            );
-          }
-        });
-        flushSync(() => undefined);
+        setLoadCalls(call);
+        if (call === 1) {
+          markCommitted();
+          setItems((current) =>
+            syncCachedUnderfill ? [userMessage(499)] : [userMessage(499), ...current],
+          );
+        }
         return true;
       });
     }

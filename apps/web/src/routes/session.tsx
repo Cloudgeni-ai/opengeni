@@ -113,7 +113,9 @@ import {
   updateLocalSessionDeliveryAttention,
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
+  restoreUnreadSessionAttentionProjection,
   shouldAcknowledgeActiveSession,
+  shouldProjectActiveSessionRead,
 } from "@/lib/session-attention";
 import {
   mergeSessionContextProjection,
@@ -330,6 +332,8 @@ export function SessionRoute({
     sessionEventFeedStore,
   } = context;
   const acknowledgedProjectionRef = useRef<string | null>(null);
+  const confirmedProjectionRef = useRef<string | null>(null);
+  const failedProjectionRef = useRef<string | null>(null);
   const retriedProjectionRef = useRef<string | null>(null);
   const [foreground, setForeground] = useState(() => ({
     documentVisible: document.visibilityState === "visible",
@@ -393,27 +397,87 @@ export function SessionRoute({
       document.removeEventListener("visibilitychange", reconcileForeground);
     };
   }, []);
+  const projectSessionAttention = useCallback(
+    (projection: Parameters<typeof notifySessionAttentionChanged>[0]) => {
+      notifySessionAttentionChanged(projection);
+      setContextSession((current) =>
+        current?.id === projection.id
+          ? applySessionAttentionProjection(current, projection)
+          : current,
+      );
+    },
+    [setContextSession],
+  );
+  const readThroughSequence = session
+    ? Math.max(session.lastSequence, renderedThroughSequence)
+    : renderedThroughSequence;
+  const activeReadProjectionKey = session
+    ? sessionReadProjectionKey(session.id, readThroughSequence)
+    : null;
+  const routeUnreadProjection = useMemo(
+    () =>
+      session
+        ? {
+            ...session,
+            unread: session.unread || readThroughSequence > session.lastSequence,
+          }
+        : null,
+    [readThroughSequence, session],
+  );
   useEffect(() => {
-    const projectionKey = session
-      ? sessionReadProjectionKey(session.id, renderedThroughSequence)
-      : null;
-    const unreadProjection = session
-      ? {
-          ...session,
-          unread:
-            (session.unread || renderedThroughSequence > session.lastSequence) &&
-            projectionKey !== acknowledgedProjectionRef.current,
-        }
-      : null;
+    if (!session || !activeReadProjectionKey) return;
+    if (
+      confirmedProjectionRef.current === activeReadProjectionKey ||
+      failedProjectionRef.current === activeReadProjectionKey ||
+      !shouldProjectActiveSessionRead({
+        activeSessionId: sessionId,
+        workspaceId,
+        session: routeUnreadProjection,
+        ...foreground,
+      })
+    ) {
+      return;
+    }
+
+    const optimisticProjection = {
+      id: session.id,
+      workspaceId: session.workspaceId,
+      unread: false,
+      attentionVersion: session.attentionVersion,
+      lastSequence: readThroughSequence,
+    };
+    projectSessionAttention(optimisticProjection);
+    return () => {
+      if (
+        confirmedProjectionRef.current === activeReadProjectionKey ||
+        failedProjectionRef.current === activeReadProjectionKey
+      ) {
+        return;
+      }
+      projectSessionAttention({ ...optimisticProjection, unread: true });
+    };
+  }, [
+    activeReadProjectionKey,
+    foreground,
+    projectSessionAttention,
+    readThroughSequence,
+    routeUnreadProjection,
+    session,
+    sessionId,
+    workspaceId,
+  ]);
+  useEffect(() => {
+    const projectionKey = activeReadProjectionKey;
     const liveTipLoaded =
       !initialLoading && !hasNewer && !loadingNewer && !loadingOldest && !loadingLatest;
     if (
       !session ||
       !projectionKey ||
+      acknowledgedProjectionRef.current === projectionKey ||
       !shouldAcknowledgeActiveSession({
         activeSessionId: sessionId,
         workspaceId,
-        session: unreadProjection,
+        session: routeUnreadProjection,
         liveTipLoaded,
         ...foreground,
       })
@@ -421,35 +485,40 @@ export function SessionRoute({
       return;
     }
     const targetSession = session;
-    let cancelled = false;
+    let active = true;
     const timer = window.setTimeout(() => {
       if (document.visibilityState !== "visible" || !document.hasFocus()) return;
       const acceptedTransition = captureWorkspaceInvocation(workspaceId);
-      if (!acceptedTransition) return;
+      if (!acceptedTransition) {
+        failedProjectionRef.current = projectionKey;
+        projectSessionAttention(
+          restoreUnreadSessionAttentionProjection(targetSession, readThroughSequence),
+        );
+        return;
+      }
       acknowledgedProjectionRef.current = projectionKey;
       void client
         .updateSessionAttention(workspaceId, targetSession.id, {
           unread: false,
-          acknowledgedThroughSequence: renderedThroughSequence,
+          acknowledgedThroughSequence: readThroughSequence,
         })
         .then((updated) => {
-          if (cancelled || !ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+          if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+          confirmedProjectionRef.current = projectionKey;
+          if (failedProjectionRef.current === projectionKey) {
+            failedProjectionRef.current = null;
+          }
           // The rail owns separately polled page objects. Keep this exact
           // frontier result there so a stale list poll cannot resurrect or
           // prematurely clear the unread dot.
-          notifySessionAttentionChanged(updated);
-          setContextSession((current) =>
-            current?.id === updated.id
-              ? applySessionAttentionProjection(current, updated)
-              : current,
-          );
+          projectSessionAttention(updated);
         })
         .catch(() => {
           // Retry one transient failure for this exact frontier. Keeping the
           // receipt after the second failure prevents a permanent 4xx/5xx from
           // becoming an unbounded request and log loop.
           if (
-            !cancelled &&
+            active &&
             ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
             acknowledgedProjectionRef.current === projectionKey &&
             retriedProjectionRef.current !== projectionKey
@@ -457,15 +526,23 @@ export function SessionRoute({
             retriedProjectionRef.current = projectionKey;
             acknowledgedProjectionRef.current = null;
             setAttentionRetryRevision((revision) => revision + 1);
+            return;
+          }
+          if (active && ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+            failedProjectionRef.current = projectionKey;
+            projectSessionAttention(
+              restoreUnreadSessionAttentionProjection(targetSession, readThroughSequence),
+            );
           }
         });
     }, 750);
     return () => {
-      cancelled = true;
+      active = false;
       window.clearTimeout(timer);
     };
   }, [
     attentionRetryRevision,
+    activeReadProjectionKey,
     captureWorkspaceInvocation,
     client,
     foreground,
@@ -475,10 +552,11 @@ export function SessionRoute({
     loadingNewer,
     loadingOldest,
     ownsWorkspaceInvocation,
-    renderedThroughSequence,
+    projectSessionAttention,
+    readThroughSequence,
+    routeUnreadProjection,
     session,
     sessionId,
-    setContextSession,
     workspaceId,
   ]);
   useEffect(() => {
@@ -1428,6 +1506,12 @@ function SessionChatPane(props: {
     events: props.events,
     sendExtras: () => ({
       resources: [...attachments.readyResources, ...repositories.pendingResources],
+      ...(repositories.pendingResources.some(
+        (resource) =>
+          resource.kind === "repository" && resource.connectionType === "github_personal",
+      ) && context.personalGitHubAuthority
+        ? { connectionAuthorities: [context.personalGitHubAuthority] }
+        : {}),
       ...(personalAttachment.intent
         ? { personalResourceAttachment: personalAttachment.intent }
         : {}),
@@ -1768,10 +1852,12 @@ function SessionChatPane(props: {
               onLoadOlder={props.onLoadOlder}
               hasNewer={props.hasNewer}
               loadingNewer={props.loadingNewer}
-              onLoadNewer={() => void props.onLoadNewer()}
+              onLoadNewer={props.onLoadNewer}
               loadingOldest={props.loadingOldest}
-              onJumpToStart={() => void props.onJumpToStart()}
-              onJumpToLatest={() => void props.onJumpToLatest()}
+              onJumpToStart={async () => {
+                await props.onJumpToStart();
+              }}
+              onJumpToLatest={props.onJumpToLatest}
               trailingState={
                 props.humanInput.requests.length > 0 &&
                 props.session.status === "requires_action" ? (

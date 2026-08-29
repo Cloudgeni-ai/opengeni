@@ -40,14 +40,16 @@ export const CapabilityTile = memo(function CapabilityTile({
       data-capability-catalog-tile={item.id}
       className={cn(
         "group flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface/50 p-3",
-        "transition-colors hover:border-border-strong",
+        "transition-[border-color,background-color,box-shadow] duration-150",
+        "hover:border-brand/40 hover:bg-accent hover:shadow-sm",
+        "focus-within:border-brand/60 focus-within:ring-1 focus-within:ring-brand/30",
       )}
     >
       <button
         type="button"
         onClick={onOpen}
         aria-label={`${item.name}. ${chip.label}`}
-        className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+        className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none"
       >
         <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
         <div className="min-w-0 flex-1">

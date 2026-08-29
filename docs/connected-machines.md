@@ -460,6 +460,13 @@ tool result, and source frame references are then released.
 A session points at one active sandbox at a time. `swapActiveSandbox` re-points
 it — the user-authenticated equivalent of the agent's `sandbox_swap` MCP tool.
 
+A machine-home session does not create a cloud box while its Connected Machine
+is selected. When the deployment has a managed backend, the fleet also exposes
+the session's synthetic managed group as an explicit fallback target. Choosing
+`"session"` or `"default"` verifies that group through the normal lease path and
+then clears the active machine pointer. A deployment configured with only
+`selfhosted` or `none` has no managed group to select.
+
 ```ts
 // Point the session at a machine…
 const swap = await client.swapActiveSandbox(workspaceId, sessionId, {
@@ -481,8 +488,8 @@ comes back as `swapped: false` with a `reason` rather than throwing. The next
 turn runs on whatever the pointer resolves to.
 
 An agent turn that started on a Connected Machine does not pre-lease a managed
-home sandbox. If that turn explicitly swaps a managed-home session back to
-`"session"`/`"default"`, OpenGeni preserves the successful pointer change,
+group. If that turn explicitly swaps back to `"session"`/`"default"`, OpenGeni
+preserves the successful pointer change,
 checkpoints completed model/tool truth, and continues the same logical turn in a
 fresh home-primary attempt. The handoff requires no new user message, never
 silently runs a post-swap operation on the old machine, and never provisions a

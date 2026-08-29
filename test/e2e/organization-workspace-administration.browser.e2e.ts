@@ -53,8 +53,11 @@ describe("organization workspace administration in Chromium", () => {
   }, 30_000);
 
   test("uses named roles, exact CAS requests, explicit custom access, and destructive revoke", async () => {
-    const soleOwnerPause = page.getByRole("button", { name: "Pause access", exact: true }).first();
-    expect(await soleOwnerPause.isDisabled()).toBe(true);
+    const soleOwnerActions = page.getByRole("button", {
+      name: "No actions available for Morgan Owner (you)",
+      exact: true,
+    });
+    expect(await soleOwnerActions.isDisabled()).toBe(true);
     expect(await page.getByText(/Assign another active owner before changing/).count()).toBe(1);
     expect(
       await page
@@ -68,22 +71,42 @@ describe("organization workspace administration in Chromium", () => {
         })
         .count(),
     ).toBe(1);
+    await page
+      .getByRole("button", {
+        name: "More actions for invitation to reconcile-member@example.test",
+        exact: true,
+      })
+      .click();
     expect(
       await page
-        .getByRole("button", { name: "Retry delivery to reconcile-member@example.test" })
+        .getByRole("menuitem", {
+          name: "Retry delivery to reconcile-member@example.test",
+          exact: true,
+        })
         .count(),
     ).toBe(0);
-    expect(
-      await page
-        .getByText("Delivery failed — invitation expired · 1 attempt", { exact: true })
-        .count(),
-    ).toBe(1);
-    await page.getByRole("button", { name: "Retry delivery" }).click();
+    await page.keyboard.press("Escape");
+    expect(await page.getByText("expired-member@example.test", { exact: true }).count()).toBe(0);
+    await page
+      .getByRole("button", {
+        name: "More actions for invitation to retry-member@example.test",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByRole("menuitem", {
+        name: "Retry delivery to retry-member@example.test",
+        exact: true,
+      })
+      .click();
     await expectReceipt(page, {
       action: "retry-delivery",
       invitationId: "77777777-7777-4777-8777-777777777777",
     });
-    await page.getByText("Email sent · 2 attempts", { exact: true }).waitFor();
+    await page
+      .getByText(/Member · Sent · Expires/)
+      .first()
+      .waitFor();
 
     const workspaceSummary = page.locator("summary").filter({ hasText: "Product engineering" });
     await workspaceSummary.focus();
@@ -94,21 +117,18 @@ describe("organization workspace administration in Chromium", () => {
       "Viewer",
       "Member",
       "Workspace admin",
-      "Custom permissions…",
     ]);
     await role.selectOption("member");
     await expectReceipt(page, { action: "grant", role: "member" });
 
-    await role.selectOption("custom");
-    const customRegion = page
-      .locator("details")
-      .filter({ hasText: /custom permissions/i })
-      .last();
-    await customRegion.locator("summary").click();
+    await page
+      .getByRole("button", { name: "Fine-tune permissions for Ada Member", exact: true })
+      .click();
+    const customRegion = page.getByRole("dialog", { name: "Fine-tune workspace access" });
     const filesWrite = customRegion.getByRole("checkbox", { name: "files:write" });
     await filesWrite.focus();
     await page.keyboard.press("Space");
-    await customRegion.getByRole("button", { name: "Save custom permissions" }).click();
+    await customRegion.getByRole("button", { name: "Save custom access" }).click();
     await expectReceipt(page, {
       action: "grant",
       role: "custom",
@@ -141,16 +161,18 @@ describe("organization workspace administration in Chromium", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.reload({ waitUntil: "networkidle" });
     await page.getByText("Product engineering", { exact: true }).first().waitFor();
+    await page.getByRole("button", { name: "Invite person", exact: true }).click();
     const email = page.getByLabel("Email address");
     await email.fill("new-member@example.test");
     await page.getByLabel("Name", { exact: true }).fill("New Member");
+    await page.getByText("Workspace access", { exact: true }).click();
     const sharedWorkspace = page.getByRole("checkbox", { name: "Product engineering" });
     expect(await page.getByText("Personal workspace", { exact: false }).count()).toBeGreaterThan(0);
     expect(await page.getByRole("checkbox", { name: /Personal/ }).count()).toBe(0);
     await sharedWorkspace.focus();
     await page.keyboard.press("Space");
     expect(await sharedWorkspace.isChecked()).toBe(true);
-    const invite = page.getByRole("button", { name: "Invite", exact: true });
+    const invite = page.getByRole("button", { name: "Send invitation", exact: true });
     await invite.focus();
     await page.keyboard.press("Enter");
     await expectReceipt(page, {
@@ -164,8 +186,12 @@ describe("organization workspace administration in Chromium", () => {
         exact: true,
       })
       .waitFor();
-    await page.getByText("New Member · new-member@example.test", { exact: true }).waitFor();
-    await page.getByText("Email sent · 1 attempt", { exact: true }).last().waitFor();
+    await page.getByText("New Member", { exact: true }).waitFor();
+    await page.getByText("new-member@example.test", { exact: true }).waitFor();
+    await page
+      .getByText(/Member · Sent · Expires/)
+      .last()
+      .waitFor();
 
     await page.screenshot({
       path: "/tmp/opengeni-organization-administration-narrow.png",

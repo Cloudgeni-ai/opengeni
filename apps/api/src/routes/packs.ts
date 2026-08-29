@@ -83,7 +83,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Built-in pack ids stay reserved so a registration can never shadow them.
   app.post("/v1/workspaces/:workspaceId/packs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const manifest = RegisterCapabilityPackRequest.parse(await c.req.json());
     if (isBuiltInCapabilityPack(manifest.id)) {
       throw new HTTPException(409, {
@@ -100,7 +100,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/packs/:packId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const packId = c.req.param("packId");
     if (isBuiltInCapabilityPack(packId)) {
       throw new HTTPException(409, {
@@ -172,7 +172,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/packs/:packId/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const pack = await requirePack(db, workspaceId, c.req.param("packId"));
     const payload = InstallPackRequest.parse(await c.req.json());
     const preview = PackInstallationPreview.parse(
@@ -393,7 +393,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/packs/:packId/installation", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const pack = await requirePack(db, workspaceId, c.req.param("packId"));
     const payload = UninstallPackRequest.parse(await c.req.json());
     const requestDigest = sha256(
@@ -483,7 +483,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/packs/:packId/enable", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const pack = await requirePack(db, workspaceId, c.req.param("packId"));
     if (capabilityPackRequiresInstallationPlan(pack)) {
       throw new HTTPException(409, {

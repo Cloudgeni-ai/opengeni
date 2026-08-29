@@ -258,8 +258,11 @@ function appRepositoryAuthority(resources: ResourceRef[]): GitHubRestRepository[
     );
     const repositoryId = positiveSafeInteger(resource.githubRepositoryId ?? resource.repositoryId);
     const fullName = canonicalGitHubFullName(resource.uri);
-    if (!installationId || !repositoryId || !fullName) {
+    if (!installationId || !repositoryId) {
       throw new GitHubRestAuthorityError("GitHub App repository authority is incomplete");
+    }
+    if (!fullName) {
+      throw new GitHubRestAuthorityError("GitHub App repository URL is invalid");
     }
     return [
       {
@@ -645,7 +648,8 @@ function githubConnectorBindings(
 function canonicalGitHubFullName(uri: string): string | null {
   try {
     const url = new URL(uri);
-    const path = url.pathname.replace(/^\/+|\/+$/gu, "");
+    const clonePath = url.pathname.replace(/^\/+|\/+$/gu, "");
+    const path = clonePath.endsWith(".git") ? clonePath.slice(0, -4) : clonePath;
     if (
       url.protocol !== "https:" ||
       url.hostname !== "github.com" ||
@@ -654,7 +658,6 @@ function canonicalGitHubFullName(uri: string): string | null {
       url.password ||
       url.search ||
       url.hash ||
-      path.endsWith(".git") ||
       !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(path)
     ) {
       return null;

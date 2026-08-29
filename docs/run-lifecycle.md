@@ -23,24 +23,28 @@ OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
 Session display titles are durable session metadata, not a truncation of model
-history. Creation and migration use the prompt-free `New conversation` fallback.
-While a session still has that fallback (or a legacy null title), and its exact
-selected first-party tool and permission policy permits `set_session_title`, the
-worker projects only that exact operation through the attempt-local tool server
-and removes it from the broader remote first-party catalog for the attempt. The
-request-local one-shot instruction can therefore call `set_session_title` on the
-first model request without waiting for the remaining first-party `tools/list`;
-all other selected first-party schemas stay deferred and searchable. This does
-not grant or attach any new tool authority. The attempt-local operation uses the
-canonical title mutation, which updates the session row and appends
-`session.title_set`; a human title remains protected from later agent writes.
-The hint is based on durable title state rather than history length: turn claim
-persists the accepted user item before agent construction, so history count
-cannot identify a first turn.
-Historical fallback sessions therefore self-heal on their next eligible model
-turn. Read projections encountering malformed legacy nulls use an explicit
-factual session or agent identifier and never copy prompt text into title
-metadata.
+history. Creation and migration use `New conversation` as the durable marker
+that semantic naming is still pending. Human-facing clients may render a short,
+sensitive-safe opening-prompt preview while that marker (or a legacy null title)
+remains; the preview is display-only, never persisted or searched as title
+metadata, and obvious credential-, URL-, or identifier-shaped prefixes retain
+the generic marker. When the durable title changes, the client naturally yields
+to it.
+
+While a session still has the pending marker, and its exact selected first-party
+tool and permission policy permits `set_session_title`, the worker projects only
+that exact operation through the attempt-local tool server and removes it from
+the broader remote first-party catalog for the attempt. The request-local
+one-shot instruction can therefore call `set_session_title` on the first model
+request without waiting for the remaining first-party `tools/list`; all other
+selected first-party schemas stay deferred and searchable. This does not grant
+or attach any new tool authority. The attempt-local operation uses the canonical
+title mutation, which updates the session row and appends `session.title_set`; a
+human title remains protected from later agent writes. The hint is based on
+durable title state rather than history length: turn claim persists the accepted
+user item before agent construction, so history count cannot identify a first
+turn. Historical fallback sessions therefore self-heal on their next eligible
+model turn.
 
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
@@ -76,6 +80,17 @@ together. The response is built from those returned committed rows.
 NATS and workspace-control fanout plus the immediate Temporal wake attempt are
 scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
+
+One narrow Send exception prevents a conversational answer from getting stuck
+behind the question it is answering. When the active, unpaused branch is in
+`requires_action`, a normal human Send is promoted inside that same transaction
+to Steer-equivalent replacement: pending human-input or approval state is
+cancelled, the new prompt is inserted at the head, and its routing is
+`accepted_for_steering`. Running, recovering, and capacity-waiting turns retain
+ordinary Send queue semantics. An explicitly paused branch also remains inert;
+only Resume or an explicit Steer activates it. Resubmitting a checked-out queue
+Edit also keeps ordinary queue placement: it is a revision of already accepted
+work, not a new conversational answer to the active wait.
 
 An owner-authored `personalResourceAttachment` is part of that same accepted
 work transaction for create, Send, and Steer. The server derives the fixed
@@ -402,9 +417,10 @@ projection of legacy workspace instructions in one immutable turn-context
 snapshot. The first exact attempt creates a content-free selection receipt that
 binds that snapshot to the accepted logical turn. Its default `retrieval_only`
 (migration 0271; absent settings resolve to it) removes
-the broad Memory V1 working-set block and
-legacy preference-kind agent retrieval; canonical rows and human surfaces are
-unchanged. The former `legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
+the broad Memory V1 working-set block. Every existing Memory kind remains
+available through explicit agent search; legacy preference and procedure rows
+are historical context rather than behavioral authority. The former
+`legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
 omits it and retains mandatory instruction policy plus the always-visible
 structured preference and configured Skill descriptors. At the ordinary model
 request boundary, metadata-only telemetry records the exact attempt, existing
@@ -570,7 +586,15 @@ and continue; compaction itself never creates queue or recovery work. If that
 fresh continuation ends without any terminal model response, it is not accepted
 as an empty completion: cancellation still wins, otherwise the compacted
 checkpoint enters the ordinary bounded same-turn recovery path while newer
-queued prompts remain behind it.
+queued prompts remain behind it. Steer admission is immediate but deliberately
+does not interrupt while the latest exact-attempt compaction landmark is
+`started`, because an interruption row would also fence the terminal checkpoint
+write. Once `session.context.compacted` or
+`session.context.compaction.skipped` is durable, a waiting human/API or Agent
+Steer cooperatively settles the ordinary turn as `superseded` before another
+model request. A claimed standalone compaction instead completes its maintenance
+turn, then the waiting Steer is first to claim. Pause and Cancel remain immediate
+interruption fences.
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
@@ -707,6 +731,9 @@ turn that attached them; historical attachment ids do not cause sandbox or
 object-storage work. This-turn generated-video files may still copy onto the
 box before dispatch; a copy miss is deferred like generated images (the
 durable File remains) and does not fail the turn.
+Source-bearing `generate_video` calls join that same single-flight provisioner
+immediately before inspecting their `/workspace` references and use the active
+routed session. Text-to-video requests do not acquire a sandbox.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
@@ -834,10 +861,17 @@ terminal event on a unique contiguous durable sequence. The operator output is
 limited to safe IDs, event counts, sequences, and model name; credentials and
 event payloads are never printed.
 Pause closes the exact live attempt as `interrupted_recoverable` and leaves its
-logical turn `recovering`; Steer closes it as `superseded`, makes the steered
-human prompt first, and does not revive the old turn. A missing or already
-closed owner is an event-free stale no-op. This prevents a superseded activity
-that keeps running from publishing contradictory history or terminal truth.
+logical turn `recovering`; Steer normally closes it as `superseded`, makes the
+steered human prompt first, and does not revive the old turn. The exact exception
+is active compaction: while the latest exact-attempt landmark is
+`session.context.compaction.started`, and for the whole lifetime of a claimed
+standalone compaction turn, Steer records durable waiting work but inserts no
+interruption. The terminal checkpoint write therefore remains authorized; its
+first safe boundary supersedes the ordinary turn before another model request,
+or completes standalone maintenance before the Steer claim. A missing or
+already closed owner is an event-free stale no-op. This prevents a superseded
+activity that keeps running from publishing contradictory history or terminal
+truth without creating a compaction/Steer retry loop.
 
 Pause/Resume command persistence distinguishes `changed`, `unchanged`, and
 `replayed` before allocating a control revision. A fresh Pause is unchanged
@@ -992,6 +1026,10 @@ original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
 workspace mutation admission.
+If that process's durable row already records exit or loss, a later model-visible
+`write_stdin` remains fenced before provider dispatch but returns the stored
+terminal exit/loss banner. It never labels a permanently dead handle as a
+retryable platform fault or calls the provider again.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
@@ -1260,6 +1298,14 @@ single in-flight model step is lost, the same bound as a crash. This is an
 explicit checkpoint/resume, not an automatic Temporal retry. A newer control
 revision, terminal state, or successor attempt wins instead of being
 overwritten.
+
+The shared worker process owns its own fatality policy. The pinned Agents SDK
+is patched so its MCP lifecycle queue settles every submitted command even when
+an internal error value is hostile, and its tracing provider does not register
+process-global `unhandledRejection` termination behavior. No SDK background
+promise may escape into the process boundary. The worker listener remains an
+observational last resort; a genuinely unhealthy worker stops polling and uses
+the normal drain path rather than letting a dependency call `process.exit(1)`.
 
 An active-route filesystem-root change uses the same durable same-logical-turn
 boundary. A machine-primary attempt never pre-leases home. Clearing its pointer

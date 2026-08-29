@@ -34,6 +34,13 @@ metadata:
 spec:
   groups:
     - name: opengeni.rules
+      # Make every alert and recording rule self-identifying when one Prometheus
+      # evaluates more than one OpenGeni deployment. Dashboard and Alertmanager
+      # consumers can then select the exact release instead of matching globally.
+      labels:
+        namespace: {{ .Release.Namespace | quote }}
+        environment: {{ $environment | quote }}
+        release: {{ .Release.Name | quote }}
       rules:
         # These recording rules admit only a complete inventory projection whose
         # matching domain refreshed on the same scrape target within the configured
@@ -233,6 +240,198 @@ spec:
           annotations:
             summary: A SuperGrok response stream stopped producing valid SSE events
             description: The accepted stream was cancelled after its configured valid-event silence interval and was not replayed. Correlate the durable agent.model.request terminal checkpoint with provider request metadata.
+        - alert: OpenGeniTurnFailureRatioHigh
+          expr: |
+            (
+              sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
+              /
+              clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+            ) > 0.2
+            and on()
+            sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni turn failures exceed 20%
+            description: Durable logical turns are terminalizing failed. Compare MCP lifecycle/tool outcomes, sandbox provision categories, provider terminals, and startup phases before changing retry policy.
+        - alert: OpenGeniTurnRecoveryRatioHigh
+          expr: |
+            (
+              sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="recovering"}[10m]))
+              /
+              clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+            ) > 0.2
+            and on()
+            sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni same-turn recovery pressure exceeds 20%
+            description: Recovery is preserving logical turns but consuming capacity and adding latency. Inspect typed MCP transport, sandbox, provider, and worker-shutdown evidence for the dominant retryable boundary.
+        - alert: OpenGeniTurnWorkerRestarted
+          expr: |
+            sum(
+              increase(kube_pod_container_status_restarts_total{namespace={{ .Release.Namespace | quote }},container="worker"}[10m])
+              * on(namespace, pod) group_left()
+              max by (namespace, pod) (
+                kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }},label_app_kubernetes_io_component="worker-turns"}
+              )
+            ) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenGeni turn worker restarted
+            description: A turn-worker process exited unexpectedly within the last 10 minutes. Correlate the affected Pod logs with same-turn recovery outcomes before assuming the active turn completed normally.
+        - alert: OpenGeniTurnWorkerCrashLoop
+          expr: |
+            sum(
+              increase(kube_pod_container_status_restarts_total{namespace={{ .Release.Namespace | quote }},container="worker"}[10m])
+              * on(namespace, pod) group_left()
+              max by (namespace, pod) (
+                kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }},label_app_kubernetes_io_component="worker-turns"}
+              )
+            ) > 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni turn workers are repeatedly restarting
+            description: More than one turn-worker container restart occurred within 10 minutes. Treat this as an active crash loop because repeated worker loss can exhaust bounded same-turn recovery and fail a session.
+        - alert: OpenGeniTurnWorkerDeathRecovered
+          expr: |
+            sum(increase(opengeni_turn_worker_death_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="recovering"}[10m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni recovered a turn after worker death
+            description: Durable same-turn recovery prevented immediate session failure, but an in-flight worker was lost. Inspect worker restarts, heartbeat health, the container termination reason, and the last worker log entry.
+        - alert: OpenGeniTurnWorkerDeathRecoveryExhausted
+          expr: |
+            sum(increase(opengeni_turn_worker_death_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="exhausted"}[15m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni exhausted same-turn worker-death recovery
+            description: One logical turn lost four workers and was durably failed after three re-dispatches. Inspect the turn-worker fatal boundary and the correlated turn.failed event with code worker_death_redispatch_exhausted.
+        - alert: OpenGeniModelCallFailureRatioHigh
+          expr: |
+            (
+              sum by (provider) (increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
+              /
+              clamp_min(sum by (provider) (increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+            ) > 0.2
+            and on(provider)
+            sum by (provider) (increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni model-call failures exceed 20% for {{ "{{ $labels.provider }}" }}
+            description: The provider request boundary is failing independently of sandbox and tool preparation. Correlate provider terminal phases and first-byte availability before retrying or rerouting work.
+        - alert: OpenGeniMcpStrictConnectFailed
+          expr: |
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome="failed"}[5m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: A required OpenGeni MCP server failed to connect
+            description: A strict MCP dependency prevented a turn from reaching the model. Inspect the bounded McpLifecycleError code/status/origin log and the Runtime Failures dashboard; never copy transport bodies or credentials into incident evidence.
+        - alert: OpenGeniMcpCloseFailed
+          expr: |
+            sum by (policy) (increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="close",outcome="failed"}[5m])) > 0
+          for: 1m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni MCP cleanup failed for {{ "{{ $labels.policy }}" }} connections
+            description: A transport did not close cleanly and may retain resources. Inspect the bounded MCP lifecycle diagnostic and worker health; do not obscure the turn's original outcome with cleanup retries.
+        - alert: OpenGeniMcpBestEffortConnectFailureRatio
+          expr: |
+            (
+              sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort",outcome="failed"}[10m]))
+              /
+              clamp_min(sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort"}[10m])), 1)
+            ) > 0.2
+            and on()
+            sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="best_effort"}[10m])) >= 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Optional or connector-backed MCP connection failures exceed 20%
+            description: Turns may continue with missing tools, but users are losing capabilities. Check connector authentication, endpoint health, and bounded MCP lifecycle logs.
+        - alert: OpenGeniMcpToolFailureRatio
+          expr: |
+            (
+              sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"provider_declared_error|auth_needed|outcome_uncertain|timeout|thrown_transport_error|thrown_protocol_error"}[10m]))
+              /
+              clamp_min(sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+            ) > 0.2
+            and on()
+            sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni MCP tool-call failures exceed 20%
+            description: Includes provider-declared, authentication, timeout, uncertain, transport, and protocol outcomes. User cancellation remains visible in Grafana but does not page operators.
+        - alert: OpenGeniMcpToolOutcomeUncertain
+          expr: |
+            sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="outcome_uncertain"}[5m])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: An MCP mutation ended with an uncertain outcome
+            description: Do not replay the operation automatically. Reconcile through the tool's durable provider receipt or idempotency boundary before retrying.
+        - alert: OpenGeniMcpToolLatencyHigh
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))
+            ) > 15
+            and on()
+            sum(increase(opengeni_mcp_tool_call_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni MCP tool-call p95 exceeds 15 seconds
+            description: Tool latency is materially delaying turns. Split by structural outcome and compare MCP connect time before attributing this to model inference.
+        - alert: OpenGeniHttp5xxRatioHigh
+          expr: |
+            (
+              sum(increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"5.."}[5m]))
+              /
+              clamp_min(sum(increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api"}[5m])), 1)
+            ) > 0.05
+            and on()
+            sum(increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api"}[5m])) >= 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni API 5xx responses exceed 5%
+            description: Group the bounded route/status series in Grafana, then correlate the affected route with Postgres append latency and application logs.
+        - alert: OpenGeniCoreReadLatencyHigh
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le, route) (rate(opengeni_http_request_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[10m]))
+            ) > 2
+            and on(route)
+            sum by (route) (increase(opengeni_http_request_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/workspaces/:workspaceId|/v1/workspaces/:workspaceId/sessions|/v1/workspaces/:workspaceId/sessions/:id"}[10m])) >= 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni core read p95 exceeds 2 seconds on {{ "{{ $labels.route }}" }}
+            description: Workspace or session reads are slow enough to degrade the interactive control plane. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
         - alert: OpenGeniSandboxCreateFailureRatio
           expr: |
             (
@@ -600,7 +799,7 @@ spec:
         # layer: the model (TTFT), the durable write path (append), or delivery
         # (publish). Thresholds are starters — tune per deployment.
         - alert: OpenGeniStreamingFirstTokenSlow
-          expr: histogram_quantile(0.99, sum by (le, provider) (rate(opengeni_stream_ttft_seconds_bucket[10m]))) > 8
+          expr: histogram_quantile(0.99, sum by (le, provider) (rate(opengeni_stream_ttft_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 8
           for: 15m
           labels:
             severity: warning
@@ -608,15 +807,23 @@ spec:
             summary: OpenGeni p99 time-to-first-token exceeds 8s
             description: The model is slow to START streaming (p99 TTFT by provider above 8s for 15m). Suspect the model provider before the write/delivery path.
         - alert: OpenGeniEventAppendLatencyHigh
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket[10m]))) > 1
+          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 1
           for: 10m
           labels:
             severity: warning
           annotations:
             summary: OpenGeni session-event append p99 exceeds 1s (durable write path)
             description: appendSessionEvents p99 is above 1s for 10m — Postgres is the streaming bottleneck, not the model or NATS.
+        - alert: OpenGeniEventAppendLatencyCritical
+          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[5m]))) > 2
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni session-event append p99 exceeds 2s
+            description: The durable Postgres write path is critically saturated. Inspect database CPU, active sessions, hot statements, and application request pressure before scaling stateless pods.
         - alert: OpenGeniEventPublishLatencyHigh
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket[10m]))) > 0.5
+          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 0.5
           for: 10m
           labels:
             severity: warning

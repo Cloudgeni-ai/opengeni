@@ -1,5 +1,38 @@
 # @opengeni/db
 
+## 3.6.3
+
+### Patch Changes
+
+- 551cead: Return durable retained-process exit or loss results to shell tools instead of rendering a retryable platform fault for an already-terminal command handle.
+- 06fda28: Return bounded stable-key conflict outcomes for governed preference proposals instead of exposing persistence query details.
+
+## 3.6.2
+
+### Patch Changes
+
+- 8dc432d: Settle interrupted native tool-search calls with the provider correlation identity retained in provider metadata.
+- c705de3: Bound session-control settlement reads to the requested session subtrees, avoid redundant workspace refreshes for session-scoped control events, and add low-cardinality MCP lifecycle telemetry with failure, latency, and runtime reliability alerts and dashboards.
+- Updated dependencies [595939e]
+- Updated dependencies [80d7594]
+  - @opengeni/config@0.22.2
+  - @opengeni/contracts@2.8.0
+  - @opengeni/codemode@0.4.19
+
+## 3.6.1
+
+### Patch Changes
+
+- 17d253b: Complete personal GitHub identity support across managed, self-hosted, and local modes. Add a compact connect-and-repository UI, exact local-human authority persistence, Docker-safe credential brokering, durable child and goal propagation, and reviewed GitHub tools for pull-request reviews and merges without exposing provider tokens to agents.
+- ff4af61: Promote a normal human Send to Steer-equivalent replacement when an active session is waiting for human action, cancelling the stale decision surface and placing the conversational message directly in chat.
+- c116379: Improve organization and workspace administration with compact people management, workspace-admin member controls, personal integration and Codex subscription setup, clearer permission presets, consistent connector presentation, and organization-scoped resource navigation.
+- c116379: Recover sessions containing legacy duplicate native tool-search pairs and prevent crash settlement from appending another pair when the provider correlation id is stored only in provider data.
+- Updated dependencies [17d253b]
+- Updated dependencies [c116379]
+  - @opengeni/config@0.22.1
+  - @opengeni/contracts@2.7.1
+  - @opengeni/codemode@0.4.18
+
 ## 3.6.0
 
 ### Minor Changes

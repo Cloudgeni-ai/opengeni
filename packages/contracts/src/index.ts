@@ -942,15 +942,8 @@ const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
  * trustworthy logical-delivery identity. Server-owned Slack delivery paths
  * call the internal client directly with their own durable operation IDs.
  */
-// Names kept so previously written data still parses - immutable scheduled-task
-// execution snapshots recorded the tool set that was default at the time, and
-// they are strictly re-parsed on replay. Retiring a tool must not strand an
-// accepted occurrence. These are never registered, never default, and never
-// authorized; they exist so history stays readable.
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
-  "memory_save",
-  "memory_correct",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -983,10 +976,6 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
-    // Memory V1 writes are retired entirely; `remember` and task-note
-    // promotion own durable agent writes.
-    name !== "memory_save" &&
-    name !== "memory_correct" &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -3019,10 +3008,26 @@ export const ListWorkspaceMembersResponse = z.object({
 });
 export type ListWorkspaceMembersResponse = z.infer<typeof ListWorkspaceMembersResponse>;
 
+export const WorkspaceMemberCandidate = z.object({
+  organizationMembershipId: z.string().uuid(),
+  subjectId: z.string().min(1),
+  name: z.string().min(1).max(1024).nullable(),
+  email: z.string().email().max(320).nullable(),
+  organizationRole: z.enum(["owner", "admin", "member"]),
+});
+export type WorkspaceMemberCandidate = z.infer<typeof WorkspaceMemberCandidate>;
+
+export const ListWorkspaceMemberCandidatesResponse = z.object({
+  members: z.array(WorkspaceMemberCandidate).max(1000),
+});
+export type ListWorkspaceMemberCandidatesResponse = z.infer<
+  typeof ListWorkspaceMemberCandidatesResponse
+>;
+
 export const AddWorkspaceMemberRequest = z.object({
-  // Resolved against the managed (Better Auth) users; email invites for
-  // not-yet-registered users are deferred, so an unknown email returns 404.
-  email: z.string().email(),
+  // The candidate inventory exposes this opaque organization-local identifier.
+  // Organization invitations stay in the organization-admin lifecycle.
+  organizationMembershipId: z.string().uuid(),
   role: z.string().min(1).optional(),
   permissions: z.array(Permission),
 });
@@ -7646,6 +7651,48 @@ export const VariableSetVariableName = z
   .max(128);
 export type VariableSetVariableName = z.infer<typeof VariableSetVariableName>;
 
+export const VARIABLE_SET_RESERVED_EXACT_NAMES = [
+  "HOME",
+  "PATH",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "IFS",
+  "ENV",
+  "BASH_ENV",
+  "NODE_OPTIONS",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PERL5OPT",
+  "PERL5LIB",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GITLAB_TOKEN",
+  "AZURE_DEVOPS_EXT_PAT",
+  "GIT_ASKPASS",
+  "GIT_TERMINAL_PROMPT",
+] as const;
+
+export const VARIABLE_SET_RESERVED_PREFIXES = [
+  "OPENGENI_",
+  "GIT_CONFIG_",
+  "GIT_AUTHOR_",
+  "GIT_COMMITTER_",
+  "LD_",
+  "DYLD_",
+] as const;
+
+export function variableSetVariableNameReservation(
+  name: string,
+): { kind: "exact" | "prefix"; value: string } | null {
+  if ((VARIABLE_SET_RESERVED_EXACT_NAMES as readonly string[]).includes(name)) {
+    return { kind: "exact", value: name };
+  }
+  const prefix = VARIABLE_SET_RESERVED_PREFIXES.find((candidate) => name.startsWith(candidate));
+  return prefix ? { kind: "prefix", value: prefix } : null;
+}
+
 function withVariableSetIdAlias<T extends z.ZodRawShape>(
   shape: T,
   options: { rejectKeys?: readonly string[] } = {},
@@ -8483,15 +8530,14 @@ function scheduledTaskBoundedString(maxBytes: number, label: string) {
 }
 
 /** Ingress-bounded task name for create/update requests. */
-export const ScheduledTaskNameInput = /* @__PURE__ */ scheduledTaskBoundedString(
-  SCHEDULED_TASK_NAME_MAX_BYTES,
-  "scheduled task name",
-);
+export const ScheduledTaskNameInput =
+  /* @__PURE__ */ scheduledTaskBoundedString(SCHEDULED_TASK_NAME_MAX_BYTES, "scheduled task name");
 /** Ingress-bounded task metadata for create/update requests. */
-export const ScheduledTaskMetadataInput = /* @__PURE__ */ scheduledTaskBoundedJsonObject(
-  SCHEDULED_TASK_METADATA_MAX_BYTES,
-  "scheduled task metadata",
-);
+export const ScheduledTaskMetadataInput =
+  /* @__PURE__ */ scheduledTaskBoundedJsonObject(
+    SCHEDULED_TASK_METADATA_MAX_BYTES,
+    "scheduled task metadata",
+  );
 
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   return {
@@ -8918,48 +8964,49 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
-export const UpdateScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
-  name: ScheduledTaskNameInput.optional(),
-  schedule: ScheduledTaskScheduleSpec.optional(),
-  runMode: ScheduledTaskRunMode.optional(),
-  overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
-  action: ScheduledTaskAction.optional(),
-  targetSessionId: z.string().uuid().nullable().optional(),
-  connectionAuthorities: McpConnectionAuthoritySelections.optional(),
-  agentConfig: ScheduledTaskAgentConfigInput.optional(),
-  status: ScheduledTaskStatus.optional(),
-  variableSetId: z.string().uuid().nullable().optional(),
-  environmentId: z.string().uuid().nullable().optional(),
-  // The rig each run binds to (M3); null clears it. Its active version is
-  // resolved per fire, so an update takes effect on the next dispatch.
-  rigId: z.string().uuid().nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-}).superRefine((value, context) => {
-  if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
-    context.addIssue({
-      code: "custom",
-      path: ["targetSessionId"],
-      message: "targetSessionId requires runMode=existing_session",
-    });
-  }
-  if (value.runMode === "existing_session" && value.targetSessionId === null) {
-    context.addIssue({
-      code: "custom",
-      path: ["targetSessionId"],
-      message: "targetSessionId cannot be null when runMode=existing_session",
-    });
-  }
-  if (
-    value.agentConfig?.goal &&
-    (value.runMode === "existing_session" || Boolean(value.targetSessionId))
-  ) {
-    context.addIssue({
-      code: "custom",
-      path: ["agentConfig", "goal"],
-      message: "agentConfig.goal cannot be used with an existing-session target",
-    });
-  }
-});
+export const UpdateScheduledTaskRequest =
+  /* @__PURE__ */ withVariableSetIdAlias({
+    name: ScheduledTaskNameInput.optional(),
+    schedule: ScheduledTaskScheduleSpec.optional(),
+    runMode: ScheduledTaskRunMode.optional(),
+    overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+    action: ScheduledTaskAction.optional(),
+    targetSessionId: z.string().uuid().nullable().optional(),
+    connectionAuthorities: McpConnectionAuthoritySelections.optional(),
+    agentConfig: ScheduledTaskAgentConfigInput.optional(),
+    status: ScheduledTaskStatus.optional(),
+    variableSetId: z.string().uuid().nullable().optional(),
+    environmentId: z.string().uuid().nullable().optional(),
+    // The rig each run binds to (M3); null clears it. Its active version is
+    // resolved per fire, so an update takes effect on the next dispatch.
+    rigId: z.string().uuid().nullable().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }).superRefine((value, context) => {
+    if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
+      context.addIssue({
+        code: "custom",
+        path: ["targetSessionId"],
+        message: "targetSessionId requires runMode=existing_session",
+      });
+    }
+    if (value.runMode === "existing_session" && value.targetSessionId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["targetSessionId"],
+        message: "targetSessionId cannot be null when runMode=existing_session",
+      });
+    }
+    if (
+      value.agentConfig?.goal &&
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfig", "goal"],
+        message: "agentConfig.goal cannot be used with an existing-session target",
+      });
+    }
+  });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
 /**
@@ -14498,6 +14545,10 @@ export const ClientAuthConfig = z.discriminatedUnion("mode", [
     mode: z.literal("managedSession"),
     session: z.literal("cookie"),
     emailVerificationRequired: z.boolean().default(true),
+    socialProviders: z
+      .array(z.enum(["google", "github"]))
+      .max(2)
+      .default([]),
   }),
 ]);
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
@@ -15279,9 +15330,8 @@ function defineModelContractSchema<Schema>(factory: () => Schema): Schema {
   return factory();
 }
 
-export const ModelCapabilitySupportV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["supported", "unsupported", "unknown"]),
-);
+export const ModelCapabilitySupportV1 =
+  /* @__PURE__ */ defineModelContractSchema(() => z.enum(["supported", "unsupported", "unknown"]));
 export type ModelCapabilitySupportV1 = z.infer<typeof ModelCapabilitySupportV1>;
 
 export const ModelCapabilityStateV1 = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -15329,28 +15379,29 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1>;
 
-export const ModelCredentialSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.union([
-    z
-      .object({
-        kind: z.literal("deployment"),
-        mechanism: z.enum(["api_key", "azure_ad_bearer"]),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("connected_subscription"),
-        provider: z.enum(["codex", "xai"]),
-      })
-      .strict(),
-    z
-      .object({
-        kind: z.literal("workspace_connection"),
-        mechanism: z.literal("api_key"),
-      })
-      .strict(),
-  ]),
-);
+export const ModelCredentialSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.union([
+      z
+        .object({
+          kind: z.literal("deployment"),
+          mechanism: z.enum(["api_key", "azure_ad_bearer"]),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("connected_subscription"),
+          provider: z.enum(["codex", "xai"]),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("workspace_connection"),
+          mechanism: z.literal("api_key"),
+        })
+        .strict(),
+    ]),
+  );
 export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
 
 const TurnExecutionCredentialSourceV1 = z.union([
@@ -15363,31 +15414,35 @@ const TurnExecutionCredentialSourceV1 = z.union([
     .strict(),
 ]);
 
-export const ModelBillingAttributionV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z
-    .object({
-      upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
-      metering: z.enum(["opengeni_credits", "external"]),
-    })
-    .strict(),
-);
+export const ModelBillingAttributionV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z
+      .object({
+        upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+        metering: z.enum(["opengeni_credits", "external"]),
+      })
+      .strict(),
+  );
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
 export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
 
-export const TurnExecutionModelSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["explicit", "session", "deployment", "continuation"]),
-);
+export const TurnExecutionModelSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.enum(["explicit", "session", "deployment", "continuation"]),
+  );
 export type TurnExecutionModelSourceV1 = z.infer<typeof TurnExecutionModelSourceV1>;
 
-export const TurnExecutionReasoningSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["explicit", "session", "deployment", "continuation"]),
-);
+export const TurnExecutionReasoningSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.enum(["explicit", "session", "deployment", "continuation"]),
+  );
 export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
-export const TurnExecutionLatencyModeSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["explicit", "session", "deployment", "continuation"]),
-);
+export const TurnExecutionLatencyModeSourceV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.enum(["explicit", "session", "deployment", "continuation"]),
+  );
 export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLatencyModeSourceV1>;
 
 /**
@@ -15589,59 +15644,60 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
 );
 export type ClientModel = z.infer<typeof ClientModel>;
 
-export const ModelCredentialReadinessV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z
-    .object({
-      status: z.enum(["ready", "not_ready", "error"]),
-      reason: z
-        .enum([
-          "missing_credential",
-          "needs_reauth",
-          "prerequisites_missing",
-          "resolver_error",
-          "observation_stale",
-        ])
-        .nullable(),
-      basis: z.enum(["configuration", "connection", "resolver"]),
-      checkedAt: z.string().datetime().nullable(),
-    })
-    .strict()
-    .superRefine((readiness, context) => {
-      if ((readiness.status === "ready") !== (readiness.reason === null)) {
-        context.addIssue({
-          code: "custom",
-          path: ["reason"],
-          message: "ready credential state requires no reason; non-ready state requires a reason",
-        });
-      }
-      if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
-        context.addIssue({
-          code: "custom",
-          path: ["reason"],
-          message:
-            "credential errors require resolver_error and resolver_error requires error status",
-        });
-      }
-      if (
-        readiness.basis === "resolver" &&
-        readiness.status === "ready" &&
-        readiness.checkedAt === null
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["checkedAt"],
-          message: "resolver readiness requires an observation timestamp",
-        });
-      }
-      if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
-        context.addIssue({
-          code: "custom",
-          path: ["checkedAt"],
-          message: "a stale observation requires its observation timestamp",
-        });
-      }
-    }),
-);
+export const ModelCredentialReadinessV1 =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z
+      .object({
+        status: z.enum(["ready", "not_ready", "error"]),
+        reason: z
+          .enum([
+            "missing_credential",
+            "needs_reauth",
+            "prerequisites_missing",
+            "resolver_error",
+            "observation_stale",
+          ])
+          .nullable(),
+        basis: z.enum(["configuration", "connection", "resolver"]),
+        checkedAt: z.string().datetime().nullable(),
+      })
+      .strict()
+      .superRefine((readiness, context) => {
+        if ((readiness.status === "ready") !== (readiness.reason === null)) {
+          context.addIssue({
+            code: "custom",
+            path: ["reason"],
+            message: "ready credential state requires no reason; non-ready state requires a reason",
+          });
+        }
+        if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
+          context.addIssue({
+            code: "custom",
+            path: ["reason"],
+            message:
+              "credential errors require resolver_error and resolver_error requires error status",
+          });
+        }
+        if (
+          readiness.basis === "resolver" &&
+          readiness.status === "ready" &&
+          readiness.checkedAt === null
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["checkedAt"],
+            message: "resolver readiness requires an observation timestamp",
+          });
+        }
+        if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
+          context.addIssue({
+            code: "custom",
+            path: ["checkedAt"],
+            message: "a stale observation requires its observation timestamp",
+          });
+        }
+      }),
+  );
 export type ModelCredentialReadinessV1 = z.infer<typeof ModelCredentialReadinessV1>;
 
 export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -15664,21 +15720,23 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
 
-export const WorkspaceModelCatalogModel = /* @__PURE__ */ defineModelContractSchema(() =>
-  ClientModel.extend({
-    credentialReadiness: ModelCredentialReadinessV1,
-    /** Exact workspace-policy verdict without exposing provider identity. */
-    policyAllowed: z.boolean().optional(),
-    availability: ModelAvailabilityV1,
-  }),
-);
+export const WorkspaceModelCatalogModel =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    ClientModel.extend({
+      credentialReadiness: ModelCredentialReadinessV1,
+      /** Exact workspace-policy verdict without exposing provider identity. */
+      policyAllowed: z.boolean().optional(),
+      availability: ModelAvailabilityV1,
+    }),
+  );
 export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
 
-export const WorkspaceModelCatalogResponse = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.object({
-    models: z.array(WorkspaceModelCatalogModel),
-  }),
-);
+export const WorkspaceModelCatalogResponse =
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.object({
+      models: z.array(WorkspaceModelCatalogModel),
+    }),
+  );
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
 
 /**

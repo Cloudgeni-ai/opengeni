@@ -1509,6 +1509,14 @@ export function requiredRuntimeEnvVars(
         "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
       );
     }
+    for (const key of [
+      "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID",
+      "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET",
+      "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID",
+      "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET",
+    ] as const) {
+      if (env[key]) vars.push(key);
+    }
   } else if (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey") {
     vars.push("OPENGENI_DELEGATION_SECRET");
   }
@@ -2282,6 +2290,22 @@ function runtimeEnvValues(
           ),
           valueEnv("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS", env.OPENGENI_BETTER_AUTH_ALLOWED_HOSTS),
           valueEnv("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN", env.OPENGENI_BETTER_AUTH_COOKIE_DOMAIN),
+          valueEnv(
+            "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID",
+            env.OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID,
+          ),
+          valueEnv(
+            "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET",
+            env.OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET,
+          ),
+          valueEnv(
+            "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID",
+            env.OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID,
+          ),
+          valueEnv(
+            "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET",
+            env.OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET,
+          ),
           requiredEnv(
             "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
             env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,

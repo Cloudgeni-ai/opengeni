@@ -83,14 +83,26 @@ export function useGoal(
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const generation = useRef(0);
   const targetKeyRef = useRef<string | null>(null);
+  const loadAbort = useRef<AbortController | null>(null);
+
+  const retireLoads = useCallback(() => {
+    generation.current += 1;
+    loadAbort.current?.abort();
+    loadAbort.current = null;
+  }, []);
 
   const load = useCallback(async (): Promise<void> => {
     if (!sessionId) {
       return;
     }
     const ticket = ++generation.current;
+    loadAbort.current?.abort();
+    const controller = new AbortController();
+    loadAbort.current = controller;
     try {
-      const fetched = await client.getGoal(workspaceId, sessionId);
+      const fetched = await client.getGoal(workspaceId, sessionId, {
+        signal: controller.signal,
+      });
       if (ticket === generation.current) {
         setGoal(fetched);
         setError(null);
@@ -108,6 +120,8 @@ export function useGoal(
         setError(cause instanceof Error ? cause : new Error(String(cause)));
       }
       setLoading(false);
+    } finally {
+      if (loadAbort.current === controller) loadAbort.current = null;
     }
   }, [client, workspaceId, sessionId]);
 
@@ -119,13 +133,14 @@ export function useGoal(
       setError(null);
     }
     if (!enabled || !pageLive) {
+      retireLoads();
       setLoading(false);
       return;
     }
     if (sharedFeed) {
       setLoading(false);
       return () => {
-        generation.current += 1;
+        retireLoads();
       };
     }
     setLoading(true);
@@ -133,7 +148,7 @@ export function useGoal(
     if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
       void load();
       return () => {
-        generation.current += 1;
+        retireLoads();
       };
     }
     let cancelled = false;
@@ -149,9 +164,18 @@ export function useGoal(
     return () => {
       cancelled = true;
       if (timer !== null) clearTimeout(timer);
-      generation.current += 1;
+      retireLoads();
     };
-  }, [load, enabled, pageLive, workspaceId, sessionId, options.pollIntervalMs, sharedFeed]);
+  }, [
+    load,
+    enabled,
+    pageLive,
+    workspaceId,
+    sessionId,
+    options.pollIntervalMs,
+    retireLoads,
+    sharedFeed,
+  ]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
   useSessionEventTrigger(client, workspaceId, sessionId, isGoalRefreshEvent, scheduleRefresh, {
@@ -203,11 +227,11 @@ export function useGoal(
       return true as const;
     });
     if (ok) {
-      generation.current += 1;
+      retireLoads();
       setGoal(null);
       setError(null);
     }
-  }, [client, workspaceId, sessionId, run]);
+  }, [client, workspaceId, sessionId, run, retireLoads]);
 
   return {
     goal,

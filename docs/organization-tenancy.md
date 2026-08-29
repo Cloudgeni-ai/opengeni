@@ -306,8 +306,9 @@ codebase today:
   for the workspace the caller is already authorized in.
 
 Anything else - a subject that was looked up, inferred, or supplied by a caller
+
 - is a vulnerability. Prefer plumbing the caller's own identity to the call site
-over widening what the oracle is asked.
+  over widening what the oracle is asked.
 
 The in-scope variant refuses to set the subject GUC, making the
 arbitrary-subject oracle shape unrepresentable at its session-list, pin, and
@@ -324,7 +325,7 @@ not receive personal-workspace access by exclusion-list inference.
 For the same reason, "make
 `list_self_organization_memberships` read the GUC instead of taking the subject
 as a parameter" is **not** the structural fix it appears to be: reading the GUC
-rather than a parameter changes nothing about *who may set that GUC*.
+rather than a parameter changes nothing about _who may set that GUC_.
 `setSubjectRlsContext` is an ordinary `set_config` that accepts any string from
 any `opengeni_app` connection, so the caller still names whoever it likes - the
 name just arrives by a different route. Reaching for that design because it
@@ -345,7 +346,7 @@ this oracle into an authorization.
 >
 > The naming is deliberate and worth preserving. The **dangerous** function
 > carries the qualifier (`namedSubjectHasLiveWorkspaceAuthority` - it answers
-> about a *named* subject) and the safer one reads as scoped. Do not "simplify"
+> about a _named_ subject) and the safer one reads as scoped. Do not "simplify"
 > by giving the oracle the shorter name: at the point of use the name is the
 > most visible warning either function has.
 >
@@ -370,8 +371,8 @@ reintroduce a `getWorkspaceGrant` boolean in those positions, and do not widen
 `getWorkspaceGrant` itself: it is also the fallback inside
 `accessGrantAuthorization`, where a delegated bearer or API-key principal would
 inherit any widening. `getWorkspaceGrant` and the oracle answer genuinely
-different questions - a *grant with permissions* for a request principal versus
-a *boolean about a named subject* - and are not interchangeable at an
+different questions - a _grant with permissions_ for a request principal versus
+a _boolean about a named subject_ - and are not interchangeable at an
 authorization site.
 
 Two mechanical traps on this path, both now closed and both worth not
@@ -418,10 +419,12 @@ else, so each is a broken feature, not an authority hole:
   (`packages/core/src/domain/capabilities.ts`) - Codex Apps designation and
   execution.
 - The OAuth-callback grant rechecks over the signed `state.subjectId` in
-  `apps/api/src/integrations/{oauth-client,provider-oauth,google-drive,atlassian,fiken,social-oauth}.ts`
-  and `apps/api/src/routes/connections.ts` - connecting a provider *from* a
-  personal workspace fails at callback even though `connections:write` is in
-  the personal permission set.
+  `apps/api/src/integrations/{google-drive,atlassian,fiken,social-oauth}.ts`
+  and `apps/api/src/routes/connections.ts`. The generic MCP and curated API
+  Integration callbacks (`oauth-client` and `provider-oauth`) now resolve the
+  exact signed human's live personal-workspace pointer through the narrow
+  `resolveNamedManagedPersonalWorkspaceGrant` seam; the remaining provider
+  callbacks still deny personal-workspace setup rather than leaking authority.
 - SQL seams without the personal-workspace disjunct: the xAI subscription
   authority views/functions in 0234. Migration 0303 repairs
   `transition_session_visibility` and `fork_session_content` with the exact
@@ -497,7 +500,7 @@ The managed-human API surface is:
   `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
 - `PATCH /v1/organizations/:organizationId/workspaces/:workspaceId` plus its
   `/settings` route, `PUT
-  /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
+/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
   for an idempotent named or custom grant, and the explicit `/revoke` command
   below that member route for the shared-workspace control plane; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
@@ -646,7 +649,7 @@ provider key; the injectable seam does not relax that deployment preflight.
 
 Because the bearer is derived from the invitation id, the URL and signing
 configuration (`OPENGENI_PUBLIC_BASE_URL` and
-`OPENGENI_BETTER_AUTH_SECRET`) is proven as a precondition *before* the
+`OPENGENI_BETTER_AUTH_SECRET`) is proven as a precondition _before_ the
 invitation commits and reported as `503`; a deployment missing either would
 otherwise fail after the row exists without even being able to construct the
 setup link. Provider availability is deliberately not part of that
@@ -825,10 +828,15 @@ function and its Personal retention fields remain unchanged for older binaries.
 New organization-administration routes use the separate
 `list_organization_administration_members` projection, which exposes safe
 name/email plus shared-workspace access and omits Personal workspace and
-retention metadata. Organization settings is the sole editor for the human
-roster and shared-workspace grants. Workspace settings performs no raw human
-roster read or edit; it shows only the notice/link back to Organization
-settings, while its separate Slack access-request queue keeps its existing
+retention metadata. Organization settings remains the cross-workspace editor
+for the human roster and shared-workspace grants. A shared workspace's Members
+page is the scoped editor for that workspace: a holder of `members:manage` may
+choose from a bounded list of active same-organization humans who do not already
+have access, add the selected organization membership, change that member's
+workspace role or fine-grained permissions, and revoke that exact workspace
+grant. It cannot invite people into the organization, change organization
+roles, enumerate unrelated workspace access, or administer Personal
+workspaces. The separate Slack access-request queue keeps its existing
 workspace-admin lifecycle.
 
 ### Recovery custody and permanent workspace ownership
@@ -1039,7 +1047,7 @@ wrapped `organization_membership_command_0263`, and the 0275
 (`workspace_inference_controls FOR SHARE` -> `workspaces FOR KEY SHARE`) only
 afterwards. An ordinary workspace writer is forced into the opposite order and
 cannot avoid it: it locks its own `workspaces` row first - AGENTS.md's canonical
-event-write prefix - and only then reaches `managed_accounts` *implicitly*, through
+event-write prefix - and only then reaches `managed_accounts` _implicitly_, through
 the account foreign-key check of a row it inserts. `sessions`,
 `session_events`, `session_turns`, `session_goals`, and
 `session_system_updates` all reference `managed_accounts`, and an FK check takes
@@ -1068,7 +1076,7 @@ and primary-key UPDATE while being compatible with every ordinary writer's FK
 check. This is the same shape migration 0278 already used for the workspace
 membership removal seam.
 
-The lifecycle's first *row* lock is therefore the canonical prefix, and the full
+The lifecycle's first _row_ lock is therefore the canonical prefix, and the full
 order is:
 
 ```
@@ -1117,7 +1125,7 @@ plus its CAS revisions, and a deadlock abort rolls back every durable effect,
 so re-running the identical command either applies it once or observes the
 newer authoritative state. `40001` remains the authoritative stale-revision /
 stale-epoch conflict and is never replayed. That wrapper is a caller-side
-safety net for a `40P01` raised by some *other* cycle; it is not the lock-order
+safety net for a `40P01` raised by some _other_ cycle; it is not the lock-order
 fix and must never be treated as a licence to reintroduce a conflicting
 organization row lock. The 0299 parallel-load probe reads
 `pg_stat_database.deadlocks` directly precisely so this replay cannot hide a
@@ -1154,14 +1162,14 @@ foreign-key and access constraints.
 `workspaces`, `workspace_memberships`, and `auth_identities` carry an
 `account_id`, grant the runtime role full DML, and deliberately have no
 row-level security. They are the tables the authentication and access layer
-reads to *establish* the organization context that every RLS predicate then
+reads to _establish_ the organization context that every RLS predicate then
 depends on, so an `account_id = current_account_id()` predicate over them is
 circular for the first two and type-incoherent for the third — `auth_identities`
 holds Better Auth's provider subject string in `account_id`, not a tenant id,
 and Better Auth queries it over its own connection pool that never carries an
 OpenGeni GUC. Consequently a query that reached the database layer without going
 through the access layer can read another organization's workspace and
-membership *metadata*, though never its content: every content table remains
+membership _metadata_, though never its content: every content table remains
 FORCE RLS and genuinely isolated.
 
 This is a reasoned exemption rather than an oversight, and it is attested by
@@ -1197,7 +1205,7 @@ no visibility mutation, read authorization, or fork path; its successor
 `0225_session_visibility_fork_activation.sql` does, and the next section states
 exactly which parts of that successor are live and which remain inert.
 
-Note that owner membership is null only as a *column default*. Since 0225 the
+Note that owner membership is null only as a _column default_. Since 0225 the
 `guard_session_authority_write` trigger derives
 `owner_organization_membership_id` and `owner_subject_id` on every subject-created
 session insert - from the parent session for children, otherwise from the
@@ -1466,7 +1474,7 @@ lifecycle seam - `open_tenancy_backfill_receipt`,
 `record_tenancy_backfill_unresolved`, and `complete_tenancy_backfill_receipt`.
 
 Three properties of that seam are load-bearing. The append function takes exactly
-receipt, resource, and reason: an unresolved row records a *refusal* to infer
+receipt, resource, and reason: an unresolved row records a _refusal_ to infer
 authority, so the ledger has no column and no argument able to express the
 inference it declined to make. The unresolved count is owned by the append
 path rather than supplied at completion, so a sweep cannot settle its own
@@ -1525,7 +1533,7 @@ ordinary account-scoped application-role read.
 
 A candidate is provisioned only on complete deterministic evidence: a live
 Better Auth login identity for the exact subject, an organization whose own
-external identity *is* that human, and a persisted owner-role workspace
+external identity _is_ that human, and a persisted owner-role workspace
 membership. Anything else is recorded unresolved with a bounded reason code and
 left completely untouched - `missing_login_identity`,
 `organization_identity_mismatch` (the human is a member of someone else's
@@ -1552,7 +1560,7 @@ other, and the pass hands back the `nextCursor` that resumes it. One command
 invocation chains those passes until the stream is exhausted (`drained: true`,
 `lastCursor: null`), bounded by `--max-passes`; a run stopped by that bound
 reports `drained: false` and the `lastCursor` that `--after-subject-id`
-resumes. This is what makes repeated runs *converge*: a subject the driver
+resumes. This is what makes repeated runs _converge_: a subject the driver
 cannot resolve stays in its population permanently, so a fixed `LIMIT n` window
 over an organization with more than `n` `user:`-kind subjects would return the
 same first `n` rows on every pass and never reach subject `n + 1` at all.
@@ -1574,7 +1582,7 @@ gave `list_organization_membership_backfill_anchors` and
 marker list to add `personal_resource_grant_management` and dropped 0290's
 entry. Both seams have returned `[]` ever since for a NON-superuser migration
 owner - measured on `acquireOwnerMigratedTestDatabase`, not inferred. Because
-they are SECURITY DEFINER owned by that role, even a superuser *caller* gets the
+they are SECURITY DEFINER owned by that role, even a superuser _caller_ gets the
 owner's RLS, so only a superuser-migrated database (every prior test harness)
 hid it. The consequence was that an already-anchored subject read as
 provisionable and the memberships carrying no personal workspace - the actual
@@ -1701,7 +1709,7 @@ Both of those paths depend on one seam,
 `FORCE ROW LEVEL SECURITY` and OpenGeni runs its SECURITY DEFINER routines as a
 NON-superuser owner without `BYPASSRLS`. Migration 0256's inline
 `SELECT ... FOR SHARE` plus authority `INSERT` therefore matched nothing on
-every real deployment: a personal connection whose subject *did* hold a live
+every real deployment: a personal connection whose subject _did_ hold a live
 membership silently degraded to `legacy_user`, and 0340's convergence would
 have raised `42501 connection backfill membership authority is unavailable` on
 every deterministic candidate. The seam opens one read-only
@@ -1749,7 +1757,7 @@ kind of capability-claiming seam.
 Machines, and one must not be reintroduced without new schema.** 0285 reported
 one, defined as `authority_id IS NULL`; 0292 removed it. The authority shape
 constraints (`workspace_variable_sets_authority_shape_check`,
-`rigs_authority_shape_check`, `enrollments_authority_shape_check`) *require* a
+`rigs_authority_shape_check`, `enrollments_authority_shape_check`) _require_ a
 NULL `authority_id` for every organization- and workspace-scoped row, so that
 predicate was structurally `total - userScoped`: every correctly classified row
 was reported as unmigrated and the number could never drain to zero. No
@@ -1762,7 +1770,7 @@ workspace-scoped one, and nothing else separates them:
   NULL for every pre-0254 row and non-NULL for every row `create_scoped_variable_set`
   writes. That is a real fact, but it means "predates the scoped lifecycle", not
   "lacks an explicit authority classification": this phase classifies a reviewed
-  legacy row explicitly *as* workspace-owned, which writes nothing, so a fully
+  legacy row explicitly _as_ workspace-owned, which writes nothing, so a fully
   reviewed row still reads NULL.
 - **Rigs** - `origin_workspace_id` is not even a legacy marker. `createRig`
   retains a live non-scoped branch that inserts through Drizzle without it, so
@@ -1770,7 +1778,7 @@ workspace-scoped one, and nothing else separates them:
 - **Connected Machines** - 0262 added `origin_workspace_id` and backfilled it
   from `workspace_id` in the same statement, while the ordinary
   `createEnrollment` upsert still leaves it NULL. The polarity is inverted: NULL
-  marks a *post*-0262 ordinary row.
+  marks a _post_-0262 ordinary row.
 
 `byScope` reports every authority distinction the schema can truthfully make,
 and any non-user-scoped total is derivable from it. Restoring a classification
@@ -1798,7 +1806,7 @@ repairable, and `--apply` repairs only those:
   `personal_workspace_id` of one active membership (0218's unique
   `organization_memberships_personal_workspace_idx` makes that a 1:1 anchor)
   and the session's `created_by_subject_id` is that same membership's subject.
-  Slice B provisions a personal workspace *without* a `workspace_memberships`
+  Slice B provisions a personal workspace _without_ a `workspace_memberships`
   row. Migration 0302 extended live derivation to the membership's exact
   `personal_workspace_id`, so this is now a finite historical population;
   migration 0340 makes parity count that pointer form as well as ordinary
@@ -1833,7 +1841,7 @@ here, so the seam refuses it by construction rather than relying on 0219/0263
 never having minted a non-`user:` anchor.
 
 Session rows are safe to re-run over - an attributed row stops matching either
-candidate predicate. A `--run-key` ledger is deliberately *not*: each batch
+candidate predicate. A `--run-key` ledger is deliberately _not_: each batch
 opens its own `<run-key>:batch-N` receipt and the ledger refuses to re-open a
 settled one, so a repeat under the same key fails on the first settled batch
 instead of overwriting immutable evidence. Resume or repeat with a new
@@ -1880,7 +1888,7 @@ and an explicit `truncated` flag.
   exactly how membership CRUD and the subject-membership fallback would widen it
   into delegable access;
 - stable authority uniqueness: the physical unique index is per
-  (account, membership, kind, resource), so two *different* memberships can
+  (account, membership, kind, resource), so two _different_ memberships can
   still claim one resource. That ambiguity is reported, never resolved;
 - zero partial delegations, plus a live owning membership, a non-revoked
   authority, and a session fence that is never ahead of the session it fences;
@@ -1894,20 +1902,20 @@ and an explicit `truncated` flag.
   proves existence, never ownership);
 - the shadow scope comparison: legacy effective scope is workspace for every
   resource, so every connection, Variable Set, Rig, Connected Machine, or
-  Document whose *proposed* effective scope is `user` must have an active
+  Document whose _proposed_ effective scope is `user` must have an active
   authority owned by an active membership. Without one there is no reachable
   user resolution - it must fall back to workspace or deny.
 
 **Lanes** are legacy populations, not corruption: a non-zero lane blocks a
 cutover (`cutoverReady`) without failing the invariants. Every lane must
-therefore have a *reachable* zero, or the cutover gate is structurally
+therefore have a _reachable_ zero, or the cutover gate is structurally
 unreachable rather than merely unmet. A lane is `drainable` only when a backfill
 can actually take it to zero; a lane over immutable history is `observation`
 and is reported over a bounded recent window, where the honest signal is "the
 lane stopped being exercised".
 
 They are the 0285 inventory populations plus these refinements.
-`sessionsAttributableButUnattributed` is the *drainable* subset of ownerless
+`sessionsAttributableButUnattributed` is the _drainable_ subset of ownerless
 sessions - those whose creating subject today's `guard_session_authority_write`
 fence would attribute. Three lanes are `observation` because their tables are
 immutable history whose all-time count can never drain:
@@ -1923,11 +1931,11 @@ immutable history whose all-time count can never drain:
   admission therefore keeps the `legacy_unattributed` sentinel permanently, so
   a single such row would otherwise pin `cutoverReady` to false forever.
 
-`connectionsLegacyUser` is the opposite case and is deliberately *not* bounded
+`connectionsLegacyUser` is the opposite case and is deliberately _not_ bounded
 today: 0256's `guard_connection_authority_write` still actively mints
 `legacy_user` for any **new** connection whose subject holds no active
 organization membership, and no migration upgrades an existing `legacy_user`
-row to `user`. It is drainable only *after* the organization-membership
+row to `user`. It is drainable only _after_ the organization-membership
 backfill lands and stops the mint, which is why it names that owner.
 
 Documents and Codex credentials are consumed as gate inputs only; their repair
@@ -1946,10 +1954,10 @@ counter that could never reach zero:
 
 - Variable Sets, Rigs, and Connected Machines have no legacy discriminator.
   `authority_scope` defaults to `workspace` and the `*_authority_shape_check`
-  constraints *require* `authority_id IS NULL` for organization/workspace scope,
+  constraints _require_ `authority_id IS NULL` for organization/workspace scope,
   so a never-classified legacy row and a deliberately workspace-owned row are
   byte-identical. Any "unclassified" counter for them is structurally
-  `total − userScoped`. (Documents are the exception that *does* have a
+  `total − userScoped`. (Documents are the exception that _does_ have a
   discriminator: `authority_kind = 'personal' AND authority_id IS NULL`.)
 - `workspace_shared` is the permanent correct visibility for a shared session,
   not a legacy marker.
@@ -1998,11 +2006,11 @@ session, subject, connection, resource, provider, or server identity - and a
 registry failure is swallowed at the telemetry boundary, so counting can never
 change an authorization or credential outcome.
 
-| Lane | Increments when | Emitted from |
-| --- | --- | --- |
-| `connection_legacy_user` | An accepted connection use resolves to `authority_scope = 'legacy_user'` - a personal row with no common authority or grant, admitted through `legacy_user_compatibility` provenance. | `apps/worker/src/activities/mcp-credentials.ts` |
-| `connection_pre_snapshot_ref` | A workspace-scope connection ref carries no connection id, so accepted-use authority (0279) cannot identify the exact row and the request takes the unprivileged pre-snapshot resolution. | `apps/worker/src/activities/mcp-credentials.ts` |
-| `workspace_writer_unattributed` | An API-direct persistable `/workspace` mutation is refused `authority_unattributed` because its writer has no recorded authority. | `apps/api/src/sandbox/channel-a.ts` |
+| Lane                            | Increments when                                                                                                                                                                           | Emitted from                                    |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `connection_legacy_user`        | An accepted connection use resolves to `authority_scope = 'legacy_user'` - a personal row with no common authority or grant, admitted through `legacy_user_compatibility` provenance.     | `apps/worker/src/activities/mcp-credentials.ts` |
+| `connection_pre_snapshot_ref`   | A workspace-scope connection ref carries no connection id, so accepted-use authority (0279) cannot identify the exact row and the request takes the unprivileged pre-snapshot resolution. | `apps/worker/src/activities/mcp-credentials.ts` |
+| `workspace_writer_unattributed` | An API-direct persistable `/workspace` mutation is refused `authority_unattributed` because its writer has no recorded authority.                                                         | `apps/api/src/sandbox/channel-a.ts`             |
 
 The workspace-writer lane is scoped to the API-direct surface on purpose: that
 is where the fence is a deliberate, observable refusal of a caller's request.
@@ -2013,7 +2021,7 @@ into one durable-output rejection without discriminating the code, so counting
 there would need a separate change to that fence's contract.
 
 **These counters are use rates, never burndown gauges, and must not be
-relabelled as one.** Restating the finding plainly: *none* of the tenancy
+relabelled as one.** Restating the finding plainly: _none_ of the tenancy
 compatibility populations is bounded on the current write paths. Each is still
 open, so no row-count predicate over it can reach zero, and a backlog gauge
 would read as a permanent unmigrated backlog - the same defect class that
@@ -2021,7 +2029,7 @@ already had to be removed from the inventory seam's resource counters.
 
 - **`legacy_user` connections are not backfill residue.** Migration 0256's
   `bind_connection_authority` trigger is still the live classifier and is never
-  superseded by 0264/0275/0279/0280, which only *read* the lane. It assigns
+  superseded by 0264/0275/0279/0280, which only _read_ the lane. It assigns
   `legacy_user` to any NEW personal connection whose inserting subject has no
   active organization membership, and `configured:`, `api_key:`, and bare `dev` subjects
   can never have one (below). The offboarding sweep in 0263 deletes only
@@ -2034,7 +2042,7 @@ already had to be removed from the inventory seam's resource counters.
   Only the direct lane fences it; `assertRetainedProcessAuthority` deliberately
   accepts a recorded-but-legacy initiator rather than fencing ordinary work.
   There is no targeted prune, retention job, or recurring backfill on either table,
-  so nothing ages out. The counter above therefore reports *refused mutations*,
+  so nothing ages out. The counter above therefore reports _refused mutations_,
   which is a real bounded event, and says nothing about the row population.
 - **Null-authority personal Documents are a permanent lane, not only a legacy
   one.** `create_personal_document_authority` (0258) returns zero rows when the
@@ -2059,7 +2067,7 @@ already had to be removed from the inventory seam's resource counters.
   row: managed-human provisioning (0219), gated to `user:%` subjects in their
   own `better-auth:user` self-account, and invitation acceptance (0263), whose
   invitations are CHECK-constrained to `user:%`. So `configured:`, `api_key:`, and
-  bare `dev` subjects can *never* acquire an anchor - the inventory's
+  bare `dev` subjects can _never_ acquire an anchor - the inventory's
   `user:%` filter correctly excludes them. Cross-account human grants
   (`grantWorkspaceAccess`, `bootstrapWorkspace`, the Slack link approval) still
   add anchorless `user:` subjects, and re-authentication cannot fix those;
@@ -2108,7 +2116,7 @@ typed 410/rebase path on an old replica; it never points at a materialized row.
 
 - A cached list page is stripped at the transition, not filtered on the read
   path. An `AFTER UPDATE OF visibility` trigger on `sessions` replaces the
-  transitioned identity with the reserved all-zero UUID in every *other*
+  transitioned identity with the reserved all-zero UUID in every _other_
   subject's live snapshot for that workspace; the owner's own page is left
   intact because the session is still visible to them. Replacing rather than
   removing the slot keeps snapshot cardinality and every in-flight cursor offset
@@ -2126,7 +2134,7 @@ typed 410/rebase path on an old replica; it never points at a materialized row.
   PostgreSQL applies SELECT policies to a `DELETE` that reads any column, so a
   command-scoped `FOR DELETE` exemption is impossible; the RESTRICTIVE policy's
   USING side instead carries an explicit `subject_id =
-  current_subject_id()` escape. That discloses nothing new — the pre-existing
+current_subject_id()` escape. That discloses nothing new — the pre-existing
   permissive `workspace_isolation` policy already limits every visible pin to
   its own subject, and a pin row's only session-derived field is an id that
   subject supplied. The WITH CHECK side keeps the strict predicate, so a member

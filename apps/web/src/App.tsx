@@ -193,8 +193,11 @@ const setupAccountRoute = createRoute({
 const accountAuthRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "account-auth",
-  validateSearch: (search: Record<string, unknown>): { transaction?: string } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { transaction?: string; social?: "complete" | "error" } => ({
     ...(typeof search.transaction === "string" ? { transaction: search.transaction } : {}),
+    ...(search.social === "complete" || search.social === "error" ? { social: search.social } : {}),
   }),
   component: AccountAuth,
 });
@@ -720,8 +723,8 @@ function SetupAccount() {
 }
 
 function AccountAuth() {
-  const { transaction } = accountAuthRoute.useSearch();
-  return <LazyAccountAuthRoute transactionId={transaction} />;
+  const { transaction, social } = accountAuthRoute.useSearch();
+  return <LazyAccountAuthRoute transactionId={transaction} socialOutcome={social} />;
 }
 
 function ComposerChromeGallery() {

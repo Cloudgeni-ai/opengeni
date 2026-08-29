@@ -18,6 +18,7 @@ import {
 } from "@opengeni/runtime";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
+export type WorkerDeathRecoveryOutcome = "recovering" | "exhausted";
 export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
 export type CreditBalanceGauge = { accountId: string; balanceMicros: number };
@@ -49,6 +50,12 @@ const modelCacheCounterTotals = new WeakMap<Observability, Map<string, number>>(
 // before floating-point precision can degrade; a restart resets both the
 // process-local Prometheus registry and this guard together.
 const MAX_MODEL_CACHE_COUNTER_TOTAL = 1_000_000_000_000;
+const TURN_OUTCOMES: readonly TurnOutcome[] = ["completed", "failed", "cancelled", "recovering"];
+const WORKER_DEATH_RECOVERY_OUTCOMES: readonly WorkerDeathRecoveryOutcome[] = [
+  "recovering",
+  "exhausted",
+];
+const WORKER_DEATH_TIMEOUT_TYPES = ["heartbeat", "schedule_to_start"] as const;
 
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {
@@ -160,6 +167,19 @@ export function runtimeMetricsHooksForObservability(
         name: "opengeni_mcp_tool_call_duration_seconds",
         help: "MCP tool-call duration in seconds by bounded structural outcome.",
         labels: { outcome },
+        value: durationSeconds,
+      });
+    },
+    onMcpLifecycle: ({ phase, policy, outcome, durationSeconds }) => {
+      observability.incrementCounter({
+        name: "opengeni_mcp_lifecycle_operations_total",
+        help: "Total physical MCP lifecycle operations by bounded phase, policy, and outcome.",
+        labels: { phase, policy, outcome },
+      });
+      observability.observeHistogram({
+        name: "opengeni_mcp_lifecycle_operation_duration_seconds",
+        help: "MCP lifecycle operation duration in seconds by bounded phase, policy, and outcome.",
+        labels: { phase, policy, outcome },
         value: durationSeconds,
       });
     },
@@ -298,6 +318,53 @@ export function turnLifecycleMetricsFor(observability: Observability): TurnLifec
   const tracker = new TurnLifecycleMetrics(observability);
   turnTrackers.set(observability, tracker);
   return tracker;
+}
+
+export function initializeWorkerOutcomeMetrics(observability: Observability): void {
+  for (const outcome of TURN_OUTCOMES) {
+    observability.incrementCounter({
+      name: "opengeni_turns_total",
+      help: "Total agent turns by terminal outcome.",
+      labels: { outcome },
+      amount: 0,
+    });
+  }
+  for (const outcome of WORKER_DEATH_RECOVERY_OUTCOMES) {
+    for (const timeoutType of WORKER_DEATH_TIMEOUT_TYPES) {
+      observability.incrementCounter({
+        name: "opengeni_turn_worker_death_recoveries_total",
+        help: "Total durable same-turn worker-death recovery outcomes.",
+        labels: { outcome, timeout_type: timeoutType },
+        amount: 0,
+      });
+    }
+  }
+}
+
+export function recordWorkerDeathRecoveryMetrics(
+  observability: Observability,
+  input: {
+    outcome: WorkerDeathRecoveryOutcome;
+    timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START";
+  },
+): void {
+  const turnOutcome: TurnOutcome = input.outcome === "exhausted" ? "failed" : "recovering";
+  observability.incrementCounter({
+    name: "opengeni_turn_worker_death_recoveries_total",
+    help: "Total durable same-turn worker-death recovery outcomes.",
+    labels: {
+      outcome: input.outcome,
+      timeout_type: input.timeoutType.toLowerCase(),
+    },
+  });
+  // The turn process that owned this attempt is gone, so its process-local
+  // lifecycle tracker cannot publish the outcome. Record it from the fenced
+  // control activity only after the durable recovery transaction wins.
+  observability.incrementCounter({
+    name: "opengeni_turns_total",
+    help: "Total agent turns by terminal outcome.",
+    labels: { outcome: turnOutcome },
+  });
 }
 
 export class TurnLifecycleMetrics {

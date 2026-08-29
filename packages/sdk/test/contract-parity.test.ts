@@ -770,7 +770,7 @@ describe("SDK / contracts parity", () => {
     expect(typeof acceptOrganizationPut).toBe("function");
 
     const add: AddWorkspaceMemberRequest = {
-      email: "teammate@example.com",
+      organizationMembershipId: "00000000-0000-4000-8000-000000000001",
       role: "member",
       permissions: ["sessions:read"],
     };

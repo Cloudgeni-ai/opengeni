@@ -120,7 +120,7 @@ export function registerPluginRoutes(
 
   app.post("/v1/workspaces/:workspaceId/plugins/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const payload = InstallPluginRequest.parse(await c.req.json());
     const resolved = await resolvePluginPackage({
       deps,
@@ -253,7 +253,7 @@ export function registerPluginRoutes(
 
   app.delete("/v1/workspaces/:workspaceId/plugins/:pluginKey", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const pluginKey = decodeURIComponent(c.req.param("pluginKey"));
     const payload = UninstallPluginRequest.parse(await c.req.json());
     try {

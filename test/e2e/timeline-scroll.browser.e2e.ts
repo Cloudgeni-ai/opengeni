@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing";
 import { chromium, type Browser, type Page } from "playwright";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -10,26 +12,81 @@ const artifactDir = process.env.TIMELINE_SCROLL_ARTIFACT_DIR;
 
 type VisibleRow = { id: string | null; top: number | null };
 
+async function withConfiguredCpuThrottle<T>(page: Page, task: () => Promise<T>): Promise<T> {
+  const configuredRate = Number(process.env.TIMELINE_SCROLL_CPU_THROTTLE_RATE ?? "1");
+  if (!Number.isFinite(configuredRate) || configuredRate < 1) {
+    throw new Error("TIMELINE_SCROLL_CPU_THROTTLE_RATE must be a finite number at least 1");
+  }
+  if (configuredRate === 1) {
+    return task();
+  }
+  const session = await page.context().newCDPSession(page);
+  await session.send("Emulation.setCPUThrottlingRate", { rate: configuredRate });
+  try {
+    return await task();
+  } finally {
+    await session.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+    await session.detach();
+  }
+}
+
+function observeBrowserErrors(page: Page, browserErrors: string[]): void {
+  page.on("pageerror", (error) => browserErrors.push(`pageerror: ${error.message}`));
+  page.on("console", (message) => {
+    if (message.type() !== "error") return;
+    const location = message.location().url;
+    if (location.endsWith("/favicon.ico")) return;
+    browserErrors.push(`console: ${message.text()}`);
+  });
+}
+
 describe("timeline scroll ownership browser regression", () => {
-  let web: StartedProcess;
+  let productionServer: ReturnType<typeof Bun.serve> | undefined;
   let browser: Browser;
   let page: Page;
   let baseUrl: string;
+  let productionBuildDir: string | undefined;
   let networkRequests = 0;
+  const browserErrors: string[] = [];
 
   beforeAll(async () => {
-    const port = await freePort();
-    baseUrl = `http://127.0.0.1:${port}`;
-    web = await startProcess(
-      ["bun", "run", "vite", ".", "--port", String(port), "--strictPort", "--host", "127.0.0.1"],
-      {
-        cwd: demoRoot,
-        ready: async () =>
-          (await fetch(baseUrl, { signal: AbortSignal.timeout(2_000) }).catch(() => null))?.ok ===
-          true,
-        timeoutMs: 45_000,
+    productionBuildDir = await mkdtemp(join(tmpdir(), "opengeni-timeline-scroll-"));
+    const productionEnvironment = {
+      OPENGENI_REACT_DEMO_OUT_DIR: productionBuildDir,
+      OPENGENI_TIMELINE_SCROLL_TEST_BUILD: "1",
+    };
+    const build = Bun.spawn(["bun", "run", "vite", "build", "."], {
+      cwd: demoRoot,
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "/tmp",
+        ...productionEnvironment,
       },
-    );
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if ((await build.exited) !== 0) {
+      throw new Error(
+        `timeline production harness build failed\n${await new Response(build.stderr).text()}`,
+      );
+    }
+    const productionPort = await freePort();
+    baseUrl = `http://127.0.0.1:${productionPort}`;
+    productionServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: productionPort,
+      fetch: async (request) => {
+        const pathname = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, "");
+        if (pathname.includes("..")) {
+          return new Response("Not found", { status: 404 });
+        }
+        const relativePath = pathname || "timeline-scroll-test.html";
+        const asset = Bun.file(join(productionBuildDir!, relativePath));
+        return (await asset.exists())
+          ? new Response(asset, { headers: { "content-type": asset.type } })
+          : new Response("Not found", { status: 404 });
+      },
+    });
     const executablePath = [
       process.env.CHROMIUM_EXECUTABLE_PATH,
       "/opt/google/chrome/chrome",
@@ -40,6 +97,7 @@ describe("timeline scroll ownership browser regression", () => {
       args: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
     page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    observeBrowserErrors(page, browserErrors);
     page.on("request", () => {
       networkRequests += 1;
     });
@@ -49,7 +107,14 @@ describe("timeline scroll ownership browser regression", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await Promise.allSettled([browser?.close(), web?.stop()]);
+    try {
+      expect(browserErrors).toEqual([]);
+    } finally {
+      await Promise.allSettled([browser?.close(), productionServer?.stop(true)]);
+      if (productionBuildDir) {
+        await rm(productionBuildDir, { recursive: true, force: true });
+      }
+    }
   });
 
   test("keeps the reader's row and pixel anchor through prepend, wheel, resize, and append", async () => {
@@ -173,6 +238,71 @@ describe("timeline scroll ownership browser regression", () => {
     expect(samples.every((sample) => Math.abs((sample.top ?? 0) - (before.top ?? 0)) < 1)).toBe(
       true,
     );
+  }, 30_000);
+
+  test("production-scheduled 100-row prepend avoids a browser long task", async () => {
+    const performancePage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    observeBrowserErrors(performancePage, browserErrors);
+    try {
+      await performancePage.goto(`${baseUrl}/timeline-scroll-test.html`);
+      await performancePage.waitForFunction(() => window.timelineScrollHarness !== undefined);
+      await performancePage.locator('[data-timeline-row="row-1000"]').waitFor({ timeout: 15_000 });
+      await performancePage.locator('[data-timeline-row="row-1040"]').evaluate((node) => {
+        node.scrollIntoView({ block: "start" });
+      });
+      await performancePage.waitForTimeout(100);
+
+      const before = await visible(performancePage);
+      const performance = await withConfiguredCpuThrottle(performancePage, () =>
+        performancePage.evaluate(
+          () =>
+            new Promise<{
+              longTasks: number[];
+              maxFrameIntervalMs: number;
+            }>((resolve) => {
+              const longTasks: number[] = [];
+              const frames: number[] = [];
+              const observer =
+                typeof PerformanceObserver === "undefined"
+                  ? null
+                  : new PerformanceObserver((list) => {
+                      for (const entry of list.getEntries()) longTasks.push(entry.duration);
+                    });
+              try {
+                observer?.observe({ type: "longtask" });
+              } catch {
+                // Frame intervals remain the portable signal.
+              }
+              const sample = (timestamp: number) => {
+                frames.push(timestamp);
+                if (frames.length < 12) {
+                  requestAnimationFrame(sample);
+                  return;
+                }
+                observer?.takeRecords().forEach((entry) => longTasks.push(entry.duration));
+                observer?.disconnect();
+                const intervals = frames.slice(1).map((value, index) => value - frames[index]!);
+                resolve({
+                  longTasks,
+                  maxFrameIntervalMs: Math.max(0, ...intervals),
+                });
+              };
+              requestAnimationFrame(() => {
+                window.timelineScrollHarness!.prependDeferred();
+                requestAnimationFrame(sample);
+              });
+            }),
+        ),
+      );
+      const after = await visible(performancePage);
+
+      expect(after.id).toBe(before.id);
+      expect(after.top).toBeCloseTo(before.top ?? 0, 0);
+      expect(performance.longTasks).toEqual([]);
+      expect(performance.maxFrameIntervalMs).toBeLessThan(50);
+    } finally {
+      await performancePage.close();
+    }
   }, 30_000);
 
   test("preserves the anchor during every progressive prepend frame", async () => {
@@ -1352,6 +1482,7 @@ declare global {
       append: () => void;
       growRowsAbove: () => void;
       prepend: () => void;
+      prependDeferred: () => void;
       stream: () => void;
       visible: () => VisibleRow;
     };

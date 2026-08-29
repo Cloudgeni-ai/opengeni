@@ -43,7 +43,10 @@ export function useAvailableModels(
   options: UseAvailableModelsOptions = {},
 ): UseAvailableModelsResult {
   const client = useOpenGeniClient(options);
-  const load = useCallback(async () => await client.getClientConfig(), [client]);
+  const load = useCallback(
+    async (signal?: AbortSignal) => await client.getClientConfig({ signal }),
+    [client],
+  );
   const state = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
@@ -62,19 +65,22 @@ export function useWorkspaceModelCatalog(
   options: UseWorkspaceModelCatalogOptions,
 ): UseWorkspaceModelCatalogResult {
   const client = useOpenGeniClient(options);
-  const load = useCallback(async () => {
-    if (!options.workspaceId) {
-      return { models: [], defaultModel: null };
-    }
-    const [catalog, config] = await Promise.all([
-      client.getWorkspaceModelCatalog(options.workspaceId),
-      client.getClientConfig(),
-    ]);
-    return {
-      models: catalog.models,
-      defaultModel: config.defaultModel,
-    };
-  }, [client, options.workspaceId]);
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!options.workspaceId) {
+        return { models: [], defaultModel: null };
+      }
+      const [catalog, config] = await Promise.all([
+        client.getWorkspaceModelCatalog(options.workspaceId, { signal }),
+        client.getClientConfig({ signal }),
+      ]);
+      return {
+        models: catalog.models,
+        defaultModel: config.defaultModel,
+      };
+    },
+    [client, options.workspaceId],
+  );
   const state = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled !== false && Boolean(options.workspaceId),

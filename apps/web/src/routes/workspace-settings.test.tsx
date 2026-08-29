@@ -1,9 +1,13 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
-import type { SlackUserLinkAccessRequest } from "@/types";
+import type {
+  SlackUserLinkAccessRequest,
+  WorkspaceMember,
+  WorkspaceMemberCandidate,
+} from "@/types";
 
 const workspaceA = "22222222-2222-4222-8222-222222222222";
 const workspaceB = "33333333-3333-4333-8333-333333333333";
@@ -23,15 +27,46 @@ const slackRequest = {
   updatedAt: "2026-08-11T12:00:00.000Z",
 } satisfies SlackUserLinkAccessRequest;
 
-const listWorkspaceMembers = mock(async () => {
-  throw new Error("the retired workspace member API must not be called");
-});
-const updateWorkspaceMember = mock(async () => {
-  throw new Error("the retired workspace member API must not be called");
-});
-const removeWorkspaceMember = mock(async () => {
-  throw new Error("the retired workspace member API must not be called");
-});
+const callerMember = {
+  subjectId: "user:caller",
+  subjectLabel: "owner@example.com",
+  role: "admin",
+  permissions: ["workspace:read", "workspace:admin", "members:manage"],
+  createdAt: "2026-08-10T12:00:00.000Z",
+} satisfies WorkspaceMember;
+const collaboratorMember = {
+  subjectId: "user:collaborator",
+  subjectLabel: "Ada Member",
+  role: "viewer",
+  permissions: [
+    "workspace:read",
+    "sessions:read",
+    "stream:view",
+    "files:read",
+    "documents:search",
+    "variable-sets:list",
+    "connections:read",
+    "rigs:use",
+    "artifacts:read",
+  ],
+  createdAt: "2026-08-11T12:00:00.000Z",
+} satisfies WorkspaceMember;
+const listWorkspaceMembers = mock(
+  async (): Promise<WorkspaceMember[]> => [callerMember, collaboratorMember],
+);
+const candidateMember = {
+  organizationMembershipId: "55555555-5555-4555-8555-555555555555",
+  subjectId: "user:candidate",
+  name: "Grace Hopper",
+  email: "grace@example.com",
+  organizationRole: "member",
+} satisfies WorkspaceMemberCandidate;
+const listWorkspaceMemberCandidates = mock(
+  async (): Promise<WorkspaceMemberCandidate[]> => [candidateMember],
+);
+const addWorkspaceMember = mock(async (): Promise<WorkspaceMember> => callerMember);
+const updateWorkspaceMember = mock(async (): Promise<WorkspaceMember> => callerMember);
+const removeWorkspaceMember = mock(async () => undefined);
 const listSlackUserLinkAccessRequests = mock(
   async (_workspaceId: string): Promise<SlackUserLinkAccessRequest[]> => [slackRequest],
 );
@@ -41,8 +76,10 @@ const denySlackUserLinkAccessRequest = mock(async () => undefined);
 const context = {
   client: {
     approveSlackUserLinkAccessRequest,
+    addWorkspaceMember,
     denySlackUserLinkAccessRequest,
     listSlackUserLinkAccessRequests,
+    listWorkspaceMemberCandidates,
     listWorkspaceMembers,
     removeWorkspaceMember,
     updateWorkspaceMember,
@@ -56,14 +93,11 @@ mock.module("@tanstack/react-router", () => ({
   useNavigate: () => () => undefined,
 }));
 
-const { MembersSection } = await import("./workspace-settings");
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
 
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
-});
+const { MembersSection } = await import("./workspace-members-section");
 
 afterAll(() => {
   mock.restore();
@@ -72,6 +106,8 @@ afterAll(() => {
 
 beforeEach(() => {
   listWorkspaceMembers.mockClear();
+  listWorkspaceMemberCandidates.mockClear();
+  addWorkspaceMember.mockClear();
   updateWorkspaceMember.mockClear();
   removeWorkspaceMember.mockClear();
   listSlackUserLinkAccessRequests.mockClear();
@@ -102,20 +138,63 @@ async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
 }
 
 describe("workspace access settings convergence", () => {
-  test("retires raw human member reads and mutations in favor of organization roles", async () => {
+  test("shows the workspace-scoped member manager", async () => {
     const rendered = await renderMembers(true);
     try {
+      expect(rendered.container.textContent).toContain("owner@example.com");
+      expect(rendered.container.textContent).toContain("Ada Member");
+      expect(rendered.container.textContent).toContain("Add member");
+      expect(rendered.container.textContent).toContain("Fine-tune");
+      expect(rendered.container.textContent).toContain("Remove");
       expect(rendered.container.textContent).toContain(
-        "Workspace access is managed from the organization",
+        "This workspace is permanently owned by its organization",
       );
-      expect(rendered.container.textContent).toContain(
-        "granting or revoking named workspace roles",
-      );
-      expect(rendered.container.textContent).toContain("Manage organization workspaces");
-      expect(listWorkspaceMembers).not.toHaveBeenCalled();
+      expect(rendered.container.textContent).toContain("Open organization settings");
+      expect(listWorkspaceMembers).toHaveBeenCalledWith(workspaceA);
       expect(updateWorkspaceMember).not.toHaveBeenCalled();
       expect(removeWorkspaceMember).not.toHaveBeenCalled();
-      expect(rendered.container.textContent).not.toContain("custom permissions");
+      expect(rendered.container.textContent).not.toContain("organization-admin action");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("selects an existing organization member instead of asking for an email", async () => {
+    const rendered = await renderMembers(true);
+    try {
+      const addButton = Array.from(rendered.container.querySelectorAll("button")).find(
+        (candidate) => candidate.textContent?.trim() === "Add member",
+      );
+      await act(async () => {
+        addButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+
+      expect(listWorkspaceMemberCandidates).toHaveBeenCalledWith(workspaceA);
+      expect(document.body.textContent).toContain("Grace Hopper");
+      expect(document.body.textContent).toContain("grace@example.com");
+      expect(document.body.textContent).not.toContain("Enter their email");
+      expect(document.body.querySelector('input[type="email"]')).toBeNull();
+      expect(document.body.querySelector('input[type="search"]')).not.toBeNull();
+
+      const option = document.body.querySelector<HTMLButtonElement>('[role="option"]');
+      await act(async () => option?.click());
+      const submit = Array.from(document.body.querySelectorAll("button")).find(
+        (candidate) => candidate.textContent?.trim() === "Add to workspace",
+      );
+      expect(submit?.disabled).toBe(false);
+      await act(async () => {
+        submit?.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(addWorkspaceMember).toHaveBeenCalledWith(
+        workspaceA,
+        expect.objectContaining({
+          organizationMembershipId: candidateMember.organizationMembershipId,
+          role: "member",
+        }),
+      );
     } finally {
       await rendered.unmount();
     }
@@ -136,9 +215,8 @@ describe("workspace access settings convergence", () => {
     const rendered = await renderMembers(false);
     try {
       expect(listSlackUserLinkAccessRequests).not.toHaveBeenCalled();
-      expect(rendered.container.textContent).toContain(
-        "Workspace access is managed from the organization",
-      );
+      expect(listWorkspaceMembers).toHaveBeenCalledWith(workspaceA);
+      expect(rendered.container.textContent).not.toContain("Add member");
       expect(rendered.container.textContent).not.toContain("Slack Requester");
     } finally {
       await rendered.unmount();

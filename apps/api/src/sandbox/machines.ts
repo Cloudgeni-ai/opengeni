@@ -9,8 +9,9 @@
 //     heartbeat), projected to the contract's MetricSample;
 //   * sharedSessionCount — the lease refcount (how many sessions share this one
 //     whole machine, the maxSandboxes:1 disclosure).
-// PLUS, when a session context is supplied, the session's synthetic Modal group
-// box (isSessionGroup:true) + the active-sandbox pointer (activeSandboxId/Epoch).
+// PLUS, when a session context is supplied, the session's synthetic managed
+// group box (isSessionGroup:true) + the active-sandbox pointer
+// (activeSandboxId/Epoch).
 //
 // This is workspace-scoped (perm enrollments:read) and flag-gated upstream
 // (sandboxSelfhostedEnabled). It deliberately does NOT depend on a FleetContext
@@ -32,6 +33,7 @@ import {
   type MachineMetricsRow,
 } from "@opengeni/db";
 import { MachineView, MetricSample, type MachinesResponse } from "@opengeni/contracts";
+import { managedSessionGroupBackend } from "@opengeni/core";
 import { selfhostedHeartbeatLiveness } from "@opengeni/runtime/sandbox";
 
 export type MachinesServices = {
@@ -244,10 +246,15 @@ export async function listMachines(
   }
 
   const machines: MachineView[] = [];
+  const groupBackend = session
+    ? managedSessionGroupBackend(services.settings.sandboxBackend, session.sandboxBackend)
+    : null;
 
-  // The session's own group box (synthetic): the default/home sandbox a null
-  // active pointer routes to. A backend:none session has no home box.
-  if (session && session.sandboxBackend !== "none") {
+  // The session's own managed group box (synthetic): the sandbox a null active
+  // pointer routes to. A machine-home session uses the deployment's managed
+  // backend only after an explicit switch; none/selfhosted-only deployments do
+  // not invent a group they cannot establish.
+  if (session && groupBackend) {
     const groupActive = activeSandboxId === null;
     const groupLease = await readLease(db, workspaceId, session.sandboxGroupId);
     machines.push(
@@ -255,7 +262,7 @@ export async function listMachines(
         sandboxId: session.sandboxGroupId,
         enrollmentId: null,
         name: "session sandbox",
-        kind: session.sandboxBackend === "selfhosted" ? "selfhosted" : "modal",
+        kind: groupBackend === "opensandbox" ? "opensandbox" : "modal",
         state: "online",
         active: groupActive,
         isSessionGroup: true,

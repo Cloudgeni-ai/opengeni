@@ -10,15 +10,16 @@ import {
   KeyRoundIcon,
   Loader2Icon,
   PauseIcon,
+  PencilIcon,
   PlayIcon,
   PlusIcon,
   ShrinkIcon,
   Trash2Icon,
   TriangleAlertIcon,
   UserIcon,
-  UsersIcon,
+  XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
@@ -58,11 +59,10 @@ import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   apiKeyPermissionGroups,
   defaultApiKeyPermissions,
-  defaultWorkspaceMemberPermissions,
   delegableApiKeyPermissions,
   hasWorkspacePermission,
 } from "@/lib/permissions";
-import type { ApiKey, SlackUserLinkAccessRequest } from "@/types";
+import type { ApiKey } from "@/types";
 import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
 
 export function WorkspaceSettingsRoute({
@@ -85,6 +85,7 @@ export function WorkspaceSettingsRoute({
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
 
   const [nameDraft, setNameDraft] = useState(activeWorkspace?.name ?? "");
+  const [nameEditing, setNameEditing] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const canRename =
     activeWorkspace !== null &&
@@ -99,6 +100,11 @@ export function WorkspaceSettingsRoute({
     context.accessContext,
     workspaceId,
     "workspace:admin",
+  );
+  const canManageConnections = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "connections:write",
   );
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
@@ -134,6 +140,7 @@ export function WorkspaceSettingsRoute({
 
   useEffect(() => {
     setNameDraft(activeWorkspace?.name ?? "");
+    setNameEditing(false);
   }, [activeWorkspace?.id, activeWorkspace?.name]);
 
   const refreshApiKeys = useCallback(async () => {
@@ -170,7 +177,11 @@ export function WorkspaceSettingsRoute({
 
   async function submitRename() {
     const name = nameDraft.trim();
-    if (!name || name === activeWorkspace?.name) {
+    if (!name) {
+      return;
+    }
+    if (name === activeWorkspace?.name) {
+      setNameEditing(false);
       return;
     }
     const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
@@ -179,11 +190,17 @@ export function WorkspaceSettingsRoute({
     try {
       const renamed = await context.renameWorkspace(workspaceId, name);
       if (renamed && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        setNameEditing(false);
         toast.success("Workspace renamed");
       }
     } finally {
       setRenaming(false);
     }
+  }
+
+  function cancelRename() {
+    setNameDraft(activeWorkspace?.name ?? "");
+    setNameEditing(false);
   }
 
   async function toggleWorkspaceControl() {
@@ -312,48 +329,85 @@ export function WorkspaceSettingsRoute({
       <section className="grid min-w-0 gap-6 text-left">
         {section === "general" ? (
           <>
-            <section className="grid max-w-xl gap-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h2 className="text-sm font-medium">Workspace name</h2>
-                  {personal ? <PersonalWorkspaceBadge /> : null}
+            <section className="grid max-w-3xl gap-4 border-b border-border pb-5">
+              <div className="flex min-w-0 items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+                    Workspace
+                  </p>
+                  <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-2">
+                    <h2 className="truncate text-lg font-semibold tracking-tight text-fg">
+                      {activeWorkspace?.name ?? "Workspace"}
+                    </h2>
+                    {personal ? <PersonalWorkspaceBadge /> : null}
+                  </div>
+                  <p className="mt-1 text-xs text-fg-muted">
+                    {personal ? "Private workspace" : "Shared workspace"} in {organizationLabel}
+                  </p>
                 </div>
-                <p className="mt-1 text-xs text-fg-muted">Shown throughout {organizationLabel}.</p>
-              </div>
-              <form
-                className="flex min-w-0 items-center gap-2"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void submitRename();
-                }}
-              >
-                <Input
-                  value={nameDraft}
-                  onChange={(event) => setNameDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") {
-                      setNameDraft(activeWorkspace?.name ?? "");
-                    }
-                  }}
-                  disabled={!canRename || renaming}
-                  className="h-9 text-sm"
-                  placeholder="Workspace name"
-                  aria-label="Workspace name"
-                />
-                {canRename ? (
+                {canRename && !nameEditing ? (
                   <Button
-                    type="submit"
+                    type="button"
                     size="sm"
-                    variant="secondary"
-                    disabled={
-                      renaming || !nameDraft.trim() || nameDraft.trim() === activeWorkspace?.name
-                    }
+                    variant="ghost"
+                    className="shrink-0 text-fg-muted hover:text-fg"
+                    onClick={() => setNameEditing(true)}
+                    aria-label={`Rename workspace ${activeWorkspace?.name ?? ""}`}
                   >
-                    {renaming ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-                    Save
+                    <PencilIcon className="size-3.5" />
+                    Rename
                   </Button>
                 ) : null}
-              </form>
+              </div>
+              {nameEditing && canRename ? (
+                <form
+                  className="grid max-w-xl gap-3 rounded-lg border border-border bg-surface/45 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void submitRename();
+                  }}
+                >
+                  <div className="grid min-w-0 gap-1.5">
+                    <Label htmlFor="workspace-name" className="text-xs text-fg-muted">
+                      Workspace name
+                    </Label>
+                    <Input
+                      id="workspace-name"
+                      value={nameDraft}
+                      onChange={(event) => setNameDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") cancelRename();
+                      }}
+                      disabled={renaming}
+                      placeholder="Workspace name"
+                      aria-label="Workspace name"
+                      autoFocus
+                    />
+                  </div>
+                  <div className="flex items-center justify-end gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={renaming}
+                      onClick={cancelRename}
+                    >
+                      <XIcon className="size-3.5" />
+                      Cancel
+                    </Button>
+                    <Button
+                      type="submit"
+                      size="sm"
+                      disabled={
+                        renaming || !nameDraft.trim() || nameDraft.trim() === activeWorkspace?.name
+                      }
+                    >
+                      {renaming ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                      Save
+                    </Button>
+                  </div>
+                </form>
+              ) : null}
             </section>
 
             <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
@@ -418,7 +472,9 @@ export function WorkspaceSettingsRoute({
           personal ? (
             <PersonalWorkspaceNotice organizationLabel={organizationLabel} />
           ) : (
-            <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
+            <Suspense fallback={<MembersSectionFallback />}>
+              <LazyMembersSection workspaceId={workspaceId} canManage={canManageMembers} />
+            </Suspense>
           )
         ) : null}
 
@@ -476,16 +532,16 @@ export function WorkspaceSettingsRoute({
             <CodexSubscriptionsCard
               key={`codex-subscriptions:${workspaceId}`}
               workspaceId={workspaceId}
-              canManage={canDeleteWorkspace}
+              canManage={canManageConnections}
             />
             <SuperGrokSubscriptionsCard
               key={`supergrok:${workspaceId}`}
               workspaceId={workspaceId}
-              canManage={canDeleteWorkspace}
+              canManage={canManageConnections}
             />
             <AiGatewayConnectionCard
               workspaceId={workspaceId}
-              canManage={canDeleteWorkspace}
+              canManage={canManageConnections}
               onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
             />
           </>
@@ -730,197 +786,17 @@ function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: str
   );
 }
 
-/** Organization-owned access entry point plus the separate Slack-link approval queue. */
-export function MembersSection(props: { workspaceId: string; canManage: boolean }) {
-  return <MembersSectionContent key={props.workspaceId} {...props} />;
-}
+const LazyMembersSection = lazy(async () => {
+  const module = await import("./workspace-members-section");
+  return { default: module.MembersSection };
+});
 
-function MembersSectionContent({
-  workspaceId,
-  canManage,
-}: {
-  workspaceId: string;
-  canManage: boolean;
-}) {
-  const context = useAppContext();
-  const client = context.client;
-  const [slackAccessRequests, setSlackAccessRequests] = useState<SlackUserLinkAccessRequest[]>([]);
-  const [slackAccessRequestsError, setSlackAccessRequestsError] = useState<Error | null>(null);
-  const [busy, setBusy] = useState(false);
-  const refreshGenerationRef = useRef(0);
-  const currentRefreshScopeRef = useRef<{
-    canManage: boolean;
-    client: typeof client;
-    workspaceId: string;
-  }>({ canManage, client, workspaceId });
-  currentRefreshScopeRef.current = { canManage, client, workspaceId };
-
-  const refresh = useCallback(async () => {
-    const currentScope = currentRefreshScopeRef.current;
-    if (
-      !currentScope ||
-      currentScope.workspaceId !== workspaceId ||
-      currentScope.canManage !== canManage ||
-      currentScope.client !== client
-    ) {
-      return;
-    }
-    const generation = ++refreshGenerationRef.current;
-    const isCurrentRefresh = () => {
-      const nextScope = currentRefreshScopeRef.current;
-      return (
-        refreshGenerationRef.current === generation &&
-        nextScope?.workspaceId === workspaceId &&
-        nextScope.canManage === canManage &&
-        nextScope.client === client
-      );
-    };
-    setSlackAccessRequests([]);
-    setSlackAccessRequestsError(null);
-    if (!canManage) return;
-    try {
-      const requests = await client.listSlackUserLinkAccessRequests(workspaceId);
-      if (!isCurrentRefresh()) return;
-      setSlackAccessRequests(requests);
-    } catch (caught) {
-      if (!isCurrentRefresh()) return;
-      setSlackAccessRequestsError(caught instanceof Error ? caught : new Error(String(caught)));
-    }
-  }, [canManage, client, workspaceId]);
-
-  useEffect(() => {
-    refreshGenerationRef.current += 1;
-    setSlackAccessRequests([]);
-    setSlackAccessRequestsError(null);
-    void refresh();
-    return () => {
-      refreshGenerationRef.current += 1;
-    };
-  }, [refresh]);
-
-  async function approveSlackAccess(request: SlackUserLinkAccessRequest) {
-    setBusy(true);
-    try {
-      await client.approveSlackUserLinkAccessRequest(workspaceId, request.id, {
-        expectedVersion: request.version,
-        idempotencyKey: crypto.randomUUID(),
-        role: "member",
-        permissions: [...defaultWorkspaceMemberPermissions],
-      });
-      await refresh();
-      toast.success("Access approved and Slack identity linked");
-    } catch (caught) {
-      toast.error("Failed to approve access", {
-        description: caught instanceof Error ? caught.message : String(caught),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function denySlackAccess(request: SlackUserLinkAccessRequest) {
-    setBusy(true);
-    try {
-      await client.denySlackUserLinkAccessRequest(workspaceId, request.id, {
-        expectedVersion: request.version,
-        idempotencyKey: crypto.randomUUID(),
-      });
-      setSlackAccessRequests((current) => current.filter((entry) => entry.id !== request.id));
-      toast.success("Access request denied");
-    } catch (caught) {
-      toast.error("Failed to deny access", {
-        description: caught instanceof Error ? caught.message : String(caught),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
+function MembersSectionFallback() {
   return (
-    <section className="grid gap-2">
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="flex items-center gap-1.5 text-sm font-medium">
-          <UsersIcon className="size-3.5 text-brand" />
-          People with access
-        </h2>
-      </div>
-
-      <Notice title="Workspace access is managed from the organization">
-        This workspace is permanently owned by its organization. Hand off access within the same
-        organization by granting or revoking named workspace roles. Cross-organization transfer and
-        Personal workspace transfer are unsupported. Personal workspaces are never administered from
-        this page.
-        {canManage ? (
-          <Button asChild type="button" variant="secondary" size="sm" className="mt-2">
-            <Link
-              to="/workspaces/$workspaceId/organization"
-              params={{ workspaceId }}
-              search={{ section: "overview" }}
-            >
-              Manage organization workspaces
-            </Link>
-          </Button>
-        ) : null}
-      </Notice>
-
-      {canManage && slackAccessRequests.length > 0 ? (
-        <div className="grid gap-2 rounded-lg border border-border bg-surface-2/35 p-3">
-          <div>
-            <p className="text-xs font-medium text-fg">Pending Slack access requests</p>
-            <p className="mt-0.5 text-2xs text-fg-subtle">
-              Approval grants the standard member permissions and completes Slack identity linking.
-            </p>
-          </div>
-          {slackAccessRequests.map((request) => (
-            <div
-              key={request.id}
-              className="flex flex-col gap-2 rounded-md border border-border/70 bg-surface px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
-            >
-              <div className="min-w-0">
-                <p className="truncate text-xs font-medium text-fg">
-                  {request.subjectLabel ?? "Signed-in OpenGeni user"}
-                </p>
-                <p className="text-2xs text-fg-subtle">
-                  Expires {new Date(request.expiresAt).toLocaleString()}
-                </p>
-              </div>
-              <div className="flex shrink-0 gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void approveSlackAccess(request)}
-                >
-                  Approve
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  disabled={busy}
-                  onClick={() => void denySlackAccess(request)}
-                >
-                  Deny
-                </Button>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {canManage && slackAccessRequestsError ? (
-        <Notice
-          title="Pending Slack access requests unavailable"
-          action={
-            <Button type="button" size="sm" variant="ghost" onClick={() => void refresh()}>
-              Retry
-            </Button>
-          }
-        >
-          {slackAccessRequestsError.message}
-        </Notice>
-      ) : null}
-    </section>
+    <div role="status" className="grid gap-2" aria-label="Loading workspace members">
+      <Skeleton className="h-16 rounded-lg" />
+      <Skeleton className="h-16 rounded-lg" />
+    </div>
   );
 }
 
@@ -956,7 +832,7 @@ function MemoryPreferenceRow({
     <PreferenceToggleRow
       icon={<BrainCircuitIcon className="size-3.5 text-brand" />}
       label="Workspace memory"
-      description="Durable facts agents carry across sessions — manage them in Memory."
+      description="Let agents autonomously save and correct durable facts, incidents, decisions, and outcomes across sessions."
       checked={enabled}
       disabled={saving || !canManage}
       saving={saving}

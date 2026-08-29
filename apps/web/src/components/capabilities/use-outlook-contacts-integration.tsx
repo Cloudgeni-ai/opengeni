@@ -2,6 +2,7 @@ import {
   useIntegrationDefinitionRow,
   type IntegrationAdapter,
 } from "@/components/capabilities/use-api-integration-accounts";
+import { OUTLOOK_LOGO_URL } from "@/components/capabilities/use-outlook-mail-integration";
 import type { ApiIntegrationInstallationSummary, IntegrationDefinitionSummary } from "@/types";
 
 export const OUTLOOK_CONTACTS_DEFINITION_ID = "microsoft-outlook-contacts";
@@ -26,7 +27,7 @@ export function useOutlookContactsIntegration({
     id: "outlook-contacts",
     name: "Outlook Contacts",
     description: "Read and manage contacts in a connected Outlook account.",
-    mark: { icon: "contacts" },
+    mark: { logoSrc: OUTLOOK_LOGO_URL, monogram: "OC" },
     definitionId: OUTLOOK_CONTACTS_DEFINITION_ID,
     workspaceId,
     definitions,

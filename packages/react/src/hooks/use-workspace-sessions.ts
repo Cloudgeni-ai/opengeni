@@ -67,34 +67,38 @@ export function useWorkspaceSessions(
   useEffect(() => {
     previousQueryKey.current = queryKey;
   }, [queryKey]);
-  const load = useCallback(async () => {
-    const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
-    const page = await client.listSessionPage(workspaceId, {
-      ...(limit !== undefined ? { limit } : {}),
-      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
-      ...(cursor !== undefined ? { cursor } : {}),
-      ...(search !== undefined ? { search } : {}),
-      ...(pinsOnly ? { pinsOnly: true } : {}),
-      ...(archivedOnly ? { archivedOnly: true } : {}),
-    });
-    return {
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
+      const page = await client.listSessionPage(workspaceId, {
+        ...(limit !== undefined ? { limit } : {}),
+        ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+        ...(cursor !== undefined ? { cursor } : {}),
+        ...(search !== undefined ? { search } : {}),
+        ...(pinsOnly ? { pinsOnly: true } : {}),
+        ...(archivedOnly ? { archivedOnly: true } : {}),
+        signal,
+      });
+      return {
+        queryKey,
+        page,
+        revision: ++nextReadRevision.current,
+        readGeneration,
+      };
+    },
+    [
+      beginRead,
+      client,
+      workspaceId,
+      limit,
+      parentSessionId,
+      cursor,
+      search,
+      pinsOnly,
+      archivedOnly,
       queryKey,
-      page,
-      revision: ++nextReadRevision.current,
-      readGeneration,
-    };
-  }, [
-    beginRead,
-    client,
-    workspaceId,
-    limit,
-    parentSessionId,
-    cursor,
-    search,
-    pinsOnly,
-    archivedOnly,
-    queryKey,
-  ]);
+    ],
+  );
   const state = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled,

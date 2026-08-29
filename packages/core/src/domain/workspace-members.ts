@@ -44,7 +44,9 @@ export function assertWorkspaceMemberRemovable(input: {
 }): void {
   const { members, subjectId, callerSubjectId } = input;
   if (subjectId === callerSubjectId) {
-    throw new HTTPException(409, { message: "you cannot remove your own membership" });
+    throw new HTTPException(409, {
+      message: "you cannot remove your own membership",
+    });
   }
   const target = members.find((member) => member.subjectId === subjectId);
   if (!target) {
@@ -62,6 +64,34 @@ export function assertWorkspaceMemberRemovable(input: {
   }
 }
 
+/** Keep scoped member edits from orphaning the workspace or changing the caller's own grant. */
+export function assertWorkspaceMemberUpdateAllowed(input: {
+  members: WorkspaceMember[];
+  subjectId: string;
+  callerSubjectId: string;
+  nextPermissions: Permission[];
+}): void {
+  const { members, subjectId, callerSubjectId, nextPermissions } = input;
+  if (subjectId === callerSubjectId) {
+    throw new HTTPException(409, {
+      message: "you cannot change your own workspace access",
+    });
+  }
+  const target = members.find((member) => member.subjectId === subjectId);
+  if (!target) {
+    throw new HTTPException(404, { message: "member not found" });
+  }
+  if (
+    memberCanAdminister(target) &&
+    !memberCanAdminister({ permissions: nextPermissions }) &&
+    !members.some((member) => member.subjectId !== subjectId && memberCanAdminister(member))
+  ) {
+    throw new HTTPException(409, {
+      message: "the workspace must keep at least one administrator",
+    });
+  }
+}
+
 /**
  * Guard the workspace-delete path before any external/DB mutation. Refuses
  * (409) to delete the account's last workspace, and refuses while any session
@@ -74,7 +104,9 @@ export function assertWorkspaceDeletable(input: {
   activeSessionCount: number;
 }): void {
   if (input.workspaceCountForAccount <= 1) {
-    throw new HTTPException(409, { message: "cannot delete the account's only workspace" });
+    throw new HTTPException(409, {
+      message: "cannot delete the account's only workspace",
+    });
   }
   if (input.activeSessionCount > 0) {
     throw new HTTPException(409, {

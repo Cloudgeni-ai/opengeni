@@ -21,7 +21,7 @@ import {
   testSettings,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
 import {
@@ -93,6 +93,7 @@ const recoveryReadActorEpochs: Array<{
 }> = [];
 const externalRequests: string[] = [];
 const browserProblems: string[] = [];
+let custodianTwoSuspended = false;
 const fakeProvider = new InMemoryOrganizationRecoveryNotificationTransport();
 
 function workflowStub(): SessionWorkflowClient {
@@ -131,6 +132,37 @@ function accountMenuTrigger(page: Page, displayName: string) {
   });
 }
 
+async function waitForSelectedAccount(
+  page: Page,
+  account: Pick<ActorAccount, "name">,
+  timeout = 30_000,
+): Promise<Locator> {
+  const trigger = accountMenuTrigger(page, account.name);
+  const continueAs = page.getByRole("button", {
+    name: `Continue as ${account.name}`,
+  });
+  const deadline = Date.now() + timeout;
+  let visibleSince: number | null = null;
+  while (Date.now() < deadline) {
+    if ((await continueAs.isVisible()) && (await continueAs.isEnabled())) {
+      await continueAs.click();
+      visibleSince = null;
+      await page.waitForTimeout(100);
+      continue;
+    }
+    if (await trigger.isVisible()) {
+      visibleSince ??= Date.now();
+      if (Date.now() - visibleSince >= 250) return trigger;
+    } else {
+      visibleSince = null;
+    }
+    await page.waitForTimeout(50);
+  }
+  throw new Error(
+    `account selection did not settle for ${account.name}: url=${page.url()} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
+  );
+}
+
 async function completeEmailPopup(popup: Page, account: Pick<ActorAccount, "email" | "name">) {
   await popup.getByRole("heading", { name: "Authenticate this account" }).waitFor();
   await popup.getByLabel("Email").fill(account.email);
@@ -167,6 +199,64 @@ function waitForSessionSetReconciliation(page: Page): Promise<void> {
   });
 }
 
+async function reauthenticateAccount(
+  page: Page,
+  account: Pick<ActorAccount, "email" | "name">,
+): Promise<void> {
+  let lastBootstrapError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (attempt > 1) {
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await page.waitForTimeout(100);
+    }
+    const accountTrigger = await waitForSelectedAccount(page, account);
+    await accountTrigger.click();
+    const accountMenu = page
+      .locator('[data-slot="dropdown-menu-content"][data-state="open"]')
+      .filter({ hasText: "Browser accounts" })
+      .last();
+    const slot = accountMenu.getByRole("menuitem", {
+      name: new RegExp(escapeRegExp(account.name)),
+    });
+    await slot.hover();
+    const reauthenticate = page.getByRole("menuitem", {
+      name: "Re-authenticate",
+    });
+    await reauthenticate.waitFor();
+    await page.waitForFunction(() => {
+      const candidates = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+      const item = candidates.find(
+        (candidate) =>
+          candidate.textContent?.trim() === "Re-authenticate" && candidate.offsetParent,
+      );
+      return (
+        item !== undefined &&
+        !item.hasAttribute("data-disabled") &&
+        item.getAttribute("aria-disabled") !== "true"
+      );
+    });
+    const [popup] = await Promise.all([
+      page.waitForEvent("popup"),
+      reauthenticate.click({ force: true }),
+    ]);
+    try {
+      await popup.getByRole("heading", { name: "Authenticate this account" }).waitFor();
+    } catch (error) {
+      lastBootstrapError = error;
+      await popup.close().catch(() => undefined);
+      continue;
+    }
+    const reconciliation = waitForSessionSetReconciliation(page);
+    await completeEmailPopup(popup, account);
+    await reconciliation;
+    return;
+  }
+  throw new Error(
+    `re-authentication popup did not bootstrap for ${account.name}: main=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
+    { cause: lastBootstrapError },
+  );
+}
+
 async function signInAndReauthenticate(account: ActorAccount): Promise<ActorBrowser> {
   if (!browser) throw new Error("browser unavailable");
   const actorOctet = (
@@ -189,59 +279,14 @@ async function signInAndReauthenticate(account: ActorAccount): Promise<ActorBrow
     page.getByRole("button", { name: "Continue with email" }).click(),
   ]);
   await completeEmailPopup(initialPopup, account);
-  const continueAs = page.getByRole("button", {
-    name: `Continue as ${account.name}`,
-  });
-  const accountTrigger = accountMenuTrigger(page, account.name);
-  if (!(await accountTrigger.isVisible())) {
-    try {
-      await continueAs.waitFor({ timeout: 30_000 });
-      await continueAs.click();
-    } catch (error) {
-      throw new Error(
-        `account selection did not settle for ${account.name}: url=${page.url()} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
-        { cause: error },
-      );
-    }
-  }
-  await accountTrigger.waitFor({ timeout: 30_000 });
+  await waitForSelectedAccount(page, account);
 
   // The selected actor transition commits before the account trigger mounts,
   // but its final finite access reads can still replace the menu tree once.
   // Let that settled render win before opening the re-authentication submenu.
   await page.waitForTimeout(1_000);
-  await accountTrigger.click();
-  const accountMenu = page
-    .locator('[data-slot="dropdown-menu-content"][data-state="open"]')
-    .filter({ hasText: "Browser accounts" })
-    .last();
-  const slot = accountMenu.getByRole("menuitem", {
-    name: new RegExp(escapeRegExp(account.name)),
-  });
-  await slot.hover();
-  const reauthenticate = page.getByRole("menuitem", {
-    name: "Re-authenticate",
-  });
-  await reauthenticate.waitFor();
-  await page.waitForFunction(() => {
-    const candidates = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
-    const item = candidates.find(
-      (candidate) => candidate.textContent?.trim() === "Re-authenticate" && candidate.offsetParent,
-    );
-    return (
-      item !== undefined &&
-      !item.hasAttribute("data-disabled") &&
-      item.getAttribute("aria-disabled") !== "true"
-    );
-  });
-  const [reauthPopup] = await Promise.all([
-    page.waitForEvent("popup"),
-    reauthenticate.click({ force: true }),
-  ]);
-  const reconciliation = waitForSessionSetReconciliation(page);
-  await completeEmailPopup(reauthPopup, account);
-  await reconciliation;
-  await accountTrigger.waitFor({ timeout: 30_000 });
+  await reauthenticateAccount(page, account);
+  await waitForSelectedAccount(page, account);
   await page.waitForTimeout(100);
 
   observeRecoveryPage(page, account.key);
@@ -281,12 +326,38 @@ function observeRecoveryPage(page: Page, actor: ActorKey): void {
     }
   });
   page.on("requestfailed", (request) => {
+    const url = new URL(request.url());
+    const failure = request.failure()?.errorText ?? "unknown";
+    const expectedNavigationReadCancellation =
+      request.method() === "GET" &&
+      url.origin === publicOrigin &&
+      failure === "net::ERR_ABORTED" &&
+      (url.pathname === "/v1/config/client" ||
+        url.pathname === "/v1/auth/get-session" ||
+        /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(url.pathname));
+    if (expectedNavigationReadCancellation) return;
+    const expectedSuspendedCustodianStreamFailure =
+      custodianTwoSuspended &&
+      actor === "custodian-2" &&
+      request.method() === "GET" &&
+      url.pathname === `/v1/workspaces/${workspaceId}/live-events/stream` &&
+      /ERR_ABORTED|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(failure);
+    if (expectedSuspendedCustodianStreamFailure) return;
     browserProblems.push(
-      `${actor}: requestfailed: ${request.method()} ${request.url()} ${request.failure()?.errorText ?? "unknown"}`,
+      `${actor}: requestfailed: ${request.method()} ${request.url()} ${failure}`,
     );
   });
   page.on("response", (response) => {
     const url = new URL(response.url());
+    if (
+      custodianTwoSuspended &&
+      actor === "custodian-2" &&
+      response.request().method() === "GET" &&
+      response.status() === 403 &&
+      url.pathname === `/v1/workspaces/${workspaceId}/live-events/stream`
+    ) {
+      return;
+    }
     if (url.pathname.includes("/recovery") && response.status() >= 400) {
       browserProblems.push(`${actor}: recovery response ${response.status()} ${url.pathname}`);
     } else if (
@@ -826,6 +897,10 @@ describe("organization recovery same-origin Chromium acceptance", () => {
       operationState: "executed",
     });
 
+    await custodianOnePage.locator("[data-sonner-toast]").first().waitFor({
+      state: "hidden",
+      timeout: 10_000,
+    });
     await axe(custodianOnePage);
     await bounded(custodianOnePage, 1440);
     await custodianOnePage.screenshot({
@@ -854,6 +929,7 @@ describe("organization recovery same-origin Chromium acceptance", () => {
       from organization_memberships
       where id = ${members[1].membershipId}::uuid`;
     if (!custodian) throw new Error("custodian membership missing");
+    custodianTwoSuspended = true;
     await updateOrganizationMember(client.db, {
       organizationId,
       actorSubjectId: `user:${ownerUserId}`,

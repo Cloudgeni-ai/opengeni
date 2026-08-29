@@ -15,6 +15,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  editQueuedTurnInTransaction,
   expireSessionHumanInputRequest,
   getActiveSessionHistoryItems,
   getHumanInputResumeForEvent,
@@ -24,6 +25,7 @@ import {
   listSessionSystemUpdatesForTurn,
   listTurnOpenSuffixToolCalls,
   nextSessionHistoryPosition,
+  mutateSessionControlInTransaction,
   peekSessionWork,
   registerPendingSessionToolCall,
   submitHumanPromptInTransaction,
@@ -104,10 +106,14 @@ async function freezeRequest(
     parallel?: boolean;
     allowSkip?: boolean;
     optionalText?: boolean;
+    queueEditPrompt?: boolean;
   } = {},
 ) {
   const { grant, session } = await createFixture();
   await send(grant, session.id, "continue with my decision");
+  const queuedPrompt = options.queueEditPrompt
+    ? await send(grant, session.id, "revise this queued prompt later")
+    : null;
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
     sessionId: session.id,
@@ -196,7 +202,16 @@ async function freezeRequest(
     ],
   });
   expect(settlement.action).toBe("settled");
-  return { grant, session, turn, attemptId, requestId, parallelRequestId, questions };
+  return {
+    grant,
+    session,
+    turn,
+    queuedPrompt,
+    attemptId,
+    requestId,
+    parallelRequestId,
+    questions,
+  };
 }
 
 describe("durable structured human input", () => {
@@ -811,6 +826,140 @@ describe("durable structured human input", () => {
     expect(await peekSessionWork(client.db, frozen.grant.workspaceId!, frozen.session.id)).toEqual({
       kind: "runnable",
     });
+  });
+
+  test("normal Send replaces an active human wait instead of queueing behind it", async () => {
+    const frozen = await freezeRequest();
+    const submitted = await send(
+      frozen.grant,
+      frozen.session.id,
+      "I answered in the composer instead",
+    );
+
+    expect(submitted).toMatchObject({
+      routing: "accepted_for_steering",
+      interruptionCount: 0,
+      turn: {
+        metadata: {
+          delivery: "steer",
+          replacedTurnId: frozen.turn.id,
+        },
+      },
+      accepted: {
+        payload: {
+          delivery: "steer",
+          routing: "accepted_for_steering",
+        },
+      },
+    });
+    expect(
+      await getSessionHumanInputRequest(
+        client.db,
+        frozen.grant.workspaceId!,
+        frozen.session.id,
+        frozen.requestId,
+      ),
+    ).toMatchObject({
+      status: "cancelled",
+      response: { outcome: "cancelled" },
+    });
+    expect(await peekSessionWork(client.db, frozen.grant.workspaceId!, frozen.session.id)).toEqual({
+      kind: "runnable",
+    });
+  });
+
+  test("normal Send preserves a human wait when the session was explicitly paused", async () => {
+    const frozen = await freezeRequest();
+    await withWorkspaceSubjectRls(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: frozen.grant.accountId,
+            workspaceId: frozen.grant.workspaceId!,
+            sessionId: frozen.session.id,
+            actor: { type: "human", subjectId: frozen.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+          }),
+        ),
+    );
+
+    const submitted = await send(frozen.grant, frozen.session.id, "queue this until resume");
+    expect(submitted.routing).toBe("queued_for_execution");
+    expect(
+      await getSessionHumanInputRequest(
+        client.db,
+        frozen.grant.workspaceId!,
+        frozen.session.id,
+        frozen.requestId,
+      ),
+    ).toMatchObject({ status: "pending", response: null });
+  });
+
+  test("resubmitting a queue-edit draft preserves an unrelated active human wait", async () => {
+    const frozen = await freezeRequest({ queueEditPrompt: true });
+    const queuedPrompt = frozen.queuedPrompt;
+    if (!queuedPrompt) throw new Error("queue-edit fixture did not create a queued prompt");
+    const edited = await withWorkspaceSubjectRls(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          editQueuedTurnInTransaction(tx as unknown as typeof db, {
+            accountId: frozen.grant.accountId,
+            workspaceId: frozen.grant.workspaceId!,
+            sessionId: frozen.session.id,
+            turnId: queuedPrompt.turn.id,
+            subjectId: frozen.grant.subjectId,
+            expectedTurnVersion: queuedPrompt.turn.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: { type: "human", subjectId: frozen.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+    );
+
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: frozen.grant.accountId,
+            workspaceId: frozen.grant.workspaceId!,
+            sessionId: frozen.session.id,
+            subjectId: frozen.grant.subjectId,
+            actor: { type: "human", subjectId: frozen.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            expectedDraftRevision: edited.draft.revision,
+            text: edited.draft.text,
+            annotations: [],
+            resources: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+        ),
+    );
+
+    expect(submitted).toMatchObject({
+      routing: "queued_for_execution",
+      turn: { metadata: expect.not.objectContaining({ delivery: "steer" }) },
+    });
+    expect(
+      await getSessionHumanInputRequest(
+        client.db,
+        frozen.grant.workspaceId!,
+        frozen.session.id,
+        frozen.requestId,
+      ),
+    ).toMatchObject({ status: "pending", response: null });
   });
 
   test("attaches open-suffix reasoning onto the pending interruption receipt", async () => {

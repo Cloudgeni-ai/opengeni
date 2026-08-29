@@ -32,7 +32,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const payload = CreateCapabilityCatalogItemRequest.parse(await c.req.json());
     return c.json(
       await createCatalogItem({ db, accountId: grant.accountId, workspaceId, payload }),
@@ -62,7 +62,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/capabilities/:capabilityId/enable", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const payload = EnableCapabilityRequest.parse(await c.req.json());
     const installation = await enableCapability({
       db,
@@ -78,7 +78,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/capabilities/:capabilityId/disable", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const installation = await disableCapability({
       db,
       accountId: grant.accountId,

@@ -1,5 +1,84 @@
 # @opengeni/worker-bundle
 
+## 0.22.12
+
+### Patch Changes
+
+- 3c75347: Keep Agents SDK MCP lifecycle failures inside owned promises and reserve shared-worker process termination policy for OpenGeni.
+- 237ef39: Keep detached SDK and transport promise rejections from restarting shared worker pods and causing cross-session lease loss.
+- da6708a: Keep detached duplicates of already-handled MCP lifecycle failures from restarting turn workers.
+- Updated dependencies [3c75347]
+- Updated dependencies [551cead]
+- Updated dependencies [06460ae]
+- Updated dependencies [227c54c]
+- Updated dependencies [06fda28]
+- Updated dependencies [499cc48]
+- Updated dependencies [37faec3]
+  - @opengeni/runtime@1.4.6
+  - @opengeni/db@3.6.3
+  - @opengeni/core@2.5.7
+  - @opengeni/github@0.6.4
+  - @opengeni/documents@0.8.9
+  - @opengeni/events@0.4.7
+
+## 0.22.11
+
+### Patch Changes
+
+- f13d721: Record durable worker-death recovery and exhaustion outcomes, alert on release-owned turn-worker restarts and crash loops, and surface alert, scrape, probe, restart, and recovery health at the top of the runtime dashboard.
+- becd349: Return browser HTTP/1 event streams as capped, known-length batches so multiple tabs cannot retain ambiguous streaming requests and starve ordinary API reads.
+- 34a05ca: Deliver browser HTTP/1 events as immediate, vendor-typed snapshots read from the durable event store, without opening a timed live subscription or closing the reusable socket. Preserve cursor-based replay while preventing replaced documents from starving ordinary API reads across tabs and account changes.
+  - @opengeni/runtime@1.4.5
+  - @opengeni/core@2.5.6
+
+## 0.22.10
+
+### Patch Changes
+
+- c705de3: Bound session-control settlement reads to the requested session subtrees, avoid redundant workspace refreshes for session-scoped control events, and add low-cardinality MCP lifecycle telemetry with failure, latency, and runtime reliability alerts and dashboards.
+- e4655a7: Make common Documents uploads reliable by replacing ImageMagick-dependent image conversion, shipping Office conversion and local OCR prerequisites in the stock workloads, recognizing ordinary text files with generic MIME types, and surfacing indexing failures during upload.
+- Updated dependencies [595939e]
+- Updated dependencies [8dc432d]
+- Updated dependencies [c705de3]
+- Updated dependencies [e4655a7]
+- Updated dependencies [246b71f]
+- Updated dependencies [95d3971]
+- Updated dependencies [80d7594]
+  - @opengeni/config@0.22.2
+  - @opengeni/contracts@2.8.0
+  - @opengeni/core@2.5.5
+  - @opengeni/db@3.6.2
+  - @opengeni/runtime@1.4.4
+  - @opengeni/documents@0.8.8
+  - @opengeni/github@0.6.3
+  - @opengeni/storage@0.2.112
+  - @opengeni/codemode@0.4.19
+  - @opengeni/events@0.4.6
+  - @opengeni/observability@0.8.11
+
+## 0.22.9
+
+### Patch Changes
+
+- 9069509: Reconcile goal continuations against authoritative state, pursue the full verified objective within each turn, and avoid repeating already-satisfied state mutations.
+- 17d253b: Complete personal GitHub identity support across managed, self-hosted, and local modes. Add a compact connect-and-repository UI, exact local-human authority persistence, Docker-safe credential brokering, durable child and goal propagation, and reviewed GitHub tools for pull-request reviews and merges without exposing provider tokens to agents.
+- 88c1155: Recover the same logical turn when sandbox deadline rotation aborts an SDK stream instead of committing an empty successful turn.
+- Updated dependencies [17d253b]
+- Updated dependencies [ff4af61]
+- Updated dependencies [c116379]
+- Updated dependencies [c116379]
+  - @opengeni/config@0.22.1
+  - @opengeni/core@2.5.4
+  - @opengeni/db@3.6.1
+  - @opengeni/runtime@1.4.3
+  - @opengeni/contracts@2.7.1
+  - @opengeni/documents@0.8.7
+  - @opengeni/github@0.6.2
+  - @opengeni/storage@0.2.111
+  - @opengeni/events@0.4.5
+  - @opengeni/codemode@0.4.18
+  - @opengeni/observability@0.8.10
+
 ## 0.22.8
 
 ### Patch Changes

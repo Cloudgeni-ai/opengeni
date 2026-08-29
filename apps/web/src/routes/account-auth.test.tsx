@@ -65,7 +65,14 @@ describe("isolated browser account authentication", () => {
     const originalFetch = globalThis.fetch;
     const mutationBodies: Array<Record<string, unknown>> = [];
     let reads = 0;
-    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url =
+        input instanceof Request ? input.url : input instanceof URL ? input.toString() : input;
+      if (new URL(url, "https://opengeni.test").pathname === "/v1/config/client") {
+        return Response.json({
+          auth: { mode: "managedSession", session: "cookie", socialProviders: [] },
+        });
+      }
       if ((init?.method ?? "GET") === "GET") {
         reads += 1;
         return Response.json(projection(reads === 1 ? "1" : "2"));

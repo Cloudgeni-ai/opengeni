@@ -5,41 +5,53 @@
 // the Enter-save / Esc-cancel / blur-save / empty-or-unchanged-no-op behaviour
 // lives in exactly one place.
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
+  deriveSessionDisplayTitle,
+  sessionTitleIsPending,
+} from "@opengeni/sdk";
 
 import type { Session } from "@/types";
 
 /** The maximum length a session title may be renamed to. */
 export const SESSION_TITLE_MAX_LENGTH = 200;
 
-const AUTOMATIC_SESSION_TITLE_FALLBACK = "New conversation";
-
 /**
- * The title shown for a session: the durable agent/user-set title, falling back
- * to a stable prompt-free placeholder. Mirrors the rail list and the header so
- * every surface reads identically.
+ * The title shown for a session: durable agent/user metadata once available,
+ * otherwise a bounded opening-prompt preview while automatic naming is still
+ * pending. Mirrors the rail list and the header so every surface reads
+ * identically.
  */
 export function sessionDisplayTitle(session: Session): string {
-  return session.title?.trim() || AUTOMATIC_SESSION_TITLE_FALLBACK;
+  return deriveSessionDisplayTitle(session);
 }
 
 /**
- * The value the editor seeds from when entering edit mode: the raw current
- * title without the fallback placeholder, so the user edits durable metadata
- * rather than prompt content and an untitled legacy session opens empty.
+ * The value the editor seeds from when entering edit mode. A safe provisional
+ * prompt preview is editable because it is also what the user sees; the generic
+ * fallback remains an empty draft rather than becoming an accidental rename.
  */
 export function renameSeedValue(session: Session): string {
-  const title = session.title?.trim() || "";
-  return session.titleSource === "agent" && title === AUTOMATIC_SESSION_TITLE_FALLBACK ? "" : title;
+  if (!sessionTitleIsPending(session)) {
+    return session.title?.trim() || "";
+  }
+  const display = deriveSessionDisplayTitle(session);
+  return display === AUTOMATIC_SESSION_TITLE_FALLBACK ? "" : display;
 }
 
 /**
  * Resolve a submitted draft against the current display title. Returns the
- * trimmed title to persist, or `null` when the edit is a no-op (empty, or
- * unchanged from what is already shown) and should simply cancel.
+ * trimmed title to persist, or `null` when the edit is a no-op (empty,
+ * unchanged from what is already shown, or still equal to the value that
+ * seeded this edit) and should simply cancel.
  */
-export function resolveRenameSubmission(draft: string, display: string): string | null {
+export function resolveRenameSubmission(
+  draft: string,
+  display: string,
+  editSeed?: string,
+): string | null {
   const next = draft.trim();
-  if (!next || next === display) {
+  if (!next || next === display || (editSeed !== undefined && next === editSeed.trim())) {
     return null;
   }
   return next;
@@ -102,6 +114,10 @@ export function useInlineRename(session: Session, onRename: RenameFn): InlineRen
   // `saving` is deliberately retained as render state for consumers but is
   // not authoritative for event handlers from the previous render.
   const commitInFlightRef = useRef(false);
+  // A semantic/cross-client title can arrive while this editor remains open.
+  // Retain the exact seed so an untouched provisional draft stays a no-op
+  // instead of overwriting the newer durable title on blur.
+  const editSeedRef = useRef(display);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   // Reseed the draft whenever the displayed title changes while not editing
@@ -114,7 +130,9 @@ export function useInlineRename(session: Session, onRename: RenameFn): InlineRen
   }, [display, editing]);
 
   const startEditing = useCallback(() => {
-    setDraft(renameSeedValue(session));
+    const seed = renameSeedValue(session);
+    editSeedRef.current = seed;
+    setDraft(seed);
     setEditing(true);
     // Focus + select once the input mounts.
     requestAnimationFrame(() => {
@@ -132,7 +150,7 @@ export function useInlineRename(session: Session, onRename: RenameFn): InlineRen
     if (commitInFlightRef.current || saving) {
       return;
     }
-    const next = resolveRenameSubmission(draft, display);
+    const next = resolveRenameSubmission(draft, display, editSeedRef.current);
     setEditing(false);
     if (next === null) {
       return;

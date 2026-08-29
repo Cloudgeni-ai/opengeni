@@ -1559,10 +1559,15 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         and l.sandbox_group_id = ${groupId} and h.holder_id = ${holderId}`;
     const aged = await holderHeartbeatAt(workspaceId, groupId, holderId);
     expect(aged).not.toBeNull();
-    // Several loop ticks (50 ms cadence) under the rotation fence.
-    await Bun.sleep(400);
+    // Allow a loaded CI runner to schedule the 50 ms liveness loop, while
+    // retaining a bounded fail-closed proof that the heartbeat advances.
+    let touched = aged;
+    for (let attempt = 0; attempt < 100 && touched === aged; attempt += 1) {
+      await Bun.sleep(50);
+      touched = await holderHeartbeatAt(workspaceId, groupId, holderId);
+    }
     expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
-    const touched = await holderHeartbeatAt(workspaceId, groupId, holderId);
+    expect(touched).not.toBeNull();
     expect(touched).toBeGreaterThan(aged!);
     const row = await readRow(workspaceId, groupId);
     expect(row?.liveness).toBe("warm");

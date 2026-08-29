@@ -143,12 +143,41 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await shared?.release();
   }, 60_000);
 
+  test("keeps the selected session grouping after a page refresh", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      await createSessionThroughApi(page, apiBaseUrl, workspaceId, "Grouping preference proof");
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
+
+      await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("menuitemradio", { name: "Creator" }).click();
+      await page.getByRole("button", { name: "Session filters, active" }).waitFor();
+
+      await page.reload();
+      await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
+      await page.getByRole("button", { name: "Session filters, active" }).click();
+      expect(
+        await page.getByRole("menuitemradio", { name: "Creator" }).getAttribute("aria-checked"),
+      ).toBe("true");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("acknowledges later output without leaving and reopening the active chat", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
     });
     const page = await context.newPage();
+    let releaseFirstAcknowledgement = () => {};
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
@@ -160,9 +189,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       const attentionPath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`;
       let acknowledgementAttempts = 0;
+      const firstAcknowledgementRelease = new Promise<void>((resolve) => {
+        releaseFirstAcknowledgement = resolve;
+      });
+      let markFirstAcknowledgementStarted = () => {};
+      const firstAcknowledgementStarted = new Promise<void>((resolve) => {
+        markFirstAcknowledgementStarted = resolve;
+      });
       await page.route(`**${attentionPath}`, async (route) => {
         acknowledgementAttempts += 1;
         if (acknowledgementAttempts === 1) {
+          markFirstAcknowledgementStarted();
+          await firstAcknowledgementRelease;
           await route.fulfill({
             status: 503,
             contentType: "application/json",
@@ -180,6 +218,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         { timeout: 10_000 },
       );
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      await firstAcknowledgementStarted;
+      const targetRow = page.locator(`a[data-session-row="${target.id}"]`);
+      await targetRow.waitFor({ state: "visible", timeout: 10_000 });
+      expect(await targetRow.getAttribute("aria-label")).not.toContain("unread");
+      releaseFirstAcknowledgement();
       const firstAcknowledgementResponse = await firstAcknowledgement;
       const firstReadThrough = Number(
         firstAcknowledgementResponse.request().postDataJSON().acknowledgedThroughSequence,
@@ -228,10 +271,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page
         .locator(`a[data-session-row="${target.id}"]`)
         .waitFor({ state: "visible", timeout: 10_000 });
-      expect(
-        await page.locator(`a[data-session-row="${target.id}"]`).getAttribute("aria-label"),
-      ).not.toContain("unread");
+      expect(await targetRow.getAttribute("aria-label")).not.toContain("unread");
     } finally {
+      releaseFirstAcknowledgement();
       await context.close();
     }
   }, 60_000);
@@ -577,7 +619,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await route.continue();
       });
 
-      await page.keyboard.press("Enter");
+      // Route registration yields to background refreshes. Address the menu
+      // item directly so a refresh cannot move focus before keyboard activation.
+      await unpin.press("Enter");
       await page.getByText("Couldn't unpin session", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Unpin session" }).waitFor();
       await page.waitForFunction(

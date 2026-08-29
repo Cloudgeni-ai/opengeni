@@ -19,7 +19,7 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
-import { recordTurnsQueuedGauge } from "../observability-metrics";
+import { recordTurnsQueuedGauge, recordWorkerDeathRecoveryMetrics } from "../observability-metrics";
 import {
   MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   providerRecoveryCountFromMetadata,
@@ -66,6 +66,7 @@ export type SessionStateActivityOverrides = Partial<{
   deliverFailedChildTurnToParent: typeof deliverFailedChildTurnToParent;
   notifyParentOfChildIdle: typeof notifyParentOfChildIdle;
   recordTurnsQueuedGauge: typeof recordTurnsQueuedGauge;
+  recordWorkerDeathRecoveryMetrics: typeof recordWorkerDeathRecoveryMetrics;
 }>;
 
 // Crash-loop guard for worker-death re-dispatch: a turn that takes a worker
@@ -112,6 +113,8 @@ export function createSessionStateActivities(
     overrides.deliverFailedChildTurnToParent ?? deliverFailedChildTurnToParent;
   const notifyParentOfChildIdleFn = overrides.notifyParentOfChildIdle ?? notifyParentOfChildIdle;
   const recordTurnsQueuedGaugeFn = overrides.recordTurnsQueuedGauge ?? recordTurnsQueuedGauge;
+  const recordWorkerDeathRecoveryMetricsFn =
+    overrides.recordWorkerDeathRecoveryMetrics ?? recordWorkerDeathRecoveryMetrics;
 
   async function failSessionAttempt(
     input: FailSessionAttemptInput,
@@ -397,6 +400,10 @@ export function createSessionStateActivities(
     if (result.action === "stale" || result.action === "unclaimed") {
       return { action: result.action };
     }
+    recordWorkerDeathRecoveryMetricsFn(observability, {
+      outcome: result.action === "exceeded" ? "exhausted" : "recovering",
+      timeoutType: input.timeoutType,
+    });
     await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     if (result.action === "exceeded") {

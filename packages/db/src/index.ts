@@ -15,6 +15,7 @@ import {
   type ChildRequiresActionRespondedByKind,
   ModelContextContributionSummaries,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
+  ListWorkspaceMemberCandidatesResponse,
   OrganizationMember,
   WorkspaceMember as WorkspaceMemberContract,
   SessionGoalSnapshot,
@@ -81,6 +82,7 @@ import type {
   ManagedAccount,
   ManagedOrganizationMembershipProjection,
   OrganizationMember as OrganizationMemberType,
+  WorkspaceMemberCandidate,
   McpPersonalConnectionDelegation,
   ModelContextContributionSummary,
   Permission,
@@ -516,6 +518,7 @@ import {
   setSubjectRlsContext,
   withAccountRls,
   withRlsContext,
+  withRestoredSessionActivityRlsContext,
   withSessionActivityRlsContext,
   withSessionActivitySavepoint,
   withWorkspaceRls,
@@ -1229,6 +1232,7 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
+  "capabilities:manage",
   "variable-sets:list",
   "variable-sets:read",
   "variable-sets:write",
@@ -1268,6 +1272,7 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "github:use",
   "connections:read",
   "connections:write",
+  "capabilities:manage",
   "variable-sets:list",
   "variable-sets:read",
   "variable-sets:write",
@@ -1285,6 +1290,35 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "artifacts:read",
   "artifacts:publish",
 ];
+
+/**
+ * Resolve the synthetic personal-workspace grant for a subject whose human
+ * identity was authenticated out of band (for example, in HMAC-signed OAuth
+ * state). This is intentionally narrower than ordinary access resolution:
+ * the requested workspace must still be the subject's current personal
+ * workspace pointer and its organization membership must remain active.
+ */
+export async function resolveNamedManagedPersonalWorkspaceGrant(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<AccessGrant | null> {
+  const personalWorkspaceId = await namedSubjectPersonalWorkspaceId(db, {
+    accountId: input.accountId,
+    subjectId: input.subjectId,
+  });
+  if (personalWorkspaceId !== input.workspaceId) return null;
+
+  const live = await namedSubjectHasLiveWorkspaceAuthority(db, input);
+  if (!live) return null;
+
+  return {
+    workspaceId: input.workspaceId,
+    accountId: input.accountId,
+    subjectId: input.subjectId,
+    permissions: managedPersonalWorkspacePermissions,
+    principalKind: "human_session",
+  };
+}
 
 export const allAccountPermissions: Permission[] = [
   "account:read",
@@ -1468,6 +1502,21 @@ export async function bootstrapWorkspace(
         })
         .where(eq(schema.workspaceMemberships.id, membership.id));
     }
+    if (
+      input.accountExternalSource === "opengeni:local" &&
+      input.accountExternalId === "default" &&
+      input.subjectId === "dev"
+    ) {
+      await setRlsContext(tx as unknown as Database, {
+        accountId: account.id,
+        workspaceId: null,
+      });
+      await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
+      await ensureManagedHumanPersonalWorkspace(tx as unknown as Database, {
+        accountId: account.id,
+        subjectId: input.subjectId,
+      });
+    }
     // Access refreshes must retain workspaces created or granted after the
     // default workspace. Restore account-scoped RLS before listing them.
     await setRlsContext(tx as unknown as Database, {
@@ -1616,7 +1665,10 @@ async function projectManagedOrganizationAccess(
     }
   }
   const organizationAccounts = await db
-    .select({ id: schema.managedAccounts.id, name: schema.managedAccounts.name })
+    .select({
+      id: schema.managedAccounts.id,
+      name: schema.managedAccounts.name,
+    })
     .from(schema.managedAccounts)
     .where(
       inArray(
@@ -1687,10 +1739,9 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         )`,
       );
     }
-    const [existingOrganizationMembershipResult] = await rawRows<{ result: unknown }>(
-      txDb,
-      sql`select list_self_organization_memberships(${subjectId}) as result`,
-    );
+    const [existingOrganizationMembershipResult] = await rawRows<{
+      result: unknown;
+    }>(txDb, sql`select list_self_organization_memberships(${subjectId}) as result`);
     const existingOrganizationMemberships = OrganizationMember.array().parse(
       existingOrganizationMembershipResult?.result ?? [],
     );
@@ -1710,7 +1761,10 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       );
       let preferredDefaultWorkspaceId: string | null = null;
       if (fallbackAccount && firstActiveMembership?.organizationId === fallbackAccount.id) {
-        await setRlsContext(txDb, { accountId: fallbackAccount.id, workspaceId: null });
+        await setRlsContext(txDb, {
+          accountId: fallbackAccount.id,
+          workspaceId: null,
+        });
         const [legacyDefaultWorkspace] = await tx
           .select({ id: schema.workspaces.id })
           .from(schema.workspaces)
@@ -2268,6 +2322,145 @@ export async function grantWorkspaceAccess(
     });
 }
 
+export class WorkspaceMemberManagementError extends Error {
+  constructor(
+    readonly code:
+      | "WORKSPACE_MEMBER_ALREADY_EXISTS"
+      | "WORKSPACE_MEMBER_NOT_FOUND"
+      | "WORKSPACE_MEMBER_SELF_UPDATE"
+      | "WORKSPACE_MEMBER_LAST_ADMIN",
+  ) {
+    super(code);
+    this.name = "WorkspaceMemberManagementError";
+  }
+}
+
+/**
+ * Add or update one human workspace member under the same organization fence
+ * used by suspension, offboarding, organization-level grants, and removals.
+ * The SECURITY DEFINER candidate check runs after the fence is held, so a
+ * concurrent lifecycle transition cannot invalidate authority between the
+ * check and the membership write.
+ */
+export async function upsertWorkspaceMemberAsWorkspaceManager(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    targetSubjectId: string;
+    mode: "add" | "update";
+    subjectLabel?: string;
+    role: string;
+    permissions: Permission[];
+  },
+): Promise<void> {
+  await db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Database;
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(
+        ${`organization-membership:${input.accountId}`}, 0
+      ))`,
+    );
+    await assertWorkspaceMemberManagementCandidate(tx, input);
+    if (input.targetSubjectId === input.actorSubjectId) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_SELF_UPDATE");
+    }
+    if (!input.targetSubjectId.startsWith("user:")) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_NOT_FOUND");
+    }
+
+    const roster = await tx
+      .select({
+        subjectId: schema.workspaceMemberships.subjectId,
+        permissions: schema.workspaceMemberships.permissions,
+      })
+      .from(schema.workspaceMemberships)
+      .where(eq(schema.workspaceMemberships.workspaceId, input.workspaceId))
+      .orderBy(asc(schema.workspaceMemberships.id))
+      .for("update");
+    const target = roster.find((member) => member.subjectId === input.targetSubjectId);
+    if (input.mode === "add" && target) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_ALREADY_EXISTS");
+    }
+    if (input.mode === "update" && !target) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_NOT_FOUND");
+    }
+    const administers = (permissions: unknown): boolean => {
+      const normalized = normalizeWorkspaceMembershipPermissions(permissions);
+      return normalized.includes("workspace:admin") || normalized.includes("members:manage");
+    };
+    if (
+      target &&
+      administers(target.permissions) &&
+      !administers(input.permissions) &&
+      !roster.some(
+        (member) => member.subjectId !== input.targetSubjectId && administers(member.permissions),
+      )
+    ) {
+      throw new WorkspaceMemberManagementError("WORKSPACE_MEMBER_LAST_ADMIN");
+    }
+
+    await grantWorkspaceAccess(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.targetSubjectId,
+      ...(input.subjectLabel !== undefined ? { subjectLabel: input.subjectLabel } : {}),
+      role: input.role,
+      permissions: input.permissions,
+    });
+  });
+}
+
+/** Prove workspace-scoped management and same-organization active membership. */
+export async function assertWorkspaceMemberManagementCandidate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    targetSubjectId: string;
+  },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.actorSubjectId, async (scopedDb) => {
+    await scopedDb.execute(sql`select assert_workspace_member_management_candidate(
+        ${input.accountId}::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.actorSubjectId},
+        ${input.targetSubjectId}
+      )`);
+  });
+}
+
+/** List active same-organization humans who do not already have workspace access. */
+export async function listWorkspaceMemberManagementCandidates(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+  },
+): Promise<WorkspaceMemberCandidate[]> {
+  return await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.actorSubjectId,
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select list_workspace_member_management_candidates(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.actorSubjectId}
+        ) as result`,
+      );
+      return ListWorkspaceMemberCandidatesResponse.parse({
+        members: row?.result ?? [],
+      }).members;
+    },
+  );
+}
+
 async function withOrganizationSharedWorkspaceAdministration<T>(
   db: Database,
   input: {
@@ -2773,7 +2966,9 @@ export async function deleteWorkspaceIfQuiescent(
             return { status: "active_video_generations" as const };
           }
 
-          const [backgroundCommands] = await tx.execute<{ activeCount: number | string }>(sql`
+          const [backgroundCommands] = await tx.execute<{
+            activeCount: number | string;
+          }>(sql`
             select opengeni_private.prepare_workspace_background_command_deletion(
               ${input.accountId}::uuid,
               ${input.workspaceId}::uuid
@@ -2922,6 +3117,30 @@ export async function deleteWorkspaceIfQuiescent(
               ${input.workspaceId}::uuid
             )
           `);
+          // Variable-set attachment guards intentionally prevent deleting a set
+          // while any session still selects it. A workspace cascade owns both
+          // sides, so detach those selections through the activity gate before
+          // deleting the parent. Finalize the gate inside this transaction: the
+          // workspace activity counter disappears with the parent cascade.
+          await withRestoredSessionActivityRlsContext(
+            tx,
+            { accountId: input.accountId, workspaceId: input.workspaceId },
+            async (activityDb) => {
+              await activityDb
+                .update(schema.sessions)
+                .set({
+                  variableSetIds: [],
+                  variableSetId: null,
+                  updatedAt: new Date(),
+                })
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, input.workspaceId),
+                    isNotNull(schema.sessions.variableSetId),
+                  ),
+                );
+            },
+          );
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -10228,7 +10447,10 @@ export async function getOrCreateSlackInteraction(
     | "terminalDeliveryState"
     | "createdAt"
     | "updatedAt"
-  > & { initiatingSlackUserId?: string | null; routedWorkspaceLabel?: string | null },
+  > & {
+    initiatingSlackUserId?: string | null;
+    routedWorkspaceLabel?: string | null;
+  },
 ): Promise<{ created: boolean; interaction: SlackInteraction }> {
   const outcome = await withRlsContext(db, input, async (scopedDb) => {
     const [created] = await scopedDb
@@ -10241,7 +10463,10 @@ export async function getOrCreateSlackInteraction(
       .onConflictDoNothing()
       .returning();
     if (created) {
-      return { created: true, interaction: mapSlackInteraction(created) } as const;
+      return {
+        created: true,
+        interaction: mapSlackInteraction(created),
+      } as const;
     }
     const [existing] = await scopedDb
       .select()
@@ -10254,7 +10479,10 @@ export async function getOrCreateSlackInteraction(
       )
       .limit(1);
     return existing
-      ? ({ created: false, interaction: mapSlackInteraction(existing) } as const)
+      ? ({
+          created: false,
+          interaction: mapSlackInteraction(existing),
+        } as const)
       : ({ created: false, interaction: null } as const);
   });
   if (outcome.interaction) {
@@ -13479,6 +13707,7 @@ export type CorrectWorkspaceMemoryInput = {
   reason?: string | undefined;
   replacementText?: string | undefined;
   sessionId?: string | null | undefined;
+  origin?: WorkspaceMemoryOrigin | undefined;
 };
 
 export type CorrectWorkspaceMemoryResult = {
@@ -13718,10 +13947,16 @@ export async function saveWorkspaceMemory(
             eq(schema.knowledgeMemories.id, replacesFullId),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("update");
       if (!row) {
         throw new Error(
           `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
+        );
+      }
+      if (input.origin === "agent" && row.status !== "active") {
+        throw new Error(
+          `Autonomous Memory can replace only active agent-writable records; memory "${row.id}" has status "${row.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
         );
       }
       replacesRow = row;
@@ -14028,10 +14263,16 @@ export async function correctWorkspaceMemory(
             eq(schema.knowledgeMemories.id, fullId),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("update");
     });
     if (!old) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    if (input.origin === "agent" && old.status !== "active") {
+      throw new Error(
+        `Autonomous Memory can correct only active agent-writable records; memory "${old.id}" has status "${old.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
+      );
     }
     const result = await saveWorkspaceMemory(
       db,
@@ -14043,7 +14284,7 @@ export async function correctWorkspaceMemory(
         pinned: old.pinned,
         replacesId: old.id,
         sessionId: input.sessionId ?? null,
-        origin: "agent",
+        origin: input.origin,
       },
       embedder,
     );
@@ -14076,9 +14317,15 @@ export async function correctWorkspaceMemory(
           eq(schema.knowledgeMemories.id, fullId),
         ),
       )
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (!existing) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    if (input.origin === "agent" && existing.status !== "active") {
+      throw new Error(
+        `Autonomous Memory can archive only active agent-writable records; memory "${existing.id}" has status "${existing.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
+      );
     }
     const correctionReason = cleanDbString(input.reason);
     const [archived] = await scopedDb
@@ -14127,11 +14374,6 @@ export async function searchWorkspaceMemories(
     eq(schema.knowledgeMemories.workspaceId, workspaceId),
     inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
   ];
-  if (input.agentPromptMode === "retrieval_only") {
-    // Legacy preference-kind rows remain canonical and human-searchable, but
-    // they are observations rather than structured preference authority.
-    baseConditions.push(ne(schema.knowledgeMemories.kind, "preference"));
-  }
   if (input.kind) {
     baseConditions.push(eq(schema.knowledgeMemories.kind, input.kind));
   }
@@ -19151,7 +19393,11 @@ export async function namedSubjectHasLiveWorkspaceAuthority(
  */
 export async function resolveSlackTargetAuthority(
   db: Database,
-  input: { subjectId: string; targetAccountId: string; targetWorkspaceId: string },
+  input: {
+    subjectId: string;
+    targetAccountId: string;
+    targetWorkspaceId: string;
+  },
 ): Promise<AccessGrant | null> {
   const grant = await getWorkspaceGrant(db, input.subjectId, input.targetWorkspaceId, {
     principalKind: "human_session",
@@ -19848,11 +20094,21 @@ async function getVariableSetValuesForRunInTransaction(
       } else {
         await scopedDb.execute(sql`select set_config('opengeni.subject_id', '', true)`);
       }
-      if (input.authority.initiatingHumanSubjectId) {
-        await scopedDb.execute(sql`select set_config(
-          'opengeni.initiating_human_subject_id',
-          ${input.authority.initiatingHumanSubjectId}, true)`);
-      }
+      // Always replace the causal-human GUC. A nested/reused transaction can
+      // otherwise retain an earlier actor and let a later direct attach borrow
+      // that actor's personal-resource grant. The authenticated user is the
+      // default causal human; an explicit null still clears inherited state.
+      await scopedDb.execute(sql`select set_config(
+        'opengeni.initiating_human_subject_id',
+        ${
+          input.authority.initiatingHumanSubjectId === undefined
+            ? input.authority.subjectId?.startsWith("user:")
+              ? input.authority.subjectId
+              : ""
+            : (input.authority.initiatingHumanSubjectId ?? "")
+        },
+        true
+      )`);
     }
     if (input.authority.kind === "agent_attempt") {
       await setSubjectRlsContext(scopedDb, input.authority.subjectId);
@@ -35672,6 +35928,138 @@ export async function recordSkippedContextCompaction(
 }
 
 /**
+ * Read the durable handoff condition immediately after one exact compaction
+ * landmark settles. Steer admission deliberately leaves the active attempt
+ * unfenced while its latest compaction event is `started`; the worker calls
+ * this at the first safe boundary after `compacted`/`skipped` and supersedes
+ * the ordinary turn before another model request can begin.
+ *
+ * The later terminal settlement remains the authority fence. This read only
+ * decides whether that settlement is needed, so a concurrent Pause/Cancel or a
+ * Steer admitted after the landmark can still win and make the caller stale.
+ */
+export async function hasPendingSteerAfterContextCompaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+): Promise<boolean> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [ownership] = await scopedDb
+        .select({
+          sessionActiveTurnId: schema.sessions.activeTurnId,
+          turnStatus: schema.sessionTurns.status,
+          turnSource: schema.sessionTurns.source,
+          turnGeneration: schema.sessionTurns.executionGeneration,
+          turnActiveAttemptId: schema.sessionTurns.activeAttemptId,
+          attemptState: schema.sessionTurnAttempts.state,
+          attemptGeneration: schema.sessionTurnAttempts.executionGeneration,
+        })
+        .from(schema.sessions)
+        .innerJoin(
+          schema.sessionTurns,
+          and(
+            eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+            eq(schema.sessionTurns.sessionId, schema.sessions.id),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .innerJoin(
+          schema.sessionTurnAttempts,
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, schema.sessionTurns.workspaceId),
+            eq(schema.sessionTurnAttempts.turnId, schema.sessionTurns.id),
+            eq(schema.sessionTurnAttempts.id, input.attemptId),
+          ),
+        )
+        .where(
+          and(
+            eq(schema.sessions.accountId, input.accountId),
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (
+        !ownership ||
+        ownership.sessionActiveTurnId !== input.turnId ||
+        ownership.turnStatus !== "running" ||
+        ownership.turnSource === "compaction" ||
+        ownership.turnGeneration !== input.executionGeneration ||
+        ownership.turnActiveAttemptId !== input.attemptId ||
+        ownership.attemptGeneration !== input.executionGeneration ||
+        !["claimed", "running"].includes(ownership.attemptState)
+      ) {
+        return false;
+      }
+
+      const [latestCompaction] = await scopedDb
+        .select({ type: schema.sessionEvents.type })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.turnId, input.turnId),
+            eq(schema.sessionEvents.turnGeneration, input.executionGeneration),
+            eq(schema.sessionEvents.turnAttemptId, input.attemptId),
+            inArray(schema.sessionEvents.type, [
+              "session.context.compaction.started",
+              "session.context.compacted",
+              "session.context.compaction.skipped",
+            ]),
+          ),
+        )
+        .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
+        .limit(1);
+      if (
+        latestCompaction?.type !== "session.context.compacted" &&
+        latestCompaction?.type !== "session.context.compaction.skipped"
+      ) {
+        return false;
+      }
+
+      const [humanSteer] = await scopedDb
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.status, "queued"),
+            inArray(schema.sessionTurns.source, ["user", "api"]),
+            sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
+          ),
+        )
+        .limit(1);
+      if (humanSteer) return true;
+
+      const [agentSteer] = await scopedDb
+        .select({ id: schema.sessionSystemUpdates.id })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+            eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+            eq(schema.sessionSystemUpdates.state, "pending"),
+          ),
+        )
+        .limit(1);
+      return agentSteer !== undefined;
+    },
+  );
+}
+
+/**
  * The next free WHOLE-NUMBER history position for a session: one past the
  * largest existing position (active or superseded), floored so the synthetic
  * summary's fractional half-step never shifts the count. The dual-write
@@ -41384,7 +41772,11 @@ export type LeaseHolderHeartbeatStatus =
       fence: "unsupported_kind" | "lease_missing" | "holder_gone";
     }
   | { holderAlive: true; leaseExtended: true; fence: null }
-  | { holderAlive: true; leaseExtended: false; fence: "epoch" | "liveness" | "rotation_requested" };
+  | {
+      holderAlive: true;
+      leaseExtended: false;
+      fence: "epoch" | "liveness" | "rotation_requested";
+    };
 
 export async function heartbeatLeaseHolderStatus(
   db: Database,
@@ -41399,7 +41791,11 @@ export async function heartbeatLeaseHolderStatus(
   },
 ): Promise<LeaseHolderHeartbeatStatus> {
   if (input.kind === "process") {
-    return { holderAlive: false, leaseExtended: false, fence: "unsupported_kind" };
+    return {
+      holderAlive: false,
+      leaseExtended: false,
+      fence: "unsupported_kind",
+    };
   }
   return await withRlsContext(
     db,
@@ -41422,7 +41818,12 @@ export async function heartbeatLeaseHolderStatus(
           for update
         `);
         const lease = leases[0];
-        if (!lease) return { holderAlive: false, leaseExtended: false, fence: "lease_missing" };
+        if (!lease)
+          return {
+            holderAlive: false,
+            leaseExtended: false,
+            fence: "lease_missing",
+          };
 
         // Holder liveness and lease authority are separate signals. Even after
         // rotation fences lease extension, the still-running owner can spend
@@ -41438,7 +41839,11 @@ export async function heartbeatLeaseHolderStatus(
         });
         if (!holderAlive) {
           // reaped or no longer the exact active attempt
-          return { holderAlive: false, leaseExtended: false, fence: "holder_gone" };
+          return {
+            holderAlive: false,
+            leaseExtended: false,
+            fence: "holder_gone",
+          };
         }
         // Recheck the same fence in the write even though its row lock is held,
         // keeping the mutation independently auditable and future-proof.
@@ -41457,9 +41862,17 @@ export async function heartbeatLeaseHolderStatus(
           return { holderAlive: true, leaseExtended: false, fence: "epoch" };
         }
         if (lease.liveness !== "warm" && lease.liveness !== "warming") {
-          return { holderAlive: true, leaseExtended: false, fence: "liveness" };
+          return {
+            holderAlive: true,
+            leaseExtended: false,
+            fence: "liveness",
+          };
         }
-        return { holderAlive: true, leaseExtended: false, fence: "rotation_requested" };
+        return {
+          holderAlive: true,
+          leaseExtended: false,
+          fence: "rotation_requested",
+        };
       }),
   );
 }
@@ -42557,6 +42970,25 @@ export class SandboxWorkspaceMutationFencedError extends Error {
   }
 }
 
+/** A process-scoped mutation named a durable retained process that has already
+ * reached a terminal state. This remains a fence—the provider must not be
+ * called again—but carries the existing terminal result so model-facing shell
+ * tools can report completion/loss instead of presenting a retryable platform
+ * failure for a handle that can never become active again. */
+export class SandboxRetainedProcessTerminalError extends SandboxWorkspaceMutationFencedError {
+  readonly name = "SandboxRetainedProcessTerminalError";
+
+  constructor(
+    public readonly state: "exited" | "lost",
+    public readonly exitCode: number | null,
+  ) {
+    super(
+      "process_fenced",
+      `Workspace mutation rejected because the retained process already ${state}`,
+    );
+  }
+}
+
 export type SandboxWorkspaceMutationAdmission = {
   id: string;
   leaseId: string;
@@ -43356,11 +43788,14 @@ async function lockWorkspaceMutationAuthorityTx(
     )
     .for("update")
     .limit(1);
-  if (!process || process.state !== "active") {
+  if (!process) {
     throw new SandboxWorkspaceMutationFencedError(
       "process_fenced",
-      "Workspace mutation rejected because the retained process is not active",
+      "Workspace mutation rejected because the retained process does not exist",
     );
+  }
+  if (process.state !== "active") {
+    throw new SandboxRetainedProcessTerminalError(process.state, process.exitCode);
   }
   if (session.sandboxGroupId !== process.sandboxGroupId) {
     throw new SandboxWorkspaceMutationFencedError(
@@ -54124,7 +54559,12 @@ export async function holdSessionGoalContinuationWithEvent(
         .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
         .where(eq(schema.sessions.id, sessionId));
       await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
-        result: { goal, eventId: event.id, holdTurnId: input.command.actor.turnId, untilAt },
+        result: {
+          goal,
+          eventId: event.id,
+          holdTurnId: input.command.actor.turnId,
+          untilAt,
+        },
       });
       return {
         goal,
@@ -54461,7 +54901,10 @@ export async function updateSessionTitleWithEvent(
                 sessionId: input.sessionId,
                 sequence,
                 type: "session.title_set",
-                payload: { title: updated.title ?? title, source: input.source },
+                payload: {
+                  title: updated.title ?? title,
+                  source: input.source,
+                },
                 occurredAt: now,
               },
               "payload",
@@ -54470,7 +54913,11 @@ export async function updateSessionTitleWithEvent(
           )
           .returning();
         if (!event) throw new Error("Failed to append session.title_set event");
-        return { updated: true, title: updated.title, events: [mapEvent(event)] };
+        return {
+          updated: true,
+          title: updated.title,
+          events: [mapEvent(event)],
+        };
       }),
   );
 }
@@ -55427,7 +55874,11 @@ export async function materializeGoalContinuation(
                 reason: GOAL_IDLE_BACKOFF_WAKE_REASON,
                 notBefore: dueAt,
               });
-              return { action: "deferred", events: [], notBefore: dueAt } as const;
+              return {
+                action: "deferred",
+                events: [],
+                notBefore: dueAt,
+              } as const;
             }
           }
         }
@@ -56608,10 +57059,6 @@ function personalConnectionDelegationsForSameSessionSuccessor(
   // grants may be re-admitted under the live DB fences; once remains bound to
   // its original accepted turn and is never copied forward.
   return delegations.filter((delegation) => {
-    // This phase freezes personal GitHub authority only for explicit human/API
-    // work. Goal, child-result, recovery, and other machine-input inheritance
-    // require the later lifecycle's fresh live repository recheck.
-    if (delegation.connectionType === "github_personal") return false;
     const authority = delegation.userDelegation;
     if (!authority) return true;
     if (authority.mode === "once") return false;
@@ -60520,7 +60967,10 @@ async function goalContinuationHoldStateTx(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  goal: { continuationHoldTurnId: string | null; continuationHoldUntil: Date | null },
+  goal: {
+    continuationHoldTurnId: string | null;
+    continuationHoldUntil: Date | null;
+  },
 ): Promise<{ current: boolean; deadlinePassed: boolean }> {
   if (!goal.continuationHoldTurnId || !goal.continuationHoldUntil) {
     return { current: false, deadlinePassed: false };
@@ -62031,7 +62481,9 @@ async function claimTurnStartupMilestone(
  */
 async function sealPreLedgerTurnStartupHistory(
   tx: Database,
-  input: TurnStartupLedgerScope & { queueEvent: { id: string; sequence: number } },
+  input: TurnStartupLedgerScope & {
+    queueEvent: { id: string; sequence: number };
+  },
 ): Promise<boolean> {
   const [earlier] = await tx
     .select({ id: schema.sessionEvents.id })
@@ -62050,7 +62502,11 @@ async function sealPreLedgerTurnStartupHistory(
   const ledger = schema.sessionTurnStartupMilestones;
   await tx
     .update(ledger)
-    .set({ canonicalSource: "pre_ledger_history", eventId: null, occurredAt: null })
+    .set({
+      canonicalSource: "pre_ledger_history",
+      eventId: null,
+      occurredAt: null,
+    })
     .where(
       and(
         eq(ledger.workspaceId, input.workspaceId),
@@ -62853,7 +63309,7 @@ export async function applySessionTurnSettlement(
           // generation for monotonic fencing, but remove the old activity id so
           // a later typed SCHEDULE_TO_START timeout can recover an approval
           // dispatch that never registered without taking over a newer one.
-          ...(input.turnStatus === "requires_action"
+          ...(input.turnStatus === "requires_action" || input.turnStatus === "superseded"
             ? { metadata: metadataWithoutTurnDispatchAttempt(turn.metadata) }
             : {}),
           finishedAt:
@@ -62895,7 +63351,9 @@ export async function applySessionTurnSettlement(
             eq(schema.sessions.id, input.sessionId),
           ),
         );
-      if (terminal && input.activeTurnId === null) {
+      // Supersession already has newer human/Agent direction waiting. It must
+      // not also arm an autonomous goal continuation behind that Steer.
+      if (terminal && input.turnStatus !== "superseded" && input.activeTurnId === null) {
         const [armedGoal] = await tx
           .update(schema.sessionGoals)
           .set({
@@ -64964,7 +65422,10 @@ async function enqueueFailedChildOutboxWithoutTurnTx(
 function parseChildLifecycleOutboxPayload(
   input: unknown,
   kind: string,
-): { kind: ChildLifecycleSystemUpdateKind; payload: ChildLifecycleOutboxPayload } {
+): {
+  kind: ChildLifecycleSystemUpdateKind;
+  payload: ChildLifecycleOutboxPayload;
+} {
   if (!isChildLifecycleSystemUpdateKind(kind)) {
     throw new Error(`System-update outbox contains retired kind ${kind}`);
   }
@@ -65008,7 +65469,10 @@ export function sessionSystemUpdateOutboxKindPayload(
   if (outbox.payload.type !== outbox.kind) {
     throw new Error(`Outbox ${outbox.kind} carries a ${outbox.payload.type} payload`);
   }
-  return { kind: outbox.kind, payload: outbox.payload } as SessionSystemUpdateOutboxKindPayload;
+  return {
+    kind: outbox.kind,
+    payload: outbox.payload,
+  } as SessionSystemUpdateOutboxKindPayload;
 }
 
 function mapSystemUpdateOutboxRow(row: {
@@ -65149,7 +65613,11 @@ export async function claimPendingSessionSystemUpdateOutbox(
         async (scopedDb) => {
           await scopedDb
             .update(schema.sessionSystemUpdateOutbox)
-            .set({ status: "failed", lastError: message.slice(0, 500), updatedAt: new Date() })
+            .set({
+              status: "failed",
+              lastError: message.slice(0, 500),
+              updatedAt: new Date(),
+            })
             .where(
               and(
                 eq(schema.sessionSystemUpdateOutbox.workspaceId, row.workspace_id),
@@ -65957,7 +66425,11 @@ export async function addSessionSystemUpdateWithSourceMutation(
         // blocked boundary (a re-freeze is a new generation and a new notice).
         const supersededUpdateIds = await supersedeStaleChildLifecycleNoticesInTransaction(
           tx as unknown as Database,
-          { workspaceId: input.workspaceId, sessionId: input.sessionId, inserted },
+          {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            inserted,
+          },
         );
         const [supersededEvent] =
           supersededUpdateIds.length > 0
@@ -66256,7 +66728,11 @@ export async function childRequiresActionResolutionExists(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  boundary: { childSessionId: string; childTurnId: string; childTurnGeneration: number },
+  boundary: {
+    childSessionId: string;
+    childTurnId: string;
+    childTurnGeneration: number;
+  },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb

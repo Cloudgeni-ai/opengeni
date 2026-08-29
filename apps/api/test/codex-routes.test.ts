@@ -76,7 +76,7 @@ async function start(
   const res = await app().request(`/v1/workspaces/${workspaceId}/codex/connect/start`, {
     method: "POST",
     headers: {
-      authorization: await bearer(workspaceId, ["workspace:admin"]),
+      authorization: await bearer(workspaceId, ["connections:write"]),
       "content-type": "application/json",
     },
   });
@@ -107,7 +107,7 @@ describe("codex connect routes", () => {
     const res = await app().request(`/v1/workspaces/${WS_A}/codex/connect/poll`, {
       method: "POST",
       headers: {
-        authorization: await bearer(WS_A, ["workspace:admin"]),
+        authorization: await bearer(WS_A, ["connections:write"]),
         "content-type": "application/json",
       },
       body: JSON.stringify({ state: body.state }),
@@ -124,7 +124,7 @@ describe("codex connect routes", () => {
     const res = await app().request(`/v1/workspaces/${WS_B}/codex/connect/poll`, {
       method: "POST",
       headers: {
-        authorization: await bearer(WS_B, ["workspace:admin"]),
+        authorization: await bearer(WS_B, ["connections:write"]),
         "content-type": "application/json",
       },
       body: JSON.stringify({ state: body.state }),
@@ -135,6 +135,20 @@ describe("codex connect routes", () => {
   test("codex routes are auth-gated (no credentials -> 401/403, route exists)", async () => {
     const res = await app().request(`/v1/workspaces/${WS_A}/codex/status`);
     expect([401, 403]).toContain(res.status);
+  });
+
+  test("connect/start rejects a workspace reader without connection-management access", async () => {
+    mockDevice({
+      usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+    });
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/connect/start`, {
+      method: "POST",
+      headers: {
+        authorization: await bearer(WS_A, ["workspace:read"]),
+        "content-type": "application/json",
+      },
+    });
+    expect(res.status).toBe(403);
   });
 });
 

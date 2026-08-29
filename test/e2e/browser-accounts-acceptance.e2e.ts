@@ -75,9 +75,27 @@ type PendingFiniteRead = {
 };
 
 type BrowserProblems = {
+  acceptedRequestTerminals: Array<{
+    observedAt: number;
+    pathnameAndSearch: string;
+    responsePhase: string;
+    terminal: "failed" | "finished";
+  }>;
   activeStreams: Map<object, string>;
+  boundedHttp1StreamDispatches: number;
+  boundedHttp1NativeSeams: number;
   actorDispatches: Array<{ actorEpoch: string; startedAt: number }>;
-  actorFenceResponses: string[];
+  actorFenceResponses: Array<{
+    actorEpoch: string | null;
+    dispatchPhase: string;
+    endedAt: number;
+    method: string;
+    pathname: string;
+    responsePhase: string;
+    search: string;
+    startedAt: number;
+    status: number;
+  }>;
   actorTransitionResponses: Array<{
     actorEpoch: string | null;
     dispatchPhase: string;
@@ -91,6 +109,7 @@ type BrowserProblems = {
   }>;
   consoleErrors: string[];
   phase: string;
+  pageErrorEvidence: Array<{ message: string; observedAt: number }>;
   pageErrors: string[];
   failedRequests: string[];
   pendingFiniteReads: Map<object, PendingFiniteRead>;
@@ -123,17 +142,16 @@ const ACTOR_TRANSITION_PHASES = [
   "signed-out-settled",
 ] as const;
 
+const DIRECT_RACE_ACTOR_RESPONSE_DISPATCH_PHASES = new Set([
+  "primary-set-sign-in",
+  "second-tab-bootstrap",
+  "add-response-loss-replay",
+  "cross-tab-select-race",
+]);
+
 const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
   ["add-response-loss-replay", new Set(["primary-set-sign-in", "add-response-loss-replay"])],
-  [
-    "cross-tab-select-race",
-    new Set([
-      "primary-set-sign-in",
-      "second-tab-bootstrap",
-      "add-response-loss-replay",
-      "cross-tab-select-race",
-    ]),
-  ],
+  ["cross-tab-select-race", DIRECT_RACE_ACTOR_RESPONSE_DISPATCH_PHASES],
   [
     "late-old-epoch-setup-beta-to-alpha",
     new Set(["cross-tab-select-race", "late-old-epoch-setup-beta-to-alpha"]),
@@ -176,15 +194,67 @@ const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlyS
   ],
 ]);
 
+const LOGOUT_ALL_FINITE_READ_RETIREMENT_DISPATCH_PHASES = new Set([
+  "cross-slot-deep-link",
+  "slot-revocation-reauthentication",
+  "logout-one",
+  "csrf-fail-closed",
+  "logout-all-response-loss-replay",
+]);
+
 const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<string, ReadonlySet<string>>([
   // These phases intentionally create or reload a whole document. React can
-  // cancel only its two bootstrap reads while replacing that document; keep
-  // the endpoint and same-phase checks exact so product/tenant reads stay red.
+  // cancel only its configuration/session bootstrap reads while replacing
+  // that document; keep endpoint and phase checks exact so other reads stay red.
+  ["primary-set-sign-in", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["add-response-loss-replay", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["second-tab-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["cross-tab-select-race", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["late-old-epoch-setup-beta-to-alpha", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["late-old-epoch-alpha-to-beta", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  [
+    "late-old-epoch-primary-settled-before-old-release",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
   ["cross-slot-deep-link", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["slot-revocation-reauthentication", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["logout-one", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["logout-all-response-loss-replay", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["signed-out-settled", new Set(["/v1/config/client", "/v1/auth/get-session"])],
   ["responsive-evidence-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["independent-set-sign-in", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  [
+    "independent-set-after-other-logout-all",
+    new Set(["/v1/config/client", "/v1/auth/get-session"]),
+  ],
+]);
+
+const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
+  "primary-set-sign-in",
+  "add-response-loss-replay",
+  "second-tab-bootstrap",
+  "cross-tab-select-race",
+  "late-old-epoch-setup-beta-to-alpha",
+  "late-old-epoch-alpha-to-beta",
+  "late-old-epoch-primary-settled-before-old-release",
+  "cross-slot-deep-link",
+  "slot-revocation-reauthentication",
+  "logout-one",
+  "logout-all-response-loss-replay",
+  "signed-out-settled",
+  "responsive-evidence-bootstrap",
+  "independent-set-sign-in",
+  "independent-set-after-other-logout-all",
+]);
+
+// Session-page hooks now own their native request lifetime just like the
+// catalog hooks above. A deliberate route/document replacement may therefore
+// cancel only the exact paged session-list GET dispatched by that same phase.
+const DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES = DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
+
+const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
+  ["late-old-epoch-primary-settled-before-old-release", new Set(["late-old-epoch-alpha-to-beta"])],
+  ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
 ]);
 
 const EXPECTED_HTTP_CONSOLE_ERRORS: ReadonlyArray<{
@@ -271,6 +341,36 @@ type FiniteReadRetirementInput = {
   startedAt: number;
 };
 
+type DocumentReplacementRetirementInput = {
+  actorEpoch: string | null;
+  confirmedActorEpoch: string;
+  currentSessionSetAuthorityHash: string | null;
+  dispatchPhase: string;
+  expectedDispatchPhase: string;
+  method: string;
+  pathname: string;
+  replacementStartedAt: number;
+  requestSessionSetAuthorityHash: string | null;
+  startedAt: number;
+  workspaceId: string;
+};
+
+type LogoutAllFiniteReadRetirementInput = {
+  acceptedActorTransitions: readonly ActorMutationAcceptance[];
+  actorEpoch: string | null;
+  confirmedActorEpoch: string;
+  confirmedAt: number;
+  currentSessionSetAuthorityHash: string | null;
+  dispatchPhase: string;
+  logoutAllAcceptedAt: number;
+  method: string;
+  oldWorkspaceId: string;
+  pathname: string;
+  requestSessionSetAuthorityHash: string | null;
+  responseSeen: boolean;
+  startedAt: number;
+};
+
 const ACTOR_CHANGING_ACCEPTANCE_PATHS = new Set([
   "/v1/auth/session-set/logout-all",
   "/v1/auth/session-set/logout-one",
@@ -293,10 +393,11 @@ function sessionSetAuthorityHash(cookieHeader: string | null): string | null {
 }
 
 function requestFailureProblem(input: BrowserRequestFailureInput): string | null {
-  const pathname = new URL(input.url).pathname;
+  const requestUrl = new URL(input.url);
+  const pathname = requestUrl.pathname;
   const isConnectionReset = /NET_RESET|CONNECTION_RESET/iu.test(input.failure);
   const isCancellation =
-    /ERR_ABORTED|NS_BINDING_ABORTED|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
+    /ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
       input.failure,
     );
   const isActorOwnedRead =
@@ -333,29 +434,108 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
         transition.acceptedAt >= startedAt &&
         transition.acceptedAt <= failedAt,
     ) === true;
+  const isExpectedLogoutAllBoundedStreamCancellation =
+    isCancellation &&
+    !isConnectionReset &&
+    input.method === "GET" &&
+    input.actorEpoch !== null &&
+    input.dispatchPhase === "late-old-epoch-primary-settled-before-old-release" &&
+    input.responsePhase === "logout-all-response-loss-replay" &&
+    requestUrl.searchParams.get("transport") === "http1-bounded" &&
+    /^\/v1\/workspaces\/[0-9a-f-]+\/live-events\/stream$/u.test(pathname) &&
+    typeof startedAt === "number" &&
+    Number.isFinite(startedAt) &&
+    typeof failedAt === "number" &&
+    Number.isFinite(failedAt) &&
+    input.acceptedActorTransitions?.some(
+      (transition) =>
+        transition.path === "/v1/auth/session-set/logout-all" &&
+        transition.actorEpoch !== null &&
+        transition.actorEpoch !== input.actorEpoch &&
+        transition.acceptedAt >= startedAt &&
+        transition.acceptedAt <= failedAt,
+    ) === true;
   const isExpectedEvidenceCatalogCancellation =
     isCancellation &&
     !isConnectionReset &&
     input.method === "GET" &&
     input.actorEpoch !== null &&
-    input.dispatchPhase === "responsive-evidence-bootstrap" &&
-    input.responsePhase === "responsive-evidence-bootstrap" &&
+    input.dispatchPhase === input.responsePhase &&
+    DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES.has(input.responsePhase) &&
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname);
+  const isExpectedDocumentSessionPageCancellation =
+    isCancellation &&
+    !isConnectionReset &&
+    input.method === "GET" &&
+    input.actorEpoch !== null &&
+    input.dispatchPhase === input.responsePhase &&
+    DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES.has(input.responsePhase) &&
+    /^\/v1\/workspaces\/[0-9a-f-]+\/sessions$/u.test(pathname) &&
+    requestUrl.searchParams.get("view") === "page";
   const isExpectedDocumentBootstrapCancellation =
     isCancellation &&
     !isConnectionReset &&
     input.method === "GET" &&
-    input.dispatchPhase === input.responsePhase &&
-    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true;
+    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true &&
+    (input.dispatchPhase === input.responsePhase ||
+      DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES.get(input.responsePhase)?.has(
+        input.dispatchPhase,
+      ) === true);
   if (
     isExpectedScopedActorReadCancellation ||
     isAcceptedActorTransitionCancellation ||
+    isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
+    isExpectedDocumentSessionPageCancellation ||
     isExpectedDocumentBootstrapCancellation
   ) {
     return null;
   }
   return `[dispatch=${input.dispatchPhase}; actor=${input.actorEpoch ?? "missing"}; response=${input.responsePhase}] ${input.method} ${input.url}: ${input.failure}`;
+}
+
+function isExpectedBoundedHttp1NativeSeam(input: {
+  failedAt: number;
+  failure: string;
+  method: string;
+  startedAt?: number;
+  url: string;
+}): boolean {
+  if (
+    input.method !== "GET" ||
+    typeof input.startedAt !== "number" ||
+    !Number.isFinite(input.startedAt) ||
+    !Number.isFinite(input.failedAt)
+  ) {
+    return false;
+  }
+  // Chromium and Firefox expose concrete abort codes; WebKit reports a bare
+  // cancellation word. Exact matching prevents an abort-shaped prefix from
+  // hiding a reset, timeout, DNS, or other transport failure.
+  const isCancellation =
+    /^(?:(?:net::)?ERR_ABORTED|NS_(?:BINDING_ABORTED|ERROR_ABORT)|(?:request (?:was )?)?(?:cancelled|canceled))$/iu.test(
+      input.failure.trim(),
+    );
+  const elapsedMs = input.failedAt - input.startedAt;
+  // The browser-owned body and pre-header seams fire at eleven seconds. Allow
+  // only the request-start offset plus bounded scheduling jitter; the
+  // four-second logical reconnect grace does not extend the native request's
+  // cancellation deadline.
+  return (
+    isBoundedHttp1StreamRequest(input.method, input.url) &&
+    isCancellation &&
+    elapsedMs >= 10_000 &&
+    elapsedMs <= 15_000
+  );
+}
+
+function isBoundedHttp1StreamRequest(method: string, rawUrl: string): boolean {
+  if (method !== "GET") return false;
+  const url = new URL(rawUrl);
+  return (
+    (url.pathname.endsWith("/stream") || url.pathname.includes("/live-events/stream")) &&
+    url.searchParams.get("transport") === "http1-bounded"
+  );
 }
 
 function retiredFiniteReadTerminalProblem(
@@ -381,20 +561,35 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
     input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash ||
     (input.requestSessionSetAuthorityHash === null &&
       new Set(["second-tab-bootstrap", "cross-tab-select-race"]).has(input.dispatchPhase));
-  return (
-    new Set(["GET", "HEAD"]).has(input.method) &&
+  const oldWorkspaceActorRead =
     input.actorEpoch !== null &&
     input.actorEpoch !== input.confirmedActorEpoch &&
+    input.pathname.startsWith(exactOldWorkspacePrefix);
+  // During the direct select race Chromium can also leave the pre-selection
+  // neutral session-set projection without any terminal event. It has no actor
+  // epoch to compare, so bind it instead to the exact path, direct-race phase,
+  // unchanged HttpOnly authority, pre-acceptance start, accepted select, and a
+  // positive dispatch from the confirmed actor on this same page.
+  const neutralPreSelectionRead =
+    input.actorEpoch === null &&
+    input.dispatchPhase === "cross-tab-select-race" &&
+    input.pathname === "/v1/auth/session-set";
+  const authorityMatchesScope = neutralPreSelectionRead
+    ? input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash
+    : requestAuthorityMatches;
+  return (
+    new Set(["GET", "HEAD"]).has(input.method) &&
     !input.responseSeen &&
-    input.pathname.startsWith(exactOldWorkspacePrefix) &&
+    (oldWorkspaceActorRead || neutralPreSelectionRead) &&
     input.currentSessionSetAuthorityHash !== null &&
-    requestAuthorityMatches &&
+    authorityMatchesScope &&
     input.acceptedActorTransitions.some(
       (transition) =>
         transition.path === "/v1/auth/session-set/select" &&
         transition.actorEpoch === input.confirmedActorEpoch &&
         transition.sessionSetAuthorityHash === input.currentSessionSetAuthorityHash &&
         transition.acceptedAt <= input.confirmedAt &&
+        (!neutralPreSelectionRead || input.startedAt <= transition.acceptedAt) &&
         input.actorDispatches.some(
           (dispatch) =>
             dispatch.actorEpoch === input.confirmedActorEpoch &&
@@ -404,6 +599,84 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
         ),
     )
   );
+}
+
+function finiteReadMayRetireAfterDocumentReplacement(
+  input: DocumentReplacementRetirementInput,
+): boolean {
+  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`;
+  const documentOwnedSessionRead = new RegExp(
+    `^${exactWorkspacePrefix.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}sessions/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}(?:/lineage)?$`,
+    "u",
+  ).test(input.pathname);
+  // Chromium may omit the HttpOnly Cookie header from Playwright metadata
+  // after destroying the old document. The only headerless exception is the
+  // exact same-actor deep-link document replaced before re-authentication;
+  // that interval cannot replace the session-set authority, and every other
+  // actor, phase, path, method, and timing check remains mandatory.
+  const requestAuthorityMatches =
+    input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash ||
+    (input.requestSessionSetAuthorityHash === null &&
+      input.expectedDispatchPhase === "cross-slot-deep-link");
+  return (
+    new Set(["GET", "HEAD"]).has(input.method) &&
+    input.actorEpoch !== null &&
+    input.actorEpoch === input.confirmedActorEpoch &&
+    input.dispatchPhase === input.expectedDispatchPhase &&
+    documentOwnedSessionRead &&
+    input.currentSessionSetAuthorityHash !== null &&
+    requestAuthorityMatches &&
+    Number.isFinite(input.startedAt) &&
+    Number.isFinite(input.replacementStartedAt) &&
+    input.startedAt <= input.replacementStartedAt
+  );
+}
+
+function finiteReadMayRetireAfterLogoutAllAuthorityReset(
+  input: LogoutAllFiniteReadRetirementInput,
+): boolean {
+  // Chromium can omit every Playwright terminal for a finite request that was
+  // still queued when logout-all synchronously aborted the old actor. Retire
+  // only a pre-acceptance read whose old HttpOnly authority is bound to the
+  // exact accepted reset and differs from the confirmed replacement set.
+  const exactOldWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.oldWorkspaceId)}/`;
+  return (
+    new Set(["GET", "HEAD"]).has(input.method) &&
+    input.actorEpoch !== null &&
+    input.actorEpoch !== input.confirmedActorEpoch &&
+    !input.responseSeen &&
+    input.pathname.startsWith(exactOldWorkspacePrefix) &&
+    LOGOUT_ALL_FINITE_READ_RETIREMENT_DISPATCH_PHASES.has(input.dispatchPhase) &&
+    input.currentSessionSetAuthorityHash !== null &&
+    input.requestSessionSetAuthorityHash !== null &&
+    input.requestSessionSetAuthorityHash !== input.currentSessionSetAuthorityHash &&
+    Number.isFinite(input.startedAt) &&
+    Number.isFinite(input.logoutAllAcceptedAt) &&
+    Number.isFinite(input.confirmedAt) &&
+    input.startedAt <= input.logoutAllAcceptedAt &&
+    input.logoutAllAcceptedAt <= input.confirmedAt &&
+    input.acceptedActorTransitions.some(
+      (transition) =>
+        transition.path === "/v1/auth/session-set/logout-all" &&
+        transition.acceptedAt === input.logoutAllAcceptedAt &&
+        transition.actorEpoch !== null &&
+        transition.actorEpoch !== input.actorEpoch &&
+        transition.sessionSetAuthorityHash === input.requestSessionSetAuthorityHash,
+    )
+  );
+}
+
+function actorTransitionResponseDispatchPhaseMatches(input: {
+  dispatchPhase: string;
+  expectedPhase: string;
+  permitsDirectRacePredecessors: boolean;
+  responsePhase: string;
+}): boolean {
+  if (input.responsePhase !== input.expectedPhase) return false;
+  return input.permitsDirectRacePredecessors
+    ? input.expectedPhase === "cross-tab-select-race" &&
+        DIRECT_RACE_ACTOR_RESPONSE_DISPATCH_PHASES.has(input.dispatchPhase)
+    : input.dispatchPhase === input.expectedPhase;
 }
 
 let owned: OwnerMigratedTestDatabase | null = null;
@@ -491,12 +764,16 @@ async function authSessionCount(email: string): Promise<number> {
 
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
+    acceptedRequestTerminals: [],
     activeStreams: new Map(),
+    boundedHttp1StreamDispatches: 0,
+    boundedHttp1NativeSeams: 0,
     actorDispatches: [],
     actorFenceResponses: [],
     actorTransitionResponses: [],
     consoleErrors: [],
     phase: "initialization",
+    pageErrorEvidence: [],
     pageErrors: [],
     failedRequests: [],
     pendingFiniteReads: new Map(),
@@ -516,7 +793,8 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   >();
   page.on("request", (request) => {
-    const pathname = new URL(request.url()).pathname;
+    const requestUrl = new URL(request.url());
+    const pathname = requestUrl.pathname;
     const actorEpoch = request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null;
     const startedAt = performance.now();
     const requestSessionSetAuthorityHash = request
@@ -524,6 +802,9 @@ function observeBrowser(page: Page): BrowserProblems {
       .then(sessionSetAuthorityHash, () => null);
     if (actorEpoch !== null) problems.actorDispatches.push({ actorEpoch, startedAt });
     if (pathname.endsWith("/stream") || pathname.includes("/live-events/stream")) {
+      if (requestUrl.searchParams.get("transport") === "http1-bounded") {
+        problems.boundedHttp1StreamDispatches += 1;
+      }
       problems.activeStreams.set(
         request,
         `[dispatch=${problems.phase}; actor=${actorEpoch ?? "missing"}] ${request.method()} ${request.url()}`,
@@ -578,9 +859,18 @@ function observeBrowser(page: Page): BrowserProblems {
     }
     if (response.status() === 401 && pathname.startsWith("/v1/workspaces/")) {
       const dispatch = requestPhases.get(request);
-      problems.actorFenceResponses.push(
-        `[dispatch=${dispatch?.phase ?? "unknown"}; actor=${dispatch?.actorEpoch ?? "missing"}; start=${dispatch?.startedAt.toFixed(1) ?? "unknown"}; response=${problems.phase}; end=${performance.now().toFixed(1)}] ${request.method()} 401 ${pathname}`,
-      );
+      const responseUrl = new URL(response.url());
+      problems.actorFenceResponses.push({
+        actorEpoch: dispatch?.actorEpoch ?? null,
+        dispatchPhase: dispatch?.phase ?? "unknown",
+        endedAt: performance.now(),
+        method: request.method(),
+        pathname,
+        responsePhase: problems.phase,
+        search: responseUrl.search,
+        startedAt: dispatch?.startedAt ?? Number.NaN,
+        status: response.status(),
+      });
     }
     const recordsActorTransition =
       (response.status() === 403 &&
@@ -606,8 +896,30 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("requestfinished", (request) => {
+    const finishedAt = performance.now();
+    const finishedUrl = new URL(request.url());
+    const finishedFiniteRead = problems.pendingFiniteReads.get(request);
+    const finishedBoundedStream = isBoundedHttp1StreamRequest(request.method(), request.url());
     problems.activeStreams.delete(request);
     problems.pendingFiniteReads.delete(request);
+    if (
+      problems.phase === "slot-revocation-reauthentication" &&
+      (finishedFiniteRead !== undefined || finishedBoundedStream)
+    ) {
+      // After its finite bytes are detached, WebKit may report the explicit
+      // native-fetch retirement—or an old-document finite-read cancellation—
+      // as a renderer access-control error while Playwright has already
+      // classified the same request as finished. Keep exact terminal evidence
+      // for the same bijective page-error fence used by requestfailed;
+      // unrelated successful requests cannot authorize it.
+      if (finishedBoundedStream) problems.boundedHttp1NativeSeams += 1;
+      problems.acceptedRequestTerminals.push({
+        observedAt: finishedAt,
+        pathnameAndSearch: `${finishedUrl.pathname}${finishedUrl.search}`,
+        responsePhase: problems.phase,
+        terminal: "finished",
+      });
+    }
     const retiredTerminalProblem = retiredFiniteReadTerminalProblem(
       problems.retiredFiniteReadTombstones.get(request),
       { kind: "finished" },
@@ -630,18 +942,45 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("pageerror", (error) => {
-    problems.pageErrors.push(`[${problems.phase}] ${error.message}`);
+    const message = `[${problems.phase}] ${error.message}`;
+    problems.pageErrorEvidence.push({ message, observedAt: performance.now() });
+    problems.pageErrors.push(message);
   });
   page.on("requestfailed", (request) => {
     const failedAt = performance.now();
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
+    const responsePhase = problems.phase;
+    const failedUrl = new URL(request.url());
+    const wasRetiredFiniteRead = problems.retiredFiniteReadTombstones.has(request);
     problems.activeStreams.delete(request);
     problems.retiredFiniteReadTombstones.delete(request);
     // A failed finite read is terminal whether expected or not. Remove it from
     // quiescence tracking, but keep every non-transition failure in the strict
     // final ledger—including canceled product mutations.
     problems.pendingFiniteReads.delete(request);
+    if (
+      isExpectedBoundedHttp1NativeSeam({
+        failedAt,
+        failure,
+        method: request.method(),
+        startedAt: dispatch?.startedAt,
+        url: request.url(),
+      })
+    ) {
+      problems.boundedHttp1NativeSeams += 1;
+      // WebKit can additionally surface the exact canceled request as a page
+      // access-control error. Preserve the URL, phase, and timestamp so the
+      // page-error gate can require the same strict one-to-one correlation as
+      // actor-transition cancellations instead of broadly allowing CORS text.
+      problems.acceptedRequestTerminals.push({
+        observedAt: failedAt,
+        pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
+        responsePhase,
+        terminal: "failed",
+      });
+      return;
+    }
     const check = (async () => {
       const problem = requestFailureProblem({
         acceptedActorTransitions: actorMutationAcceptances,
@@ -650,12 +989,37 @@ function observeBrowser(page: Page): BrowserProblems {
         failedAt,
         failure,
         method: request.method(),
-        responsePhase: problems.phase,
+        responsePhase,
         sessionSetAuthorityHash: dispatch ? await dispatch.sessionSetAuthorityHash : null,
         startedAt: dispatch?.startedAt,
         url: request.url(),
       });
-      if (problem !== null) problems.failedRequests.push(problem);
+      if (problem !== null) {
+        problems.failedRequests.push(problem);
+      } else {
+        if (wasRetiredFiniteRead) {
+          // A late failed terminal proves the retired read produced no
+          // response, but it still has to pass the complete cancellation
+          // ledger above. Record that strict disposition instead of silently
+          // treating the tombstone as a broad failure exemption.
+          problems.retirementChecks.push(
+            JSON.stringify({
+              dispatchPhase: dispatch?.phase ?? "unknown",
+              failure,
+              method: request.method(),
+              pathname: failedUrl.pathname,
+              responsePhase,
+              result: "retired-read-cancelled-with-strict-evidence",
+            }),
+          );
+        }
+        problems.acceptedRequestTerminals.push({
+          observedAt: failedAt,
+          pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
+          responsePhase,
+          terminal: "failed",
+        });
+      }
     })();
     problems.pendingRequestFailureChecks.add(check);
     void check.finally(() => problems.pendingRequestFailureChecks.delete(check));
@@ -792,10 +1156,121 @@ async function retirePendingReadsAfterConfirmedActorTransition(
   }
 }
 
-async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void> {
+async function retirePendingReadsAfterConfirmedDocumentReplacement(
+  page: Page,
+  problems: BrowserProblems,
+  input: {
+    confirmedActorEpoch: string;
+    dispatchPhase: string;
+    replacementStartedAt: number;
+    workspaceId: string;
+  },
+): Promise<void> {
+  const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
+    await browserCookieHeader(page.context()),
+  );
+  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sessions/`;
+  for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
+    if (
+      (pending.method !== "GET" && pending.method !== "HEAD") ||
+      pending.actorEpoch !== input.confirmedActorEpoch ||
+      pending.dispatchPhase !== input.dispatchPhase ||
+      !pending.pathname.startsWith(exactWorkspacePrefix) ||
+      pending.startedAt > input.replacementStartedAt
+    ) {
+      continue;
+    }
+    const requestSessionSetAuthorityHash =
+      pending.sessionSetAuthorityHashImmediate ??
+      (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
+    const mayRetire = finiteReadMayRetireAfterDocumentReplacement({
+      actorEpoch: pending.actorEpoch,
+      confirmedActorEpoch: input.confirmedActorEpoch,
+      currentSessionSetAuthorityHash,
+      dispatchPhase: pending.dispatchPhase,
+      expectedDispatchPhase: input.dispatchPhase,
+      method: pending.method,
+      pathname: pending.pathname,
+      replacementStartedAt: input.replacementStartedAt,
+      requestSessionSetAuthorityHash,
+      startedAt: pending.startedAt,
+      workspaceId: input.workspaceId,
+    });
+    if (!mayRetire) continue;
+    problems.retiredFiniteReads.push(
+      `${pending.description} [retired=confirmed-document-replacement]`,
+    );
+    problems.pendingFiniteReads.delete(request);
+  }
+}
+
+async function retirePendingReadsAfterConfirmedLogoutAllAuthorityReset(
+  page: Page,
+  problems: BrowserProblems,
+  input: {
+    confirmedActorEpoch: string;
+    confirmedAt: number;
+    logoutAllAcceptedAt: number;
+    oldWorkspaceId: string;
+  },
+): Promise<void> {
+  const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
+    await browserCookieHeader(page.context()),
+  );
+  for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
+    const requestSessionSetAuthorityHash =
+      pending.sessionSetAuthorityHashImmediate ??
+      (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
+    const mayRetire = finiteReadMayRetireAfterLogoutAllAuthorityReset({
+      acceptedActorTransitions: actorMutationAcceptances,
+      actorEpoch: pending.actorEpoch,
+      confirmedActorEpoch: input.confirmedActorEpoch,
+      confirmedAt: input.confirmedAt,
+      currentSessionSetAuthorityHash,
+      dispatchPhase: pending.dispatchPhase,
+      logoutAllAcceptedAt: input.logoutAllAcceptedAt,
+      method: pending.method,
+      oldWorkspaceId: input.oldWorkspaceId,
+      pathname: pending.pathname,
+      requestSessionSetAuthorityHash,
+      responseSeen: pending.responseSeen,
+      startedAt: pending.startedAt,
+    });
+    problems.retirementChecks.push(
+      JSON.stringify({
+        actorEpoch: pending.actorEpoch,
+        confirmedActorEpoch: input.confirmedActorEpoch,
+        currentSessionSetAuthorityPresent: currentSessionSetAuthorityHash !== null,
+        dispatchPhase: pending.dispatchPhase,
+        logoutAllAcceptedAt: input.logoutAllAcceptedAt,
+        method: pending.method,
+        pathname: pending.pathname,
+        requestSessionSetAuthorityChanged:
+          requestSessionSetAuthorityHash !== null &&
+          requestSessionSetAuthorityHash !== currentSessionSetAuthorityHash,
+        requestSessionSetAuthorityPresent: requestSessionSetAuthorityHash !== null,
+        responseSeen: pending.responseSeen,
+        result: mayRetire ? "retired-after-logout-all" : "kept-after-logout-all",
+        startedAt: pending.startedAt,
+      }),
+    );
+    if (!mayRetire) continue;
+    problems.retiredFiniteReads.push(
+      `${pending.description} [retired=confirmed-logout-all-authority-reset]`,
+    );
+    problems.retiredFiniteReadTombstones.set(request, pending.description);
+    problems.pendingFiniteReads.delete(request);
+  }
+}
+
+async function settlePendingRequestFailureChecks(problems: BrowserProblems): Promise<void> {
   while (problems.pendingRequestFailureChecks.size > 0) {
     await Promise.all([...problems.pendingRequestFailureChecks]);
   }
+}
+
+async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void> {
+  await settlePendingRequestFailureChecks(problems);
   expect({
     actorFenceResponses: problems.actorFenceResponses,
     actorTransitionResponses: problems.actorTransitionResponses,
@@ -846,6 +1321,234 @@ async function expectAndConsumeConsoleErrors(
   problems.consoleErrors.splice(0);
 }
 
+async function expectAndConsumePageErrors(
+  page: Page,
+  problems: BrowserProblems,
+  allowed: string[] | (() => string[]),
+  required: string[],
+): Promise<void> {
+  // A request terminal is delivered over Playwright independently from the
+  // renderer task that reports the corresponding page error. Close the
+  // complete correlation window for every accepted terminal, cross two renderer
+  // task boundaries, then check again for later evidence. This derives the
+  // wait from the same fail-closed time fence used by the matcher instead of an
+  // arbitrary delay, so delayed evidence is either present now or too late to
+  // be accepted and remains in the final strict ledger.
+  let latestEvidenceAt = Number.NEGATIVE_INFINITY;
+  while (true) {
+    await settlePendingRequestFailureChecks(problems);
+    latestEvidenceAt = Math.max(
+      latestEvidenceAt,
+      ...problems.acceptedRequestTerminals.map(({ observedAt }) => observedAt),
+      ...problems.pageErrorEvidence.map(({ observedAt }) => observedAt),
+    );
+    const remainingCorrelationWindow =
+      latestEvidenceAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - performance.now();
+    if (remainingCorrelationWindow > 0) await Bun.sleep(remainingCorrelationWindow);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          setTimeout(() => setTimeout(resolve, 0), 0);
+        }),
+    );
+    await settlePendingRequestFailureChecks(problems);
+    const nextLatestEvidenceAt = Math.max(
+      Number.NEGATIVE_INFINITY,
+      ...problems.acceptedRequestTerminals.map(({ observedAt }) => observedAt),
+      ...problems.pageErrorEvidence.map(({ observedAt }) => observedAt),
+    );
+    if (
+      nextLatestEvidenceAt <= latestEvidenceAt &&
+      performance.now() >= nextLatestEvidenceAt + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+    ) {
+      break;
+    }
+  }
+  const allowedMessages = typeof allowed === "function" ? allowed() : allowed;
+  const counts = Object.fromEntries(
+    [...new Set(problems.pageErrors)].map((message) => [
+      message,
+      problems.pageErrors.filter((candidate) => candidate === message).length,
+    ]),
+  );
+  const allowedCounts = Object.fromEntries(
+    [...new Set(allowedMessages)].map((message) => [
+      message,
+      allowedMessages.filter((candidate) => candidate === message).length,
+    ]),
+  );
+  expect({
+    excess: Object.fromEntries(
+      Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
+    ),
+    missing: required.filter((message) => !problems.pageErrors.includes(message)),
+  }).toEqual({ excess: {}, missing: [] });
+  problems.pageErrorEvidence.splice(0);
+  problems.pageErrors.splice(0);
+}
+
+function optionalWebKitReauthenticationReloadError(
+  problems: BrowserProblems,
+  engine: EngineName,
+): string[] {
+  if (engine !== "webkit") return [];
+  // WebKit can report the deliberately replaced document's canceled root
+  // module import after the re-authenticated document has already won. Keep
+  // the phase, message, hashed entry asset, and maximum count exact.
+  return problems.consoleErrors
+    .filter((message) =>
+      /^\[slot-revocation-reauthentication\] TypeError: Importing a module script failed\. @ \/assets\/index-[A-Za-z0-9_-]+\.js$/u.test(
+        message,
+      ),
+    )
+    .slice(0, 1);
+}
+
+// One finite batch plus its reconnect grace separates identical bounded polls.
+// Keep the terminal/page-error fence inside that four-second grace so a loaded
+// WebKit renderer may deliver its callbacks in either order, while the next
+// request to the same URL cannot authorize stale evidence from the prior one.
+const WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS = 4_000;
+
+function correlatedWebKitReauthenticationTerminalIndex(
+  pageError: BrowserProblems["pageErrorEvidence"][number],
+  acceptedRequestTerminals: BrowserProblems["acceptedRequestTerminals"],
+): number | null {
+  const match =
+    /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_./?=&%-]+) due to access control checks\.$/u.exec(
+      pageError.message,
+    );
+  const pathnameAndSearch = match?.groups?.pathnameAndSearch;
+  if (pathnameAndSearch === undefined) return null;
+  const matchingTerminalIndexes = acceptedRequestTerminals.flatMap((terminal, index) =>
+    terminal.responsePhase === "slot-revocation-reauthentication" &&
+    terminal.pathnameAndSearch === pathnameAndSearch &&
+    Math.abs(pageError.observedAt - terminal.observedAt) <= WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS
+      ? [index]
+      : [],
+  );
+  return matchingTerminalIndexes.length === 1 ? matchingTerminalIndexes[0]! : null;
+}
+
+function optionalWebKitReauthenticationAccessControlPageError(
+  problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence">,
+  engine: EngineName,
+): string[] {
+  if (engine !== "webkit") return [];
+  // WebKit can surface reads from the deliberately replaced document as page
+  // errors in addition to their request-cancellation events. Native-first
+  // transport teardown can expose more than one of those errors, so require a
+  // bijection: every page error must have exactly one same-phase, exact-URL
+  // failed-or-finished terminal inside the same bounded delivery window, and
+  // no terminal may authorize a second error. Playwright delivers renderer
+  // page errors and request terminals independently, so either can arrive first.
+  // Duplicate, late, concurrent, or stale evidence keeps the strict ledger red.
+  const candidates = problems.pageErrorEvidence.flatMap((pageError) => {
+    const terminalIndex = correlatedWebKitReauthenticationTerminalIndex(
+      pageError,
+      problems.acceptedRequestTerminals,
+    );
+    return terminalIndex === null ? [] : [{ terminalIndex, message: pageError.message }];
+  });
+  const terminalIndexes = candidates.map(({ terminalIndex }) => terminalIndex);
+  if (
+    candidates.length !== problems.pageErrorEvidence.length ||
+    new Set(terminalIndexes).size !== terminalIndexes.length
+  ) {
+    return [];
+  }
+  for (const terminalIndex of [...terminalIndexes].sort((left, right) => right - left)) {
+    problems.acceptedRequestTerminals.splice(terminalIndex, 1);
+  }
+  return candidates.map(({ message }) => message);
+}
+
+function logoutAllActorFenceResponseProblem(
+  response: BrowserProblems["actorFenceResponses"][number],
+  input: {
+    acceptedAt: number;
+    actorEpoch: string;
+    settledAt: number;
+    workspaceId: string;
+  },
+): string | null {
+  const expectedWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}`;
+  const isSessionList =
+    response.pathname === `${expectedWorkspacePrefix}/sessions` && response.search === "";
+  const isBoundedLiveStream =
+    response.pathname === `${expectedWorkspacePrefix}/live-events/stream` &&
+    exactBoundedWorkspaceLiveStreamSearch(response.search);
+  const exactShape =
+    response.actorEpoch === input.actorEpoch &&
+    response.dispatchPhase === "logout-all-response-loss-replay" &&
+    response.responsePhase === "logout-all-response-loss-replay" &&
+    response.method === "GET" &&
+    (isSessionList || isBoundedLiveStream) &&
+    response.status === 401;
+  const exactTiming =
+    Number.isFinite(response.startedAt) &&
+    Number.isFinite(response.endedAt) &&
+    response.startedAt <= input.settledAt &&
+    response.endedAt >= input.acceptedAt &&
+    response.endedAt <= input.settledAt;
+  return exactShape && exactTiming
+    ? null
+    : `unexpected logout-all actor fence: ${JSON.stringify({ input, response })}`;
+}
+
+function exactBoundedWorkspaceLiveStreamSearch(search: string): boolean {
+  const params = new URLSearchParams(search);
+  const exactSingleton = (name: string, value: string): boolean => {
+    const values = params.getAll(name);
+    return values.length === 1 && values[0] === value;
+  };
+  const exactCursor = (name: string): boolean => {
+    const values = params.getAll(name);
+    if (values.length !== 1 || !/^(?:0|[1-9][0-9]*)$/u.test(values[0] ?? "")) return false;
+    const value = Number(values[0]);
+    return Number.isSafeInteger(value) && value >= 0;
+  };
+  return (
+    [...params.keys()].length === 3 &&
+    exactSingleton("transport", "http1-bounded") &&
+    exactCursor("controlAfter") &&
+    exactCursor("interactionAfter")
+  );
+}
+
+async function expectAndConsumeLogoutAllActorFenceResponses(
+  page: Page,
+  problems: BrowserProblems,
+  input: {
+    acceptedAt: number;
+    actorEpoch: string;
+    settledAt: number;
+    workspaceId: string;
+  },
+): Promise<void> {
+  // A sibling tab can dispatch its current session-list read or one bounded
+  // event poll immediately before the accepted logout rotates the shared
+  // HttpOnly authority. The API must fence that exact old-actor request with
+  // 401; a browser may deliver the response instead of a cancellation. Keep
+  // the optional race strict by actor, phase, path, transport, method, status,
+  // and acceptance window, and leave every other 401 in the final ledger.
+  await page.waitForTimeout(1_000);
+  const validationInput = { ...input, settledAt: performance.now() };
+  expect(problems.actorFenceResponses.length).toBeLessThanOrEqual(2);
+  expect(new Set(problems.actorFenceResponses.map(({ pathname }) => pathname)).size).toBe(
+    problems.actorFenceResponses.length,
+  );
+  for (const response of problems.actorFenceResponses) {
+    expect(logoutAllActorFenceResponseProblem(response, validationInput)).toBeNull();
+  }
+  const exactConsoleErrors = problems.actorFenceResponses.map(
+    ({ pathname }) =>
+      `[logout-all-response-loss-replay] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ ${pathname}`,
+  );
+  await expectAndConsumeConsoleErrors(page, problems, exactConsoleErrors, []);
+  problems.actorFenceResponses.splice(0);
+}
+
 async function expectAndConsumeActorTransitionResponse(
   page: Page,
   problems: BrowserProblems,
@@ -857,6 +1560,7 @@ async function expectAndConsumeActorTransitionResponse(
     phase: string;
     status: number;
     statusLabel: string;
+    allowedConsoleErrors?: readonly string[];
     workspaceId?: string;
     timing?: { kind: "direct-race-fence"; settledAt: number };
   },
@@ -871,12 +1575,22 @@ async function expectAndConsumeActorTransitionResponse(
     expect(responseEvidence).toEqual(
       expect.objectContaining({
         actorEpoch: input.actorEpoch,
-        dispatchPhase: input.phase,
         method: input.method,
         responsePhase: input.phase,
         status: input.status,
       }),
     );
+    const dispatchPhaseValid = actorTransitionResponseDispatchPhaseMatches({
+      dispatchPhase: response.dispatchPhase,
+      expectedPhase: input.phase,
+      permitsDirectRacePredecessors: input.timing !== undefined,
+      responsePhase: response.responsePhase,
+    });
+    if (!dispatchPhaseValid) {
+      throw new Error(
+        `actor transition response did not originate in its exact transition window: ${JSON.stringify({ input, response: responseEvidence })}`,
+      );
+    }
     const pathnameValid =
       response.pathname === input.pathname ||
       (input.timing?.kind === "direct-race-fence" &&
@@ -918,7 +1632,7 @@ async function expectAndConsumeActorTransitionResponse(
   await expectAndConsumeConsoleErrors(
     page,
     problems,
-    exactConsoleErrors,
+    [...exactConsoleErrors, ...(input.allowedConsoleErrors ?? [])],
     requestedEngine === "firefox" ? [] : exactConsoleErrors,
   );
   problems.actorTransitionResponses.splice(0);
@@ -1150,7 +1864,11 @@ function accountMenuSurface(page: Page): Locator {
     .last();
 }
 
-async function openAccountMenu(page: Page, displayName: string): Promise<Locator> {
+async function openAccountMenu(
+  page: Page,
+  displayName: string,
+  prepareTrigger?: () => Promise<void>,
+): Promise<Locator> {
   const trigger = accountMenuTrigger(page, displayName);
   const menu = accountMenuSurface(page);
   let lastError: unknown;
@@ -1165,10 +1883,23 @@ async function openAccountMenu(page: Page, displayName: string): Promise<Locator
         await page.waitForTimeout(100);
       }
     }
-    if ((await trigger.getAttribute("aria-expanded")) === "true") {
-      await page.keyboard.press("Escape");
+    try {
+      await prepareTrigger?.();
+      await trigger.waitFor({ state: "visible", timeout: 3_000 });
+      if ((await trigger.getAttribute("aria-expanded", { timeout: 1_000 })) === "true") {
+        await page.keyboard.press("Escape");
+      }
+      await trigger.click({ timeout: 3_000 });
+    } catch (error) {
+      // Responsive navigation can finish a route transition after its account
+      // trigger first becomes visible, remounting or closing the drawer between
+      // two locator operations. Retry that bounded UI transition instead of
+      // spending Playwright's full default timeout on the vanished element.
+      lastError = error;
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await page.waitForTimeout(100);
+      continue;
     }
-    await trigger.click();
     try {
       await menu.waitFor({ timeout: 3_000 });
       await waitForStableAccountMenu(page, menu);
@@ -1205,20 +1936,20 @@ async function openResponsiveAccountMenu(
   displayName: string,
   width: number,
 ): Promise<Locator> {
-  const menu = accountMenuSurface(page);
-  if (await menu.isVisible()) {
-    await waitForStableAccountMenu(page, menu);
-    return menu;
-  }
-  if (width < 1_024) {
-    const trigger = accountMenuTrigger(page, displayName);
-    if (!(await trigger.isVisible())) {
-      await page.getByRole("button", { name: "Open navigation" }).click();
-      await page.getByRole("tab", { name: "Workspace" }).click();
-      await trigger.waitFor();
-    }
-  }
-  const opened = await openAccountMenu(page, displayName);
+  const prepareTrigger =
+    width < 1_024
+      ? async () => {
+          const trigger = accountMenuTrigger(page, displayName);
+          if (await trigger.isVisible()) return;
+          const workspaceTab = page.getByRole("tab", { name: "Workspace" });
+          if (!(await workspaceTab.isVisible())) {
+            await page.getByRole("button", { name: "Open navigation" }).click({ timeout: 3_000 });
+          }
+          await workspaceTab.click({ timeout: 3_000 });
+          await trigger.waitFor({ state: "visible", timeout: 3_000 });
+        }
+      : undefined;
+  const opened = await openAccountMenu(page, displayName, prepareTrigger);
   return opened;
 }
 
@@ -1476,12 +2207,38 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
   );
 }
 
+async function launchAccountBrowser(engine: EngineName): Promise<Browser> {
+  return await ENGINES[engine].launch(
+    engine === "chromium" && process.env.OPENGENI_BROWSER_BIN
+      ? { executablePath: process.env.OPENGENI_BROWSER_BIN }
+      : undefined,
+  );
+}
+
 async function captureResponsiveEvidence(
-  browser: Browser,
   context: BrowserContext,
   engine: EngineName,
 ): Promise<void> {
   const storageState = await context.storageState();
+  // Keep responsive evidence out of the multi-tab journey's native connection
+  // pool. The journey deliberately retains live transports in two pages while
+  // these short-lived contexts exercise seven viewport/mode combinations; a
+  // shared Chromium process can otherwise queue a bootstrap read behind those
+  // unrelated transports and turn visual capture into a transport-liveness
+  // test. The journey itself continues to prove the shared-tab behavior.
+  const evidenceBrowser = await launchAccountBrowser(engine);
+  try {
+    await captureResponsiveEvidenceInBrowser(evidenceBrowser, storageState, engine);
+  } finally {
+    await evidenceBrowser.close();
+  }
+}
+
+async function captureResponsiveEvidenceInBrowser(
+  browser: Browser,
+  storageState: Awaited<ReturnType<BrowserContext["storageState"]>>,
+  engine: EngineName,
+): Promise<void> {
   const captures = [
     { width: 320, height: 780, scheme: "light" as const },
     { width: 768, height: 900, scheme: "dark" as const },
@@ -1528,6 +2285,12 @@ async function captureResponsiveEvidence(
       });
       expect(screenshot.readUInt32BE(16)).toBe(capture.width);
       await closeResponsiveAccountMenu(evidencePage, capture.width);
+      // Menu open/close and accessibility inspection can trigger ordinary
+      // routed refreshes after the initial bootstrap has already settled.
+      // Close that second finite-read window before applying the strict final
+      // ledger; an in-flight successful read is neither a browser fault nor
+      // evidence that can be discarded by closing this short-lived context.
+      await waitForFiniteReadQuiescence(evidenceProblems);
       await expectNoBrowserProblems(evidenceProblems);
     } finally {
       await evidenceContext.close();
@@ -1570,6 +2333,7 @@ async function captureResponsiveEvidence(
     });
     expect(forcedColorsScreenshot.readUInt32BE(16)).toBe(768);
     await closeResponsiveAccountMenu(forcedColorsPage, 768);
+    await waitForFiniteReadQuiescence(forcedColorsProblems);
     await expectNoBrowserProblems(forcedColorsProblems);
   } finally {
     await forcedColors.close();
@@ -1599,6 +2363,7 @@ async function captureResponsiveEvidence(
     fullPage: true,
   });
   expect(zoomScreenshot.readUInt32BE(16)).toBe(768);
+  await waitForFiniteReadQuiescence(zoomProblems);
   await expectNoBrowserProblems(zoomProblems);
   await zoom.close();
 
@@ -1642,6 +2407,7 @@ async function captureResponsiveEvidence(
     fullPage: true,
   });
   expect(touchScreenshot.readUInt32BE(16)).toBe(320);
+  await waitForFiniteReadQuiescence(touchProblems);
   await expectNoBrowserProblems(touchProblems);
   await touch.close();
 }
@@ -1783,18 +2549,15 @@ beforeAll(async () => {
           if (!completionResponseLoss.dropped && response.ok) {
             completionResponseLoss.dropped = true;
             await response.body?.cancel();
-            const body = new ReadableStream<Uint8Array>({
-              start(controller) {
-                controller.enqueue(new TextEncoder().encode('{"projection":'));
-                queueMicrotask(() =>
-                  controller.error(new Error("injected completion response body loss")),
-                );
-              },
-            });
-            return new Response(body, {
+            const headers = new Headers(response.headers);
+            headers.delete("content-encoding");
+            headers.delete("content-length");
+            // Preserve an accepted response with an unreadable completion payload without
+            // throwing from Bun's server-side stream controller after the test has settled.
+            return new Response('{"projection":', {
               status: response.status,
               statusText: response.statusText,
-              headers: response.headers,
+              headers,
             });
           }
           return response;
@@ -1870,6 +2633,7 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_ABORT" })).toBeNull();
     expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" })).toContain(
       "/sessions",
     );
@@ -1879,6 +2643,24 @@ describe("provider-neutral browser account acceptance", () => {
         dispatchPhase: "add-response-loss-replay",
         responsePhase: "cross-tab-select-race",
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "primary-actor",
+        dispatchPhase: "primary-set-sign-in",
+        responsePhase: "primary-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "add-replay-actor",
+        dispatchPhase: "add-response-loss-replay",
+        responsePhase: "add-response-loss-replay",
+        url: `${publicOrigin}/v1/config/client`,
       }),
     ).toBeNull();
     expect(
@@ -1905,6 +2687,33 @@ describe("provider-neutral browser account acceptance", () => {
     ).toContain("responsive-accessibility-evidence");
     expect(requestFailureProblem({ ...oldActorRead, method: "POST" })).toContain("POST");
     expect(requestFailureProblem({ ...oldActorRead, actorEpoch: null })).toContain("actor=missing");
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: null,
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-sign-in",
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "independent-actor",
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/realtime-model-catalog`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        actorEpoch: "independent-actor",
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
+      }),
+    ).toContain("/sessions");
     const longLivedOldActorStream = {
       ...oldActorRead,
       acceptedActorTransitions: [
@@ -1923,7 +2732,10 @@ describe("provider-neutral browser account acceptance", () => {
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(longLivedOldActorStream)).toBeNull();
     expect(
-      requestFailureProblem({ ...longLivedOldActorStream, failure: "NS_ERROR_NET_RESET" }),
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        failure: "NS_ERROR_NET_RESET",
+      }),
     ).toBeNull();
     expect(
       requestFailureProblem({
@@ -1945,6 +2757,43 @@ describe("provider-neutral browser account acceptance", () => {
         ],
       }),
     ).toContain("/live-events/stream");
+    const signedOutOldActorBoundedStream = {
+      ...longLivedOldActorStream,
+      acceptedActorTransitions: [
+        {
+          acceptedAt: 200,
+          actorEpoch: "signed-out-actor-epoch",
+          path: "/v1/auth/session-set/logout-all",
+          sessionSetAuthorityHash: "b".repeat(64),
+        },
+      ],
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?after=12&transport=http1-bounded`,
+    } satisfies BrowserRequestFailureInput;
+    expect(requestFailureProblem(signedOutOldActorBoundedStream)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        acceptedActorTransitions: [],
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        failure: "NS_ERROR_NET_RESET",
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=sse`,
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...signedOutOldActorBoundedStream,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?transport=http1-bounded`,
+      }),
+    ).toContain("/sessions");
     expect(
       requestFailureProblem({
         ...longLivedOldActorStream,
@@ -1979,6 +2828,16 @@ describe("provider-neutral browser account acceptance", () => {
         responsePhase: "primary-set-sign-in",
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
       }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        acceptedActorTransitions: [],
+        dispatchPhase: "primary-set-sign-in",
+        failure: "NS_ERROR_NET_RESET",
+        responsePhase: "primary-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
+      }),
     ).toContain("/model-catalog");
     expect(
       requestFailureProblem({
@@ -1997,6 +2856,23 @@ describe("provider-neutral browser account acceptance", () => {
       requestFailureProblem({
         ...evidenceCatalogRead,
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
+      }),
+    ).toContain("/sessions");
+    const evidenceSessionPageRead = {
+      ...evidenceCatalogRead,
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?view=page&limit=50&parentSessionId=null`,
+    };
+    expect(requestFailureProblem(evidenceSessionPageRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...evidenceSessionPageRead,
+        failure: "NS_ERROR_NET_RESET",
+      }),
+    ).toContain("/sessions");
+    expect(
+      requestFailureProblem({
+        ...evidenceSessionPageRead,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?view=array`,
       }),
     ).toContain("/sessions");
     const crossTabBootstrapRead = {
@@ -2035,6 +2911,49 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/auth/get-session`,
       }),
     ).toBeNull();
+    const lateOldActorBootstrapRead = {
+      ...crossTabBootstrapRead,
+      actorEpoch: "old-actor-epoch",
+      dispatchPhase: "late-old-epoch-alpha-to-beta",
+      responsePhase: "late-old-epoch-primary-settled-before-old-release",
+    };
+    expect(requestFailureProblem(lateOldActorBootstrapRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        dispatchPhase: "late-old-epoch-setup-beta-to-alpha",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        responsePhase: "responsive-evidence-bootstrap",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        failure: "NS_ERROR_NET_RESET",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        method: "POST",
+      }),
+    ).toContain("POST");
+    expect(
+      requestFailureProblem({
+        ...lateOldActorBootstrapRead,
+        url: `${publicOrigin}/v1/config/other`,
+      }),
+    ).toContain("/v1/config/other");
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
@@ -2044,6 +2963,153 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/config/client`,
       }),
     ).toBeNull();
+    const reauthenticationBootstrapRead = {
+      ...crossTabBootstrapRead,
+      actorEpoch: "current-actor",
+      dispatchPhase: "slot-revocation-reauthentication",
+      responsePhase: "slot-revocation-reauthentication",
+    };
+    expect(requestFailureProblem(reauthenticationBootstrapRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        dispatchPhase: "cross-slot-deep-link",
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        dispatchPhase: "late-old-epoch-alpha-to-beta",
+      }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        url: `${publicOrigin}/v1/config/other`,
+      }),
+    ).toContain("/v1/config/other");
+    const acceptedWebKitCancellation = {
+      observedAt: 100,
+      pathnameAndSearch:
+        "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1",
+      responsePhase: "slot-revocation-reauthentication",
+      terminal: "failed" as const,
+    };
+    const correlatedWebKitPageError = {
+      message:
+        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+      observedAt: 150,
+    };
+    expect(
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+        acceptedWebKitCancellation,
+      ]),
+    ).toBe(0);
+    expect(correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [])).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationTerminalIndex(
+        {
+          message:
+            "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+          observedAt: 150,
+        },
+        [acceptedWebKitCancellation],
+      ),
+    ).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationTerminalIndex(
+        {
+          message:
+            "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog due to access control checks.",
+          observedAt: 150,
+        },
+        [
+          {
+            observedAt: 100,
+            pathnameAndSearch:
+              "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/realtime-model-catalog",
+            responsePhase: "slot-revocation-reauthentication",
+            terminal: "failed",
+          },
+        ],
+      ),
+    ).toBe(0);
+    expect(
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+        {
+          ...acceptedWebKitCancellation,
+          observedAt: 151,
+          terminal: "finished",
+        },
+      ]),
+    ).toBe(0);
+    expect(
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+        {
+          ...acceptedWebKitCancellation,
+          observedAt: 150 + WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS + 1,
+        },
+      ]),
+    ).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+        {
+          ...acceptedWebKitCancellation,
+          observedAt: 150 - WEBKIT_PAGE_ERROR_CORRELATION_WINDOW_MS - 1,
+        },
+      ]),
+    ).toBeNull();
+    expect(
+      correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
+        acceptedWebKitCancellation,
+        {
+          ...acceptedWebKitCancellation,
+          observedAt: 125,
+          terminal: "finished",
+        },
+      ]),
+    ).toBeNull();
+    const consumableWebKitFailures = [acceptedWebKitCancellation];
+    expect(
+      optionalWebKitReauthenticationAccessControlPageError(
+        {
+          acceptedRequestTerminals: consumableWebKitFailures,
+          pageErrorEvidence: [correlatedWebKitPageError],
+        },
+        "webkit",
+      ),
+    ).toEqual([correlatedWebKitPageError.message]);
+    expect(consumableWebKitFailures).toEqual([]);
+    expect(
+      optionalWebKitReauthenticationAccessControlPageError(
+        {
+          acceptedRequestTerminals: [acceptedWebKitCancellation],
+          pageErrorEvidence: [correlatedWebKitPageError, correlatedWebKitPageError],
+        },
+        "webkit",
+      ),
+    ).toEqual([]);
+    const secondAcceptedWebKitCancellation = {
+      ...acceptedWebKitCancellation,
+      pathnameAndSearch:
+        "/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/queue",
+    };
+    const secondCorrelatedWebKitPageError = {
+      message:
+        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/queue due to access control checks.",
+      observedAt: 175,
+    };
+    const bijectiveWebKitFailures = [acceptedWebKitCancellation, secondAcceptedWebKitCancellation];
+    expect(
+      optionalWebKitReauthenticationAccessControlPageError(
+        {
+          acceptedRequestTerminals: bijectiveWebKitFailures,
+          pageErrorEvidence: [correlatedWebKitPageError, secondCorrelatedWebKitPageError],
+        },
+        "webkit",
+      ),
+    ).toEqual([correlatedWebKitPageError.message, secondCorrelatedWebKitPageError.message]);
+    expect(bijectiveWebKitFailures).toEqual([]);
     expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
@@ -2094,13 +3160,21 @@ describe("provider-neutral browser account acceptance", () => {
     expect(finiteReadMayRetireAfterActorTransition(retirement)).toBe(true);
     const retiredDescription = "GET /v1/workspaces/old-workspace/sessions";
     expect(
-      retiredFiniteReadTerminalProblem(retiredDescription, { kind: "response", status: 200 }),
+      retiredFiniteReadTerminalProblem(retiredDescription, {
+        kind: "response",
+        status: 200,
+      }),
     ).toContain("unexpected-late-response=200");
-    expect(retiredFiniteReadTerminalProblem(retiredDescription, { kind: "finished" })).toContain(
-      "unexpected-late-finish",
-    );
     expect(
-      retiredFiniteReadTerminalProblem(undefined, { kind: "response", status: 200 }),
+      retiredFiniteReadTerminalProblem(retiredDescription, {
+        kind: "finished",
+      }),
+    ).toContain("unexpected-late-finish");
+    expect(
+      retiredFiniteReadTerminalProblem(undefined, {
+        kind: "response",
+        status: 200,
+      }),
     ).toBeNull();
     expect(
       finiteReadMayRetireAfterActorTransition({
@@ -2156,6 +3230,233 @@ describe("provider-neutral browser account acceptance", () => {
         startedAt: 225,
       }),
     ).toBe(true);
+    const neutralPreSelectionRetirement = {
+      ...retirement,
+      actorEpoch: null,
+      dispatchPhase: "cross-tab-select-race",
+      pathname: "/v1/auth/session-set",
+      startedAt: 100,
+    } satisfies FiniteReadRetirementInput;
+    expect(finiteReadMayRetireAfterActorTransition(neutralPreSelectionRetirement)).toBe(true);
+    for (const invalid of [
+      { ...neutralPreSelectionRetirement, method: "POST" },
+      { ...neutralPreSelectionRetirement, actorEpoch: "old-actor-epoch" },
+      {
+        ...neutralPreSelectionRetirement,
+        dispatchPhase: "late-old-epoch-setup-beta-to-alpha",
+      },
+      { ...neutralPreSelectionRetirement, pathname: "/v1/auth/session-set/select" },
+      { ...neutralPreSelectionRetirement, requestSessionSetAuthorityHash: null },
+      {
+        ...neutralPreSelectionRetirement,
+        requestSessionSetAuthorityHash: "b".repeat(64),
+      },
+      { ...neutralPreSelectionRetirement, responseSeen: true },
+      { ...neutralPreSelectionRetirement, startedAt: 201 },
+      { ...neutralPreSelectionRetirement, confirmedAt: 199 },
+      { ...neutralPreSelectionRetirement, actorDispatches: [] },
+      {
+        ...neutralPreSelectionRetirement,
+        actorDispatches: [{ actorEpoch: "new-actor-epoch", startedAt: 99 }],
+      },
+      {
+        ...neutralPreSelectionRetirement,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "new-actor-epoch",
+            path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "a".repeat(64),
+          },
+        ],
+      },
+    ]) {
+      expect(finiteReadMayRetireAfterActorTransition(invalid)).toBe(false);
+    }
+
+    const documentReplacementRetirement = {
+      actorEpoch: "current-actor-epoch",
+      confirmedActorEpoch: "current-actor-epoch",
+      currentSessionSetAuthorityHash: "a".repeat(64),
+      dispatchPhase: "cross-slot-deep-link",
+      expectedDispatchPhase: "cross-slot-deep-link",
+      method: "GET",
+      pathname:
+        "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/00000000-0000-4000-8000-000000000002/lineage",
+      replacementStartedAt: 200,
+      requestSessionSetAuthorityHash: "a".repeat(64),
+      startedAt: 100,
+      workspaceId: "00000000-0000-0000-0000-000000000001",
+    } satisfies DocumentReplacementRetirementInput;
+    expect(finiteReadMayRetireAfterDocumentReplacement(documentReplacementRetirement)).toBe(true);
+    expect(
+      finiteReadMayRetireAfterDocumentReplacement({
+        ...documentReplacementRetirement,
+        requestSessionSetAuthorityHash: null,
+      }),
+    ).toBe(true);
+    for (const invalid of [
+      { ...documentReplacementRetirement, method: "POST" },
+      { ...documentReplacementRetirement, actorEpoch: null },
+      { ...documentReplacementRetirement, actorEpoch: "old-actor-epoch" },
+      {
+        ...documentReplacementRetirement,
+        dispatchPhase: "slot-revocation-reauthentication",
+      },
+      {
+        ...documentReplacementRetirement,
+        pathname:
+          "/v1/workspaces/another-workspace/sessions/00000000-0000-4000-8000-000000000002/lineage",
+      },
+      {
+        ...documentReplacementRetirement,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/not-a-uuid/lineage",
+      },
+      {
+        ...documentReplacementRetirement,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog",
+      },
+      {
+        ...documentReplacementRetirement,
+        currentSessionSetAuthorityHash: null,
+      },
+      {
+        ...documentReplacementRetirement,
+        dispatchPhase: "slot-revocation-reauthentication",
+        expectedDispatchPhase: "slot-revocation-reauthentication",
+        requestSessionSetAuthorityHash: null,
+      },
+      {
+        ...documentReplacementRetirement,
+        requestSessionSetAuthorityHash: "b".repeat(64),
+      },
+      { ...documentReplacementRetirement, startedAt: 201 },
+    ]) {
+      expect(finiteReadMayRetireAfterDocumentReplacement(invalid)).toBe(false);
+    }
+
+    const logoutAllRetirement = {
+      acceptedActorTransitions: [
+        {
+          acceptedAt: 200,
+          actorEpoch: "accepted-reset-epoch",
+          path: "/v1/auth/session-set/logout-all",
+          sessionSetAuthorityHash: "a".repeat(64),
+        },
+      ],
+      actorEpoch: "old-actor-epoch",
+      confirmedActorEpoch: "new-neutral-epoch",
+      confirmedAt: 300,
+      currentSessionSetAuthorityHash: "b".repeat(64),
+      dispatchPhase: "slot-revocation-reauthentication",
+      logoutAllAcceptedAt: 200,
+      method: "GET",
+      oldWorkspaceId: "00000000-0000-0000-0000-000000000001",
+      pathname:
+        "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/00000000-0000-4000-8000-000000000002/queue",
+      requestSessionSetAuthorityHash: "a".repeat(64),
+      responseSeen: false,
+      startedAt: 100,
+    } satisfies LogoutAllFiniteReadRetirementInput;
+    expect(finiteReadMayRetireAfterLogoutAllAuthorityReset(logoutAllRetirement)).toBe(true);
+    expect(
+      finiteReadMayRetireAfterLogoutAllAuthorityReset({
+        ...logoutAllRetirement,
+        dispatchPhase: "cross-slot-deep-link",
+      }),
+    ).toBe(true);
+    for (const invalid of [
+      { ...logoutAllRetirement, method: "POST" },
+      { ...logoutAllRetirement, actorEpoch: null },
+      { ...logoutAllRetirement, actorEpoch: "new-neutral-epoch" },
+      { ...logoutAllRetirement, responseSeen: true },
+      {
+        ...logoutAllRetirement,
+        dispatchPhase: "late-old-epoch-primary-settled-before-old-release",
+      },
+      {
+        ...logoutAllRetirement,
+        pathname: "/v1/workspaces/another-workspace/sessions",
+      },
+      { ...logoutAllRetirement, pathname: "/v1/workspaces" },
+      { ...logoutAllRetirement, requestSessionSetAuthorityHash: null },
+      {
+        ...logoutAllRetirement,
+        currentSessionSetAuthorityHash: "a".repeat(64),
+      },
+      { ...logoutAllRetirement, startedAt: 201 },
+      { ...logoutAllRetirement, confirmedAt: 199 },
+      { ...logoutAllRetirement, logoutAllAcceptedAt: 201 },
+      { ...logoutAllRetirement, acceptedActorTransitions: [] },
+      {
+        ...logoutAllRetirement,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "old-actor-epoch",
+            path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "a".repeat(64),
+          },
+        ],
+      },
+      {
+        ...logoutAllRetirement,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "accepted-reset-epoch",
+            path: "/v1/auth/session-set/select",
+            sessionSetAuthorityHash: "a".repeat(64),
+          },
+        ],
+      },
+      {
+        ...logoutAllRetirement,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "accepted-reset-epoch",
+            path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "c".repeat(64),
+          },
+        ],
+      },
+    ]) {
+      expect(finiteReadMayRetireAfterLogoutAllAuthorityReset(invalid)).toBe(false);
+    }
+
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "second-tab-bootstrap",
+        expectedPhase: "cross-tab-select-race",
+        permitsDirectRacePredecessors: true,
+        responsePhase: "cross-tab-select-race",
+      }),
+    ).toBe(true);
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "second-tab-bootstrap",
+        expectedPhase: "cross-tab-select-race",
+        permitsDirectRacePredecessors: false,
+        responsePhase: "cross-tab-select-race",
+      }),
+    ).toBe(false);
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "second-tab-bootstrap",
+        expectedPhase: "cross-tab-select-race",
+        permitsDirectRacePredecessors: true,
+        responsePhase: "late-old-epoch-setup-beta-to-alpha",
+      }),
+    ).toBe(false);
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "logout-one",
+        expectedPhase: "logout-one",
+        permitsDirectRacePredecessors: true,
+        responsePhase: "logout-one",
+      }),
+    ).toBe(false);
 
     const expectedRaceConsole =
       "Failed to load resource: the server responded with a status of 409 (Conflict) @ /v1/auth/session-set/select";
@@ -2177,14 +3478,141 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBe(false);
   });
 
+  test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
+    const boundedLiveUrl = `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`;
+    expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl)).toBe(true);
+    expect(
+      isBoundedHttp1StreamRequest(
+        "GET",
+        `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/00000000-0000-0000-0000-000000000002/events/stream?after=4&transport=http1-bounded`,
+      ),
+    ).toBe(true);
+    expect(isBoundedHttp1StreamRequest("POST", boundedLiveUrl)).toBe(false);
+    expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl.replace("http1-bounded", "h2"))).toBe(
+      false,
+    );
+    expect(
+      isBoundedHttp1StreamRequest(
+        "GET",
+        `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001?transport=http1-bounded`,
+      ),
+    ).toBe(false);
+    const expected = {
+      failedAt: 11_100,
+      failure: "net::ERR_ABORTED",
+      method: "GET",
+      startedAt: 100,
+      url: boundedLiveUrl,
+    };
+    expect(isExpectedBoundedHttp1NativeSeam(expected)).toBe(true);
+    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 10_099 })).toBe(false);
+    expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 15_101 })).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        failure: "net::ERR_CONNECTION_RESET",
+      }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        failure: "cancelled: connection reset",
+      }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        failure: "canceled: transport failure",
+      }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        url: `${publicOrigin}/v1/workspaces?transport=http1-bounded`,
+      }),
+    ).toBe(false);
+    expect(
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream`,
+      }),
+    ).toBe(false);
+
+    const logoutAllFence = {
+      actorEpoch: "old-actor",
+      dispatchPhase: "logout-all-response-loss-replay",
+      endedAt: 220,
+      method: "GET",
+      pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions",
+      responsePhase: "logout-all-response-loss-replay",
+      search: "",
+      startedAt: 100,
+      status: 401,
+    } satisfies BrowserProblems["actorFenceResponses"][number];
+    const logoutAllFenceInput = {
+      acceptedAt: 200,
+      actorEpoch: "old-actor",
+      settledAt: 300,
+      workspaceId: "00000000-0000-0000-0000-000000000001",
+    };
+    expect(logoutAllActorFenceResponseProblem(logoutAllFence, logoutAllFenceInput)).toBeNull();
+    expect(
+      logoutAllActorFenceResponseProblem(
+        {
+          ...logoutAllFence,
+          pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+          search: "?controlAfter=12&interactionAfter=34&transport=http1-bounded",
+        },
+        logoutAllFenceInput,
+      ),
+    ).toBeNull();
+    for (const invalid of [
+      { ...logoutAllFence, actorEpoch: "new-actor" },
+      { ...logoutAllFence, dispatchPhase: "signed-out-settled" },
+      { ...logoutAllFence, responsePhase: "signed-out-settled" },
+      { ...logoutAllFence, method: "POST" },
+      { ...logoutAllFence, pathname: "/v1/workspaces" },
+      { ...logoutAllFence, search: "?view=page" },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        search: "?transport=h2",
+      },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        search: "?controlAfter=12&interactionAfter=34&transport=http1-bounded&transport=h2",
+      },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        search: "?controlAfter=12&interactionAfter=34&transport=http1-bounded&unexpected=1",
+      },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        search: "?controlAfter=012&interactionAfter=34&transport=http1-bounded",
+      },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000002/live-events/stream",
+        search: "?controlAfter=12&interactionAfter=34&transport=http1-bounded",
+      },
+      { ...logoutAllFence, status: 403 },
+      { ...logoutAllFence, endedAt: 199 },
+      { ...logoutAllFence, endedAt: 301 },
+      { ...logoutAllFence, startedAt: 301, endedAt: 302 },
+    ]) {
+      expect(logoutAllActorFenceResponseProblem(invalid, logoutAllFenceInput)).toContain(
+        "unexpected logout-all actor fence",
+      );
+    }
+  });
+
   test("real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state", async () => {
     if (!owned) throw new Error("database fixture unavailable");
     const engine = requestedEngine as EngineName;
-    const browser = await ENGINES[engine].launch(
-      engine === "chromium" && process.env.OPENGENI_BROWSER_BIN
-        ? { executablePath: process.env.OPENGENI_BROWSER_BIN }
-        : undefined,
-    );
+    const browser = await launchAccountBrowser(engine);
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
     });
@@ -2279,7 +3707,7 @@ describe("provider-neutral browser account acceptance", () => {
 
       if (engine === "chromium") {
         setBrowserPhase(pageProblems, "responsive-accessibility-evidence");
-        await captureResponsiveEvidence(browser, context, engine);
+        await captureResponsiveEvidence(context, engine);
       }
 
       setBrowserPhase(pageProblems, "cross-tab-select-race");
@@ -2333,6 +3761,12 @@ describe("provider-neutral browser account acceptance", () => {
             kind: "direct-race-fence",
             settledAt: racedSelectionSettledAt,
           },
+          allowedConsoleErrors:
+            engine === "chromium"
+              ? [
+                  `[cross-tab-select-race] Failed to load resource: net::ERR_CONNECTION_RESET @ /v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+                ]
+              : [],
         });
       }
       const racedSelectionAcceptance = actorMutationAcceptances
@@ -2442,7 +3876,8 @@ describe("provider-neutral browser account acceptance", () => {
       );
 
       setBrowserPhase(pageProblems, "slot-revocation-reauthentication");
-      const alphaSlot = (await sessionSet(page)).slots.find(
+      const projectionBeforeSlotRevocation = await sessionSet(page);
+      const alphaSlot = projectionBeforeSlotRevocation.slots.find(
         (slot) => slot.displayName === alpha.displayName,
       );
       if (!alphaSlot) throw new Error("Alpha slot missing before re-authentication");
@@ -2450,8 +3885,15 @@ describe("provider-neutral browser account acceptance", () => {
         delete from auth_sessions where id = (
           select auth_session_id from managed_auth_login_slots where id = ${alphaSlot.id}
         )`;
+      const slotRevocationReloadStartedAt = performance.now();
       await page.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(page, beta.displayName).waitFor();
+      await retirePendingReadsAfterConfirmedDocumentReplacement(page, pageProblems, {
+        confirmedActorEpoch: projectionBeforeSlotRevocation.actorEpoch,
+        dispatchPhase: "cross-slot-deep-link",
+        replacementStartedAt: slotRevocationReloadStartedAt,
+        workspaceId: beta.workspaceId,
+      });
       const reauthMenu = await openAccountMenu(page, beta.displayName);
       const alphaReauthSlot = reauthMenu.getByRole("menuitem", {
         name: new RegExp(alpha.displayName),
@@ -2474,9 +3916,17 @@ describe("provider-neutral browser account acceptance", () => {
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+          ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
         ],
+        [],
+      );
+      await expectAndConsumePageErrors(
+        page,
+        pageProblems,
+        () => optionalWebKitReauthenticationAccessControlPageError(pageProblems, engine),
         [],
       );
 
@@ -2608,7 +4058,6 @@ describe("provider-neutral browser account acceptance", () => {
       )?.value;
       expect(authorityAfterLogoutAll).toHaveLength(43);
       expect(authorityAfterLogoutAll).not.toBe(authorityBeforeLogoutAll);
-      setBrowserPhase(pageProblems, "signed-out-settled");
       await secondTab.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor({
         timeout: 30_000,
       });
@@ -2644,6 +4093,34 @@ describe("provider-neutral browser account acceptance", () => {
       ]) {
         expect(signedOutSecondTabBody).not.toContain(tenantValue);
       }
+      await Promise.all([
+        expectAndConsumeLogoutAllActorFenceResponses(page, pageProblems, {
+          acceptedAt: logoutAllResponseLoss!.acceptedAt!,
+          actorEpoch: projectionBeforeLogoutAll.actorEpoch,
+          workspaceId: beta.workspaceId,
+        }),
+        expectAndConsumeLogoutAllActorFenceResponses(secondTab, secondTabProblems, {
+          acceptedAt: logoutAllResponseLoss!.acceptedAt!,
+          actorEpoch: projectionBeforeLogoutAll.actorEpoch,
+          workspaceId: beta.workspaceId,
+        }),
+      ]);
+      const logoutAllConfirmedAt = performance.now();
+      await Promise.all([
+        retirePendingReadsAfterConfirmedLogoutAllAuthorityReset(page, pageProblems, {
+          confirmedActorEpoch: signedOutProjection.actorEpoch,
+          confirmedAt: logoutAllConfirmedAt,
+          logoutAllAcceptedAt: logoutAllResponseLoss!.acceptedAt!,
+          oldWorkspaceId: beta.workspaceId,
+        }),
+        retirePendingReadsAfterConfirmedLogoutAllAuthorityReset(secondTab, secondTabProblems, {
+          confirmedActorEpoch: signedOutSecondTabProjection.actorEpoch,
+          confirmedAt: logoutAllConfirmedAt,
+          logoutAllAcceptedAt: logoutAllResponseLoss!.acceptedAt!,
+          oldWorkspaceId: beta.workspaceId,
+        }),
+      ]);
+      setBrowserPhase(pageProblems, "signed-out-settled");
       setBrowserPhase(secondTabProblems, "signed-out-settled");
       setBrowserPhase(otherProblems, "independent-set-after-other-logout-all");
       await otherPage.reload({ waitUntil: "domcontentloaded" });
@@ -2702,6 +4179,9 @@ describe("provider-neutral browser account acceptance", () => {
       });
 
       await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems, otherProblems]);
+      for (const problems of [pageProblems, secondTabProblems, otherProblems]) {
+        expect(problems.boundedHttp1StreamDispatches).toBeGreaterThan(0);
+      }
       await expectNoBrowserProblems(pageProblems);
       await expectNoBrowserProblems(secondTabProblems);
       await expectNoBrowserProblems(otherProblems);
@@ -2721,6 +4201,16 @@ describe("provider-neutral browser account acceptance", () => {
               primary: pageProblems.retiredFiniteReads.length,
               secondTab: secondTabProblems.retiredFiniteReads.length,
               independentSet: otherProblems.retiredFiniteReads.length,
+            },
+            boundedHttp1StreamDispatches: {
+              primary: pageProblems.boundedHttp1StreamDispatches,
+              secondTab: secondTabProblems.boundedHttp1StreamDispatches,
+              independentSet: otherProblems.boundedHttp1StreamDispatches,
+            },
+            boundedHttp1NativeSeams: {
+              primary: pageProblems.boundedHttp1NativeSeams,
+              secondTab: secondTabProblems.boundedHttp1NativeSeams,
+              independentSet: otherProblems.boundedHttp1NativeSeams,
             },
             sameSetSecondTabNeutralizedAfterLogoutAll: true,
             anotherBrowserSetSurvivedLogoutAll: true,

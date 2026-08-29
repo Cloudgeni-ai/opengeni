@@ -2189,12 +2189,13 @@ export async function createSessionForRequestWithOutcome(
     });
   }
   // A registry-built selfhosted client is deliberately inert: it has no live
-  // agent identity until a concrete Connected Machine is named. Reject any
+  // agent identity until a concrete Connected Machine is named. Reject an own
   // targetless home before persisting a session whose first turn can only fail.
+  // Shared children retain their already-bound group through inheritedBackend.
   if (
+    inheritedBackend === undefined &&
     !payload.targetSandboxId &&
-    !inheritedMachineTarget &&
-    (inheritedBackend ?? payload.sandboxBackend ?? settings.sandboxBackend) === "selfhosted"
+    (payload.sandboxBackend ?? settings.sandboxBackend) === "selfhosted"
   ) {
     throw new HTTPException(422, {
       message: "selfhosted sessions require targetSandboxId; select an online Connected Machine",

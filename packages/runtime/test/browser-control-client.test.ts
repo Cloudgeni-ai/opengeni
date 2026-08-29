@@ -971,6 +971,41 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("falls back to streamed private writes for the Modal workspace-escape diagnostic", async () => {
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        if (request.headers.get("authorization") !== `Bearer ${adminToken}`) {
+          return failure(401, "permission_denied", "no authority");
+        }
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const placement = await localPlacement({
+      fakeControllerStartup: true,
+      streamWrites: true,
+    });
+    placement.session.writeFile = async () => {
+      throw new Error('Sandbox path "/tmp" escapes the workspace root.');
+    };
+    const tokenFile = join(placement.root, "modal-authority", "admin-token");
+    try {
+      await provisionBrowserControlClient(placement.session, {
+        adminToken,
+        adminTokenFile: tokenFile,
+        allowedOrigins: ["https://app.opengeni.test"],
+        port: server.port,
+      });
+
+      expect((await readFile(tokenFile, "utf8")).trim()).toBe(adminToken);
+      expect(placement.stdinWrites).toHaveLength(1);
+      expect(placement.commands.every((command) => !command.includes(adminToken))).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("uses the SDK execCommand banner and writeStdin surface when exec is unavailable", async () => {
     const server = Bun.serve({
       port: 0,

@@ -31,6 +31,12 @@ export {
   isRetryableStreamError,
 } from "./errors";
 export {
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
+  deriveSessionDisplayTitle,
+  sessionTitleIsPending,
+} from "./session-titles";
+export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+export {
   formatSseEvent,
   proxySessionEventStream,
   resumeSequenceFromRequest,
@@ -521,6 +527,7 @@ export type {
   CompleteFileUploadResponse,
   ConnectionKind,
   ConnectionMetadata,
+  McpConnectionAuthoritySelection,
   ConnectionOwnership,
   ConnectionResponse,
   ConnectionStatus,
@@ -677,6 +684,7 @@ export type {
   ListConnectionsResponse,
   ListPacksResponse,
   ListSlackUserLinkAccessRequestsResponse,
+  ListWorkspaceMemberCandidatesResponse,
   ListWorkspaceMembersResponse,
   McpServerConnectionRef,
   McpPersonalConnectionDelegation,
@@ -995,6 +1003,7 @@ export type {
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
+  WorkspaceMemberCandidate,
   PreviewSkillImportRequest,
   ApiIntegrationAuthPreview,
   ApiIntegrationInstallationSummary,

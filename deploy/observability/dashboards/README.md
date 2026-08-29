@@ -1,18 +1,19 @@
 # OpenGeni Grafana dashboards
 
-Dashboards-as-code for the OpenGeni control plane. Six boards, each answering a
+Dashboards-as-code for the OpenGeni control plane. Seven boards, each answering a
 different "manage and fix problems as soon as they arise" question:
 
 | File | Board | Answers |
 | --- | --- | --- |
-| `streaming-health.json` | **OpenGeni · Streaming Health** | Is streaming sluggish, and *where* — the model, durable append, NATS publish, batching, or SSE connection/reconnect path? |
+| `streaming-health.json` | **OpenGeni · Streaming Health** | Is streaming sluggish, and *where* — the model, durable append, NATS publish, batching, or SSE connection/reconnect path? The TTFT chart carries the same 8-second warning line as the bundled alert. |
 | `connected-machines.json` | **OpenGeni · Connected Machines** | Are Connected Machine control ops healthy — op outcomes, healed faults (the leading indicator), op latency, the fault taxonomy, and the payload wall? |
 | `worker-fleet.json` | **OpenGeni · Worker Fleet** | Is the fleet keeping up — turns inflight/queued, worker memory vs. limit, HPA replicas, sandbox leases, and whether compaction is firing against context pressure? |
 | `sandbox-health.json` | **OpenGeni · Sandbox Health** | Are provider operations, creates, lease recovery, checkpoint GC, deadline rotation, draining, and retained-process reconciliation healthy? |
 | `turn-startup.json` | **OpenGeni · Turn Startup** | Where does queue-to-first-byte time go — worker queue, sandbox/rig/repository/file/tool/model preparation, provider dispatch, or provider response? |
 | `google-drive-sync.json` | **OpenGeni · Google Drive Sync** | Are scheduled Drive runs succeeding within their persisted quotas, or failing on provider retry, reconnect, and explicit resource limits? |
+| `runtime-failures.json` | **OpenGeni · Runtime Failures** | Are alerts firing, scrape targets healthy, synthetic probes fresh, turn workers restarting, recovery exhausted, turns failing or recovering, MCP connections or tool calls broken or slow, sandboxes/providers failing, the API returning 5xx, or the durable write path saturated? |
 
-All six are theme-agnostic, tagged `opengeni` + `observability`, and carry a
+All seven are theme-agnostic, tagged `opengeni` + `observability`, and carry a
 `$datasource` template variable — pick your Prometheus datasource on import; no UID
 is hardcoded. The Turn Startup dashboard additionally requires one exact
 `$namespace`, `$environment`, and `$release` selection so a shared Prometheus
@@ -93,7 +94,10 @@ App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
 `opengeni_sandbox_leases_expired_draining`, `opengeni_retained_processes_*`,
 `opengeni_opensandbox_batchsandboxes`, `opengeni_opensandbox_workload_pods`,
 `opengeni_opensandbox_cleanup_stuck`, `opengeni_opensandbox_expiration_overdue`,
-`opengeni_model_call_duration_seconds`,
+`opengeni_model_call_duration_seconds`, `opengeni_mcp_lifecycle_operations_total`,
+`opengeni_mcp_lifecycle_operation_duration_seconds`, `opengeni_mcp_tool_calls_total`,
+`opengeni_mcp_tool_call_duration_seconds`,
+`opengeni_turn_worker_death_recoveries_total`,
 `opengeni_knowledge_source_sync_*`, `opengeni_google_drive_provider_*`,
 `opengeni_turn_worker_memory_guard_utilization_ratio`,
 `opengeni_turn_worker_memory_guard_target_ratio`,

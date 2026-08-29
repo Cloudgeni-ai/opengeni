@@ -15,6 +15,8 @@ import {
   ManagedAuthSessionSetErrorCode,
   ResolveManagedAuthDeepLinkRequest,
   SelectManagedAuthLoginSlotRequest,
+  StartManagedAuthSocialTransactionRequest,
+  StartManagedAuthSocialTransactionResponse,
   type BeginManagedAuthLoginTransactionRequest as BeginManagedAuthLoginTransactionRequestType,
   type BootstrapManagedAuthSessionSetRequest as BootstrapManagedAuthSessionSetRequestType,
   type CancelManagedAuthLoginTransactionRequest as CancelManagedAuthLoginTransactionRequestType,
@@ -28,6 +30,8 @@ import {
   type ManagedAuthSessionSetProjection as ManagedAuthSessionSetProjectionType,
   type ResolveManagedAuthDeepLinkRequest as ResolveManagedAuthDeepLinkRequestType,
   type SelectManagedAuthLoginSlotRequest as SelectManagedAuthLoginSlotRequestType,
+  type StartManagedAuthSocialTransactionRequest as StartManagedAuthSocialTransactionRequestType,
+  type StartManagedAuthSocialTransactionResponse as StartManagedAuthSocialTransactionResponseType,
 } from "@opengeni/contracts/managed-auth-session-sets";
 import type { z } from "zod";
 
@@ -53,6 +57,9 @@ export interface BrowserAccountsClientLike {
   completeEmailPasswordTransaction(
     request: CompleteManagedAuthEmailPasswordTransactionRequestType,
   ): Promise<CompleteManagedAuthLoginTransactionResponseType>;
+  startSocialTransaction?(
+    request: StartManagedAuthSocialTransactionRequestType,
+  ): Promise<StartManagedAuthSocialTransactionResponseType>;
   cancelLoginTransaction(
     request: CancelManagedAuthLoginTransactionRequestType,
   ): Promise<ManagedAuthSessionSetProjectionType>;
@@ -176,6 +183,17 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
       return { ...response, projection: await this.getSessionSet() };
     }
     return response;
+  }
+
+  async startSocialTransaction(request: StartManagedAuthSocialTransactionRequestType) {
+    return StartManagedAuthSocialTransactionResponse.parse(
+      await this.#mutation(
+        "POST",
+        "/v1/auth/session-set/transactions/social",
+        StartManagedAuthSocialTransactionRequest,
+        request,
+      ),
+    );
   }
 
   async cancelLoginTransaction(request: CancelManagedAuthLoginTransactionRequestType) {

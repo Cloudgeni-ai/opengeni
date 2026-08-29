@@ -7,6 +7,7 @@ import {
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const base = `/workspaces/${workspaceId}`;
+const shellSource = await Bun.file(`${import.meta.dir}/workspace-settings-shell.tsx`).text();
 
 describe("workspace management navigation", () => {
   test("keeps settings and management destinations in one shell", () => {
@@ -43,5 +44,13 @@ describe("workspace management navigation", () => {
     expect(workspaceSettingsSectionFromSearch(undefined)).toBe("general");
     expect(workspaceSettingsSectionFromSearch("permissions")).toBe("general");
     expect(workspaceSettingsSectionFromSearch("models")).toBe("models");
+  });
+
+  test("keeps organization settings as quiet secondary navigation", () => {
+    expect(shellSource).toContain('to="/workspaces/$workspaceId/organization"');
+    expect(shellSource).toContain("Organization settings for ${organizationName}");
+    expect(shellSource).toContain("Workspace settings");
+    expect(shellSource).toContain("{organizationName}");
+    expect(shellSource).not.toContain("Organization settings</span>");
   });
 });

@@ -199,6 +199,14 @@ body {
   cursor: text;
 }
 
+/* Sonner keeps the toast container's slide/fade, but its default child-opacity
+   tween passes through low-contrast text while a notification joins or leaves
+   the collapsed stack. Switch the content atomically so every rendered frame
+   remains readable. */
+.toaster [data-sonner-toast] > * {
+  transition: none;
+}
+
 /* Respect reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -272,6 +280,19 @@ body {
   40% {
     opacity: 1;
     transform: translateY(-2px);
+  }
+}
+
+/* HTTP/1 streams intentionally cycle to free the browser-wide connection
+   pool. Hide only the healthy sub-second handoff; a stalled reconnect appears. */
+.og-connection-pill-reconnect {
+  visibility: hidden;
+  animation: connection-pill-reveal 0s 1.5s forwards;
+}
+
+@keyframes connection-pill-reveal {
+  to {
+    visibility: visible;
   }
 }
 

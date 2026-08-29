@@ -4,6 +4,7 @@ import type {
   SessionEvent,
   SessionStatus,
 } from "@opengeni/sdk";
+import { dequal } from "dequal/lite";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
@@ -57,12 +58,13 @@ import {
   createTipFollowState,
   readerScrollUpPx,
   tipFollowCancel,
-  tipFollowCompensateShrink,
   tipFollowCompensateViewportShrink,
+  tipFollowObserveContentShrink,
   tipFollowStep,
   supportsScrollEndEvent,
   TIP_FOLLOW_READER_UP_EPS_PX,
   TIP_FOLLOW_SHRINK_EPS_PX,
+  type TipFollowContentShrinkBaseline,
   type TipFollowState,
 } from "./tip-follow";
 import {
@@ -433,7 +435,6 @@ export function MessageTimeline({
     }
     return sources;
   }, [resolvedItems]);
-  const groups = useStableTimelineGroupKeys(allGroups);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -506,6 +507,8 @@ export function MessageTimeline({
    * jumps (Vimium) settle via scrollend while the camera is idle.
    */
   const readerIntentArmRef = useRef(false);
+  /** Gesture-start geometry; cumulative tiny pointer scrolls share one budget. */
+  const readerIntentStartRef = useRef<{ scrollTop: number; maxScroll: number } | null>(null);
   /**
    * Count of camera/snap scrollTop writes whose scroll echoes are not yet
    * consumed. A boolean was wrong when the browser coalesced two writes into
@@ -533,7 +536,7 @@ export function MessageTimeline({
   const userMessageDisclosureMemoryRef = useRef<Map<string, boolean>>(new Map());
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
   const firstItemGroupKeyRef = useRef<string | null>(null);
-  const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
+  const firstItemGroupOffsetTopRef = useRef<number | null>(null);
   const firstItemContentTopRef = useRef<number | null>(null);
   const firstItemId = resolvedItems[0]?.id ?? null;
   // Pagination ownership follows the oldest committed input, before host
@@ -553,6 +556,7 @@ export function MessageTimeline({
     previousBulkFirstKeyRef.current !== undefined &&
     previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender = allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk);
+  const groups = useStableTimelineGroupKeys(allGroups, !bulkRender);
 
   const applyCanSkipTipCatchup = useCallback((value: boolean) => {
     if (canSkipTipCatchupRef.current !== value) {
@@ -592,6 +596,7 @@ export function MessageTimeline({
   // Pure tip-follow camera. Pin intent uses clamp conservation, not timers.
   const followRef = useRef<TipFollowState>(createTipFollowState());
   const followFrameRef = useRef<number | null>(null);
+  const contentShrinkBaselineRef = useRef<TipFollowContentShrinkBaseline | null>(null);
 
   const syncScrollBaseline = useCallback((node: HTMLElement) => {
     lastScrollTopRef.current = node.scrollTop;
@@ -628,7 +633,13 @@ export function MessageTimeline({
     cancelLeaveFallback();
   }, [cancelLeaveFallback]);
 
+  const clearReaderIntent = useCallback(() => {
+    readerIntentArmRef.current = false;
+    readerIntentStartRef.current = null;
+  }, []);
+
   const stopFollow = useCallback(() => {
+    contentShrinkBaselineRef.current = null;
     followRef.current = tipFollowCancel(followRef.current);
     if (followFrameRef.current != null) {
       cancelFrame(followFrameRef.current);
@@ -646,7 +657,7 @@ export function MessageTimeline({
       if (node && maxScrollOf(node) <= 1) {
         return;
       }
-      readerIntentArmRef.current = false;
+      clearReaderIntent();
       clearPendingReaderLeave();
       stopFollow();
       applyPinned(false);
@@ -658,7 +669,7 @@ export function MessageTimeline({
         setOlderPrefetchArmed(true);
       }
     },
-    [autoFollow, applyPinned, clearPendingReaderLeave, stopFollow],
+    [autoFollow, applyPinned, clearPendingReaderLeave, clearReaderIntent, stopFollow],
   );
 
   /**
@@ -731,6 +742,7 @@ export function MessageTimeline({
     button: number;
     pointerType: string;
     target: EventTarget | null;
+    currentTarget: EventTarget | null;
   }) => {
     // Primary button / touch / pen only. Ignore right-click etc.
     if (event.button && event.pointerType === "mouse") {
@@ -745,7 +757,12 @@ export function MessageTimeline({
       return;
     }
     disclosureKeepsUnpinnedRef.current = false;
+    const node =
+      event.currentTarget instanceof HTMLElement ? event.currentTarget : scrollRef.current;
     readerIntentArmRef.current = true;
+    readerIntentStartRef.current = node
+      ? { scrollTop: node.scrollTop, maxScroll: maxScrollOf(node) }
+      : null;
   };
 
   const onKeyDown = (event: { key: string; currentTarget: EventTarget | null }) => {
@@ -769,6 +786,7 @@ export function MessageTimeline({
 
   const snapToBottom = useCallback(
     (node: HTMLElement) => {
+      clearReaderIntent();
       stopFollow();
       cancelLeaveFallback();
       writeScrollTop(node, Math.max(0, node.scrollHeight - node.clientHeight));
@@ -781,7 +799,14 @@ export function MessageTimeline({
       };
       applyCanSkipTipCatchup(false);
     },
-    [applyCanSkipTipCatchup, cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
+    [
+      applyCanSkipTipCatchup,
+      cancelLeaveFallback,
+      clearReaderIntent,
+      stopFollow,
+      syncScrollBaseline,
+      writeScrollTop,
+    ],
   );
 
   const beginUserMessageDisclosureChange = useCallback(
@@ -841,6 +866,36 @@ export function MessageTimeline({
       beginChange: beginUserMessageDisclosureChange,
     }),
     [beginUserMessageDisclosureChange],
+  );
+  const timelineGroupEntryContext = useMemo<TimelineGroupEntryContext>(
+    () => ({
+      userMessageDisclosureContext,
+      behavior: {
+        renderMessageText,
+        onOpenSession,
+        onMemoryClick,
+        onReconnect,
+        resolveProviderLogo,
+        toolRegistry,
+        loadRetainedScreenshot,
+        loadRetainedArtifact,
+        loadVideoArtifactPlayback,
+        turnSummary,
+      },
+    }),
+    [
+      loadRetainedArtifact,
+      loadRetainedScreenshot,
+      loadVideoArtifactPlayback,
+      onMemoryClick,
+      onOpenSession,
+      onReconnect,
+      renderMessageText,
+      resolveProviderLogo,
+      toolRegistry,
+      turnSummary,
+      userMessageDisclosureContext,
+    ],
   );
 
   const requestOlderIfUnderfilled = useCallback(
@@ -919,19 +974,41 @@ export function MessageTimeline({
           : typeof performance !== "undefined"
             ? performance.now()
             : Date.now();
-      const previousHeight = followRef.current.lastHeight;
+      let previousHeight = followRef.current.lastHeight;
+      const previousObservedHeight = lastScrollHeightRef.current;
+      if (
+        contentShrinkBaselineRef.current &&
+        previousObservedHeight > 0 &&
+        node.scrollHeight > previousObservedHeight
+      ) {
+        // A reversal ends the collapse sequence. If it remains below the held
+        // baseline, adopt the recovered height; if it grew beyond the baseline,
+        // leave that baseline for tipFollowStep to observe as real growth.
+        contentShrinkBaselineRef.current = null;
+        if (node.scrollHeight < previousHeight) {
+          followRef.current = {
+            ...followRef.current,
+            lastHeight: node.scrollHeight,
+            cameraTop: null,
+          };
+          previousHeight = node.scrollHeight;
+        }
+      }
+      const shrinkObservation = tipFollowObserveContentShrink(
+        contentShrinkBaselineRef.current,
+        previousHeight,
+        lastScrollTopRef.current,
+        node.scrollHeight,
+        node.clientHeight,
+      );
+      contentShrinkBaselineRef.current = shrinkObservation.baseline;
       // Settle-collapse: compensate Δh from the pre-shrink baseline (browser
       // may already have clamped — don't double-subtract). Keep the follow rAF
       // alive so when collapse ends (or stream resumes) we ease instead of a
       // hard stop → flick. Do NOT tip-ease on the same frame as a real shrink
       // (that fight was the top-of-viewport flicker).
-      if (previousHeight > 0 && node.scrollHeight < previousHeight - TIP_FOLLOW_SHRINK_EPS_PX) {
-        let nextTop = tipFollowCompensateShrink(
-          lastScrollTopRef.current,
-          previousHeight,
-          node.scrollHeight,
-          node.clientHeight,
-        );
+      if (shrinkObservation.compensatedScrollTop !== null) {
+        let nextTop = shrinkObservation.compensatedScrollTop;
         // A chrome/composer dock can land on the same frame as a settle-fold
         // (the "turn blocked" moment). Compensate BOTH in one write — adopting
         // the shrunk clientHeight below without gluing left the chrome height
@@ -966,15 +1043,6 @@ export function MessageTimeline({
           });
         }
         return;
-      }
-      // Sub-eps height noise: adopt height without moving the camera. Do NOT
-      // adopt clientHeight here — tipFollowStep (next line) owns that baseline
-      // and must still see a same-frame viewport shrink to glue it.
-      if (previousHeight > 0 && node.scrollHeight < previousHeight) {
-        followRef.current = {
-          ...followRef.current,
-          lastHeight: node.scrollHeight,
-        };
       }
       const result = tipFollowStep(followRef.current, {
         scrollTop: node.scrollTop,
@@ -1027,7 +1095,7 @@ export function MessageTimeline({
     }
     const previousFirstItemId = previousFirstItemIdRef.current;
     const previousFirstItemGroupKey = firstItemGroupKeyRef.current;
-    const previousGroupOffsetByKey = groupOffsetByKeyRef.current;
+    const previousFirstItemGroupOffsetTop = firstItemGroupOffsetTopRef.current;
     const previousItemContentTop = firstItemContentTopRef.current;
     const previousScrollTop = lastScrollTopRef.current;
     const previousMaxScroll = lastMaxScrollRef.current;
@@ -1060,14 +1128,16 @@ export function MessageTimeline({
         }
       }
       const anchorKey = previousFirstItemGroupKey;
-      const previousAnchorTop =
-        anchorKey != null ? previousGroupOffsetByKey.get(anchorKey) : undefined;
       const anchorEl =
         anchorKey != null
           ? node.querySelector(`[data-og-group-key="${cssEscapeAttribute(anchorKey)}"]`)
           : null;
-      if (delta == null && anchorEl instanceof HTMLElement && previousAnchorTop !== undefined) {
-        const moved = Math.round(anchorEl.offsetTop - previousAnchorTop);
+      if (
+        delta == null &&
+        anchorEl instanceof HTMLElement &&
+        previousFirstItemGroupOffsetTop != null
+      ) {
+        const moved = Math.round(anchorEl.offsetTop - previousFirstItemGroupOffsetTop);
         if (moved) {
           delta = moved;
         }
@@ -1170,14 +1240,12 @@ export function MessageTimeline({
       hasNewer ||
       firstItemContentTopRef.current == null;
     if (needOffsets) {
-      const nextOffsetByKey = new Map<string, number>();
-      for (const { key } of groups) {
-        const el = node.querySelector(`[data-og-group-key="${cssEscapeAttribute(key)}"]`);
-        if (el instanceof HTMLElement) {
-          nextOffsetByKey.set(key, el.offsetTop);
-        }
-      }
-      groupOffsetByKeyRef.current = nextOffsetByKey;
+      const committedFirstGroupKey = firstItemGroupKeyRef.current;
+      const firstGroupEl = committedFirstGroupKey
+        ? node.querySelector(`[data-og-group-key="${cssEscapeAttribute(committedFirstGroupKey)}"]`)
+        : null;
+      firstItemGroupOffsetTopRef.current =
+        firstGroupEl instanceof HTMLElement ? firstGroupEl.offsetTop : null;
       const firstItemEl = firstItemId
         ? node.querySelector(`[data-og-item="${cssEscapeAttribute(firstItemId)}"]`)
         : null;
@@ -1279,14 +1347,16 @@ export function MessageTimeline({
     lastScrollHeightRef.current = 0;
     lastClientHeightRef.current = 0;
     firstItemGroupKeyRef.current = null;
-    groupOffsetByKeyRef.current = new Map();
+    firstItemGroupOffsetTopRef.current = null;
     firstItemContentTopRef.current = null;
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
+    clearReaderIntent();
+    contentShrinkBaselineRef.current = null;
     seenActivityIdsRef.current.clear();
     applyPinned(true);
-  }, [allGroups.length, revealed, applyPinned]);
+  }, [allGroups.length, revealed, applyPinned, clearReaderIntent]);
 
   // Parent commits cover the initial/history-loading cases. Disclosure state
   // changes are child-local, so the ResizeObserver below owns dynamic collapse
@@ -1503,6 +1573,16 @@ export function MessageTimeline({
     const readerUp = readerScrollUpPx(previousTop, nextTop, previousMaxScroll, nextMaxScroll);
     const maxFell = nextMaxScroll < previousMaxScroll - 1;
     const readerArmed = readerIntentArmRef.current;
+    const readerIntentStart = readerIntentStartRef.current;
+    const cumulativeReaderUp =
+      readerArmed && readerIntentStart
+        ? readerScrollUpPx(
+            readerIntentStart.scrollTop,
+            nextTop,
+            readerIntentStart.maxScroll,
+            nextMaxScroll,
+          )
+        : readerUp;
     const heightShrunk =
       followRef.current.lastHeight > 0 &&
       nextHeight < followRef.current.lastHeight - TIP_FOLLOW_SHRINK_EPS_PX;
@@ -1528,7 +1608,7 @@ export function MessageTimeline({
       // Fold / composer content shrink: compensate before baseline sync so
       // driveFollow still sees the pre-shrink scrollTop (avoid double-subtract).
       if (heightShrunk || maxFell || viewportShrunk) {
-        readerIntentArmRef.current = false;
+        clearReaderIntent();
         clearPendingReaderLeave();
         driveFollow(node);
         return;
@@ -1550,8 +1630,8 @@ export function MessageTimeline({
         clearPendingReaderLeave();
       }
       // Pointer-dragged scroll-up away from tip. Layout churn never arms this.
-      if (readerArmed && readerUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
-        readerIntentArmRef.current = false;
+      if (readerArmed && cumulativeReaderUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
+        clearReaderIntent();
         releasePinFromReader(node);
         rearmOlderPrefetchAfterLeavingTop(node);
         return;
@@ -1633,7 +1713,7 @@ export function MessageTimeline({
       <FoldMemoryProvider value={foldMemoryRef.current}>
         <SeenActivityIdsProvider value={seenActivityIdsRef.current}>
           <TimelineComputeLabelProvider value={computeLabel ?? null}>
-            <EntranceAnimationProvider value={!bulkRender}>
+            <EntranceAnimationProvider value={false}>
               <TooltipProvider delayDuration={400}>
                 <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
                   {onAnnotate ? (
@@ -1686,56 +1766,19 @@ export function MessageTimeline({
                           className="pointer-events-none absolute inset-x-0 top-0 h-px"
                         />
                       ) : null}
-                      {groups.map(({ group, key }, index) => {
-                        const next = groups[index + 1]?.group;
-                        const contextCompactionCount =
-                          group.kind === "turn"
-                            ? (group.contextCompactionCount ?? 0)
-                            : group.kind === "activity" &&
-                                next?.kind === "item" &&
-                                next.item.kind === "context-compaction" &&
-                                next.item.phase === "compacted"
-                              ? 1
-                              : 0;
+                      {groups.map(({ group, key, entranceEnabled }, index) => {
                         return (
-                          <div key={key} data-og-timeline-group-anchor="" data-og-group-key={key}>
-                            <TimelineGroupRenderBoundary
-                              resetKeys={[
-                                group,
-                                renderMessageText,
-                                onOpenSession,
-                                onMemoryClick,
-                                onReconnect,
-                                resolveProviderLogo,
-                                toolRegistry,
-                                loadRetainedScreenshot,
-                                loadRetainedArtifact,
-                                loadVideoArtifactPlayback,
-                                turnSummary,
-                              ]}
-                            >
-                              <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
-                                <TimelineGroupView
-                                  group={group}
-                                  renderMessageText={renderMessageText}
-                                  onOpenSession={onOpenSession}
-                                  onMemoryClick={onMemoryClick}
-                                  onReconnect={onReconnect}
-                                  resolveProviderLogo={resolveProviderLogo}
-                                  toolRegistry={toolRegistry}
-                                  loadRetainedScreenshot={loadRetainedScreenshot}
-                                  loadRetainedArtifact={loadRetainedArtifact}
-                                  loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-                                  turnSummary={turnSummary}
-                                  foldLiveCluster={isAgentProgress(next)}
-                                  trailingAgentText={trailingAgentTextAfterTurn(group, next)}
-                                  contextCompactionCount={
-                                    contextCompactionCount > 0 ? contextCompactionCount : undefined
-                                  }
-                                />
-                              </UserMessageDisclosureProvider>
-                            </TimelineGroupRenderBoundary>
-                          </div>
+                          <TimelineGroupEntry
+                            key={key}
+                            groupKey={key}
+                            group={group}
+                            nextGroup={groups[index + 1]?.group}
+                            entranceEnabled={entranceEnabled}
+                            liveEntranceEnabled={
+                              group.kind === "activity" ? !bulkRender : undefined
+                            }
+                            context={timelineGroupEntryContext}
+                          />
                         );
                       })}
                       {groups.length > 0 && trailingState ? (
@@ -1927,7 +1970,19 @@ export function MessageTimeline({
 type KeyedTimelineGroup = {
   group: TimelineGroup;
   key: string;
+  entranceEnabled: boolean;
 };
+
+function timelineGroupsRenderEqual(previous: TimelineGroup, next: TimelineGroup): boolean {
+  try {
+    return dequal(previous, next);
+  } catch {
+    // Consumer-owned `unknown` payloads may be proxies/getters. Equality is an
+    // optimization only; a hostile comparator surface must fall back to the
+    // authoritative new group rather than taking down the timeline render.
+    return false;
+  }
+}
 
 /**
  * Projection can legitimately change a group's content-derived key while
@@ -1937,7 +1992,10 @@ type KeyedTimelineGroup = {
  * committed groups by their durable item IDs so both the React key and the
  * progressive-window anchor survive either change.
  */
-function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGroup[] {
+function useStableTimelineGroupKeys(
+  allGroups: TimelineGroup[],
+  entranceEnabled: boolean,
+): KeyedTimelineGroup[] {
   const previousRef = useRef<KeyedTimelineGroup[]>([]);
   const keyedGroups = useMemo(() => {
     const previousByItemId = new Map<string, KeyedTimelineGroup>();
@@ -1950,29 +2008,36 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
     const usedKeys = new Set<string>();
     return allGroups.map((group, index) => {
       const itemIds = timelineGroupItemIds(group);
-      let retainedKey: string | undefined;
+      let retainedGroup: KeyedTimelineGroup | undefined;
       for (const itemId of itemIds) {
         const previous = previousByItemId.get(itemId);
         // Retain only same-kind matches. Activity → turn wrap must NOT keep the
         // activity chip's React key: that reused a collapsed TurnSummary and
         // skipped the settle beat (insta-collapse / content flash).
         if (previous && previous.group.kind === group.kind && !usedKeys.has(previous.key)) {
-          retainedKey = previous.key;
+          retainedGroup = previous;
           break;
         }
       }
 
       const canonicalKey = timelineGroupKey(group);
-      let key = retainedKey ?? canonicalKey;
+      let key = retainedGroup?.key ?? canonicalKey;
       let collision = 0;
       while (usedKeys.has(key)) {
         key = `${canonicalKey}:${index}:${collision}`;
         collision += 1;
       }
       usedKeys.add(key);
-      return { group, key };
+      return {
+        group:
+          retainedGroup && timelineGroupsRenderEqual(retainedGroup.group, group)
+            ? retainedGroup.group
+            : group,
+        key,
+        entranceEnabled: retainedGroup?.entranceEnabled ?? entranceEnabled,
+      };
     });
-  }, [allGroups]);
+  }, [allGroups, entranceEnabled]);
 
   useLayoutEffect(() => {
     previousRef.current = keyedGroups;
@@ -2065,11 +2130,82 @@ class TimelineGroupRenderBoundary extends Component<
   }
 }
 
+type TimelineGroupEntryProps = {
+  groupKey: string;
+  group: TimelineGroup;
+  nextGroup?: TimelineGroup | undefined;
+  entranceEnabled: boolean;
+  liveEntranceEnabled?: boolean | undefined;
+  context: TimelineGroupEntryContext;
+};
+
+type TimelineGroupEntryContext = {
+  userMessageDisclosureContext: UserMessageDisclosureContextValue;
+  behavior: TimelineGroupBehaviorProps;
+};
+
+type TimelineGroupBehaviorProps = {
+  renderMessageText: MessageTimelineProps["renderMessageText"];
+  onOpenSession: MessageTimelineProps["onOpenSession"];
+  onMemoryClick: MessageTimelineProps["onMemoryClick"];
+  onReconnect: MessageTimelineProps["onReconnect"];
+  resolveProviderLogo: MessageTimelineProps["resolveProviderLogo"];
+  toolRegistry: ToolRegistry;
+  loadRetainedScreenshot: MessageTimelineProps["loadRetainedScreenshot"];
+  loadRetainedArtifact: MessageTimelineProps["loadRetainedArtifact"];
+  loadVideoArtifactPlayback: MessageTimelineProps["loadVideoArtifactPlayback"];
+  turnSummary: MessageTimelineProps["turnSummary"];
+};
+
+/**
+ * Keep the complete settled-row shell behind one shallow memo boundary. A
+ * prepend still reconciles the keyed list, but render-equivalent suffix groups
+ * skip their providers, error boundaries, disclosure wrappers, and row trees.
+ */
+const TimelineGroupEntry = memo(function TimelineGroupEntry({
+  groupKey,
+  group,
+  nextGroup,
+  entranceEnabled,
+  liveEntranceEnabled,
+  context,
+}: TimelineGroupEntryProps) {
+  const { behavior, userMessageDisclosureContext } = context;
+  const contextCompactionCount =
+    group.kind === "turn"
+      ? (group.contextCompactionCount ?? 0)
+      : group.kind === "activity" &&
+          nextGroup?.kind === "item" &&
+          nextGroup.item.kind === "context-compaction" &&
+          nextGroup.item.phase === "compacted"
+        ? 1
+        : 0;
+  return (
+    <div data-og-timeline-group-anchor="" data-og-group-key={groupKey}>
+      <EntranceAnimationProvider value={entranceEnabled} liveValue={liveEntranceEnabled}>
+        <TimelineGroupRenderBoundary resetKeys={[group, behavior]}>
+          <UserMessageDisclosureProvider value={userMessageDisclosureContext}>
+            <TimelineGroupView
+              {...behavior}
+              group={group}
+              foldLiveCluster={isAgentProgress(nextGroup)}
+              trailingAgentText={trailingAgentTextAfterTurn(group, nextGroup)}
+              contextCompactionCount={
+                contextCompactionCount > 0 ? contextCompactionCount : undefined
+              }
+            />
+          </UserMessageDisclosureProvider>
+        </TimelineGroupRenderBoundary>
+      </EntranceAnimationProvider>
+    </div>
+  );
+});
+
 // The full loaded window stays mounted, so settled history rows must be cheap
-// on every commit: projection reuses group objects for unchanged groups, so
-// memo skips them. Live projection creates a new group object, and
-// behavior/callback changes are separate props, so ordinary streaming and host
-// updates still invalidate immediately.
+// on every commit: the stable-key projection reuses render-equivalent group
+// objects, so memo skips them. Changed projection content receives a new group
+// object, and behavior/callback changes are separate props, so ordinary
+// streaming and host updates still invalidate immediately.
 const TimelineGroupView = memo(function TimelineGroupView({
   group,
   renderMessageText,

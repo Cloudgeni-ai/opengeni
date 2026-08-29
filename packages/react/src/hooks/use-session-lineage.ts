@@ -69,24 +69,28 @@ export function useSessionLineage(
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const nextReadGeneration = useRef(0);
   const beginRead = options.beginRead;
-  const load = useCallback(async () => {
-    if (!sessionId) {
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!sessionId) {
+        return {
+          lineage: { ancestors: [], children: [], truncated: false },
+          readGeneration: 0,
+        };
+      }
+      let readGeneration = 0;
+      const lineage = await client.getSessionLineage(workspaceId, sessionId, {
+        signal,
+        onRequestStart: (sharedReadGeneration) => {
+          readGeneration = sharedReadGeneration ?? beginRead?.() ?? ++nextReadGeneration.current;
+        },
+      });
       return {
-        lineage: { ancestors: [], children: [], truncated: false },
-        readGeneration: 0,
+        lineage,
+        readGeneration,
       };
-    }
-    let readGeneration = 0;
-    const lineage = await client.getSessionLineage(workspaceId, sessionId, {
-      onRequestStart: (sharedReadGeneration) => {
-        readGeneration = sharedReadGeneration ?? beginRead?.() ?? ++nextReadGeneration.current;
-      },
-    });
-    return {
-      lineage,
-      readGeneration,
-    };
-  }, [beginRead, client, workspaceId, sessionId]);
+    },
+    [beginRead, client, workspaceId, sessionId],
+  );
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });
   const refresh = state.refresh;
   useEffect(() => {

@@ -198,6 +198,13 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
+Workspace Memory is the autonomous agent-retention lane: when the workspace
+Memory toggle is enabled, exact live agent attempts save and correct active
+facts, decisions, incidents, fixes, and outcomes without consulting Learning
+mode. It remains retrieval-only model context through `memory_search`; it is
+not a Skill, mandatory instruction, organization profile, or reviewed Knowledge
+claim.
+
 Accepted conversation and tool content is preserved at its canonical boundary;
 OpenGeni does not centrally rewrite arbitrary text because it resembles a
 credential. Configured secrets are a separate concern: they are encrypted at
@@ -228,6 +235,15 @@ worker process, a connection row, or provenance metadata. A turn freezes its
 initiating principal and the authority snapshots needed by later execution and
 recovery.
 
+Organization settings owns the cross-workspace roster and organization roles.
+A shared workspace's Members page is deliberately narrower: a caller with
+`members:manage` may add an already-active human from the same organization and
+change or revoke access only in that workspace. Personal workspaces,
+cross-organization targets, self-demotion, and removal of the final workspace
+administrator fail closed. The candidate inventory discloses only active
+same-organization humans who do not already have access, without exposing their
+other workspace grants.
+
 Managed browser login slots are explicit session-set actors, not tenant hints.
 Organization recovery custody is a separate quorum and actor-fenced authority;
 ordinary organization administration cannot transfer immutable workspace
@@ -237,6 +253,11 @@ Personal connections and resources require the exact human authority that made
 them executable. Workspace-owned credentials remain workspace-scoped and are
 revalidated at use. An embedding host may narrow access through an explicit
 port; it cannot grant access that OpenGeni denied.
+
+The managed personal-workspace owner receives a closed permission projection
+that includes `capabilities:manage`, so they can configure their own Plugins,
+Integrations, and Codex subscription without receiving the `workspace:admin`
+wildcard, member management, or API-key delegation.
 
 Canonical: `packages/core/src/access/index.ts`,
 `packages/core/src/session-authorization.ts`, `packages/db/src/runtime-posture.ts`,
@@ -278,10 +299,14 @@ outcome; text-only reasoning can still begin without contacting it. OpenGeni
 never interprets an offline machine as permission to cold-create a rival box,
 snapshot it, or provider-terminate the user's computer.
 
-A default shared child of a machine-primary session inherits the parent's
-trusted active-machine route and normalized working directory before its first
-turn. A `selfhosted` child is never persisted with only a backend label and no
-concrete machine binding.
+A machine-home session does not pre-provision a hidden managed box. When the
+deployment has a managed sandbox backend, its fleet nevertheless exposes the
+session's synthetic managed group as a separate explicit target. Selecting
+`session`/`default` clears the active machine pointer, verifies that managed
+group through the ordinary viewer/lease lifecycle, and lets the next operation
+or turn use it. This is an intentional user route change, not an
+offline-machine fallback; deployments configured with only `none` or
+`selfhosted` expose no managed group.
 
 Canonical: `packages/runtime/src/sandbox/selfhosted/`,
 `apps/worker/src/activities/agent-turn/sandbox-establish.ts`,
@@ -307,6 +332,12 @@ operation to be replayed.
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
 or selected pointer alone is not proof that a command can run.
+
+The effective backend behind a synthetic managed group is resolved once from
+the session policy and deployment backend. Fleet projection, swap readiness,
+viewer attachment, API-direct operations, and worker turns must use that same
+answer so a route cannot be advertised under one backend and established under
+another.
 
 The canonical backend enum currently contains `docker`, `modal`, `local`,
 `none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`,
@@ -507,7 +538,10 @@ flowchart LR
   Idle --> Input
 ```
 
-Send and Steer create durable turn intent. Human prompts are the reorderable
+Send and Steer create durable turn intent. A normal human Send is promoted to
+Steer-equivalent replacement only when the active, unpaused branch is waiting in
+`requires_action`; checked-out queue edits, paused sessions, and other active
+lifecycle states keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
 through the claim transaction. A `requires_action` resume preserves that rule
 without violating provider protocol: it first writes the interrupted
@@ -515,6 +549,16 @@ call/result pair, then re-enters the exact attempt claim to attach only machine
 input that was pending at the resume attempt's start boundary. Pause blocks
 admission without pretending that physical execution has already stopped.
 Cancel fences a session subtree and is terminal for the affected sessions.
+
+Steer ordinarily inserts at the head and immediately supersedes the live
+direction. Active compaction is the exact exception: while a claimed standalone
+compaction is running, or an ordinary attempt's latest compaction landmark is
+`session.context.compaction.started`, Steer is accepted without inserting the
+interruption that would fence the terminal checkpoint write. A durable
+`compacted` or `skipped` landmark becomes the handoff: the ordinary turn settles
+`superseded` before another model request, while standalone maintenance completes
+and the waiting Steer is claimed next. Pause and Cancel retain immediate
+interruption semantics.
 
 Pause and Resume are desired-state commands with durable semantic receipts. A
 fresh key allocates a control revision, events, interruptions, and wakes only
@@ -776,6 +820,13 @@ dependencies. `@opengeni/runtime` owns provider-neutral agent construction,
 model input/output handling, tool execution, progressive disclosure, and the
 sandbox interface.
 
+The embedding process—not the Agents SDK—owns process-global rejection and
+termination policy. SDK background lifecycle work must settle an owned promise;
+it may not detach a rejecting task or install an `unhandledRejection` handler
+that exits the shared worker. The worker's global rejection listener is a
+last-resort observational boundary, while deliberate restart remains an
+OpenGeni drain-and-checkpoint decision.
+
 The worker supplies frozen authority and durable sinks. Runtime must not invent
 tenancy or persistence authority from its in-memory agent context.
 
@@ -877,6 +928,12 @@ session history. Capturing a workspace requires proof that no unaccounted writer
 can race the snapshot. A failed or unverifiable capture cannot be treated as an
 empty successful snapshot, and teardown must not destroy the only recoverable
 workspace state.
+
+When provider-deadline rotation aborts an Agents SDK run, the SDK closes the
+readable stream before its completion promise rejects. Iterator EOF is therefore
+not terminal success authority: the worker must await SDK completion and route
+its rejection through `sandbox_deadline_rotation` recovery before settling
+`turn.completed`.
 
 Repeated retained-process Modal binding-missing or binding-mismatch observations
 may be quarantined for a 24-hour recheck after five claimed probes, but the

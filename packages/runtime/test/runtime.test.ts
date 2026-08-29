@@ -3300,7 +3300,7 @@ describe("runtime event normalization", () => {
     "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
     "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "When the user explicitly asks you to remember or learn something, use the remember tool when it is available and route it by purpose: lane=knowledge for facts, decisions, incidents, bug fixes, and outcomes that should become searchable Memory; lane=preference (a Skill) for reusable conditional how-to guidance; lane=instruction_policy only for the shortest universal rules every agent must follow. After a confirmed lane=knowledge save, retrieve it later with memory_search. Do not store the same material in multiple authorities.",
+    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Use remember lane=preference for reusable conditional guidance (a Skill), lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
   ].join(" ");
   const withOperationalInstructions = (instructions: string) =>
     `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${instructions}`;
@@ -5452,8 +5452,12 @@ describe("runtime event normalization", () => {
   test("nested prefixed servers preserve one exact result marker and the innermost custom data", async () => {
     const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
       [];
+    const lifecycleObservations: Array<
+      Parameters<NonNullable<RuntimeMetricsHooks["onMcpLifecycle"]>>[0]
+    > = [];
     configureRuntimeMetricsHooks({
       onMcpToolCall: (input) => observations.push(input),
+      onMcpLifecycle: (input) => lifecycleObservations.push(input),
     });
     const fullResult = {
       content: [{ type: "text" as const, text: "nested model-visible content" }],
@@ -5489,7 +5493,10 @@ describe("runtime event normalization", () => {
       async invalidateToolsCache() {},
     };
     const inner = new PrefixedMcpServer(base, "inner");
-    const outer = new PrefixedMcpServer(inner, "outer");
+    // The outer registry entry owns effective connection policy. Nested
+    // wrappers are a transport implementation detail and must not double-count
+    // or report their inner policy as the physical operation's policy.
+    const outer = new PrefixedMcpServer(inner, "outer", undefined, true);
     const settings = testSettings({
       sandboxBackend: "none",
       webSearchEnabled: false,
@@ -5506,7 +5513,10 @@ describe("runtime event normalization", () => {
       mcpServers: [outer],
     });
 
+    let connected = false;
     try {
+      await outer.connect();
+      connected = true;
       const result = await runAgentStream(agent, "Inspect it", settings);
       const streamed: any[] = [];
       for await (const event of result.toStream()) streamed.push(event);
@@ -5522,7 +5532,16 @@ describe("runtime event normalization", () => {
         [OPENGENI_INNER_MCP_CUSTOM_DATA_KEY]: { baseReceipt: "base-1" },
       });
       expect(observations.map(({ outcome }) => outcome)).toEqual(["success"]);
+      await outer.close();
+      connected = false;
+      expect(
+        lifecycleObservations.map(({ phase, policy, outcome }) => ({ phase, policy, outcome })),
+      ).toEqual([
+        { phase: "connect", policy: "best_effort", outcome: "completed" },
+        { phase: "close", policy: "best_effort", outcome: "completed" },
+      ]);
     } finally {
+      if (connected) await outer.close();
       configureRuntimeMetricsHooks(null);
     }
   });
@@ -8568,7 +8587,13 @@ describe("runtime event normalization", () => {
       rpcMethod: "initialize",
       causeChainComplete: true,
     });
-    const makeFacade = () =>
+    const lifecycleObservations: Array<
+      Parameters<NonNullable<RuntimeMetricsHooks["onMcpLifecycle"]>>[0]
+    > = [];
+    configureRuntimeMetricsHooks({
+      onMcpLifecycle: (input) => lifecycleObservations.push(input),
+    });
+    const makeFacade = (bestEffort = false) =>
       new PrefixedMcpServer(
         {
           name: `inner-${registryId}`,
@@ -8586,6 +8611,8 @@ describe("runtime event normalization", () => {
           async invalidateToolsCache() {},
         } as MCPServer,
         registryId,
+        undefined,
+        bestEffort,
       );
     const warnings: unknown[][] = [];
     const errors: unknown[][] = [];
@@ -8594,7 +8621,7 @@ describe("runtime event normalization", () => {
     console.warn = (...args: unknown[]) => warnings.push(args);
     console.error = (...args: unknown[]) => errors.push(args);
     try {
-      const bestEffortFacade = makeFacade();
+      const bestEffortFacade = makeFacade(true);
       const bestEffort = await connectMcpServersInBatches([bestEffortFacade], {
         strict: false,
       });
@@ -8637,7 +8664,16 @@ describe("runtime event normalization", () => {
       expect(exactSourceError.message).toContain(sentinel);
       expect(exactSourceError.responseBody).toEqual({ sentinel });
       expect(exactSourceError.cause).toEqual({ exact: sentinel });
+      expect(
+        lifecycleObservations.map(({ phase, policy, outcome }) => ({ phase, policy, outcome })),
+      ).toEqual([
+        { phase: "connect", policy: "best_effort", outcome: "failed" },
+        { phase: "close", policy: "best_effort", outcome: "completed" },
+        { phase: "connect", policy: "strict", outcome: "failed" },
+        { phase: "close", policy: "strict", outcome: "completed" },
+      ]);
     } finally {
+      configureRuntimeMetricsHooks(null);
       console.warn = originalWarn;
       console.error = originalError;
     }

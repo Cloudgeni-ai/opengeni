@@ -637,6 +637,7 @@ export type McpPersonalConnectionSummary = Pick<
 
 export type ConnectionMetadata = {
   id: string;
+  authorityId?: string | undefined;
   accountId: string;
   workspaceId: string;
   subjectId: string | null;
@@ -2795,6 +2796,7 @@ export const KNOWN_PERMISSIONS = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
+  "capabilities:manage",
   "environments:manage",
   "environments:use",
   "variable-sets:list",
@@ -3467,6 +3469,8 @@ export type ClientAuthConfig =
       session: "cookie";
       /** Defaults to true when omitted by an older deployment. */
       emailVerificationRequired?: boolean;
+      /** Configured managed sign-in providers; omitted by older deployments. */
+      socialProviders?: ("google" | "github")[];
     };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
@@ -4272,8 +4276,20 @@ export type ListWorkspaceMembersResponse = {
   members: WorkspaceMember[];
 };
 
+export type WorkspaceMemberCandidate = {
+  organizationMembershipId: string;
+  subjectId: string;
+  name: string | null;
+  email: string | null;
+  organizationRole: "owner" | "admin" | "member";
+};
+
+export type ListWorkspaceMemberCandidatesResponse = {
+  members: WorkspaceMemberCandidate[];
+};
+
 export type AddWorkspaceMemberRequest = {
-  email: string;
+  organizationMembershipId: string;
   role?: string | undefined;
   permissions: Permission[];
 };

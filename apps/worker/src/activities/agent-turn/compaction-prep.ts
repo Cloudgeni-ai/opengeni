@@ -1,4 +1,4 @@
-import { isSessionCompactionRequested } from "@opengeni/db";
+import { hasPendingSteerAfterContextCompaction, isSessionCompactionRequested } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   appendSessionInstructions,
@@ -102,6 +102,7 @@ export type CompactionPrepOk = {
   compactionModeOptions: NonNullable<Parameters<typeof maybeCompactContext>[5]>;
   compactionOnlyTurn: boolean;
   compactionSummarizerFor: (systemInstructions?: string) => CompactionSummarizer;
+  settleDeferredSteerAfterCompaction: () => Promise<RunAgentTurnResult | null>;
 };
 
 export type CompactionPrepOutcome = { exit: RunAgentTurnResult } | { ok: CompactionPrepOk };
@@ -114,6 +115,7 @@ export type PostAgentCompactionDeps = CompactionPrepDeps & {
   compactionModeOptions: CompactionPrepOk["compactionModeOptions"];
   compactionOnlyTurn: boolean;
   compactionSummarizerFor: CompactionPrepOk["compactionSummarizerFor"];
+  settleDeferredSteerAfterCompaction: CompactionPrepOk["settleDeferredSteerAfterCompaction"];
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]>;
 };
 
@@ -298,6 +300,39 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   const compactionOnlyTurn = turn.source === "compaction";
   const remoteV2CompactionNeedsAgentPrefix =
     Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
+  const settleDeferredSteerAfterCompaction = async (): Promise<RunAgentTurnResult | null> => {
+    if (compactionOnlyTurn) return null;
+    const pending = await hasPendingSteerAfterContextCompaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      executionGeneration: attempt.executionGeneration,
+      attemptId: input.attemptId,
+    });
+    if (!pending) return null;
+    if (
+      !(await eventing.settle({
+        events: [
+          {
+            type: "turn.superseded",
+            payload: { reason: "steer", deferredUntilCompaction: true },
+          },
+          { type: "session.status.changed", payload: { status: "queued" } },
+        ],
+        turnStatus: "superseded",
+        sessionStatus: "queued",
+        activeTurnId: null,
+      }))
+    ) {
+      return claimedResult({ status: "cancelled" });
+    }
+    // Metrics currently group user-directed supersession with cancellation;
+    // the durable turn outcome remains the precise `superseded` truth.
+    control.turnMetricOutcome = "cancelled";
+    control.activityStatus = "idle";
+    return claimedResult({ status: "idle" });
+  };
   if (compactionOnlyTurn && !remoteV2CompactionNeedsAgentPrefix) {
     const compactionInstructions = appendWorkspaceMemory(
       appendSessionInstructions(
@@ -443,6 +478,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       compactionModeOptions,
       compactionOnlyTurn,
       compactionSummarizerFor,
+      settleDeferredSteerAfterCompaction,
     },
   };
 }
@@ -468,6 +504,7 @@ export async function runPostAgentCompaction(
     compactionModeOptions,
     compactionOnlyTurn,
     compactionSummarizerFor,
+    settleDeferredSteerAfterCompaction,
     compactionModelHistoryProjector,
     media,
     agent,
@@ -661,6 +698,16 @@ export async function runPostAgentCompaction(
         }
         await publishCompactionOutcomeEvents(outcome.events);
       }
+      if (
+        outcome.events.some(
+          (event) =>
+            event.type === "session.context.compacted" ||
+            event.type === "session.context.compaction.skipped",
+        )
+      ) {
+        const deferredSteer = await settleDeferredSteerAfterCompaction();
+        if (deferredSteer) return { exit: deferredSteer };
+      }
     } catch (compactError) {
       if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
       if (compactError instanceof TurnAttemptFencedError) throw compactError;
@@ -680,6 +727,8 @@ export async function runPostAgentCompaction(
         },
       );
       if (!isCompactionSummaryFailure(compactError)) throw compactError;
+      const deferredSteer = await settleDeferredSteerAfterCompaction();
+      if (deferredSteer) return { exit: deferredSteer };
       const errorMessage = String(compactionFailureReasonFromError(compactError));
       observability.error("context compaction failed", {
         sessionId: input.sessionId,

@@ -3,6 +3,7 @@ import type {
   CapabilityCatalogItem,
   ClientConfig,
   GitHubRepository,
+  PersonalGitHubRepositoryCatalogItem,
   ReasoningEffort,
   ResourceRef,
   Session,
@@ -213,6 +214,10 @@ export function buildResources(
   repos: GitHubRepository[],
   selected: Set<number>,
   selectedRefs: Record<number, string>,
+  personalRepositories: PersonalGitHubRepositoryCatalogItem[] = [],
+  selectedPersonalRepositoryIds: Set<string> = new Set(),
+  selectedPersonalRepositoryRefs: Record<string, string> = {},
+  personalCredentialBindingId: string | null = null,
 ): ResourceRef[] {
   const raw = [
     ...repos
@@ -224,6 +229,25 @@ export function buildResources(
         installationId: repo.installationId,
         private: repo.private,
         provider: "github" as const,
+        connectionType: null,
+        credentialBindingId: null,
+        access: null,
+      })),
+    ...personalRepositories
+      .filter(
+        (repo) =>
+          repo.selectedAccess !== null && selectedPersonalRepositoryIds.has(repo.repositoryId),
+      )
+      .map((repo) => ({
+        url: repo.canonicalUrl,
+        ref: (selectedPersonalRepositoryRefs[repo.repositoryId] ?? repo.defaultBranch).trim(),
+        repositoryId: repo.repositoryId,
+        installationId: null,
+        private: repo.private,
+        provider: "github" as const,
+        connectionType: "github_personal" as const,
+        credentialBindingId: personalCredentialBindingId,
+        access: repo.selectedAccess!,
       })),
     ...manualRepos.map((repo) => ({
       url: repo.url.trim(),
@@ -232,6 +256,9 @@ export function buildResources(
       installationId: null,
       private: false,
       provider: null,
+      connectionType: null,
+      credentialBindingId: null,
+      access: null,
     })),
   ].filter((repo) => repo.url.length > 0);
   const mountPaths = new Set<string>();
@@ -248,6 +275,22 @@ export function buildResources(
       throw new Error(`Duplicate repository mount path: ${mountPath}`);
     }
     mountPaths.add(mountKey);
+    if (repo.connectionType === "github_personal") {
+      if (!repo.credentialBindingId || typeof repo.repositoryId !== "string" || !repo.access) {
+        throw new Error("Personal GitHub repository identity is unavailable.");
+      }
+      return {
+        kind: "repository",
+        uri,
+        ref: repo.ref,
+        mountPath,
+        provider: "github",
+        connectionType: "github_personal",
+        credentialBindingId: repo.credentialBindingId,
+        repositoryId: repo.repositoryId,
+        access: repo.access,
+      };
+    }
     return {
       kind: "repository",
       uri,
@@ -275,12 +318,20 @@ export function buildAdditionalRepositoryResources(input: {
   repositories: GitHubRepository[];
   selectedRepoIds: Set<number>;
   selectedRepoRefs: Record<number, string>;
+  personalRepositories?: PersonalGitHubRepositoryCatalogItem[];
+  selectedPersonalRepositoryIds?: Set<string>;
+  selectedPersonalRepositoryRefs?: Record<string, string>;
+  personalCredentialBindingId?: string | null;
 }): ResourceRef[] {
   const additions = buildResources(
     input.manualRepos,
     input.repositories,
     input.selectedRepoIds,
     input.selectedRepoRefs,
+    input.personalRepositories,
+    input.selectedPersonalRepositoryIds,
+    input.selectedPersonalRepositoryRefs,
+    input.personalCredentialBindingId,
   );
   mergeResourceRefs(input.mountedResources, additions, { rejectConflicts: true });
   return additions;
@@ -336,7 +387,11 @@ export function sameRepositoryUri(resource: ResourceRef, uri: string): boolean {
 export function rehydrateRepositoryResources(
   resources: ResourceRef[],
   repositories: GitHubRepository[],
-  options?: { catalogReady?: boolean },
+  options?: {
+    catalogReady?: boolean;
+    personalRepositories?: PersonalGitHubRepositoryCatalogItem[];
+    personalCatalogReady?: boolean;
+  },
 ): ResourceRef[] {
   // An unreadied catalog is unknown, not empty. Dropping GitHub-identity rows
   // here would autosave that loss and brick the create composer while the
@@ -344,6 +399,20 @@ export function rehydrateRepositoryResources(
   if (options?.catalogReady === false) return resources;
   return resources.flatMap<ResourceRef>((resource) => {
     if (resource.kind !== "repository") return [resource];
+    if (
+      resource.connectionType === "github_personal" &&
+      typeof resource.repositoryId === "string"
+    ) {
+      if (options?.personalCatalogReady === false) return [resource];
+      return (options?.personalRepositories ?? []).some(
+        (repository) =>
+          repository.repositoryId === resource.repositoryId &&
+          repository.canonicalUrl === resource.uri &&
+          repository.selectedAccess !== null,
+      )
+        ? [resource]
+        : [];
+    }
     const hasGitHubIdentity =
       resource.githubRepositoryId !== undefined || resource.githubInstallationId !== undefined;
     if (hasGitHubIdentity) {
@@ -363,14 +432,26 @@ export function repositorySelectionFromResources(
   manualRepos: RepoDraft[];
   selectedRepoIds: Set<number>;
   selectedRepoRefs: Record<number, string>;
+  selectedPersonalRepoIds: Set<string>;
+  selectedPersonalRepoRefs: Record<string, string>;
 } {
   const manualRepos: RepoDraft[] = [];
   const selectedRepoIds = new Set<number>();
   const selectedRepoRefs: Record<number, string> = {};
+  const selectedPersonalRepoIds = new Set<string>();
+  const selectedPersonalRepoRefs: Record<string, string> = {};
   let nextManualId = 1;
 
   for (const resource of resources) {
     if (resource.kind !== "repository") continue;
+    if (
+      resource.connectionType === "github_personal" &&
+      typeof resource.repositoryId === "string"
+    ) {
+      selectedPersonalRepoIds.add(resource.repositoryId);
+      selectedPersonalRepoRefs[resource.repositoryId] = resource.ref;
+      continue;
+    }
     const matched = repositories.find((repo) => {
       if (
         resource.githubRepositoryId !== undefined ||
@@ -387,7 +468,13 @@ export function repositorySelectionFromResources(
       manualRepos.push({ id: nextManualId++, url: resource.uri, ref: resource.ref });
     }
   }
-  return { manualRepos, selectedRepoIds, selectedRepoRefs };
+  return {
+    manualRepos,
+    selectedRepoIds,
+    selectedRepoRefs,
+    selectedPersonalRepoIds,
+    selectedPersonalRepoRefs,
+  };
 }
 
 export function repositoryDisplayName(

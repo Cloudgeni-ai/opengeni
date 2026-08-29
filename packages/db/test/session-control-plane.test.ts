@@ -38,6 +38,7 @@ import {
   getSessionQueueSnapshot,
   getBillingBalance,
   getActiveSessionHistoryItems,
+  hasPendingSteerAfterContextCompaction,
   getSession,
   getSessionGoal,
   getSessionSystemUpdateOutboxByDedupeKey,
@@ -67,6 +68,7 @@ import {
   mutateWorkspaceControlInTransaction,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
+  recordStartedContextCompaction,
   recordUsageEvent,
   recordSkippedContextCompaction,
   saveRunState,
@@ -2295,6 +2297,59 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("settlement projection follows only the requested session subtrees", async () => {
+    const { grant, session: root } = await fixture();
+    const child = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "child with interrupted attempt",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      parentSessionId: root.id,
+    });
+    const unrelated = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "unrelated root",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+    });
+    await send(grant, child.id, "run until the child is paused");
+    const attemptId = crypto.randomUUID();
+    const running = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      child.id,
+      `session-${child.id}`,
+      { attemptId },
+    );
+    expect(running?.status).toBe("running");
+    expect((await controlSession(grant, child.id, "pause")).interruptionCount).toBe(1);
+
+    const projected = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControls(db, grant.workspaceId!, [root.id, child.id, unrelated.id], {
+        lock: "share",
+      }),
+    );
+    const expectedSettlement = {
+      state: "stopping" as const,
+      attemptCount: 1,
+      interruptionPendingCount: 1,
+      quiescencePendingCount: 0,
+    };
+    expect(projected.get(root.id)?.settlement).toEqual(expectedSettlement);
+    expect(projected.get(child.id)?.settlement).toEqual(expectedSettlement);
+    expect(projected.get(unrelated.id)?.settlement).toBeNull();
+  });
+
   test("compact discovery control matches full blocker truth across pause overrides", async () => {
     const { grant, session: root } = await fixture();
     const child = await createSession(client.db, {
@@ -4155,7 +4210,7 @@ describe("clean session control plane", () => {
     );
   });
 
-  test("Steer supersedes maintenance compaction and leaves the request for the new prompt", async () => {
+  test("Steer waits behind maintenance compaction and runs next", async () => {
     const { grant, session } = await fixture();
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
     const attemptId = crypto.randomUUID();
@@ -4167,37 +4222,22 @@ describe("clean session control plane", () => {
       { attemptId },
     );
 
-    await expect(
-      markSessionAttemptQuiesced(client.db, {
-        workspaceId: grant.workspaceId!,
-        sessionId: session.id,
-        attemptId,
-        temporalWorkflowId: `session-${session.id}`,
-      }),
-    ).rejects.toThrow(/without its interruption/);
-    expect(
-      await markSessionAttemptQuiesced(client.db, {
-        workspaceId: grant.workspaceId!,
-        sessionId: session.id,
-        attemptId,
-        temporalWorkflowId: `session-${session.id}`,
-        allowUninterrupted: true,
-      }),
-    ).toEqual([]);
-
     const steered = await send(grant, session.id, "use this instead", "steer");
-    expect(steered.interruptionCount).toBe(1);
+    expect(steered.interruptionCount).toBe(0);
+    expect(steered.receipt.result.deferredUntilCompaction).toBe(true);
     expect(steered.routing).toBe("accepted_for_steering");
-    const stopping = await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id);
-    expect(stopping?.stoppingPreviousAttempt).toBe(true);
-    expect(stopping?.items).toHaveLength(0);
+    expect(await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      stoppingPreviousAttempt: false,
+      items: [],
+    });
     expect(steered.turn).toMatchObject({
       id: steered.turn.id,
       metadata: {
         delivery: "steer",
-        replacedTurnId: compaction!.id,
-        replacedAttemptId: attemptId,
-        interruptionCount: 1,
+        replacedTurnId: null,
+        replacedAttemptId: null,
+        interruptionCount: 0,
+        deferredUntilCompaction: true,
       },
     });
     expect((await getSessionTurn(client.db, grant.workspaceId!, compaction!.id))?.status).toBe(
@@ -4206,41 +4246,45 @@ describe("clean session control plane", () => {
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       true,
     );
-    const quiescenceEvents = await markSessionAttemptQuiesced(client.db, {
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      attemptId,
-      temporalWorkflowId: `session-${session.id}`,
-    });
-    await settleSessionAttemptInterruptions(client.db, grant.workspaceId!, session.id, attemptId);
     expect(
-      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))
-        ?.stoppingPreviousAttempt,
-    ).toBe(false);
-    expect(quiescenceEvents).toEqual([
-      expect.objectContaining({
-        type: "session.queue.changed",
-        turnId: compaction!.id,
-        turnAttemptId: attemptId,
-        turnAssociation: null,
-        payload: {
-          operation: "attempt_quiesced",
-          attemptId,
-          queueVersion: stopping!.version + 1,
-        },
-      }),
-    ]);
-    expect(
-      await markSessionAttemptQuiesced(client.db, {
+      await recordSkippedContextCompaction(client.db, {
+        accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
-        attemptId,
-        temporalWorkflowId: `session-${session.id}`,
+        turnId: compaction!.id,
+        expectedExecutionGeneration: compaction!.executionGeneration,
+        expectedAttemptId: attemptId,
+        reason: "no_history",
       }),
-    ).toEqual(quiescenceEvents);
-    expect(await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id)).toMatchObject({
-      version: stopping!.version + 1,
-      stoppingPreviousAttempt: false,
+    ).toMatchObject({
+      recorded: true,
+      events: [expect.objectContaining({ type: "session.context.compaction.skipped" })],
+    });
+    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
+      false,
+    );
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: compaction!.id,
+      triggerEventId: compaction!.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.completed",
+          payload: { maintenance: "context_compaction", result: "no_history" },
+        },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, compaction!.id)).toMatchObject({
+      status: "completed",
+    });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "queued",
+      activeTurnId: null,
     });
     const next = await claimTestSessionWork(
       client.db,
@@ -4250,9 +4294,129 @@ describe("clean session control plane", () => {
     );
     expect(next?.id).toBe(steered.turn.id);
     expect(next?.source).toBe("user");
-    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
-      true,
+  });
+
+  test("Steer lets an in-turn compaction landmark finish before superseding the turn", async () => {
+    const { grant, session } = await fixture();
+    const goal = await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      text: "Keep working until the human changes direction",
+      createdBy: "api",
+    });
+    const readGoalWakeRevision = async () => {
+      const [row] = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) =>
+        db
+          .select({ revision: schema.sessionGoals.continuationWakeRevision })
+          .from(schema.sessionGoals)
+          .where(eq(schema.sessionGoals.id, goal.id))
+          .limit(1),
+      );
+      if (!row) throw new Error("Goal wake revision is missing");
+      return row.revision;
+    };
+    const goalWakeRevision = await readGoalWakeRevision();
+    await send(grant, session.id, "work from the existing direction");
+    const attemptId = crypto.randomUUID();
+    const current = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
     );
+    expect(current).toMatchObject({ source: "user", status: "running" });
+    expect(
+      await recordStartedContextCompaction(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: current!.id,
+        expectedExecutionGeneration: current!.executionGeneration,
+        expectedAttemptId: attemptId,
+        trigger: "auto",
+      }),
+    ).toMatchObject({
+      recorded: true,
+      events: [expect.objectContaining({ type: "session.context.compaction.started" })],
+    });
+
+    const steered = await send(grant, session.id, "change direction after the checkpoint", "steer");
+    expect(steered).toMatchObject({
+      interruptionCount: 0,
+      routing: "accepted_for_steering",
+    });
+    expect(steered.receipt.result.deferredUntilCompaction).toBe(true);
+    expect(steered.turn).toMatchObject({
+      metadata: {
+        delivery: "steer",
+        replacedTurnId: current!.id,
+        replacedAttemptId: attemptId,
+        interruptionCount: 0,
+        deferredUntilCompaction: true,
+      },
+    });
+    expect(await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      stoppingPreviousAttempt: false,
+      items: [],
+    });
+    expect(
+      await recordSkippedContextCompaction(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: current!.id,
+        expectedExecutionGeneration: current!.executionGeneration,
+        expectedAttemptId: attemptId,
+        reason: "replacement_not_smaller",
+        requirePendingRequest: false,
+        clearRequestedCompaction: false,
+      }),
+    ).toMatchObject({
+      recorded: true,
+      events: [expect.objectContaining({ type: "session.context.compaction.skipped" })],
+    });
+    expect(
+      await hasPendingSteerAfterContextCompaction(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: current!.id,
+        executionGeneration: current!.executionGeneration,
+        attemptId,
+      }),
+    ).toBe(true);
+
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: current!.id,
+      triggerEventId: current!.triggerEventId,
+      attemptId,
+      turnStatus: "superseded",
+      sessionStatus: "queued",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.superseded",
+          payload: { reason: "steer", deferredUntilCompaction: true },
+        },
+        { type: "session.status.changed", payload: { status: "queued" } },
+      ],
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, current!.id)).toMatchObject({
+      status: "superseded",
+    });
+    expect((await getSessionGoal(client.db, grant.workspaceId!, session.id))?.id).toBe(goal.id);
+    expect(await readGoalWakeRevision()).toBe(goalWakeRevision);
+    const next = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(next?.id).toBe(steered.turn.id);
+    expect(next?.source).toBe("user");
   });
 
   test("activity-owned quiescence proof requires the exact persisted Temporal dispatch", async () => {
