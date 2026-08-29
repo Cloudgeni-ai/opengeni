@@ -2124,8 +2124,8 @@ export async function createSessionForRequestWithOutcome(
         ? {
             sandboxId: parent.activeSandboxId,
             workingDir: parent.workingDir,
-           }
-         : null;
+          }
+        : null;
     }
   } else if (typeof sandboxChoice === "object") {
     const member = await getAnySessionInGroup(db, workspaceId, sandboxChoice.groupId);
