@@ -530,6 +530,7 @@ describe("BrowserAccountsProvider", () => {
     expect(mutationAttempts).toBe(0);
     expect(accounts.current.projection).toEqual(replacement);
     expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.hasPendingTransition).toBe(false);
     expect(transitions.at(-1)).toMatchObject({
       kind: "cross_tab",
       from: null,
@@ -577,6 +578,71 @@ describe("BrowserAccountsProvider", () => {
     expect(mutationAttempts).toBe(0);
     expect(accounts.current.projection).toEqual(replacement);
     expect(accounts.current.phase).toBe("ready");
+    await accounts.unmount();
+  });
+
+  test("reconciles an invalidation that supersedes post-mutation host settlement", async () => {
+    const before = projection();
+    const replacement = projection({
+      generation: "2",
+      actorEpoch: "2",
+      selectedSlotId: SLOT_B,
+    });
+    let current = before;
+    let mutationAttempts = 0;
+    let announceSettlementStarted!: () => void;
+    const settlementStarted = new Promise<void>((resolve) => {
+      announceSettlementStarted = resolve;
+    });
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => current,
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          current = replacement;
+          return replacement;
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (
+          transition.kind === "select" &&
+          transition.from === null &&
+          transition.to === replacement
+        ) {
+          announceSettlementStarted();
+          if (!transition.signal.aborted) {
+            await new Promise<void>((resolve) =>
+              transition.signal.addEventListener("abort", () => resolve(), { once: true }),
+            );
+          }
+        }
+      },
+    );
+    transitions.length = 0;
+
+    let selection!: Promise<boolean>;
+    await act(async () => {
+      selection = accounts.current.selectSlot(SLOT_B);
+      await settlementStarted;
+    });
+    expect(accounts.current.projection).toBeNull();
+    expect(accounts.current.phase).toBe("loading");
+
+    expect(await actRun(() => accounts.current.invalidateActor())).toEqual(replacement);
+    expect(await actRun(async () => await selection)).toBe(true);
+
+    expect(mutationAttempts).toBe(1);
+    expect(accounts.current.projection).toEqual(replacement);
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.hasPendingTransition).toBe(false);
+    expect(transitions.at(-1)).toMatchObject({
+      kind: "cross_tab",
+      from: null,
+      to: replacement,
+    });
     await accounts.unmount();
   });
 

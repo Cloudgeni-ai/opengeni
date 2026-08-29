@@ -460,6 +460,17 @@ export function BrowserAccountsProvider({
           if (sequenceRef.current !== sequence) return false;
         }
         pendingRef.current = null;
+        // The server response and any invalidation reconciliation are now
+        // authoritative. Release commit ownership before host settlement so a
+        // later invalidation starts its own reconciliation instead of relying
+        // on the already-consumed check above.
+        if (pendingServerMutationSequenceRef.current === sequence) {
+          pendingServerMutationSequenceRef.current = null;
+        }
+        if (pendingCommitSequenceRef.current === sequence) {
+          pendingCommitSequenceRef.current = null;
+          invalidatedDuringPendingCommitRef.current = false;
+        }
         if (
           !initiatingActorFenced &&
           !authorityResetConfirmed &&
@@ -587,6 +598,7 @@ export function BrowserAccountsProvider({
       pendingCommitSequenceRef.current = null;
       pendingServerMutationSequenceRef.current = null;
       invalidatedDuringPendingCommitRef.current = false;
+      pendingRef.current = null;
     }
     const sequence = ++sequenceRef.current;
     const before = projectionRef.current;
