@@ -92,6 +92,7 @@ type BrowserProblems = {
     method: string;
     pathname: string;
     responsePhase: string;
+    search: string;
     startedAt: number;
     status: number;
   }>;
@@ -141,17 +142,16 @@ const ACTOR_TRANSITION_PHASES = [
   "signed-out-settled",
 ] as const;
 
+const DIRECT_RACE_ACTOR_RESPONSE_DISPATCH_PHASES = new Set([
+  "primary-set-sign-in",
+  "second-tab-bootstrap",
+  "add-response-loss-replay",
+  "cross-tab-select-race",
+]);
+
 const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
   ["add-response-loss-replay", new Set(["primary-set-sign-in", "add-response-loss-replay"])],
-  [
-    "cross-tab-select-race",
-    new Set([
-      "primary-set-sign-in",
-      "second-tab-bootstrap",
-      "add-response-loss-replay",
-      "cross-tab-select-race",
-    ]),
-  ],
+  ["cross-tab-select-race", DIRECT_RACE_ACTOR_RESPONSE_DISPATCH_PHASES],
   [
     "late-old-epoch-setup-beta-to-alpha",
     new Set(["cross-tab-select-race", "late-old-epoch-setup-beta-to-alpha"]),
@@ -331,6 +331,20 @@ type FiniteReadRetirementInput = {
   requestSessionSetAuthorityHash: string | null;
   responseSeen: boolean;
   startedAt: number;
+};
+
+type DocumentReplacementRetirementInput = {
+  actorEpoch: string | null;
+  confirmedActorEpoch: string;
+  currentSessionSetAuthorityHash: string | null;
+  dispatchPhase: string;
+  expectedDispatchPhase: string;
+  method: string;
+  pathname: string;
+  replacementStartedAt: number;
+  requestSessionSetAuthorityHash: string | null;
+  startedAt: number;
+  workspaceId: string;
 };
 
 const ACTOR_CHANGING_ACCEPTANCE_PATHS = new Set([
@@ -548,6 +562,41 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
   );
 }
 
+function finiteReadMayRetireAfterDocumentReplacement(
+  input: DocumentReplacementRetirementInput,
+): boolean {
+  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`;
+  const documentOwnedSessionRead = new RegExp(
+    `^${exactWorkspacePrefix.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}sessions/[0-9a-f-]+(?:/lineage)?$`,
+    "u",
+  ).test(input.pathname);
+  return (
+    new Set(["GET", "HEAD"]).has(input.method) &&
+    input.actorEpoch !== null &&
+    input.actorEpoch === input.confirmedActorEpoch &&
+    input.dispatchPhase === input.expectedDispatchPhase &&
+    documentOwnedSessionRead &&
+    input.currentSessionSetAuthorityHash !== null &&
+    input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash &&
+    Number.isFinite(input.startedAt) &&
+    Number.isFinite(input.replacementStartedAt) &&
+    input.startedAt <= input.replacementStartedAt
+  );
+}
+
+function actorTransitionResponseDispatchPhaseMatches(input: {
+  dispatchPhase: string;
+  expectedPhase: string;
+  permitsDirectRacePredecessors: boolean;
+  responsePhase: string;
+}): boolean {
+  if (input.responsePhase !== input.expectedPhase) return false;
+  return input.permitsDirectRacePredecessors
+    ? input.expectedPhase === "cross-tab-select-race" &&
+        DIRECT_RACE_ACTOR_RESPONSE_DISPATCH_PHASES.has(input.dispatchPhase)
+    : input.dispatchPhase === input.expectedPhase;
+}
+
 let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let edge: ReturnType<typeof Bun.serve> | null = null;
@@ -728,6 +777,7 @@ function observeBrowser(page: Page): BrowserProblems {
     }
     if (response.status() === 401 && pathname.startsWith("/v1/workspaces/")) {
       const dispatch = requestPhases.get(request);
+      const responseUrl = new URL(response.url());
       problems.actorFenceResponses.push({
         actorEpoch: dispatch?.actorEpoch ?? null,
         dispatchPhase: dispatch?.phase ?? "unknown",
@@ -735,6 +785,7 @@ function observeBrowser(page: Page): BrowserProblems {
         method: request.method(),
         pathname,
         responsePhase: problems.phase,
+        search: responseUrl.search,
         startedAt: dispatch?.startedAt ?? Number.NaN,
         status: response.status(),
       });
@@ -959,7 +1010,17 @@ async function retirePendingReadsAfterConfirmedActorTransition(
   const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
     await browserCookieHeader(page.context()),
   );
+  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`;
   for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
+    if (
+      (pending.method !== "GET" && pending.method !== "HEAD") ||
+      pending.actorEpoch !== input.confirmedActorEpoch ||
+      pending.dispatchPhase !== input.dispatchPhase ||
+      !pending.pathname.startsWith(exactWorkspacePrefix) ||
+      pending.startedAt > input.replacementStartedAt
+    ) {
+      continue;
+    }
     const requestSessionSetAuthorityHash =
       pending.sessionSetAuthorityHashImmediate ??
       (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
@@ -1002,6 +1063,44 @@ async function retirePendingReadsAfterConfirmedActorTransition(
       `${pending.description} [retired=confirmed-actor-${input.confirmedActorEpoch}]`,
     );
     problems.retiredFiniteReadTombstones.set(request, pending.description);
+    problems.pendingFiniteReads.delete(request);
+  }
+}
+
+async function retirePendingReadsAfterConfirmedDocumentReplacement(
+  page: Page,
+  problems: BrowserProblems,
+  input: {
+    confirmedActorEpoch: string;
+    dispatchPhase: string;
+    replacementStartedAt: number;
+    workspaceId: string;
+  },
+): Promise<void> {
+  const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
+    await browserCookieHeader(page.context()),
+  );
+  for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
+    const requestSessionSetAuthorityHash =
+      pending.sessionSetAuthorityHashImmediate ??
+      (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
+    const mayRetire = finiteReadMayRetireAfterDocumentReplacement({
+      actorEpoch: pending.actorEpoch,
+      confirmedActorEpoch: input.confirmedActorEpoch,
+      currentSessionSetAuthorityHash,
+      dispatchPhase: pending.dispatchPhase,
+      expectedDispatchPhase: input.dispatchPhase,
+      method: pending.method,
+      pathname: pending.pathname,
+      replacementStartedAt: input.replacementStartedAt,
+      requestSessionSetAuthorityHash,
+      startedAt: pending.startedAt,
+      workspaceId: input.workspaceId,
+    });
+    if (!mayRetire) continue;
+    problems.retiredFiniteReads.push(
+      `${pending.description} [retired=confirmed-document-replacement]`,
+    );
     problems.pendingFiniteReads.delete(request);
   }
 }
@@ -1215,13 +1314,18 @@ function logoutAllActorFenceResponseProblem(
     workspaceId: string;
   },
 ): string | null {
-  const expectedPath = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sessions`;
+  const expectedWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}`;
+  const isSessionList =
+    response.pathname === `${expectedWorkspacePrefix}/sessions` && response.search === "";
+  const isBoundedLiveStream =
+    response.pathname === `${expectedWorkspacePrefix}/live-events/stream` &&
+    new URLSearchParams(response.search).get("transport") === "http1-bounded";
   const exactShape =
     response.actorEpoch === input.actorEpoch &&
     response.dispatchPhase === "logout-all-response-loss-replay" &&
     response.responsePhase === "logout-all-response-loss-replay" &&
     response.method === "GET" &&
-    response.pathname === expectedPath &&
+    (isSessionList || isBoundedLiveStream) &&
     response.status === 401;
   const exactTiming =
     Number.isFinite(response.startedAt) &&
@@ -1244,15 +1348,19 @@ async function expectAndConsumeLogoutAllActorFenceResponses(
     workspaceId: string;
   },
 ): Promise<void> {
-  // A sibling tab can dispatch its current session-list read immediately
-  // before the accepted logout rotates the shared HttpOnly authority. The API
-  // must fence that exact old-actor request with 401; Firefox may deliver the
-  // response instead of the cancellation observed by Chromium/WebKit. Keep the
-  // optional race strict by actor, phase, path, method, status, and acceptance
-  // window, and leave every other 401 in the final failure ledger.
+  // A sibling tab can dispatch its current session-list read or one bounded
+  // event poll immediately before the accepted logout rotates the shared
+  // HttpOnly authority. The API must fence that exact old-actor request with
+  // 401; a browser may deliver the response instead of a cancellation. Keep
+  // the optional race strict by actor, phase, path, transport, method, status,
+  // and acceptance window, and leave every other 401 in the final ledger.
   await page.waitForTimeout(1_000);
   const validationInput = { ...input, settledAt: performance.now() };
-  expect(problems.actorFenceResponses.length).toBeLessThanOrEqual(1);
+  expect(problems.actorFenceResponses.length).toBeLessThanOrEqual(2);
+  expect(
+    new Set(problems.actorFenceResponses.map(({ pathname, search }) => `${pathname}${search}`))
+      .size,
+  ).toBe(problems.actorFenceResponses.length);
   for (const response of problems.actorFenceResponses) {
     expect(logoutAllActorFenceResponseProblem(response, validationInput)).toBeNull();
   }
@@ -1290,12 +1398,22 @@ async function expectAndConsumeActorTransitionResponse(
     expect(responseEvidence).toEqual(
       expect.objectContaining({
         actorEpoch: input.actorEpoch,
-        dispatchPhase: input.phase,
         method: input.method,
         responsePhase: input.phase,
         status: input.status,
       }),
     );
+    const dispatchPhaseValid = actorTransitionResponseDispatchPhaseMatches({
+      dispatchPhase: response.dispatchPhase,
+      expectedPhase: input.phase,
+      permitsDirectRacePredecessors: input.timing !== undefined,
+      responsePhase: response.responsePhase,
+    });
+    if (!dispatchPhaseValid) {
+      throw new Error(
+        `actor transition response did not originate in its exact transition window: ${JSON.stringify({ input, response: responseEvidence })}`,
+      );
+    }
     const pathnameValid =
       response.pathname === input.pathname ||
       (input.timing?.kind === "direct-race-fence" &&
@@ -2925,6 +3043,86 @@ describe("provider-neutral browser account acceptance", () => {
       }),
     ).toBe(true);
 
+    const documentReplacementRetirement = {
+      actorEpoch: "current-actor-epoch",
+      confirmedActorEpoch: "current-actor-epoch",
+      currentSessionSetAuthorityHash: "a".repeat(64),
+      dispatchPhase: "cross-slot-deep-link",
+      expectedDispatchPhase: "cross-slot-deep-link",
+      method: "GET",
+      pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/session-id/lineage",
+      replacementStartedAt: 200,
+      requestSessionSetAuthorityHash: "a".repeat(64),
+      startedAt: 100,
+      workspaceId: "00000000-0000-0000-0000-000000000001",
+    } satisfies DocumentReplacementRetirementInput;
+    expect(finiteReadMayRetireAfterDocumentReplacement(documentReplacementRetirement)).toBe(true);
+    for (const invalid of [
+      { ...documentReplacementRetirement, method: "POST" },
+      { ...documentReplacementRetirement, actorEpoch: null },
+      { ...documentReplacementRetirement, actorEpoch: "old-actor-epoch" },
+      {
+        ...documentReplacementRetirement,
+        dispatchPhase: "slot-revocation-reauthentication",
+      },
+      {
+        ...documentReplacementRetirement,
+        pathname: "/v1/workspaces/another-workspace/sessions/session-id/lineage",
+      },
+      {
+        ...documentReplacementRetirement,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog",
+      },
+      {
+        ...documentReplacementRetirement,
+        currentSessionSetAuthorityHash: null,
+      },
+      {
+        ...documentReplacementRetirement,
+        requestSessionSetAuthorityHash: null,
+      },
+      {
+        ...documentReplacementRetirement,
+        requestSessionSetAuthorityHash: "b".repeat(64),
+      },
+      { ...documentReplacementRetirement, startedAt: 201 },
+    ]) {
+      expect(finiteReadMayRetireAfterDocumentReplacement(invalid)).toBe(false);
+    }
+
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "second-tab-bootstrap",
+        expectedPhase: "cross-tab-select-race",
+        permitsDirectRacePredecessors: true,
+        responsePhase: "cross-tab-select-race",
+      }),
+    ).toBe(true);
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "second-tab-bootstrap",
+        expectedPhase: "cross-tab-select-race",
+        permitsDirectRacePredecessors: false,
+        responsePhase: "cross-tab-select-race",
+      }),
+    ).toBe(false);
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "second-tab-bootstrap",
+        expectedPhase: "cross-tab-select-race",
+        permitsDirectRacePredecessors: true,
+        responsePhase: "late-old-epoch-setup-beta-to-alpha",
+      }),
+    ).toBe(false);
+    expect(
+      actorTransitionResponseDispatchPhaseMatches({
+        dispatchPhase: "logout-one",
+        expectedPhase: "logout-one",
+        permitsDirectRacePredecessors: true,
+        responsePhase: "logout-one",
+      }),
+    ).toBe(false);
+
     const expectedRaceConsole =
       "Failed to load resource: the server responded with a status of 409 (Conflict) @ /v1/auth/session-set/select";
     expect(isExpectedHttpConsoleError(expectedRaceConsole, "cross-tab-select-race")).toBe(true);
@@ -3003,6 +3201,7 @@ describe("provider-neutral browser account acceptance", () => {
       method: "GET",
       pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions",
       responsePhase: "logout-all-response-loss-replay",
+      search: "",
       startedAt: 100,
       status: 401,
     } satisfies BrowserProblems["actorFenceResponses"][number];
@@ -3013,12 +3212,32 @@ describe("provider-neutral browser account acceptance", () => {
       workspaceId: "00000000-0000-0000-0000-000000000001",
     };
     expect(logoutAllActorFenceResponseProblem(logoutAllFence, logoutAllFenceInput)).toBeNull();
+    expect(
+      logoutAllActorFenceResponseProblem(
+        {
+          ...logoutAllFence,
+          pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+          search: "?after=12&transport=http1-bounded",
+        },
+        logoutAllFenceInput,
+      ),
+    ).toBeNull();
     for (const invalid of [
       { ...logoutAllFence, actorEpoch: "new-actor" },
       { ...logoutAllFence, dispatchPhase: "signed-out-settled" },
       { ...logoutAllFence, responsePhase: "signed-out-settled" },
       { ...logoutAllFence, method: "POST" },
       { ...logoutAllFence, pathname: "/v1/workspaces" },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        search: "?transport=h2",
+      },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000002/live-events/stream",
+        search: "?transport=http1-bounded",
+      },
       { ...logoutAllFence, status: 403 },
       { ...logoutAllFence, endedAt: 199 },
       { ...logoutAllFence, endedAt: 301 },
@@ -3297,7 +3516,8 @@ describe("provider-neutral browser account acceptance", () => {
       );
 
       setBrowserPhase(pageProblems, "slot-revocation-reauthentication");
-      const alphaSlot = (await sessionSet(page)).slots.find(
+      const projectionBeforeSlotRevocation = await sessionSet(page);
+      const alphaSlot = projectionBeforeSlotRevocation.slots.find(
         (slot) => slot.displayName === alpha.displayName,
       );
       if (!alphaSlot) throw new Error("Alpha slot missing before re-authentication");
@@ -3305,8 +3525,15 @@ describe("provider-neutral browser account acceptance", () => {
         delete from auth_sessions where id = (
           select auth_session_id from managed_auth_login_slots where id = ${alphaSlot.id}
         )`;
+      const slotRevocationReloadStartedAt = performance.now();
       await page.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(page, beta.displayName).waitFor();
+      await retirePendingReadsAfterConfirmedDocumentReplacement(page, pageProblems, {
+        confirmedActorEpoch: projectionBeforeSlotRevocation.actorEpoch,
+        dispatchPhase: "cross-slot-deep-link",
+        replacementStartedAt: slotRevocationReloadStartedAt,
+        workspaceId: beta.workspaceId,
+      });
       const reauthMenu = await openAccountMenu(page, beta.displayName);
       const alphaReauthSlot = reauthMenu.getByRole("menuitem", {
         name: new RegExp(alpha.displayName),
