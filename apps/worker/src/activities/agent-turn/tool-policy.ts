@@ -112,6 +112,8 @@ export function lazyToolTransportForTurn(
 export function shouldDeferNonEagerToolPreparation(args: {
   lazyToolTransport: LazyToolTransport | null;
   progressiveDisclosureEnabled: boolean;
+  /** Retained for call-site compatibility; the lazy runtime now gates artifact
+   * and ordinary function calls on the same exact preparation promise. */
   artifactRuntimeAvailable: boolean;
   triggerKind: "next" | "approval";
   triggerType: string;
@@ -119,7 +121,6 @@ export function shouldDeferNonEagerToolPreparation(args: {
   return Boolean(
     args.lazyToolTransport &&
     args.progressiveDisclosureEnabled &&
-    !args.artifactRuntimeAvailable &&
     args.triggerKind === "next" &&
     (args.triggerType === "user.message" || args.triggerType === "system.update.delivered"),
   );

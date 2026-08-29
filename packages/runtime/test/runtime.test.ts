@@ -123,6 +123,7 @@ import {
   type ConnectorActionPolicyHooks,
   type RuntimeMetricsHooks,
 } from "../src/index";
+import { baseModelInputFilterForSettings } from "../src/model-input";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
 
@@ -8227,7 +8228,7 @@ describe("runtime event normalization", () => {
     expect(settlement.match(/throw /g)).toHaveLength(1);
   });
 
-  test("waits only for session-eager MCP preparation and defers strict and optional servers", async () => {
+  test("waits only for required session-eager MCP preparation and defers optional eager servers", async () => {
     let releaseOptional!: () => void;
     const optionalConnect = new Promise<void>((resolve) => {
       releaseOptional = resolve;
@@ -8284,7 +8285,7 @@ describe("runtime event normalization", () => {
       [
         { kind: "mcp", id: "eager", eager: true },
         { kind: "mcp", id: "strict" },
-        { kind: "mcp", id: "optional", optional: true },
+        { kind: "mcp", id: "optional", optional: true, eager: true },
       ],
       {
         deferNonEagerUntilToolDemand: true,
@@ -10571,6 +10572,59 @@ describe("provider item id stripping", () => {
     expect("actions" in preserved).toBe(true);
     expect("action" in preserved).toBe(false);
     expect(preserved.id).toBe("cu_abc");
+  });
+
+  test("base model projection inspects only the suffix appended to a huge immutable prefix", async () => {
+    let idReads = 0;
+    const prefix = Array.from({ length: 100_000 }, (_, index) => ({
+      get id() {
+        idReads += 1;
+        return `msg_${index}`;
+      },
+      type: "message",
+      role: "user",
+      content: `history ${index}`,
+    }));
+    const filter = baseModelInputFilterForSettings(testSettings());
+    const run = async (input: Array<Record<string, unknown>>) =>
+      await filter({
+        modelData: { input: input as never },
+        agent: {} as never,
+        context: undefined,
+      });
+
+    const first = await run(prefix);
+    expect(first.input).toHaveLength(prefix.length);
+    expect(idReads).toBe(prefix.length);
+
+    const appended = {
+      get id() {
+        idReads += 1;
+        return "msg_appended";
+      },
+      type: "message",
+      role: "user",
+      content: "new suffix",
+    };
+    const beforeSecond = idReads;
+    const second = await run([...prefix, appended]);
+
+    expect(second.input).toHaveLength(prefix.length + 1);
+    expect(idReads - beforeSecond).toBe(1);
+    expect("id" in (second.input.at(-1) as object)).toBe(false);
+
+    const replacementFirst = {
+      get id() {
+        idReads += 1;
+        return "msg_replacement";
+      },
+      type: "message",
+      role: "user",
+      content: "replacement prefix",
+    };
+    const replacement = await run([replacementFirst, ...prefix.slice(1), appended]);
+    expect((replacement.input[0] as { content?: unknown }).content).toBe("replacement prefix");
+    expect("id" in (replacement.input[0] as object)).toBe(false);
   });
 
   test("callModelInputFilterForSettings always restores generic-dispatch provider history", async () => {

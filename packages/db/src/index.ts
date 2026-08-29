@@ -67971,6 +67971,7 @@ export async function appendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
+  options: SessionEventAppendPersistenceOptions = {},
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -67988,12 +67989,55 @@ export async function appendSessionEventsForTurnAttempt(
     attemptId,
     inputs,
     async () => true,
+    options,
   );
   return {
     events: result.events,
     accepted: result.accepted,
     canonicalStartupMilestones: result.canonicalStartupMilestones,
   };
+}
+
+export type SessionEventAppendPersistencePhase =
+  | "mutation"
+  | "attempt_fence"
+  | "usage_dedupe"
+  | "event_insert"
+  | "startup_projection"
+  | "realtime_projection"
+  | "session_cursor_update";
+
+export type SessionEventAppendPersistenceOptions = {
+  onPhase?: (measurement: {
+    phase: SessionEventAppendPersistencePhase;
+    outcome: "completed" | "failed";
+    durationSeconds: number;
+  }) => void;
+};
+
+async function measureSessionEventAppendPersistencePhase<T>(
+  options: SessionEventAppendPersistenceOptions,
+  phase: SessionEventAppendPersistencePhase,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const startedAt = performance.now();
+  let outcome: "completed" | "failed" = "completed";
+  try {
+    return await operation();
+  } catch (error) {
+    outcome = "failed";
+    throw error;
+  } finally {
+    try {
+      options.onPhase?.({
+        phase,
+        outcome,
+        durationSeconds: Math.max(0, performance.now() - startedAt) / 1_000,
+      });
+    } catch {
+      // Diagnostics must never alter exact event settlement.
+    }
+  }
 }
 
 /**
@@ -68010,6 +68054,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   attemptId: string,
   inputs: AppendEventInput[],
   mutate: (tx: Database) => Promise<boolean>,
+  options: SessionEventAppendPersistenceOptions = {},
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -68036,7 +68081,11 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
           workspaceId,
           activityGateOpen,
           async (tx) => {
-            const mutationApplied = await mutate(tx);
+            const mutationApplied = await measureSessionEventAppendPersistencePhase(
+              options,
+              "mutation",
+              async () => await mutate(tx),
+            );
             if (!mutationApplied) {
               return {
                 events: [],
@@ -68045,13 +68094,18 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                 canonicalStartupMilestones: [],
               };
             }
-            const fence = await lockTurnAttemptWriteFenceTx(tx, {
-              workspaceId,
-              sessionId,
-              turnId,
-              executionGeneration,
-              attemptId,
-            });
+            const fence = await measureSessionEventAppendPersistencePhase(
+              options,
+              "attempt_fence",
+              async () =>
+                await lockTurnAttemptWriteFenceTx(tx, {
+                  workspaceId,
+                  sessionId,
+                  turnId,
+                  executionGeneration,
+                  attemptId,
+                }),
+            );
             const session = fence.session;
             if (!session) throw new Error(`Session not found: ${sessionId}`);
             if (!activityGateOpen && !fence.allowed) {
@@ -68075,28 +68129,32 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                 inputs.map(usageSourceKey).filter((value): value is string => value !== null),
               ),
             ];
-            const existingUsageRows =
-              fence.allowed && incomingUsageKeys.length > 0
-                ? await tx
-                    .select({
-                      id: schema.sessionEvents.id,
-                      payload: schema.sessionEvents.payload,
-                    })
-                    .from(schema.sessionEvents)
-                    .where(
-                      and(
-                        eq(schema.sessionEvents.workspaceId, workspaceId),
-                        eq(schema.sessionEvents.sessionId, sessionId),
-                        eq(schema.sessionEvents.turnId, turnId),
-                        eq(schema.sessionEvents.type, "agent.model.usage"),
-                        eq(schema.sessionEvents.turnAssociation, "current"),
-                        inArray(
-                          sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
-                          incomingUsageKeys,
+            const existingUsageRows = await measureSessionEventAppendPersistencePhase(
+              options,
+              "usage_dedupe",
+              async () =>
+                fence.allowed && incomingUsageKeys.length > 0
+                  ? await tx
+                      .select({
+                        id: schema.sessionEvents.id,
+                        payload: schema.sessionEvents.payload,
+                      })
+                      .from(schema.sessionEvents)
+                      .where(
+                        and(
+                          eq(schema.sessionEvents.workspaceId, workspaceId),
+                          eq(schema.sessionEvents.sessionId, sessionId),
+                          eq(schema.sessionEvents.turnId, turnId),
+                          eq(schema.sessionEvents.type, "agent.model.usage"),
+                          eq(schema.sessionEvents.turnAssociation, "current"),
+                          inArray(
+                            sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
+                            incomingUsageKeys,
+                          ),
                         ),
-                      ),
-                    )
-                : [];
+                      )
+                  : [],
+            );
             const canonicalUsageIds = new Map<string, string>();
             for (const row of existingUsageRows) {
               const value =
@@ -68167,51 +68225,74 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                 occurredAt: input.occurredAt ?? now,
               };
             });
-            const inserted = await tx
-              .insert(schema.sessionEvents)
-              .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
-              .returning();
-            const canonicalStartupMilestones = fence.allowed
-              ? await canonicalTurnStartupMilestonesForInsertedEvents(tx as unknown as Database, {
-                  accountId: session.accountId,
-                  workspaceId,
-                  sessionId,
-                  turnId,
-                  turnCreatedAt: fence.turn!.createdAt,
-                  inserted,
-                  terminalTurnFailed: false,
-                })
-              : [];
+            const inserted = await measureSessionEventAppendPersistencePhase(
+              options,
+              "event_insert",
+              async () =>
+                await tx
+                  .insert(schema.sessionEvents)
+                  .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
+                  .returning(),
+            );
+            const canonicalStartupMilestones = await measureSessionEventAppendPersistencePhase(
+              options,
+              "startup_projection",
+              async () =>
+                fence.allowed
+                  ? await canonicalTurnStartupMilestonesForInsertedEvents(
+                      tx as unknown as Database,
+                      {
+                        accountId: session.accountId,
+                        workspaceId,
+                        sessionId,
+                        turnId,
+                        turnCreatedAt: fence.turn!.createdAt,
+                        inserted,
+                        terminalTurnFailed: false,
+                      },
+                    )
+                  : [],
+            );
             if (fence.allowed) {
-              await projectSessionRealtimeDelegationProgressInTransaction(
-                tx as unknown as Database,
-                {
-                  accountId: session.accountId,
-                  workspaceId,
-                  sessionId,
-                  turnId,
-                  events: inserted.map((event) => ({
-                    id: event.id,
-                    sequence: event.sequence,
-                    type: event.type,
-                    payload: event.payload,
-                  })),
-                  now,
-                },
+              await measureSessionEventAppendPersistencePhase(
+                options,
+                "realtime_projection",
+                async () =>
+                  await projectSessionRealtimeDelegationProgressInTransaction(
+                    tx as unknown as Database,
+                    {
+                      accountId: session.accountId,
+                      workspaceId,
+                      sessionId,
+                      turnId,
+                      events: inserted.map((event) => ({
+                        id: event.id,
+                        sequence: event.sequence,
+                        type: event.type,
+                        payload: event.payload,
+                      })),
+                      now,
+                    },
+                  ),
               );
             }
-            await tx
-              .update(schema.sessions)
-              .set({
-                lastSequence: sequence,
-                ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: now } : {}),
-              })
-              .where(
-                and(
-                  eq(schema.sessions.workspaceId, workspaceId),
-                  eq(schema.sessions.id, sessionId),
-                ),
-              );
+            await measureSessionEventAppendPersistencePhase(
+              options,
+              "session_cursor_update",
+              async () =>
+                await tx
+                  .update(schema.sessions)
+                  .set({
+                    lastSequence: sequence,
+                    ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: now } : {}),
+                  })
+                  .where(
+                    and(
+                      eq(schema.sessions.workspaceId, workspaceId),
+                      eq(schema.sessions.id, sessionId),
+                    ),
+                  ),
+            );
             return {
               events: inserted.map(mapEvent),
               accepted: fence.allowed,
