@@ -1009,8 +1009,8 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       order by c.relname`;
     expect(Array.from(lockedTables)).toEqual(
       [
-        "session_events",
         "session_event_cursors",
+        "session_events",
         "session_turn_attempts",
         "session_turns",
         "sessions",
