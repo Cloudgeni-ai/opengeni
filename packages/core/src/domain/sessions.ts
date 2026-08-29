@@ -2,6 +2,8 @@ import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  resolveModelProvider,
   resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
@@ -1528,16 +1530,56 @@ export function resolveSessionCreateVisibility(input: {
   return input.requestedVisibility === "private" ? "user_private" : "workspace_shared";
 }
 
+async function resolveWorkspaceModelBoundarySettings(
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  grant: AccessGrant,
+  workspaceId: string,
+  modelIds: readonly (string | null | undefined)[],
+): Promise<Settings> {
+  const workspaceModelIds = modelIds.filter(
+    (modelId): modelId is string =>
+      typeof modelId === "string" && modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX),
+  );
+  if (
+    workspaceModelIds.length > 0 &&
+    workspaceModelIds.every((modelId) => resolveModelProvider(deps.settings, modelId) !== undefined)
+  ) {
+    // Stock HTTP/MCP adapters already pass a workspace-resolved settings
+    // snapshot. Re-resolving code mode would feed its synthetic brokered
+    // workspace provider back through deployment validation and turn a normal
+    // policy denial into a 500. Direct core callers with only env settings have
+    // no such model yet and continue into the canonical resolver below.
+    return deps.settings;
+  }
+  const needsWorkspaceResolution =
+    deps.settings.modelCatalogSource === "database" || workspaceModelIds.length > 0;
+  if (!needsWorkspaceResolution) return deps.settings;
+  return (
+    await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+    })
+  ).settings;
+}
+
 export async function createSessionForRequestWithOutcome(
-  deps: ApiRouteDeps,
+  unresolvedDeps: ApiRouteDeps,
   grant: AccessGrant,
   workspaceId: string,
   rawPayload: unknown,
   authorization?: AccessGrantAuthorization,
   agentChildPresentation?: AgentChildSessionCreatePresentation,
 ): Promise<CreateSessionRequestOutcome> {
-  const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
+  const settings = await resolveWorkspaceModelBoundarySettings(
+    unresolvedDeps,
+    grant,
+    workspaceId,
+    [payload.model],
+  );
+  const deps =
+    settings === unresolvedDeps.settings ? unresolvedDeps : { ...unresolvedDeps, settings };
+  const { db, bus, workflowClient, objectStorage } = deps;
   const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
   if (payload.visibility === "private" && !grant.metadata?.["sessionId"]) {
     if (!authorization) {
