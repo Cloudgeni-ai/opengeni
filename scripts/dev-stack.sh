@@ -65,12 +65,8 @@ fi
 if [ -z "${OPENGENI_SANDBOX_DESKTOP_INTERACTIVE:-}" ]; then
   OPENGENI_SANDBOX_DESKTOP_INTERACTIVE=true
 fi
-if [ -z "${OPENGENI_COMPUTER_USE_ENABLED:-}" ]; then
-  OPENGENI_COMPUTER_USE_ENABLED=true
-fi
 export OPENGENI_SANDBOX_DESKTOP_ENABLED
 export OPENGENI_SANDBOX_DESKTOP_INTERACTIVE
-export OPENGENI_COMPUTER_USE_ENABLED
 
 # Local development must exercise the same durable same-session ownership path
 # as managed deployments. The config-library defaults stay fail-closed, while

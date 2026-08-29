@@ -14690,10 +14690,10 @@ export const SessionCapabilities = z.object({
     codecs: z.array(z.enum(["h264-mp4", "vp9-webm"])),
     reason: CapabilityUnavailableReason.nullable(),
   }),
-  // The AGENT drives the SAME :0 (xdotool/XTEST + scrot) the human watches; the
-  // human viewer plane is read-only by default (§6). `available` == desktop-
-  // capable backend && computerUseEnabled; `readOnly` reports whether the agent
-  // driver itself is gated to no-op input (v1 default false — the agent clicks).
+  // Deprecated compatibility cell for clients that predate managed
+  // ComputerSession interaction tools. Newly negotiated documents report this
+  // unavailable/read-only with `disabled_by_policy`; the shape remains so older
+  // clients and persisted payloads still parse.
   ComputerUse: z.object({
     available: z.boolean(),
     readOnly: z.boolean(),

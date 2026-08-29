@@ -74,8 +74,8 @@ The product has several deliberately separate surfaces:
   Memory, preferences, instructions, organization identity, and learning policy
   as distinct authorities.
 - **Artifacts and interaction** support retained files, generated media,
-  editable documents/spreadsheets/presentations, browser control, computer use,
-  terminals, and published outputs.
+  editable documents/spreadsheets/presentations, browser control, managed
+  ComputerSession interaction, terminals, and published outputs.
 - **Embedding and clients** expose a framework-neutral SDK, React surfaces, a
   stock web console, and advanced in-process host seams.
 - **Operations** include usage metering, entitlement admission, billing,
@@ -867,12 +867,20 @@ Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
 
-### 7.5 Artifacts, browser control, and computer use
+### 7.5 Artifacts, browser control, and managed computer sessions
 
 Editable artifacts use `@opengeni/artifact-tool` plus durable collaboration
-services. Browser/computer control uses `@opengeni/interaction` and
-`@opengeni/browserd`, with the selected sandbox or machine providing placement.
-The browser extension is an attachment client, not an authorization service.
+services. Browser and computer control use attempt-scoped managed
+`ComputerSession` tools from `@opengeni/interaction` and `@opengeni/browserd`,
+with the selected sandbox or machine providing placement. Agents do not receive
+the retired model-bound shared-desktop capability; human viewer control remains
+a separate consented surface. The browser extension is an attachment client,
+not an authorization service.
+
+New capability negotiation advertises only `manual` and `on-verify` recording.
+Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
+remain parseable for old events, SDK clients, and retained evidence, but they do
+not register a runnable legacy computer tool.
 
 Static published HTML, retained evidence, Documents/RAG, and editable artifacts
 are different products and must not share mutable truth accidentally.

@@ -210,7 +210,6 @@ import {
 } from "./context-compaction";
 import {
   createSandboxClient,
-  desktopCapableBackend,
   isRoutingMutationOutcomeUnknownError,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
@@ -240,11 +239,9 @@ import {
   type TurnToolCancellationFence,
 } from "./sandbox/turn-tool-cancellation";
 import {
-  computerUse,
   withRetainableSessionImageOutputHook,
-  type ComputerToolMode,
   type RetainableSessionImageOutputHook,
-} from "./sandbox-computer";
+} from "./retained-session-image";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import {
   MultiProviderModelProvider,
@@ -399,25 +396,11 @@ export {
   sandboxCommandStdout,
 };
 
-// P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
-// so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
-// alongside the rest of the runtime. NOT part of the agent-loop-free leaf (it
-// imports computerTool from the @openai/agents root).
 export {
-  SandboxComputer,
-  ComputerUseCapability,
-  computerUse,
-  ComputerUnavailableError,
-  ScreenshotReadError,
-  ComputerReadOnlyError,
-  ComputerActionError,
-  type SandboxComputerOptions,
-  type ComputerUseArgs,
-  type ComputerToolMode,
+  withRetainableSessionImageOutputHook,
   type RetainableSessionImageOutputHook,
   type RetainableSessionImageToolName,
-  type ScreenshotReadErrorCode,
-} from "./sandbox-computer";
+} from "./retained-session-image";
 
 // The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
 // helpers + the config-owned env/port re-exports). Re-exported verbatim so the
@@ -1551,18 +1534,6 @@ export type BuildAgentOptions = {
   supportsImageInput?: boolean;
   /** Exact typed `input_file` MIME allow-list; omitted preserves legacy behavior. */
   inputFileMediaTypes?: readonly string[];
-  // EXPLICIT computer-use tool transport, decided where provider identity is
-  // authoritative (the worker's model resolution — agent-turn.ts). Threaded into
-  // buildAgentCapabilities → computerUse({toolMode}) so tool selection never rests
-  // on the SDK's constructor-name sniff. Omitted means disabled/fail-closed.
-  computerToolMode?: ComputerToolMode;
-  /**
-   * Invoked once, immediately before the first real computer action and after
-   * the display is ready. Merely advertising computer-use does not call it.
-   * The worker uses this seam for computer-use-only recording; ordinary
-   * shell/filesystem turns never pay that cost.
-   */
-  onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
   /** Persist intentional image outputs before the SDK can add them to history. */
   onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
   // The LIVE, by-reference connector-namespace Set from prepareAgentTools
@@ -2345,10 +2316,6 @@ export function buildOpenGeniAgent(
       ...(options.supportsImageInput !== undefined
         ? { supportsImageInput: options.supportsImageInput }
         : {}),
-      ...(options.computerToolMode !== undefined
-        ? { computerToolMode: options.computerToolMode }
-        : {}),
-      ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
       ...(options.onRetainableSessionImageOutput
         ? {
             onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
@@ -2827,7 +2794,7 @@ function installInteractionInterventionPolicy(agent: ApprovalCapableAgent): void
  * by the server's `<id>__` prefix, then the unprefixed tool name. A tool that
  * needs approval raises a run INTERRUPTION, which the worker turns into
  * `session.requiresAction` and resolves via `user.approvalDecision`
- * (resumeApproval) — the same generic path shell/computer-use approvals use, so
+ * (resumeApproval) — the same generic path other tool approvals use, so
  * no extra plumbing. No-op when no server requests approval, so the default
  * (auto-run everything) is byte-for-byte unchanged.
  *
@@ -2897,18 +2864,15 @@ function applyMcpApprovalPolicy(
  * of the hosted ones, by dropping the model instance the SDK's transport
  * detection keys off. See {@link buildAgentCapabilities} for why (codex routes the
  * OpenAIResponsesModel to the ChatGPT backend, which rejects the hosted
- * `apply_patch` AND `computer_use_preview` tool types). The SDK reads
+ * `apply_patch` tool type). The SDK reads
  * hosted-vs-function ONLY from `_modelInstance` (set via `bindModel`); overriding
  * `bindModel` to discard the instance leaves `_modelInstance` undefined, so
  * `supportsApplyPatchTransport` / `supportsStructuredToolOutputTransport` return
  * false and `tools()` emits the function variants — `apply_patch` + text
- * `view_image` for filesystem, and the `computer_*` function tools + text
- * `computer_screenshot` for computer-use. `bindModel` still returns the capability
+ * `view_image` for filesystem. `bindModel` still returns the capability
  * so the SDK's bind chain (`.bind().bindRunAs().bindModel()`) is preserved.
  */
-function neutralizeStructuredToolTransport(
-  capability: ReturnType<typeof filesystem> | ReturnType<typeof computerUse>,
-): void {
+function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesystem>): void {
   // Use `this` (NOT a captured reference to `capability`): the SandboxAgent binds
   // via `cap.clone().bind(session).bindRunAs(runAs).bindModel(model, instance)` and
   // runs tools() on the object the CHAIN returns. Capability.clone() copies this
@@ -3020,10 +2984,6 @@ export function buildAgentCapabilities(
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
-    // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode).
-    // Omitted/unproven transport fails closed with no computer tools.
-    computerToolMode?: ComputerToolMode;
-    onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
     onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
@@ -3048,8 +3008,6 @@ function buildAgentCapabilitiesFromComposition(
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
-    computerToolMode?: ComputerToolMode;
-    onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
     onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
@@ -3110,39 +3068,6 @@ function buildAgentCapabilitiesFromComposition(
         skillComposition.nativeToolNames,
       ),
     );
-  }
-  // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
-  // scrot), but only when the desktop tier is ON, computer-use is enabled, and the
-  // backend is one whose image carries the X stack (descriptorgate — honest about
-  // which backends are desktop-capable today; headless/dev backends never get the
-  // tool, so a misconfigured non-desktop box can't register a tool that always
-  // fails). The capability's tools() bind to the live externally-owned session at
-  // run time (the SandboxAgent merge); xdotool drives :0 regardless of whether any
-  // viewer is attached, so no pixel-tunnel dependency.
-  if (
-    options.supportsImageInput !== false &&
-    settings.computerUseEnabled &&
-    settings.sandboxDesktopEnabled &&
-    desktopCapableBackend(settings.sandboxBackend)
-  ) {
-    // computer-use is ordinary `computer_*` function tools on a proven visual
-    // transport. Chat-wire and omitted/unproven callers fail closed.
-    //
-    // The worker declares an explicit mode from authoritative provider resolution.
-    // Exported/public callers that omit it are unproven and therefore disabled.
-    const computerCapability = computerUse({
-      dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
-      readOnly: settings.computerUseReadOnly,
-      ...(options.turnCancellationSignal ? { abortSignal: options.turnCancellationSignal } : {}),
-      ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
-      ...(options.onRetainableSessionImageOutput
-        ? {
-            onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
-          }
-        : {}),
-      toolMode: options.computerToolMode ?? "disabled",
-    });
-    caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
   }
   if (toolCancellation) {
     for (const capability of caps) {

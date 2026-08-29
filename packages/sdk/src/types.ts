@@ -329,6 +329,7 @@ export type SessionCapabilities = {
     codecs: ("h264-mp4" | "vp9-webm")[];
     reason: CapabilityUnavailableReason | null;
   };
+  /** @deprecated Use the managed ComputerSession interaction tools. */
   ComputerUse: {
     available: boolean;
     readOnly: boolean;
@@ -345,6 +346,7 @@ export type TerminalCapability = SessionCapabilities["Terminal"];
 export type GitCapability = SessionCapabilities["Git"];
 export type DesktopStreamCapability = SessionCapabilities["DesktopStream"];
 export type RecordingCapability = SessionCapabilities["Recording"];
+/** @deprecated Use the managed ComputerSession interaction tools. */
 export type ComputerUseCapability = SessionCapabilities["ComputerUse"];
 
 // ── Stream-surfacing client surface (Phase 5) ───────────────────────────────

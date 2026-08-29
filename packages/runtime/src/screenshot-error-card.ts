@@ -10,7 +10,7 @@
 // to the exact scanline size) rendered from a fixed message, so the provider's image
 // decoder accepts it (an invalid/empty image_url is what 400s the turn). The specific
 // failure REASON (permission denied / null image / timeout / display down) is not in
-// the card — it is logged worker-side by `NativeDesktopComputer.screenshot()`; the
+// the card — it was logged worker-side by the retired desktop adapter; the
 // card's job is only to stop the model from hallucinating a real blank desktop.
 //
 // Regenerate with: `bun run scripts/gen-screenshot-error-card.mjs`

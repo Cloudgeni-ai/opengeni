@@ -52,7 +52,6 @@ const MUTATING_OPS = [
   "fsRemove",
   "ptyOpen",
   "ptyWrite",
-  "desktopInput",
 ];
 const READONLY_OPS = ["ping", "metrics", "fsStat", "fsList", "fsRead"];
 

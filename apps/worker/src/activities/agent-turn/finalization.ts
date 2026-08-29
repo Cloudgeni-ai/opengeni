@@ -46,7 +46,6 @@ import type {
   AttemptIdentityState,
   EventingState,
   ProviderTurnState,
-  RecordingState,
   RenewalState,
   SandboxRuntimeState,
   TurnControlState,
@@ -76,7 +75,6 @@ export type TurnFinalizationDeps = {
   attempt: AttemptIdentityState;
   sandboxState: SandboxRuntimeState;
   renewals: RenewalState;
-  recordingState: RecordingState;
   eventing: EventingState;
   providerTurn: ProviderTurnState;
   workspaceRefs: WorkspaceRefState;
@@ -87,7 +85,6 @@ export type TurnFinalizationDeps = {
   ) => Promise<T>;
   requireResolvedSandboxForMutation: (message: string) => ResumedTurnSandbox;
   stopLeaseHeartbeat: () => void;
-  abandonActiveRecording: (reason: string, disposition?: "failed" | "discard") => Promise<void>;
   turnCompletionMemoryCollector: ReturnType<typeof createModelCheckpointMemoryCollector>;
 };
 
@@ -115,14 +112,12 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     attempt,
     sandboxState,
     renewals,
-    recordingState,
     eventing,
     providerTurn,
     workspaceRefs,
     runWorkspaceMutationForSandbox,
     requireResolvedSandboxForMutation,
     stopLeaseHeartbeat,
-    abandonActiveRecording,
     turnCompletionMemoryCollector,
   } = deps;
   // This is the logical ownership boundary. Abort before any fallible
@@ -435,10 +430,8 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     // Workbench v2 turn-end workspace capture — runs FIRST in
     // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
     // tool ran before this finally, so /workspace is already final; capture is
-    // FS-equivalent to the already-settled recording preparation and the warm
-    // snapshot (neither mutates workspace files). Running it here — BEFORE
-    // preparedTools.close() (which tears down tools / computer-use / the display
-    // stack and is what starts the Modal box exiting a few seconds later) —
+    // FS-equivalent to the warm snapshot (neither mutates workspace files).
+    // Running it here — BEFORE preparedTools.close() tears down tools —
     // gives capture the full live-box margin instead of racing the teardown
     // tail, which was dropping 100% of captures on real Modal desktop boxes
     // ("request cancelled due to container exiting", 0 rows). External module:
@@ -556,17 +549,6 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         () => undefined,
       );
     }
-    // A recording normally closes inside the attempt-fenced turn settlement.
-    // Reaching finally with one still active means settlement threw, never ran,
-    // or lost ownership. Stop ffmpeg and mark only this exact attempt-owned row
-    // failed; publish no event and leave the artifact recoverable on the box.
-    await waitForTurnFinalizerStep(
-      abandonActiveRecording(
-        "activity ended without recording settlement",
-        recordingState.didComputerUse ? "failed" : "discard",
-      ),
-      finalizerSignal,
-    );
     if (sandboxState.resolvedSandbox) {
       // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
       // turn's finished /workspace onto the lease before releasing the holder,

@@ -896,7 +896,7 @@ export async function bindLazySandboxProvisioner(
         // recursion that HANGS the turn — caught live on staging 2026-07-08). The SDK
         // already holds the proxy directly (injected as lazyOwnedSandbox.session), so it
         // gets per-op routing; the worker-side handle (resolvedSandbox: release,
-        // heartbeat, computer-use recording) wants the real box, unproxied.
+        // heartbeat, workspace capture) wants the real box, unproxied.
         return provisioned;
       },
       {

@@ -557,6 +557,11 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
       expect(caps.Git).toBeDefined();
       expect(caps.DesktopStream).toBeDefined();
       expect(caps.Recording).toBeDefined();
+      expect(caps.ComputerUse).toEqual({
+        available: false,
+        readOnly: true,
+        reason: "disabled_by_policy",
+      });
       // reason is null-or-string, never undefined/absent.
       expect(caps.FileSystem.reason === null || typeof caps.FileSystem.reason === "string").toBe(
         true,
@@ -576,6 +581,7 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
     expect(caps.DesktopStream.unredacted).toBe(true);
     expect(caps.DesktopStream.requiresAcknowledgment).toBe(true);
     expect(caps.Recording.available).toBe(true);
+    expect(caps.Recording.modes).toEqual(["manual", "on-verify"]);
     expect(caps.Terminal.transport).toBe("pty-ws"); // modal has real pty
   });
 
@@ -585,6 +591,7 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
     expect(caps.DesktopStream.client).toBe("novnc");
     expect(caps.DesktopStream.reason).toBeNull();
     expect(caps.Recording.available).toBe(true);
+    expect(caps.Recording.modes).toEqual(["manual", "on-verify"]);
     expect(caps.Terminal.transport).toBe("pty-ws");
     expect(caps.Git.available).toBe(true);
   });
