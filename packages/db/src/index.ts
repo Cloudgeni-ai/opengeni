@@ -67975,7 +67975,7 @@ export async function appendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
-  options: SessionEventAppendPersistenceOptions = {},
+  observer?: SessionEventAppendObserver,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -67993,7 +67993,7 @@ export async function appendSessionEventsForTurnAttempt(
     attemptId,
     inputs,
     async () => true,
-    options,
+    observer,
   );
   return {
     events: result.events,
@@ -68002,45 +68002,76 @@ export async function appendSessionEventsForTurnAttempt(
   };
 }
 
-export type SessionEventAppendPersistencePhase =
+export type SessionEventAppendClass = "raw" | "semantic" | "mixed";
+export type SessionEventAppendPhase =
+  | "transaction"
   | "mutation"
-  | "attempt_fence"
-  | "usage_dedupe"
+  | "turn_attempt_fence"
+  | "idempotency"
   | "event_insert"
-  | "startup_projection"
-  | "realtime_projection"
-  | "session_cursor_update";
-
-export type SessionEventAppendPersistenceOptions = {
-  onPhase?: (measurement: {
-    phase: SessionEventAppendPersistencePhase;
-    outcome: "completed" | "failed";
-    durationSeconds: number;
-  }) => void;
+  | "projection"
+  | "sequence_update";
+export type SessionEventAppendPhaseOutcome =
+  | "ok"
+  | "rejected"
+  | "mutation_skipped"
+  | "escalated"
+  | "error";
+export type SessionEventAppendPhaseObservation = {
+  phase: SessionEventAppendPhase;
+  eventClass: SessionEventAppendClass;
+  eventCount: number;
+  outcome: SessionEventAppendPhaseOutcome;
+  durationSeconds: number;
+};
+export type SessionEventAppendObserver = {
+  onPhase?: (observation: SessionEventAppendPhaseObservation) => void;
 };
 
-async function measureSessionEventAppendPersistencePhase<T>(
-  options: SessionEventAppendPersistenceOptions,
-  phase: SessionEventAppendPersistencePhase,
+export function sessionEventAppendClass(
+  inputs: ReadonlyArray<{ type: string }>,
+): SessionEventAppendClass {
+  const rawCount = inputs.filter((input) =>
+    SESSION_EVENT_RAW_DELTA_TYPE_SET.has(input.type),
+  ).length;
+  if (rawCount === inputs.length) return "raw";
+  if (rawCount === 0) return "semantic";
+  return "mixed";
+}
+
+export function observeSessionEventAppendPhase(
+  observer: SessionEventAppendObserver | undefined,
+  observation: SessionEventAppendPhaseObservation,
+): void {
+  try {
+    observer?.onPhase?.(observation);
+  } catch {
+    // Telemetry must never affect durable event admission or ordering.
+  }
+}
+
+async function runSessionEventAppendPhase<T>(
+  observer: SessionEventAppendObserver | undefined,
+  input: Omit<SessionEventAppendPhaseObservation, "durationSeconds" | "outcome">,
   operation: () => Promise<T>,
+  outcome: (value: T) => SessionEventAppendPhaseOutcome = () => "ok",
 ): Promise<T> {
   const startedAt = performance.now();
-  let outcome: "completed" | "failed" = "completed";
   try {
-    return await operation();
+    const value = await operation();
+    observeSessionEventAppendPhase(observer, {
+      ...input,
+      outcome: outcome(value),
+      durationSeconds: Math.max(0, (performance.now() - startedAt) / 1_000),
+    });
+    return value;
   } catch (error) {
-    outcome = "failed";
+    observeSessionEventAppendPhase(observer, {
+      ...input,
+      outcome: error instanceof SessionActivityGateEscalation ? "escalated" : "error",
+      durationSeconds: Math.max(0, (performance.now() - startedAt) / 1_000),
+    });
     throw error;
-  } finally {
-    try {
-      options.onPhase?.({
-        phase,
-        outcome,
-        durationSeconds: Math.max(0, performance.now() - startedAt) / 1_000,
-      });
-    } catch {
-      // Diagnostics must never alter exact event settlement.
-    }
   }
 }
 
@@ -68058,7 +68089,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   attemptId: string,
   inputs: AppendEventInput[],
   mutate: (tx: Database) => Promise<boolean>,
-  options: SessionEventAppendPersistenceOptions = {},
+  observer?: SessionEventAppendObserver,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -68069,6 +68100,10 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
     throw new Error("Atomic attempt mutation requires a timeline projection event");
   }
   const eventTypes = [...new Set(inputs.map((input) => input.type))].sort();
+  const phaseInput = {
+    eventClass: sessionEventAppendClass(inputs),
+    eventCount: inputs.length,
+  };
   const initiallyAdvancesActivity = sessionEventTypesAdvanceActivity(inputs);
   const persistence = {
     stage: "session_events.append_for_turn_attempt",
@@ -68076,236 +68111,258 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
     maxAttempts: 3,
     correlationId: crypto.randomUUID(),
   };
-  const persist = async (activityGateOpen: boolean) =>
-    await runIdempotentPersistenceTransaction(
-      persistence,
-      async () =>
-        await withWorkspaceSessionEventActivityRls(
-          db,
-          workspaceId,
-          activityGateOpen,
-          async (tx) => {
-            const mutationApplied = await measureSessionEventAppendPersistencePhase(
-              options,
-              "mutation",
-              async () => await mutate(tx),
-            );
-            if (!mutationApplied) {
-              return {
-                events: [],
-                accepted: false,
-                mutationApplied: false,
-                canonicalStartupMilestones: [],
+  const persist = async (activityGateOpen: boolean) => {
+    const startedAt = performance.now();
+    try {
+      const result = await runIdempotentPersistenceTransaction(
+        persistence,
+        async () =>
+          await withWorkspaceSessionEventActivityRls(
+            db,
+            workspaceId,
+            activityGateOpen,
+            async (tx) => {
+              const mutationApplied = await runSessionEventAppendPhase(
+                observer,
+                { ...phaseInput, phase: "mutation" },
+                async () => await mutate(tx),
+                (applied) => (applied ? "ok" : "mutation_skipped"),
+              );
+              if (!mutationApplied) {
+                return {
+                  events: [],
+                  accepted: false,
+                  mutationApplied: false,
+                  canonicalStartupMilestones: [],
+                };
+              }
+              const fence = await runSessionEventAppendPhase(
+                observer,
+                { ...phaseInput, phase: "turn_attempt_fence" },
+                async () =>
+                  await lockTurnAttemptWriteFenceTx(tx, {
+                    workspaceId,
+                    sessionId,
+                    turnId,
+                    executionGeneration,
+                    attemptId,
+                  }),
+                (fenceResult) => (fenceResult.allowed ? "ok" : "rejected"),
+              );
+              const session = fence.session;
+              if (!session) throw new Error(`Session not found: ${sessionId}`);
+              if (!activityGateOpen && !fence.allowed) {
+                throw new SessionActivityGateEscalation();
+              }
+              let sequence = session.lastSequence;
+              const now = new Date();
+              const usageSourceKey = (input: AppendEventInput): string | null => {
+                if (
+                  input.type !== "agent.model.usage" ||
+                  !input.payload ||
+                  typeof input.payload !== "object"
+                ) {
+                  return null;
+                }
+                const value = (input.payload as Record<string, unknown>).sourceKey;
+                return typeof value === "string" && value.length > 0 ? value : null;
               };
-            }
-            const fence = await measureSessionEventAppendPersistencePhase(
-              options,
-              "attempt_fence",
-              async () =>
-                await lockTurnAttemptWriteFenceTx(tx, {
-                  workspaceId,
-                  sessionId,
-                  turnId,
-                  executionGeneration,
-                  attemptId,
-                }),
-            );
-            const session = fence.session;
-            if (!session) throw new Error(`Session not found: ${sessionId}`);
-            if (!activityGateOpen && !fence.allowed) {
-              throw new SessionActivityGateEscalation();
-            }
-            let sequence = session.lastSequence;
-            const now = new Date();
-            const usageSourceKey = (input: AppendEventInput): string | null => {
-              if (
-                input.type !== "agent.model.usage" ||
-                !input.payload ||
-                typeof input.payload !== "object"
-              ) {
-                return null;
-              }
-              const value = (input.payload as Record<string, unknown>).sourceKey;
-              return typeof value === "string" && value.length > 0 ? value : null;
-            };
-            const incomingUsageKeys = [
-              ...new Set(
-                inputs.map(usageSourceKey).filter((value): value is string => value !== null),
-              ),
-            ];
-            const existingUsageRows = await measureSessionEventAppendPersistencePhase(
-              options,
-              "usage_dedupe",
-              async () =>
-                fence.allowed && incomingUsageKeys.length > 0
-                  ? await tx
-                      .select({
-                        id: schema.sessionEvents.id,
-                        payload: schema.sessionEvents.payload,
-                      })
-                      .from(schema.sessionEvents)
-                      .where(
-                        and(
-                          eq(schema.sessionEvents.workspaceId, workspaceId),
-                          eq(schema.sessionEvents.sessionId, sessionId),
-                          eq(schema.sessionEvents.turnId, turnId),
-                          eq(schema.sessionEvents.type, "agent.model.usage"),
-                          eq(schema.sessionEvents.turnAssociation, "current"),
-                          inArray(
-                            sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
-                            incomingUsageKeys,
+              const incomingUsageKeys = [
+                ...new Set(
+                  inputs.map(usageSourceKey).filter((value): value is string => value !== null),
+                ),
+              ];
+              const existingUsageRows = await runSessionEventAppendPhase(
+                observer,
+                { ...phaseInput, phase: "idempotency" },
+                async () =>
+                  fence.allowed && incomingUsageKeys.length > 0
+                    ? await tx
+                        .select({
+                          id: schema.sessionEvents.id,
+                          payload: schema.sessionEvents.payload,
+                        })
+                        .from(schema.sessionEvents)
+                        .where(
+                          and(
+                            eq(schema.sessionEvents.workspaceId, workspaceId),
+                            eq(schema.sessionEvents.sessionId, sessionId),
+                            eq(schema.sessionEvents.turnId, turnId),
+                            eq(schema.sessionEvents.type, "agent.model.usage"),
+                            eq(schema.sessionEvents.turnAssociation, "current"),
+                            inArray(
+                              sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
+                              incomingUsageKeys,
+                            ),
                           ),
-                        ),
-                      )
-                  : [],
-            );
-            const canonicalUsageIds = new Map<string, string>();
-            for (const row of existingUsageRows) {
-              const value =
-                row.payload && typeof row.payload === "object"
-                  ? (row.payload as Record<string, unknown>).sourceKey
-                  : null;
-              if (typeof value === "string" && value.length > 0) {
-                canonicalUsageIds.set(value, row.id);
+                        )
+                    : [],
+              );
+              const canonicalUsageIds = new Map<string, string>();
+              for (const row of existingUsageRows) {
+                const value =
+                  row.payload && typeof row.payload === "object"
+                    ? (row.payload as Record<string, unknown>).sourceKey
+                    : null;
+                if (typeof value === "string" && value.length > 0) {
+                  canonicalUsageIds.set(value, row.id);
+                }
               }
-            }
-            const values = inputs.map((input) => {
-              const id = crypto.randomUUID();
-              if (!fence.allowed) {
+              const values = inputs.map((input) => {
+                const id = crypto.randomUUID();
+                if (!fence.allowed) {
+                  return {
+                    id,
+                    accountId: session.accountId,
+                    workspaceId,
+                    sessionId,
+                    sequence: ++sequence,
+                    type: "turn.event.rejected_late",
+                    payload: {
+                      rejectedType: input.type,
+                      rejectedPayload: input.payload ?? {},
+                      reason: fence.reason,
+                      expectedExecutionGeneration: executionGeneration,
+                      rejectedAttemptId: attemptId,
+                      currentExecutionGeneration: fence.turn?.executionGeneration ?? null,
+                      currentAttemptId: fence.turn?.activeAttemptId ?? null,
+                      currentTurnStatus: fence.turn?.status ?? null,
+                      currentActiveTurnId: session.activeTurnId,
+                    },
+                    clientEventId: input.clientEventId ?? null,
+                    turnId,
+                    turnGeneration: executionGeneration,
+                    turnAttemptId: attemptId,
+                    turnAssociation: "late_rejected" as const,
+                    duplicateOfEventId: null,
+                    duplicateReason: null,
+                    producerId: input.producerId ?? null,
+                    producerSeq: input.producerSeq ?? null,
+                    occurredAt: input.occurredAt ?? now,
+                  };
+                }
+                const sourceKey = usageSourceKey(input);
+                const duplicateOfEventId = sourceKey
+                  ? (canonicalUsageIds.get(sourceKey) ?? null)
+                  : null;
+                if (sourceKey && !duplicateOfEventId) {
+                  canonicalUsageIds.set(sourceKey, id);
+                }
                 return {
                   id,
                   accountId: session.accountId,
                   workspaceId,
                   sessionId,
                   sequence: ++sequence,
-                  type: "turn.event.rejected_late",
-                  payload: {
-                    rejectedType: input.type,
-                    rejectedPayload: input.payload ?? {},
-                    reason: fence.reason,
-                    expectedExecutionGeneration: executionGeneration,
-                    rejectedAttemptId: attemptId,
-                    currentExecutionGeneration: fence.turn?.executionGeneration ?? null,
-                    currentAttemptId: fence.turn?.activeAttemptId ?? null,
-                    currentTurnStatus: fence.turn?.status ?? null,
-                    currentActiveTurnId: session.activeTurnId,
-                  },
+                  type: input.type,
+                  payload: input.payload ?? {},
                   clientEventId: input.clientEventId ?? null,
                   turnId,
                   turnGeneration: executionGeneration,
                   turnAttemptId: attemptId,
-                  turnAssociation: "late_rejected" as const,
-                  duplicateOfEventId: null,
-                  duplicateReason: null,
+                  turnAssociation: duplicateOfEventId
+                    ? ("duplicate" as const)
+                    : ("current" as const),
+                  duplicateOfEventId,
+                  duplicateReason: duplicateOfEventId ? "duplicate_provider_response_usage" : null,
                   producerId: input.producerId ?? null,
                   producerSeq: input.producerSeq ?? null,
                   occurredAt: input.occurredAt ?? now,
                 };
-              }
-              const sourceKey = usageSourceKey(input);
-              const duplicateOfEventId = sourceKey
-                ? (canonicalUsageIds.get(sourceKey) ?? null)
-                : null;
-              if (sourceKey && !duplicateOfEventId) {
-                canonicalUsageIds.set(sourceKey, id);
-              }
-              return {
-                id,
-                accountId: session.accountId,
-                workspaceId,
-                sessionId,
-                sequence: ++sequence,
-                type: input.type,
-                payload: input.payload ?? {},
-                clientEventId: input.clientEventId ?? null,
-                turnId,
-                turnGeneration: executionGeneration,
-                turnAttemptId: attemptId,
-                turnAssociation: duplicateOfEventId ? ("duplicate" as const) : ("current" as const),
-                duplicateOfEventId,
-                duplicateReason: duplicateOfEventId ? "duplicate_provider_response_usage" : null,
-                producerId: input.producerId ?? null,
-                producerSeq: input.producerSeq ?? null,
-                occurredAt: input.occurredAt ?? now,
-              };
-            });
-            const inserted = await measureSessionEventAppendPersistencePhase(
-              options,
-              "event_insert",
-              async () =>
-                await tx
-                  .insert(schema.sessionEvents)
-                  .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
-                  .returning(),
-            );
-            const canonicalStartupMilestones = await measureSessionEventAppendPersistencePhase(
-              options,
-              "startup_projection",
-              async () =>
-                fence.allowed
-                  ? await canonicalTurnStartupMilestonesForInsertedEvents(
+              });
+              const inserted = await runSessionEventAppendPhase(
+                observer,
+                { ...phaseInput, phase: "event_insert" },
+                async () =>
+                  await tx
+                    .insert(schema.sessionEvents)
+                    .values(
+                      withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"),
+                    )
+                    .returning(),
+              );
+              const canonicalStartupMilestones = await runSessionEventAppendPhase(
+                observer,
+                { ...phaseInput, phase: "projection" },
+                async () => {
+                  const milestones = fence.allowed
+                    ? await canonicalTurnStartupMilestonesForInsertedEvents(
+                        tx as unknown as Database,
+                        {
+                          accountId: session.accountId,
+                          workspaceId,
+                          sessionId,
+                          turnId,
+                          turnCreatedAt: fence.turn!.createdAt,
+                          inserted,
+                          terminalTurnFailed: false,
+                        },
+                      )
+                    : [];
+                  if (fence.allowed) {
+                    await projectSessionRealtimeDelegationProgressInTransaction(
                       tx as unknown as Database,
                       {
                         accountId: session.accountId,
                         workspaceId,
                         sessionId,
                         turnId,
-                        turnCreatedAt: fence.turn!.createdAt,
-                        inserted,
-                        terminalTurnFailed: false,
+                        events: inserted.map((event) => ({
+                          id: event.id,
+                          sequence: event.sequence,
+                          type: event.type,
+                          payload: event.payload,
+                        })),
+                        now,
                       },
-                    )
-                  : [],
-            );
-            if (fence.allowed) {
-              await measureSessionEventAppendPersistencePhase(
-                options,
-                "realtime_projection",
-                async () =>
-                  await projectSessionRealtimeDelegationProgressInTransaction(
-                    tx as unknown as Database,
-                    {
-                      accountId: session.accountId,
-                      workspaceId,
-                      sessionId,
-                      turnId,
-                      events: inserted.map((event) => ({
-                        id: event.id,
-                        sequence: event.sequence,
-                        type: event.type,
-                        payload: event.payload,
-                      })),
-                      now,
-                    },
-                  ),
+                    );
+                  }
+                  return milestones;
+                },
               );
-            }
-            await measureSessionEventAppendPersistencePhase(
-              options,
-              "session_cursor_update",
-              async () =>
-                await tx
-                  .update(schema.sessions)
-                  .set({
-                    lastSequence: sequence,
-                    ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: now } : {}),
-                  })
-                  .where(
-                    and(
-                      eq(schema.sessions.workspaceId, workspaceId),
-                      eq(schema.sessions.id, sessionId),
+              await runSessionEventAppendPhase(
+                observer,
+                { ...phaseInput, phase: "sequence_update" },
+                async () =>
+                  await tx
+                    .update(schema.sessions)
+                    .set({
+                      lastSequence: sequence,
+                      ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: now } : {}),
+                    })
+                    .where(
+                      and(
+                        eq(schema.sessions.workspaceId, workspaceId),
+                        eq(schema.sessions.id, sessionId),
+                      ),
                     ),
-                  ),
-            );
-            return {
-              events: inserted.map(mapEvent),
-              accepted: fence.allowed,
-              mutationApplied: true,
-              canonicalStartupMilestones,
-            };
-          },
-        ),
-    );
+              );
+              return {
+                events: inserted.map(mapEvent),
+                accepted: fence.allowed,
+                mutationApplied: true,
+                canonicalStartupMilestones,
+              };
+            },
+          ),
+      );
+      observeSessionEventAppendPhase(observer, {
+        ...phaseInput,
+        phase: "transaction",
+        outcome: !result.mutationApplied ? "mutation_skipped" : result.accepted ? "ok" : "rejected",
+        durationSeconds: Math.max(0, (performance.now() - startedAt) / 1_000),
+      });
+      return result;
+    } catch (error) {
+      observeSessionEventAppendPhase(observer, {
+        ...phaseInput,
+        phase: "transaction",
+        outcome: error instanceof SessionActivityGateEscalation ? "escalated" : "error",
+        durationSeconds: Math.max(0, (performance.now() - startedAt) / 1_000),
+      });
+      throw error;
+    }
+  };
   try {
     return await persist(initiallyAdvancesActivity);
   } catch (error) {
