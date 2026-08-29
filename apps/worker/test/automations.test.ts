@@ -127,6 +127,79 @@ describe("automation dispatch activity", () => {
     expect(recordUsage).toHaveBeenCalledTimes(1);
   });
 
+  test("preserves an explicit Codex subscription model through admission and session creation", async () => {
+    const codexRun: AutomationRunExecution = {
+      ...run,
+      acceptedExecution: {
+        ...run.acceptedExecution,
+        sessionTemplate: {
+          ...run.acceptedExecution.sessionTemplate,
+          model: "codex/gpt-5.6-sol",
+        },
+      },
+    };
+    const admit = mock(async () => null);
+    let createInput: Record<string, unknown> | null = null;
+    const activity = createAutomationActivities(
+      async () => {
+        const service = await services()();
+        return {
+          ...service,
+          settings: testSettings({
+            sandboxBackend: "none",
+            codexSubscriptionEnabled: true,
+          }),
+        };
+      },
+      {
+        claim: async () => codexRun,
+        settle: async () => undefined,
+        admit,
+        assertModelPolicy: async () => undefined,
+        assertAuthority: async () => undefined,
+        recordUsage: async () => undefined,
+        createSession: (async (input) => {
+          createInput = input as unknown as Record<string, unknown>;
+          return {
+            session: {
+              id: sessionId,
+              createdBy: {
+                kind: "service",
+                subjectId: codexRun.acceptedExecution.serviceSubjectId,
+                label: codexRun.acceptedExecution.serviceLabel,
+              },
+              createdByContext: codexRun.acceptedExecution.provenance,
+            },
+            outcome: "created",
+            replay: false,
+            changed: true,
+          } as never;
+        }) as never,
+      },
+    );
+
+    expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+      action: "started",
+      sessionId,
+    });
+    expect(admit).toHaveBeenCalledWith(expect.anything(), {
+      accountId,
+      workspaceId,
+      model: "codex/gpt-5.6-sol",
+      requestedAgentRuns: 1,
+    });
+    expect(createInput).toMatchObject({
+      model: "codex/gpt-5.6-sol",
+      turnExecutionPolicy: {
+        productModelId: "codex/gpt-5.6-sol",
+        requestedModelId: "codex/gpt-5.6-sol",
+        modelSource: "explicit",
+        credentialSource: { kind: "connected_subscription", provider: "codex" },
+        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      },
+    });
+  });
+
   test("settles a run as skipped when live authority is revoked before session commit", async () => {
     const settle = mock(async () => undefined);
     const activity = createAutomationActivities(services(), {
