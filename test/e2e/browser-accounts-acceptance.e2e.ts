@@ -239,6 +239,11 @@ const DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES = new Set([
   "independent-set-after-other-logout-all",
 ]);
 
+// Session-page hooks now own their native request lifetime just like the
+// catalog hooks above. A deliberate route/document replacement may therefore
+// cancel only the exact paged session-list GET dispatched by that same phase.
+const DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES = DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES;
+
 const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
   ["late-old-epoch-primary-settled-before-old-release", new Set(["late-old-epoch-alpha-to-beta"])],
   ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
@@ -420,6 +425,15 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     input.dispatchPhase === input.responsePhase &&
     DOCUMENT_WORKSPACE_CATALOG_CANCELLATION_PHASES.has(input.responsePhase) &&
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname);
+  const isExpectedDocumentSessionPageCancellation =
+    isCancellation &&
+    !isConnectionReset &&
+    input.method === "GET" &&
+    input.actorEpoch !== null &&
+    input.dispatchPhase === input.responsePhase &&
+    DOCUMENT_SESSION_PAGE_CANCELLATION_PHASES.has(input.responsePhase) &&
+    /^\/v1\/workspaces\/[0-9a-f-]+\/sessions$/u.test(pathname) &&
+    requestUrl.searchParams.get("view") === "page";
   const isExpectedDocumentBootstrapCancellation =
     isCancellation &&
     !isConnectionReset &&
@@ -434,6 +448,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     isAcceptedActorTransitionCancellation ||
     isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
+    isExpectedDocumentSessionPageCancellation ||
     isExpectedDocumentBootstrapCancellation
   ) {
     return null;
@@ -2546,6 +2561,20 @@ describe("provider-neutral browser account acceptance", () => {
       requestFailureProblem({
         ...evidenceCatalogRead,
         url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
+      }),
+    ).toContain("/sessions");
+    const evidenceSessionPageRead = {
+      ...evidenceCatalogRead,
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?view=page&limit=50&parentSessionId=null`,
+    };
+    expect(requestFailureProblem(evidenceSessionPageRead)).toBeNull();
+    expect(
+      requestFailureProblem({ ...evidenceSessionPageRead, failure: "NS_ERROR_NET_RESET" }),
+    ).toContain("/sessions");
+    expect(
+      requestFailureProblem({
+        ...evidenceSessionPageRead,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions?view=array`,
       }),
     ).toContain("/sessions");
     const crossTabBootstrapRead = {
