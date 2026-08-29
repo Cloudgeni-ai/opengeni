@@ -3,6 +3,7 @@ import {
   ArrowLeftIcon,
   BrainCircuitIcon,
   Building2Icon,
+  Code2Icon,
   CreditCardIcon,
   DatabaseIcon,
   LayoutDashboardIcon,
@@ -27,6 +28,7 @@ const ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "people", label: "People & invitations", icon: UsersIcon },
   { id: "recovery", label: "Recovery", icon: ShieldCheckIcon },
   { id: "retention", label: "Retention", icon: DatabaseIcon },
+  { id: "developer", label: "Developer", icon: Code2Icon },
   { id: "billing", label: "Billing", icon: CreditCardIcon },
 ];
 
@@ -52,6 +54,10 @@ const COPY: Record<OrganizationAdminSection, { title: string; description: strin
     title: "Retention",
     description: "Control how long organization data is retained.",
   },
+  developer: {
+    title: "Developer",
+    description: "Connect your product to every organization workspace.",
+  },
   billing: {
     title: "Billing",
     description: "Credits, usage, plan entitlements, and payment settings.",
@@ -73,6 +79,8 @@ export function OrganizationSettingsShell({
   return (
     <div
       data-workspace-scroll-owner="self-managed"
+      tabIndex={0}
+      aria-label="Organization settings page"
       className="h-dvh overflow-x-hidden overflow-y-auto overscroll-y-contain bg-bg text-fg lg:grid lg:min-h-0 lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden"
     >
       <a
@@ -122,7 +130,7 @@ export function OrganizationSettingsShell({
 
           <nav
             aria-label="Organization settings"
-            className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-6 lg:flex lg:flex-col"
+            className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-4 lg:flex lg:flex-col"
           >
             {ITEMS.map((item) => {
               const Icon = item.icon;

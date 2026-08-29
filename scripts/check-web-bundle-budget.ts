@@ -351,6 +351,13 @@ const budgets = {
   // Linux/x64 Bun 1.4 graph measures 2,242,670 raw bytes. Advance only the
   // policy-derived raw envelope while gzip, file-count, initial, per-file,
   // lazy-chunk, and CSS caps remain fixed.
+  // Organization API-key management adds three typed methods to the shared SDK
+  // client while the Developer settings surface remains lazy. On exact current
+  // main, Linux/x64 Bun 1.4 measures 2,264,303 raw / 634,542 gzip bytes across
+  // the same 32 files; current main alone measures 2,242,670 raw bytes.
+  // Advance only these direct-session aggregates to the policy-derived 2,213-KiB
+  // raw envelope and 622-KiB gzip envelope. Initial, file-count, per-file, lazy,
+  // and CSS caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
@@ -368,7 +375,7 @@ const budgets = {
 // per-file, lazy, and CSS cap unchanged.
 const effectiveBudgets = {
   ...budgets,
-  directSessionGzip: Math.max(budgets.directSessionGzip, 615 * kib),
+  directSessionGzip: Math.max(budgets.directSessionGzip, 622 * kib),
   directSessionFiles: Math.max(budgets.directSessionFiles, 32),
 } as const;
 

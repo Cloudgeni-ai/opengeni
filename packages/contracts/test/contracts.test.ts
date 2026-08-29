@@ -23,6 +23,8 @@ import {
   CreateDocumentBaseRequest,
   CreateCheckoutRequest,
   CreateApiKeyRequest,
+  CreateOrganizationApiKeyRequest,
+  EnsureWorkspaceRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   DocumentSearchRequest,
@@ -116,6 +118,62 @@ describe("API key descriptions", () => {
     expect(CreateApiKeyRequest.safeParse({ ...base, description: "x".repeat(501) }).success).toBe(
       false,
     );
+  });
+
+  test("organization API key requests are strict, trimmed, and bounded", () => {
+    expect(
+      CreateOrganizationApiKeyRequest.parse({
+        name: "  Product backend  ",
+        description: "  Provisions tenants  ",
+        expiresAt: "2027-01-01T00:00:00+00:00",
+      }),
+    ).toEqual({
+      name: "Product backend",
+      description: "Provisions tenants",
+      expiresAt: "2027-01-01T00:00:00+00:00",
+    });
+    expect(
+      CreateOrganizationApiKeyRequest.safeParse({ name: "backend", permissions: [] }).success,
+    ).toBe(false);
+    expect(CreateOrganizationApiKeyRequest.safeParse({ name: "x".repeat(201) }).success).toBe(
+      false,
+    );
+  });
+});
+
+describe("external workspace identity", () => {
+  test("requires a strict, bounded, trimmed stable identity", () => {
+    const accountId = "11111111-1111-4111-8111-111111111111";
+    expect(
+      EnsureWorkspaceRequest.parse({
+        accountId,
+        externalSource: "  acme-product  ",
+        externalId: "  tenant-42  ",
+        name: "  Acme tenant  ",
+      }),
+    ).toEqual({
+      accountId,
+      externalSource: "acme-product",
+      externalId: "tenant-42",
+      name: "Acme tenant",
+    });
+    expect(
+      EnsureWorkspaceRequest.safeParse({
+        accountId,
+        externalSource: "acme-product",
+        externalId: "tenant-42",
+        name: "Acme tenant",
+        settings: {},
+      }).success,
+    ).toBe(false);
+    expect(
+      EnsureWorkspaceRequest.safeParse({
+        accountId,
+        externalSource: "acme-product",
+        externalId: "x".repeat(1025),
+        name: "Acme tenant",
+      }).success,
+    ).toBe(false);
   });
 });
 

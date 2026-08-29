@@ -1,11 +1,31 @@
-import { CreateApiKeyRequest, CreateApiKeyResponse, Permission } from "@opengeni/contracts";
-import { createApiKey, listApiKeys, revokeApiKey } from "@opengeni/db";
+import {
+  CreateApiKeyRequest,
+  CreateApiKeyResponse,
+  CreateOrganizationApiKeyRequest,
+  Permission,
+  type AccessContext,
+} from "@opengeni/contracts";
+import {
+  createApiKey,
+  listApiKeys,
+  listOrganizationApiKeys,
+  revokeApiKey,
+  revokeOrganizationApiKey,
+} from "@opengeni/db";
 import { zValidator } from "@hono/zod-validator";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { requireAccessGrant } from "@opengeni/core";
+import { requireAccessContext, requireAccessGrant } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
+
+export const organizationApiKeyPermissions: Permission[] = [
+  "account:read",
+  "workspace:create",
+  "workspace:read",
+  "workspace:admin",
+  "api_keys:manage",
+];
 
 export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/api-keys", async (c) => {
@@ -51,6 +71,66 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "api_keys:manage");
     return c.json(await revokeApiKey(deps.db, workspaceId, c.req.param("apiKeyId")));
   });
+
+  app.get("/v1/organizations/:organizationId/api-keys", async (c) => {
+    const organizationId = c.req.param("organizationId");
+    const context = await requireAccessContext(c, deps);
+    requireAccountPermission(context, organizationId, "api_keys:manage");
+    return c.json({ apiKeys: await listOrganizationApiKeys(deps.db, organizationId) });
+  });
+
+  app.post(
+    "/v1/organizations/:organizationId/api-keys",
+    zValidator("json", CreateOrganizationApiKeyRequest),
+    async (c) => {
+      const organizationId = c.req.param("organizationId");
+      const context = await requireAccessContext(c, deps);
+      requireAccountPermission(context, organizationId, "api_keys:manage");
+      await requireLimit(deps, {
+        accountId: organizationId,
+        action: "api_key:create",
+        quantity: 1,
+      });
+      const body = c.req.valid("json");
+      const token = generateApiKeyToken();
+      const apiKey = await createApiKey(deps.db, {
+        accountId: organizationId,
+        workspaceId: null,
+        name: body.name,
+        description: body.description ?? null,
+        prefix: token.slice(0, 14),
+        keyHash: await sha256Hex(token),
+        permissions: organizationApiKeyPermissions,
+        expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
+      });
+      return c.json(CreateApiKeyResponse.parse({ apiKey, token }), 201);
+    },
+  );
+
+  app.delete("/v1/organizations/:organizationId/api-keys/:apiKeyId", async (c) => {
+    const organizationId = c.req.param("organizationId");
+    const context = await requireAccessContext(c, deps);
+    requireAccountPermission(context, organizationId, "api_keys:manage");
+    const apiKey = await revokeOrganizationApiKey(deps.db, organizationId, c.req.param("apiKeyId"));
+    if (!apiKey) {
+      throw new HTTPException(404, { message: "API key not found" });
+    }
+    return c.json(apiKey);
+  });
+}
+
+function requireAccountPermission(
+  context: AccessContext,
+  accountId: string,
+  permission: Permission,
+): void {
+  const grant = context.accountGrants.find((candidate) => candidate.accountId === accountId);
+  if (
+    !grant ||
+    (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
+  ) {
+    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+  }
 }
 
 function ensureDelegablePermissions(grantPermissions: Permission[], requested: Permission[]): void {

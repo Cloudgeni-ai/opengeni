@@ -58,6 +58,9 @@ Then open the smallest source files that answer the question:
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
 - React hooks + styled components: `packages/react/src/` (hooks on the SDK, timeline projection, ChatComposer/MessageTimeline/SessionStatus/FleetTile, CSS-variable design tokens in `packages/react/styles/`) and `packages/react/README.md`; runnable harness under `packages/react/demo/`.
+- Standalone product integration: `docs/product-integration.md` is canonical for
+  organization API keys, organization workspaces, Personal-workspace exclusion,
+  external tenant mapping, and external Skill ownership.
 
 If paths have moved, find concepts by symbol name, not by old paths:
 
@@ -69,14 +72,34 @@ rg -n "CreateSessionRequest|ClientSessionEvent|sessionWorkflow|runAgentTurn|crea
 
 For external clients, SaaS integrations, SDK wrappers, customer-side coding agents, or UIs on top of OpenGeni, prefer the separate `opengeni-client` skill when available. For TypeScript clients, `@opengeni/sdk` (`packages/sdk`) is the first-party client: typed session/event API, the SSE streaming core (reconnect + replay-by-sequence + dedup), and proxy-through-your-own-API re-streaming helpers. When staying inside this source-level skill, read `references/client-integration.md`. Treat OpenGeni as a service boundary: the client discovers or chooses a workspace, creates sessions under `/v1/workspaces/:workspaceId/...`, streams/replays events, sends follow-up/control events, uploads files, selects resources/tools, and displays approvals/status. Do not require the client to know worker, Temporal, NATS, or sandbox internals except as concepts for status and product behavior.
 
+For the canonical external-product shape, the product backend holds an
+organization API key and calls `ensureWorkspace` /
+`PUT /v1/workspaces/external` for a stable product-tenant mapping. Call the
+result an organization workspace; its wire kind is `"shared"`. Personal
+workspaces are excluded. The external backend stores and versions product
+Skills and passes selected definitions inline in `CreateSessionRequest.skills`
+for each product-created session. Do not document or implement an
+organization-wide Skill registry or Skill inheritance for this boundary. See
+`docs/product-integration.md`.
+
 ## Access, Workspaces, Billing
 
 Keep these boundaries explicit:
 
 - Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; scoped Variable Sets are selected through that boundary but may be organization-, workspace-, or organization-user-owned.
+- External product backends use an **organization API key**. Organization key
+  administration uses `/v1/organizations/:organizationId/api-keys`; the key is
+  server-held and cannot reach Personal workspaces through organization
+  provisioning.
+- An external product tenant maps to an **organization workspace**. The wire
+  kind is `"shared"`; Personal workspaces (`"personal"`) are excluded from
+  `ensureWorkspace` and must not be selected through a default-workspace
+  fallback.
 - Old unscoped operational routes are deleted, not soft-deprecated. Do not add compatibility aliases unless the user explicitly changes that product decision.
 - Better Auth is only the managed-mode browser human auth resolver. It is not the tenant model and should not appear in core session/file/document/schedule route code.
-- OpenGeni product API keys are owned by OpenGeni and use the `Authorization` header. The optional deployment shared key uses `x-opengeni-access-key`.
+- OpenGeni organization API keys are owned by OpenGeni and use the
+  `Authorization` header. The optional deployment shared key uses
+  `x-opengeni-access-key`.
 - Billing, Stripe, prepaid credits, entitlements, usage, and limits belong in billing/access modules. Core route/domain code should check local providers/interfaces, not call Stripe directly.
 - Product access mode (`local`, `configured`, `managed`) is separate from deployment/infrastructure profile (`azure-managed`, existing services, local Kubernetes, previews, and so on).
 - RLS is defense-in-depth. Do not claim RLS-backed isolation from app-level checks alone; verify policies with a non-owner DB role and current workspace/account settings.
@@ -284,6 +307,9 @@ Update this skill in the same change whenever the repo changes any of these:
 - Terminology: session, turn, goal, event, resource, tool, schedule, sandbox, activity, workspace environment.
 - Run lifecycle: the goal continuation loop, the no-run-length-limits principle, and the three-store session memory model (history items / run-state blob / event log).
 - Public workflow: how to create sessions, stream events, upload files, attach resources, approve/interrupt, schedule tasks.
+- Product integration boundary: organization API-key administration,
+  `ensureWorkspace`, organization-workspace wire kind, Personal-workspace
+  exclusion, and external inline Skill ownership.
 - Pluggability model: sandbox backend contract, MCP tool config, model provider config, object storage, GitHub integration.
 - Compute targeting: the Connected Machine (`selfhosted`) primary-compute model, the machines/enrollment routes, per-session `workingDir`, and the `targetSandboxId` create field.
 - Source layout: if important files move or names change.

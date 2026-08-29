@@ -2188,6 +2188,38 @@ export async function listWorkspacesForSubject(
   );
 }
 
+/**
+ * Complete organization-workspace inventory for an account-scoped caller.
+ * Personal workspaces are excluded by the canonical organization-membership
+ * pointer through one narrowly granted set-based database capability; the
+ * public projection is therefore safely emitted as the current wire value
+ * `kind: "shared"`.
+ */
+export async function listSharedWorkspacesForAccount(
+  db: Database,
+  accountId: string,
+): Promise<Workspace[]> {
+  const rows = await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) => {
+    return await scopedDb
+      .select()
+      .from(schema.workspaces)
+      .where(
+        and(
+          eq(schema.workspaces.accountId, accountId),
+          sql`${schema.workspaces.id} in (
+            select workspace_id from list_organization_workspace_ids(${accountId}::uuid)
+          )`,
+        ),
+      )
+      .orderBy(desc(schema.workspaces.createdAt));
+  });
+  return await Promise.all(
+    rows.map(async (row) =>
+      mapWorkspace(row, await workspaceControlProjection(db, row.id), "shared"),
+    ),
+  );
+}
+
 export async function countWorkspacesForAccount(db: Database, accountId: string): Promise<number> {
   const [{ count } = { count: 0 }] = await db
     .select({
@@ -2243,6 +2275,98 @@ export async function createWorkspace(
       },
       "shared",
     );
+  });
+}
+
+export class WorkspaceExternalIdentityConflictError extends Error {
+  constructor() {
+    super("External workspace identity is already in use");
+    this.name = "WorkspaceExternalIdentityConflictError";
+  }
+}
+
+/**
+ * Create an organization workspace exactly once for a stable external tenant
+ * identity. The global unique index is the concurrency arbiter. A replay never
+ * mutates presentation fields supplied by the original create.
+ */
+export async function ensureWorkspaceByExternalIdentity(
+  db: Database,
+  input: {
+    accountId: string;
+    externalSource: string;
+    externalId: string;
+    name: string;
+    slug?: string | null;
+    agentInstructions?: string | null;
+  },
+): Promise<{ workspace: Workspace; created: boolean }> {
+  return await db.transaction(async (tx) => {
+    const [inserted] = await tx
+      .insert(schema.workspaces)
+      .values({
+        accountId: input.accountId,
+        name: input.name,
+        slug: input.slug ?? null,
+        externalSource: input.externalSource,
+        externalId: input.externalId,
+        agentInstructions: input.agentInstructions ?? null,
+      })
+      .onConflictDoNothing({
+        target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+      })
+      .returning();
+
+    if (inserted) {
+      await setRlsContext(tx as unknown as Database, {
+        accountId: inserted.accountId,
+        workspaceId: inserted.id,
+      });
+      await tx.insert(schema.workspaceInferenceControls).values({
+        workspaceId: inserted.id,
+        accountId: inserted.accountId,
+      });
+      return {
+        workspace: mapWorkspace(
+          inserted,
+          {
+            state: "active",
+            revision: 0,
+            reason: null,
+            changedBy: null,
+            changedAt: null,
+          },
+          "shared",
+        ),
+        created: true,
+      };
+    }
+
+    const [existing] = await tx
+      .select()
+      .from(schema.workspaces)
+      .where(
+        and(
+          eq(schema.workspaces.externalSource, input.externalSource),
+          eq(schema.workspaces.externalId, input.externalId),
+        ),
+      )
+      .limit(1);
+    if (!existing || existing.accountId !== input.accountId) {
+      throw new WorkspaceExternalIdentityConflictError();
+    }
+    const kind = await workspaceKindProjection(tx as unknown as Database, existing);
+    if (kind !== "shared") {
+      throw new WorkspaceExternalIdentityConflictError();
+    }
+    return {
+      workspace: mapWorkspace(
+        existing,
+        await workspaceControlProjection(tx as unknown as Database, existing.id),
+        kind,
+      ),
+      created: false,
+    };
   });
 }
 
@@ -3307,6 +3431,17 @@ export async function listApiKeys(db: Database, workspaceId: string): Promise<Ap
   });
 }
 
+export async function listOrganizationApiKeys(db: Database, accountId: string): Promise<ApiKey[]> {
+  return await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.apiKeys)
+      .where(and(eq(schema.apiKeys.accountId, accountId), isNull(schema.apiKeys.workspaceId)))
+      .orderBy(desc(schema.apiKeys.createdAt));
+    return rows.map(mapApiKey);
+  });
+}
+
 export async function countActiveApiKeysForWorkspace(
   db: Database,
   workspaceId: string,
@@ -3320,6 +3455,28 @@ export async function countActiveApiKeysForWorkspace(
       .where(
         and(
           eq(schema.apiKeys.workspaceId, workspaceId),
+          sql`${schema.apiKeys.revokedAt} is null`,
+          sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
+        ),
+      );
+    return Number(count);
+  });
+}
+
+export async function countActiveOrganizationApiKeysForAccount(
+  db: Database,
+  accountId: string,
+): Promise<number> {
+  return await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb
+      .select({
+        count: sql<number>`count(*)::int`,
+      })
+      .from(schema.apiKeys)
+      .where(
+        and(
+          eq(schema.apiKeys.accountId, accountId),
+          isNull(schema.apiKeys.workspaceId),
           sql`${schema.apiKeys.revokedAt} is null`,
           sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
         ),
@@ -3346,6 +3503,30 @@ export async function revokeApiKey(
       throw new Error(`API key not found: ${apiKeyId}`);
     }
     return mapApiKey(row);
+  });
+}
+
+export async function revokeOrganizationApiKey(
+  db: Database,
+  accountId: string,
+  apiKeyId: string,
+): Promise<ApiKey | null> {
+  return await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.apiKeys)
+      .set({
+        revokedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.apiKeys.accountId, accountId),
+          isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.id, apiKeyId),
+        ),
+      )
+      .returning();
+    return row ? mapApiKey(row) : null;
   });
 }
 

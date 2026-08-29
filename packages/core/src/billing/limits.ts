@@ -8,6 +8,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   countActiveApiKeysForWorkspace,
+  countActiveOrganizationApiKeysForAccount,
   countScheduledTasksForWorkspace,
   countWorkspacesForAccount,
   getBillingBalance,
@@ -130,10 +131,12 @@ async function checkStaticCaps(
           );
     }
     case "api_key:create": {
-      if (!limits.maxApiKeysPerWorkspace || !input.workspaceId) {
+      if (!limits.maxApiKeysPerWorkspace) {
         return { allowed: true };
       }
-      const count = await countActiveApiKeysForWorkspace(deps.db, input.workspaceId);
+      const count = input.workspaceId
+        ? await countActiveApiKeysForWorkspace(deps.db, input.workspaceId)
+        : await countActiveOrganizationApiKeysForAccount(deps.db, input.accountId);
       return count < limits.maxApiKeysPerWorkspace
         ? { allowed: true }
         : blocked(

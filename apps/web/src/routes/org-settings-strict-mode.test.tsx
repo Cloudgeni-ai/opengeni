@@ -34,6 +34,19 @@ const createBillingCheckout = mock(async () => {
 const createBillingPortalSession = mock(async () => {
   throw new Error("bounded portal failure");
 });
+const listOrganizationApiKeys = mock(async (_accountId: string) => []);
+const createOrganizationApiKey = mock(async () => {
+  throw new Error("not used");
+});
+const deleteOrganizationApiKey = mock(async () => {
+  throw new Error("not used");
+});
+const useBillingUsage = mock((_options: unknown) => ({
+  loading: false,
+  error: null,
+  usage: [],
+  refresh: async () => undefined,
+}));
 
 const context = {
   client: {
@@ -41,6 +54,9 @@ const context = {
     getBillingEntitlements,
     createBillingCheckout,
     createBillingPortalSession,
+    listOrganizationApiKeys,
+    createOrganizationApiKey,
+    deleteOrganizationApiKey,
   } as unknown as OpenGeniBrowserClient,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
@@ -53,7 +69,7 @@ const context = {
         accountId,
         subjectId: "user:strict-owner",
         role: "owner" as const,
-        permissions: ["billing:read", "billing:manage"],
+        permissions: ["account:admin", "billing:read", "billing:manage", "api_keys:manage"],
       },
     ],
     workspaceGrants: [],
@@ -91,12 +107,7 @@ const context = {
 mock.module("@/context", () => ({ ...ContextModule, useAppContext: () => context }));
 mock.module("@opengeni/react", () => ({
   ...ReactPackage,
-  useBillingUsage: () => ({
-    loading: false,
-    error: null,
-    usage: [],
-    refresh: async () => undefined,
-  }),
+  useBillingUsage,
 }));
 mock.module("@tanstack/react-router", () => ({
   ...RouterPackage,
@@ -160,6 +171,10 @@ describe("organization billing StrictMode ownership", () => {
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("$25.00 available");
     expect(container.textContent).toContain("seats");
+    expect(useBillingUsage.mock.calls.at(-1)?.[0]).toEqual({
+      accountId,
+      enabled: true,
+    });
     expect(container.textContent).toContain(
       "View invoices and manage payment information in Stripe.",
     );
@@ -184,6 +199,32 @@ describe("organization billing StrictMode ownership", () => {
       description: "bounded portal failure",
     });
     expect(button(container, "Open Stripe billing").disabled).toBe(false);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("loads organization keys with the organization SDK method", async () => {
+    listOrganizationApiKeys.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <OrgSettingsRoute workspaceId={workspaceId} section="developer" />
+        </StrictMode>,
+      );
+    });
+    await flush();
+
+    expect(listOrganizationApiKeys.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(
+      listOrganizationApiKeys.mock.calls.every(([seenAccountId]) => seenAccountId === accountId),
+    ).toBe(true);
+    expect(container.textContent).toContain("Organization API keys");
+    expect(container.textContent).toContain("No organization API keys yet");
 
     await act(async () => root.unmount());
     container.remove();

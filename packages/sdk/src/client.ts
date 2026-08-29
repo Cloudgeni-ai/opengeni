@@ -184,6 +184,7 @@ import type {
   VerifyPersonalGitHubRepositorySelectionsRequest,
   CreateApiKeyRequest,
   CreateApiKeyResponse,
+  CreateOrganizationApiKeyRequest,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -216,6 +217,8 @@ import type {
   ResolveVariableSetAttachmentsResponse,
   CreateRigRequest,
   CreateWorkspaceRequest,
+  EnsureWorkspaceRequest,
+  EnsureWorkspaceResponse,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
   // enroll-token mint.
   DeviceEnrollmentApproveRequest,
@@ -4382,6 +4385,18 @@ export class OpenGeniClient {
     return await this.requestJson<Workspace>("POST", "/v1/workspaces", request);
   }
 
+  /**
+   * Create an organization workspace once for a stable external tenant
+   * identity, or return the existing workspace without overwriting it.
+   */
+  async ensureWorkspace(request: EnsureWorkspaceRequest): Promise<EnsureWorkspaceResponse> {
+    return await this.requestJson<EnsureWorkspaceResponse>(
+      "PUT",
+      "/v1/workspaces/external",
+      request,
+    );
+  }
+
   async getWorkspace(workspaceId: string): Promise<Workspace> {
     return await this.requestJson<Workspace>("GET", `/v1/workspaces/${workspaceId}`);
   }
@@ -6871,6 +6886,34 @@ export class OpenGeniClient {
     return await this.requestJson<ApiKey>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/api-keys/${apiKeyId}`,
+    );
+  }
+
+  async listOrganizationApiKeys(organizationId: string): Promise<ApiKey[]> {
+    const response = await this.requestJson<ListApiKeysResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/api-keys`,
+    );
+    return response.apiKeys;
+  }
+
+  /** The returned `token` is shown once; only its prefix is stored. */
+  async createOrganizationApiKey(
+    organizationId: string,
+    request: CreateOrganizationApiKeyRequest,
+  ): Promise<CreateApiKeyResponse> {
+    return await this.requestJson<CreateApiKeyResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/api-keys`,
+      request,
+    );
+  }
+
+  /** Revoke an organization-scoped API key. Returns the revoked key. */
+  async deleteOrganizationApiKey(organizationId: string, apiKeyId: string): Promise<ApiKey> {
+    return await this.requestJson<ApiKey>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
     );
   }
 

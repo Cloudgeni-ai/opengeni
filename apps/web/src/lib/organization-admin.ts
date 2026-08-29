@@ -10,6 +10,7 @@ export const ORGANIZATION_ADMIN_SECTIONS = [
   "people",
   "recovery",
   "retention",
+  "developer",
   "billing",
 ] as const;
 

@@ -116,6 +116,14 @@ export function delegableApiKeyPermissions(grantPermissions: readonly string[]):
   );
 }
 
+export const fixedOrganizationApiKeyPermissions = [
+  "account:read",
+  "workspace:create",
+  "workspace:read",
+  "workspace:admin",
+  "api_keys:manage",
+] as const;
+
 export const defaultApiKeyPermissions = new Set<string>([
   "workspace:read",
   "sessions:create",

@@ -4223,6 +4223,20 @@ export type CreateWorkspaceRequest = {
   agentInstructions?: string | null | undefined;
 };
 
+export type EnsureWorkspaceRequest = {
+  accountId: string;
+  externalSource: string;
+  externalId: string;
+  name: string;
+  slug?: string | undefined;
+  agentInstructions?: string | null | undefined;
+};
+
+export type EnsureWorkspaceResponse = {
+  workspace: Workspace;
+  created: boolean;
+};
+
 export type UpdateWorkspaceRequest = {
   name?: string | undefined;
   slug?: string | null | undefined;
@@ -4255,6 +4269,12 @@ export type CreateApiKeyResponse = {
   apiKey: ApiKey;
   /** The full secret token — shown once at creation, never returned again. */
   token: string;
+};
+
+export type CreateOrganizationApiKeyRequest = {
+  name: string;
+  description?: string | undefined;
+  expiresAt?: string | undefined;
 };
 
 export type ListApiKeysResponse = {

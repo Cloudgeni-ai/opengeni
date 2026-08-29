@@ -1,7 +1,5 @@
-// Organization settings (formerly "Account"): identity, billing balance +
-// usage (from /v1/billing/usage), plan entitlements (from
-// /v1/billing/entitlements), and members. The workspace-scoped API keys section
-// moved to Workspace settings; this surface is the tenant-level console.
+// Organization settings (formerly "Account"): identity, organization API
+// keys, account-wide billing usage, plan entitlements, and members.
 import { useBillingUsage } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -11,7 +9,7 @@ import {
   Loader2Icon,
   RefreshCwIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState } from "@/components/common";
@@ -24,6 +22,7 @@ import {
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
   entitlementEntries,
@@ -52,6 +51,11 @@ import type {
 } from "@/types";
 import { OrganizationKnowledgePrompt } from "./organization-knowledge-prompt";
 import { useCompanyProfileInventory } from "./workspace-state-loader";
+
+const LazyOrganizationApiKeysSection = lazy(async () => {
+  const module = await import("@/components/organization-api-keys-section");
+  return { default: module.OrganizationApiKeysSection };
+});
 
 function OrganizationKnowledgeSummary({
   workspaceId,
@@ -198,6 +202,11 @@ export function OrgSettingsRoute({
   );
   const accountGrant =
     context.accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
+  const canManageOrganizationApiKeys = hasAccountPermission(
+    context.accessContext,
+    accountId,
+    "api_keys:manage",
+  );
   const actorRole: OrganizationMembershipRole | null =
     accountGrant?.role === "owner" ||
     accountGrant?.role === "admin" ||
@@ -255,6 +264,19 @@ export function OrgSettingsRoute({
       activeOperations.clear();
     };
   }, [adminIdentity]);
+
+  const listOrganizationApiKeys = useCallback(async () => {
+    return await client.listOrganizationApiKeys(accountId);
+  }, [accountId, client]);
+  const createOrganizationApiKey = useCallback(
+    async (request: Parameters<typeof client.createOrganizationApiKey>[1]) =>
+      await client.createOrganizationApiKey(accountId, request),
+    [accountId, client],
+  );
+  const deleteOrganizationApiKey = useCallback(
+    async (apiKeyId: string) => await client.deleteOrganizationApiKey(accountId, apiKeyId),
+    [accountId, client],
+  );
 
   const refreshBilling = useCallback(async () => {
     if (!accountId || !canReadBilling) {
@@ -481,6 +503,19 @@ export function OrgSettingsRoute({
           />
         ) : null}
 
+        {section === "developer" ? (
+          <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+            <LazyOrganizationApiKeysSection
+              key={`${identityKey}:organization-api-keys`}
+              organizationId={accountId}
+              canManage={canManageOrganizationApiKeys && Boolean(accountId)}
+              listApiKeys={listOrganizationApiKeys}
+              createApiKey={createOrganizationApiKey}
+              deleteApiKey={deleteOrganizationApiKey}
+            />
+          </Suspense>
+        ) : null}
+
         {section === "billing" ? (
           <section className="grid gap-4 border-b border-border pb-6">
             <div className="flex items-center justify-between gap-3">
@@ -604,7 +639,6 @@ export function OrgSettingsRoute({
           <BillingUsageSection
             key={identityKey}
             accountId={accountId}
-            workspaceId={workspaceId}
             enabled={canReadBilling && Boolean(accountId)}
           />
         ) : null}
@@ -795,11 +829,10 @@ function UsageSection(props: {
   );
 }
 
-/** Keyed by exact principal/org/workspace identity so hook-owned usage cannot flash across tenants. */
-function BillingUsageSection(props: { accountId: string; workspaceId: string; enabled: boolean }) {
+/** Remounted at route identity boundaries; the usage request itself stays account-wide. */
+function BillingUsageSection(props: { accountId: string; enabled: boolean }) {
   const usage = useBillingUsage({
     ...(props.accountId ? { accountId: props.accountId } : {}),
-    workspaceId: props.workspaceId,
     enabled: props.enabled,
   });
   return (
