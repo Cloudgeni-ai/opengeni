@@ -24,7 +24,13 @@ describe("session event cursor foundation", () => {
 
     expect(parity).toBeGreaterThanOrEqual(0);
     expect(migration.slice(parity, backfill)).toContain(
-      "sessions.last_sequence <> COALESCE(MAX(session_events.sequence), 0)::integer",
+      "COUNT(session_events.sequence)::integer <> sessions.last_sequence",
+    );
+    expect(migration.slice(parity, backfill)).toContain(
+      "MIN(session_events.sequence)::integer <> 1",
+    );
+    expect(migration.slice(parity, backfill)).toContain(
+      "MAX(session_events.sequence)::integer <> sessions.last_sequence",
     );
     expect(backfill).toBeGreaterThan(parity);
     expect(restoreEvents).toBeGreaterThan(backfill);
@@ -45,6 +51,12 @@ describe("session event cursor foundation", () => {
       "inserted_group.last_sequence <> current_sequence + inserted_group.sequence_count",
     );
     expect(migration).toContain("COUNT(DISTINCT sequence)::integer");
+    expect(migration).toContain("SECURITY DEFINER\nSET search_path FROM CURRENT");
+    expect(migration).toContain("open_session_tenancy_fenced_access");
+    expect(migration).toContain("close_session_tenancy_fenced_access");
+    expect(migration).toContain(
+      "REVOKE ALL ON FUNCTION advance_session_event_cursors_for_inserted_events() FROM PUBLIC",
+    );
     expect(migration).not.toContain("UPDATE sessions\n    SET last_sequence");
   });
 

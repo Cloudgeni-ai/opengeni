@@ -95,14 +95,30 @@ BEGIN
   SELECT
     sessions.id AS session_id,
     sessions.last_sequence AS stored_sequence,
-    COALESCE(MAX(session_events.sequence), 0)::integer AS event_sequence
+    COUNT(session_events.sequence)::integer AS event_count,
+    MIN(session_events.sequence)::integer AS first_event_sequence,
+    MAX(session_events.sequence)::integer AS last_event_sequence
   INTO mismatch
   FROM sessions
   LEFT JOIN session_events
     ON session_events.workspace_id = sessions.workspace_id
    AND session_events.session_id = sessions.id
   GROUP BY sessions.id, sessions.last_sequence
-  HAVING sessions.last_sequence <> COALESCE(MAX(session_events.sequence), 0)::integer
+  HAVING COUNT(session_events.sequence)::integer <> sessions.last_sequence
+    OR (
+      sessions.last_sequence = 0
+      AND (
+        MIN(session_events.sequence) IS NOT NULL
+        OR MAX(session_events.sequence) IS NOT NULL
+      )
+    )
+    OR (
+      sessions.last_sequence > 0
+      AND (
+        MIN(session_events.sequence)::integer <> 1
+        OR MAX(session_events.sequence)::integer <> sessions.last_sequence
+      )
+    )
   LIMIT 1;
 
   IF FOUND THEN
@@ -110,10 +126,12 @@ BEGIN
       ERRCODE = '55000',
       MESSAGE = 'session event cursor backfill refused because sessions.last_sequence diverges from durable event history',
       DETAIL = pg_catalog.format(
-        'session_id=%s stored_sequence=%s event_sequence=%s',
+        'session_id=%s stored_sequence=%s event_count=%s first_event_sequence=%s last_event_sequence=%s',
         mismatch.session_id,
         mismatch.stored_sequence,
-        mismatch.event_sequence
+        mismatch.event_count,
+        mismatch.first_event_sequence,
+        mismatch.last_event_sequence
       );
   END IF;
 END
@@ -165,12 +183,21 @@ EXECUTE FUNCTION initialize_session_event_cursors_for_inserted_sessions();
 CREATE FUNCTION advance_session_event_cursors_for_inserted_events()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $advance_session_event_cursors$
 DECLARE
+  fenced_access_capability_id uuid;
   inserted_group record;
   current_sequence integer;
 BEGIN
+  -- Runtime writers already hold the exact workspace tenancy fence before an
+  -- event insert. Open only the transaction-local owner capability needed for
+  -- this trigger to inspect and advance the FORCE-RLS cursor under that fence.
+  fenced_access_capability_id :=
+    opengeni_private.open_session_tenancy_fenced_access(
+      session_tenancy_fence_target_schema()
+    );
   FOR inserted_group IN
     SELECT
       account_id,
@@ -237,9 +264,19 @@ BEGIN
         MESSAGE = 'session event cursor changed while applying an inserted event statement';
     END IF;
   END LOOP;
+  PERFORM opengeni_private.close_session_tenancy_fenced_access(
+    fenced_access_capability_id
+  );
   RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM opengeni_private.close_session_tenancy_fenced_access(
+    fenced_access_capability_id
+  );
+  RAISE;
 END
 $advance_session_event_cursors$;
+
+REVOKE ALL ON FUNCTION advance_session_event_cursors_for_inserted_events() FROM PUBLIC;
 
 CREATE TRIGGER session_events_advance_event_cursors
 AFTER INSERT ON session_events
