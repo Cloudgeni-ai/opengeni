@@ -1687,6 +1687,65 @@ describe("DB integration", () => {
     expect(saved.memory.id).toBe(curated.id);
   });
 
+  test("autonomous Memory cannot mutate approved reviewed Knowledge", async () => {
+    const grant = await testGrant(dbClient.db);
+    const curated = await createKnowledgeMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      status: "approved",
+      kind: "decision",
+      text: "Production changes require a reviewed rollout plan.",
+    });
+
+    await expect(
+      saveWorkspaceMemory(
+        dbClient.db,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          text: "Production changes may skip the reviewed rollout plan.",
+          kind: "decision",
+          replacesId: curated.id,
+          origin: "agent",
+        },
+        memoryEmbedder,
+      ),
+    ).rejects.toThrow(/Autonomous Memory can replace only active agent-writable records/i);
+
+    await expect(
+      correctWorkspaceMemory(
+        dbClient.db,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          id: curated.id,
+          reason: "agent attempted archival",
+          origin: "agent",
+        },
+        memoryEmbedder,
+      ),
+    ).rejects.toThrow(/Autonomous Memory can archive only active agent-writable records/i);
+
+    await expect(
+      correctWorkspaceMemory(
+        dbClient.db,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          id: curated.id,
+          replacementText: "Production changes never require a rollout plan.",
+          origin: "agent",
+        },
+        memoryEmbedder,
+      ),
+    ).rejects.toThrow(/Autonomous Memory can correct only active agent-writable records/i);
+
+    expect(await getKnowledgeMemory(dbClient.db, grant.workspaceId, curated.id)).toMatchObject({
+      status: "approved",
+      text: "Production changes require a reviewed rollout plan.",
+    });
+  });
+
   test("AC-3: near-duplicate (cosine >= threshold) save is a NOOP", async () => {
     const grant = await testGrant(dbClient.db);
     const embedder = collidingEmbedder("colliding-model-3072");

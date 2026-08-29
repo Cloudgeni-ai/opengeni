@@ -30,7 +30,11 @@ when workspace Memory is enabled. They do not activate a Skill, instruction,
 company profile, or reviewed Knowledge claim. `remember lane=knowledge` remains
 the narrower reviewed fallback when autonomous Memory is unavailable and a user
 explicitly requests reviewed workspace knowledge; its confirmation-to-Memory
-receipt preserves exact approved text and provenance.
+receipt preserves exact approved text and provenance. Autonomous correction and
+supersession may target only `active` agent-writable Memory; `approved`
+human-reviewed Knowledge remains under its review lifecycle. Expiring findings,
+ownership, blockers, artifacts, and handoffs that should be visible only inside
+one root session tree belong in Task notes, not shared Workspace Memory.
 
 ## Data model
 

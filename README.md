@@ -19,7 +19,7 @@ Most agent products give you some of these; OpenGeni's premise is that organizat
 - **Self-host everything, Apache-2.0 all the way down.** The control plane, sessions API, web app, and deployment artifacts (Helm chart, reference Terraform for Azure/AWS/GCP) are open source. The durable record is a Postgres database you operate.
 - **Durable, replayable sessions as an API.** Every event lands in a Postgres event log; live streams over SSE backfill from it, so a browser reload, a new client, or an audit replays the same history.
 - **Your hardware as a first-class target.** Connected Machines run sessions on computers you enroll, with dial-out-only networking, no platform-minted credentials on your machines, loud consent-based enrollment, and one-click revocation. Off by default until an operator enables it.
-- **Governance built in, not bolted on.** Human approvals gate tool use, agents can pause durably for structured answers, credentials are brokered per session, and agent memory is a reviewed resource — agents *propose* memories, and a human or your API approves them before they become retrieval context.
+- **Governance built in, not bolted on.** Human approvals gate tool use, agents can pause durably for structured answers, and credentials are brokered per session. When Workspace Memory is enabled, exact live agents autonomously save and correct durable facts, decisions, incidents, fixes, and outcomes for later retrieval; the separate curated Knowledge lane remains proposal-and-review based.
 
 ## What It Does
 
@@ -399,7 +399,7 @@ The generated GitHub URL is only the manifest form target. Opening or copying th
 
 The Documents workspace supports document bases, file upload, indexing status, failed-document retry, and hybrid/vector/keyword search. Typical knowledge uploads include PDF, Word, PowerPoint, Excel, OpenDocument, plain-text/structured-text, email, and common image formats. The stock API and worker images include headless LibreOffice for Office conversion and local English OCR data; native source runs use the parser's built-in image conversion but require LibreOffice on the host to index Office formats. Indexed documents can carry source metadata such as source kind, URI, title, author, version, timestamps, and ACL tags for retrieval filtering.
 
-The workspace knowledge layer also includes reviewed memory records. Agents can search approved memories and propose new memories through the built-in docs MCP server. Human/API review happens through workspace knowledge memory endpoints before proposed memories become approved retrieval context.
+The workspace knowledge layer includes two retrieval-only memory paths. Workspace Memory lets exact live agents autonomously save and correct active durable facts when the workspace toggle is enabled. The curated Knowledge lane remains reviewed: agents can search approved records and propose new ones through the built-in docs MCP server, while human/API review happens through workspace knowledge memory endpoints before proposals become approved retrieval context.
 
 Document indexing depends on:
 

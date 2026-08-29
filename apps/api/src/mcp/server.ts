@@ -3609,18 +3609,31 @@ function registerMemoryTools(
           : null,
         deps.getDocumentServices().embedder,
       );
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-        {
-          type: "memory.saved",
-          payload: {
-            memoryId: result.memory.id,
-            kind: result.memory.kind,
-            preview: memoryPreview(result.memory.text),
-            deduped: result.deduped,
-            ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
+      let timelineWarning: string | null = null;
+      try {
+        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+          {
+            type: "memory.saved",
+            payload: {
+              memoryId: result.memory.id,
+              kind: result.memory.kind,
+              preview: memoryPreview(result.memory.text),
+              deduped: result.deduped,
+              ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
+            },
           },
-        },
-      ]);
+        ]);
+      } catch {
+        timelineWarning = "Memory committed, but its session timeline event could not be recorded.";
+        console.warn("workspace memory save: committed without session timeline event", {
+          errorClass: "MemoryTimelineOperationError",
+          errorCode: "memory_save_timeline_append_failed",
+          origin: "api",
+          workspaceId: grant.workspaceId,
+          sessionId,
+          memoryId: result.memory.id,
+        });
+      }
       const changed = !result.deduped || result.updated || result.superseded !== null;
       const outcome =
         result.updated || result.superseded !== null
@@ -3650,9 +3663,12 @@ function registerMemoryTools(
             : undefined,
           timestamp: result.memory.updatedAt,
           idempotency: { status: "not_supported" },
-          warnings: !result.embedded
-            ? ["Memory committed without a vector embedding; keyword search remains available."]
-            : [],
+          warnings: [
+            ...(!result.embedded
+              ? ["Memory committed without a vector embedding; keyword search remains available."]
+              : []),
+            ...(timelineWarning ? [timelineWarning] : []),
+          ],
           facts: {
             deduped: result.deduped,
             dedupeReason: result.dedupeReason,
@@ -3699,6 +3715,7 @@ function registerMemoryTools(
           id,
           ...(reason ? { reason } : {}),
           ...(replacement_text ? { replacementText: replacement_text } : {}),
+          origin: "agent",
         },
         slack_publication
           ? {
@@ -3710,24 +3727,38 @@ function registerMemoryTools(
           : null,
         deps.getDocumentServices().embedder,
       );
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-        {
-          type: "memory.corrected",
-          payload: {
-            memoryId: result.memory.id,
-            kind: result.memory.kind,
-            preview: memoryPreview(result.memory.text),
-            action: result.action,
-            ...(reason ? { reason: memoryPreview(reason) } : {}),
-            ...(result.replacement
-              ? {
-                  replacementMemoryId: result.replacement.id,
-                  replacementPreview: memoryPreview(result.replacement.text),
-                }
-              : {}),
+      let timelineWarning: string | null = null;
+      try {
+        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+          {
+            type: "memory.corrected",
+            payload: {
+              memoryId: result.memory.id,
+              kind: result.memory.kind,
+              preview: memoryPreview(result.memory.text),
+              action: result.action,
+              ...(reason ? { reason: memoryPreview(reason) } : {}),
+              ...(result.replacement
+                ? {
+                    replacementMemoryId: result.replacement.id,
+                    replacementPreview: memoryPreview(result.replacement.text),
+                  }
+                : {}),
+            },
           },
-        },
-      ]);
+        ]);
+      } catch {
+        timelineWarning =
+          "Memory correction committed, but its session timeline event could not be recorded.";
+        console.warn("workspace memory correction: committed without session timeline event", {
+          errorClass: "MemoryTimelineOperationError",
+          errorCode: "memory_correct_timeline_append_failed",
+          origin: "api",
+          workspaceId: grant.workspaceId,
+          sessionId,
+          memoryId: result.memory.id,
+        });
+      }
       return json(
         mcpMutationReceipt({
           operation: "memory_correct",
@@ -3750,6 +3781,7 @@ function registerMemoryTools(
             : undefined,
           timestamp: (result.replacement ?? result.memory).updatedAt,
           idempotency: { status: "not_supported" },
+          warnings: timelineWarning ? [timelineWarning] : [],
           facts: {
             correctionAction: result.action,
             slackPublicationDecision: result.slackPublication.decision?.eligible
