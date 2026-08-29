@@ -38,6 +38,7 @@ import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
 import {
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
+  armTurnQuiescenceWatchdog,
   clearAttemptCredentialsWithSettledFence,
   drainAttemptOwnedSandboxWriters,
   persistOrSignalSessionAttemptQuiescence,
@@ -136,6 +137,17 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
   let finalizationError: unknown;
   let physicalToolQuiescenceConfirmed = !control.acknowledgeQuiescence;
   let quiescenceReceiptOrProofDurable = !control.acknowledgeQuiescence;
+  const disarmQuiescenceWatchdog = armTurnQuiescenceWatchdog({
+    enabled: control.acknowledgeQuiescence,
+    onTimeout: () => {
+      observability.error("turn quiescence drain exceeded hard containment deadline", {
+        "opengeni.session_id": input.sessionId,
+        "opengeni.turn_id": attempt.turnId ?? "",
+        "opengeni.attempt_id": input.attemptId,
+      });
+    },
+    terminateWorker: () => process.exit(1),
+  });
   const finalizerSignal = turnFinalizerCancellationSignal(
     cancellationSignal,
     control.activityStatus,
@@ -302,6 +314,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         },
       });
       quiescenceReceiptOrProofDurable = true;
+      disarmQuiescenceWatchdog();
       if (recoveryMode === "signal") {
         observability.info("agent turn quiescence proof handed to workflow recovery", {
           "opengeni.session_id": input.sessionId,
