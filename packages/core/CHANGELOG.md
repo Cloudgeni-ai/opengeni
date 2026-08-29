@@ -1,5 +1,11 @@
 # @opengeni/core
 
+## 2.5.6
+
+### Patch Changes
+
+- @opengeni/runtime@1.4.5
+
 ## 2.5.5
 
 ### Patch Changes
