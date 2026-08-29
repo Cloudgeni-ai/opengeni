@@ -1,5 +1,15 @@
 # @opengeni/api-router
 
+## 2.5.3
+
+### Patch Changes
+
+- becd349: Return browser HTTP/1 event streams as capped, known-length batches so multiple tabs cannot retain ambiguous streaming requests and starve ordinary API reads.
+- 9787ca2: Close authorization-revoked SSE responses cleanly and cycle browser streams with server- and browser-owned HTTP/1 lifetimes so stale or orphaned native requests cannot exhaust the shared connection pool or starve ordinary API reads.
+- 34a05ca: Deliver browser HTTP/1 events as immediate, vendor-typed snapshots read from the durable event store, without opening a timed live subscription or closing the reusable socket. Preserve cursor-based replay while preventing replaced documents from starving ordinary API reads across tabs and account changes.
+  - @opengeni/runtime@1.4.5
+  - @opengeni/core@2.5.6
+
 ## 2.5.2
 
 ### Patch Changes
