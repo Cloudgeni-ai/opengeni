@@ -18,6 +18,7 @@ const personalGitHubRepositorySelectionMigrationName =
 const sessionTenancyFenceMigrationName = "0345_tenant_scoped_session_tenancy_fence.sql";
 const orderedVariableSetRuntimeAuthorityMigrationName =
   "0372_ordered_variable_set_runtime_authority.sql";
+const sessionEventCursorMigrationName = "0374_session_event_cursors.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -176,7 +177,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           (${organizationMembershipLockOrderMigrationName}),
           (${personalGitHubRepositorySelectionMigrationName}),
           (${sessionTenancyFenceMigrationName}),
-          (${orderedVariableSetRuntimeAuthorityMigrationName})
+          (${orderedVariableSetRuntimeAuthorityMigrationName}),
+          (${sessionEventCursorMigrationName})
       `;
       await migrate(databaseUrl);
       await sql`
@@ -190,7 +192,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${organizationMembershipLockOrderMigrationName},
           ${personalGitHubRepositorySelectionMigrationName},
           ${sessionTenancyFenceMigrationName},
-          ${orderedVariableSetRuntimeAuthorityMigrationName}
+          ${orderedVariableSetRuntimeAuthorityMigrationName},
+          ${sessionEventCursorMigrationName}
         )
       `;
 
@@ -231,7 +234,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${organizationMembershipLockOrderMigrationName},
           ${personalGitHubRepositorySelectionMigrationName},
           ${sessionTenancyFenceMigrationName},
-          ${orderedVariableSetRuntimeAuthorityMigrationName}
+          ${orderedVariableSetRuntimeAuthorityMigrationName},
+          ${sessionEventCursorMigrationName}
         )
         order by name
       `;
@@ -245,6 +249,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         personalGitHubRepositorySelectionMigrationName,
         sessionTenancyFenceMigrationName,
         orderedVariableSetRuntimeAuthorityMigrationName,
+        sessionEventCursorMigrationName,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);
