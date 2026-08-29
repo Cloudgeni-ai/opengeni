@@ -27,7 +27,7 @@ type Handler = (input: Record<string, unknown>) => Promise<{
   content: { type: "text"; text: string }[];
 }>;
 
-function harness() {
+function harness(options: { automatic?: boolean } = {}) {
   const handlers = new Map<string, Handler>();
   const proposals: unknown[] = [];
   const confirmations: unknown[] = [];
@@ -49,10 +49,26 @@ function harness() {
       async propose(input) {
         proposals.push(input);
         const request = input.request as { profile: ReturnType<typeof profile> };
+        if (options.automatic) {
+          return {
+            status: "activated",
+            operationId: PROPOSE_OPERATION_ID,
+            proposalReceiptId: PROPOSAL_RECEIPT_ID,
+            automaticActivationReceiptId: "00000000-0000-4000-8000-000000000114",
+            policyMode: "automatic",
+            mutation: {
+              revision: null,
+              head: null,
+              event: null,
+            },
+            replayed: false,
+          };
+        }
         return {
           status: "confirmation_required",
           operationId: PROPOSE_OPERATION_ID,
           proposalReceiptId: PROPOSAL_RECEIPT_ID,
+          policyMode: "suggest",
           revision: {
             id: "00000000-0000-4000-8000-000000000113",
             operationId: PROPOSE_OPERATION_ID,
@@ -125,6 +141,7 @@ describe("company-profile agent administration MCP tools", () => {
     expect(JSON.parse(result.content[0]!.text)).toMatchObject({
       status: "confirmation_required",
       proposalReceiptId: PROPOSAL_RECEIPT_ID,
+      policyMode: "suggest",
       confirmWith: "company_profile_confirm",
     });
     expect(h.proposals).toEqual([
@@ -162,6 +179,22 @@ describe("company-profile agent administration MCP tools", () => {
         },
       },
     ]);
+    expect(h.authorizations()).toBe(1);
+  });
+
+  test("returns an autonomous activation without manufacturing a confirmation step", async () => {
+    const h = harness({ automatic: true });
+    const result = await h.handlers.get("company_profile_propose")!({
+      operationId: PROPOSE_OPERATION_ID,
+      identity: profile().identity,
+      mission: profile().mission,
+    });
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({
+      status: "activated",
+      proposalReceiptId: PROPOSAL_RECEIPT_ID,
+      policyMode: "automatic",
+    });
+    expect(h.confirmations).toHaveLength(0);
     expect(h.authorizations()).toBe(1);
   });
 

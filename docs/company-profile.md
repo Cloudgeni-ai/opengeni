@@ -26,11 +26,13 @@ Canonical implementation:
   `packages/sdk/src/company-profile.ts`;
 - concrete durable-learning adapter:
   `packages/core/src/domain/company-profile-durable-learning-adapter.ts`;
-- explicit owner-confirmed agent administration:
+- policy-governed owner agent administration:
   `packages/db/src/company-profile-agent-admin.ts`,
+  `packages/db/src/company-profile-agent-policy.ts`,
   `packages/core/src/domain/company-profile-agent-admin.ts`,
   `apps/api/src/mcp/company-profile-agent-admin.ts`, and migration
-  `0324_human_confirmed_company_profile_agent_admin.sql`;
+  `0324_human_confirmed_company_profile_agent_admin.sql` plus
+  `0379_autonomous_company_profile_agent_policy.sql`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
   resolved by `apps/worker/src/activities/agent-turn/governance-model.ts`;
 - admin presentation: Organization settings → Knowledge in
@@ -54,34 +56,51 @@ admins, or narrowing it to the canonical managed-cookie session only, is a
 deliberate product decision rather than a side effect of agent administration.
 
 An exact live agent attempt may administer the profile only through the
-separate `company_profile_propose` → structured human input →
-`company_profile_confirm` path. Proposal admission resolves the logical turn's
-initiating human and requires that human's current active organization
-membership to be the `owner` role, i.e. exactly the authority the manual
-`account:admin` route requires; an organization admin who cannot use the
-manual editor cannot activate through an agent either. The proposal is an
-inactive, immutable identity/mission revision with empty compatibility lists. Confirmation requires the
-canonical question returned by the proposal to have been answered `activate`
-by that same human, then revalidates the current attempt, organization
-membership, immutable proposal provenance/hash, and unchanged active-profile
-head before activation. Dedicated immutable proposal and confirmation receipts
-retain the exact session, turn, attempt generation, membership, human-input
-request, revision, and activation event; both receipt tables carry the
-restrictive `session_visibility_isolation` policy like every other
-session-referencing receipt. The revision uses the distinct `agent_admin`
-provenance, not `durable_learning`. MCP authorization supplies only ordinary
-exact-session control/read capabilities; organization role is resolved
-authoritatively in PostgreSQL, so an agent never receives `account:admin`.
+separate `company_profile_propose` path. Proposal admission resolves the
+logical turn's initiating human and requires that human's current active
+organization membership to be the `owner` role, i.e. exactly the authority the
+manual `account:admin` route requires; an organization admin who cannot use the
+manual editor cannot activate through an agent either. A separate
+organization-scoped policy, editable only by an active organization owner,
+controls the result:
 
-The two SECURITY DEFINER functions follow the canonical lock order: `workspaces
-FOR KEY SHARE`, the initiating human's `organization_memberships` row `FOR KEY
-SHARE` (the migration 0299 membership seam orders workspaces, then
-memberships, then sessions), then the exact session/turn/attempt rows `FOR
-SHARE`. Only after that prefix does `propose` touch `managed_accounts` (`FOR
-KEY SHARE`) and does `confirm` reach the organization row `FOR UPDATE` through
-the nested `company_profile_apply_activation` call. Nothing stronger than
+- `off` rejects the operation before a proposal revision is created;
+- `suggest` (the default for existing and new organizations) creates an
+  inactive immutable proposal and requires the bound
+  `company_profile_confirm` human-confirmation path;
+- `automatic` creates the same immutable proposal and immediately activates it
+  through the existing company-profile compare-and-swap lifecycle, without a
+  second human prompt.
+
+The policy mode and version are frozen on the proposal receipt. Changing the
+policy afterward does not reinterpret an existing proposal, and every mode
+still requires an exact live turn initiated by the active organization owner.
+Under `suggest`, confirmation requires the canonical question returned by the
+proposal to have been answered `activate` by that same human, then revalidates
+the current attempt, organization membership, immutable proposal
+provenance/hash, and unchanged active-profile head before activation. Under
+`automatic`, a dedicated immutable receipt retains the initiating owner,
+membership, policy version, exact attempt, proposal, revision, and activation
+event; the activation event is attributed to
+`service:company-profile-autonomy` so the event actor truthfully describes the
+automatic lifecycle writer while the causal owner remains auditable. Proposal,
+confirmation, and automatic-activation receipts carry the restrictive
+`session_visibility_isolation` policy like every other session-referencing
+receipt. The revision uses the distinct `agent_admin` provenance, not
+`durable_learning`. MCP authorization supplies only ordinary exact-session
+control/read capabilities; organization role is resolved authoritatively in
+PostgreSQL, so an agent never receives `account:admin`.
+
+The proposal and confirmation SECURITY DEFINER capabilities follow the
+canonical lock order: `workspaces FOR KEY SHARE`, the initiating human's
+`organization_memberships` row `FOR KEY SHARE` (the migration 0299 membership
+seam orders workspaces, then memberships, then sessions), then the exact
+session/turn/attempt rows `FOR SHARE`. Only after that prefix does `propose`
+touch `managed_accounts` (`FOR KEY SHARE`) and does reviewed or automatic
+activation reach the organization row `FOR UPDATE` through the nested
+`company_profile_apply_activation` call. Nothing stronger than
 `managed_accounts FOR KEY SHARE` ever precedes the session prefix, so the
-functions cannot form an ABBA cycle with the canonical event writer, which
+capabilities cannot form an ABBA cycle with the canonical event writer, which
 holds the session row and then reaches `managed_accounts` through the
 `session_events` account foreign key. One residual remains: the nested
 `company_profile_apply_activation` (migration 0201) still takes
@@ -93,21 +112,24 @@ can be deadlock-detected (`40P01`, both sides retry-safe); the fix is
 downgrading `company_profile_apply_activation` to `KEY SHARE` plus the
 organization advisory key in the 0299 style (follow-up).
 
-Both functions are idempotent across replacement attempts of the same logical
-turn: their input hashes bind account, workspace, session, turn, operation id,
-content/proposal identity, and the initiating membership, never the attempt id
-or execution generation (those are persisted on the receipt rows). After a
-worker death re-claims the turn at generation G+1, the same operation id
-replays, and a `confirm` retry under a fresh operation id after a successful
-activation replays the existing confirmation for that proposal (same bound
-human-input request) instead of reporting a profile conflict. The first
-confirmation still requires the exact content hash and the `P <= R < L`
-generation rule.
+The proposal, confirmation, and automatic-activation paths are idempotent
+across replacement attempts of the same logical turn. Their input hashes bind
+account, workspace, session, turn, operation id, content/proposal identity, and
+the initiating membership, never the attempt id or execution generation (those
+are persisted on the receipt rows). After a worker death re-claims the turn at
+generation G+1, the same proposal operation id replays. An automatic proposal
+replays its original activation receipt, and a `confirm` retry under a fresh
+operation id after a successful reviewed activation replays the existing
+confirmation for that proposal (same bound human-input request) instead of
+reporting a profile conflict. The first reviewed confirmation still requires
+the exact content hash and the `P <= R < L` generation rule.
 
 This explicit administration path is not governed learning and never consults
 workspace learning mode. In particular, `learning_policy_off` cannot block the
-owner's explicit request to manage the organization profile. The browser HTTP
-administration route remains direct-human-only.
+owner's explicit request to manage the organization profile. Agent behavior is
+instead controlled by the separate organization-level company-profile policy.
+The direct profile administration route remains direct-human-only, as do the
+policy read/update routes.
 
 The historical durable-learning adapter remains readable for compatibility.
 New products, customers, goals, constraints, strategy, and other changing facts
@@ -177,13 +199,17 @@ atomically changes the head and appends exactly one activation event. A stale
 writer receives `COMPANY_PROFILE_CONFLICT`; it never silently overwrites newer
 truth.
 
-Agent-admin proposals and confirmations add no second mutation mechanism.
-Migration `0324_human_confirmed_company_profile_agent_admin.sql` routes the
-confirmed operation through the same `company_profile_apply_activation`
-lifecycle function, attributes the event to the confirming human, and retains
-compare-and-swap behavior. Its receipt tables are FORCE-RLS, immutable, and
-have no direct runtime table privileges; the runtime role can execute only the
-two bounded exact-attempt functions.
+Agent-admin proposals, confirmations, and automatic activations add no second
+mutation mechanism. Migration
+`0324_human_confirmed_company_profile_agent_admin.sql` routes a confirmed
+operation through the same `company_profile_apply_activation` lifecycle and
+attributes that event to the confirming human. Migration
+`0379_autonomous_company_profile_agent_policy.sql` adds the organization policy
+and routes `automatic` through that same lifecycle under the dedicated service
+actor while retaining the initiating owner as causal evidence. All policy and
+receipt tables are FORCE-RLS, immutable or lifecycle-fenced, and have no direct
+runtime table privileges; the runtime role can execute only the bounded
+SECURITY DEFINER capabilities.
 
 Rollback creates another immutable event and moves the head to a previously
 active revision. Router rollback tokens restore the exact prior head, including
@@ -195,9 +221,10 @@ that operation. No history row is edited or deleted.
 
 The API below `/v1/workspaces/:workspaceId/company-profile` exposes current and
 historical revisions, one revision, deterministic JSON diff, direct-admin
-update-and-activate, proposal activation, and rollback. Purpose-built governance
-clients may use this API directly; the simplified organization settings entry
-uses the owner-confirmed agent administration path below. List responses contain a separate bounded `activeRevision`
+update-and-activate, proposal activation, rollback, and owner-only
+`agent-policy` read/update. Purpose-built governance clients may use this API
+directly; the simplified organization settings entry uses the policy-governed
+agent administration path below. List responses contain a separate bounded `activeRevision`
 lookup in addition to the bounded newest-revision page, so more than 50 newer
 proposals cannot hide the effective profile or initialize the editor from an
 empty value.
@@ -234,7 +261,7 @@ The operation identity is the router attempt id, so exact router retry converges
 without duplicate profile state. The router remains responsible for attempt-ledger
 receipts and public `AUTHORITY_WRITE_FAILED` translation.
 
-## Agent proposals and confirmation
+## Agent proposals, review, and automatic activation
 
 The first-party `company_profile_propose` and `company_profile_confirm` tools
 (`apps/api/src/mcp/company-profile-agent-admin.ts`) are the agent-facing path the
@@ -242,9 +269,10 @@ Organization settings → Knowledge "Create with OpenGeni" prompt directs a sess
 only for exact worker-signed agent attempts with `workspace:read` plus
 `sessions:control`. Proposal input contains only identity and mission; the
 canonical compatibility lists are written empty before the exact profile is
-hashed. The proposal appends one inactive revision with `agent_admin`
-provenance and returns the exact structured-human-input payload. It never changes
-the head or activation events.
+hashed. The result depends on the organization policy frozen at proposal time:
+`off` creates nothing, `suggest` appends one inactive revision and returns the
+exact structured-human-input payload, and `automatic` appends the proposal and
+activates it through the existing lifecycle before returning `status=activated`.
 
 Proposal input is validated against `AgentAuthoredCompanyProfileContent` rather
 than `CompanyProfileContent`, so the agent bounds in "Bounded structured content"
@@ -256,20 +284,23 @@ numbered procedure and no marketing copy. The style clause used for workspace
 rules is deliberately not reused here; a profile is descriptive, not an
 instruction, so "write one imperative rule" would be the wrong shape.
 
-The returned question's `helpText` binds the revision number and content
-SHA-256 and renders a readable summary of the proposed identity and mission
-(bounded to the human-input contract), never raw JSON. Migration `0360` narrows
-new confirmation copy while preserving immutable prompts on older proposals;
-during a rolling deploy it still discloses any nonempty legacy lists submitted
-by an older API instance before the human can activate them.
+For `suggest`, the returned question's `helpText` binds the revision number and
+content SHA-256 and renders a readable summary of the proposed identity and
+mission (bounded to the human-input contract), never raw JSON. Migration `0360`
+narrows new confirmation copy while preserving immutable prompts on older
+proposals; during a rolling deploy it still discloses any nonempty legacy lists
+submitted by an older API instance before the human can activate them.
 
-Only `company_profile_confirm`, after the initiating owner answered the bound
-question with `activate`, can move the head. It revalidates the live attempt,
-current organization role, proposal receipt/hash, human-input request, and
-active-head compare-and-swap baseline. The simplified organization Knowledge
-section intentionally does not expose revision lists or proposal lifecycle
-controls; those remain available through the canonical API for authorized
-governance clients. The earlier proposal-only `company_profile_propose` tool
+In `suggest`, only `company_profile_confirm`, after the initiating owner
+answered the bound question with `activate`, can move the head. It revalidates
+the live attempt, current organization role, proposal receipt/hash, human-input
+request, and active-head compare-and-swap baseline. In `automatic`, `propose`
+returns the completed mutation and the agent must report the applied change
+without asking for another confirmation. The simplified organization Knowledge
+section exposes the three organization-wide modes to owners but intentionally
+does not expose revision lists or proposal lifecycle controls; those remain
+available through the canonical API for authorized governance clients. The
+earlier proposal-only `company_profile_propose` tool
 (`durable_learning` provenance, `agent-attempt:<attemptId>` source id) and its
 `proposeCompanyProfile` helper are retired; this propose/confirm path fully
 supersedes them.

@@ -18,6 +18,12 @@ describe("company-profile SDK", () => {
     });
     await client.listCompanyProfile(WORKSPACE_ID, { afterRevision: 12, limit: 10 });
     await client.getCompanyProfileRevision(WORKSPACE_ID, REVISION_A);
+    await client.getCompanyProfileAgentPolicy(WORKSPACE_ID);
+    await client.updateCompanyProfileAgentPolicy(WORKSPACE_ID, {
+      mode: "automatic",
+      expectedVersion: 1,
+      operationId: crypto.randomUUID(),
+    });
     await client.updateCompanyProfile(WORKSPACE_ID, {
       operationId: crypto.randomUUID(),
       profile: {
@@ -55,6 +61,14 @@ describe("company-profile SDK", () => {
       [
         "GET",
         `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/company-profile/revisions/${REVISION_A}`,
+      ],
+      [
+        "GET",
+        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/company-profile/agent-policy`,
+      ],
+      [
+        "PATCH",
+        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/company-profile/agent-policy`,
       ],
       ["PUT", `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/company-profile`],
       [

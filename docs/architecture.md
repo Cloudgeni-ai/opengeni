@@ -211,6 +211,14 @@ mode. It remains retrieval-only model context through `memory_search`; it is
 not a Skill, mandatory instruction, organization profile, or reviewed Knowledge
 claim.
 
+Organization identity has a separate organization-owner autonomy policy. Off
+rejects agent-authored identity changes before proposal creation, Review first
+keeps the bound human-confirmation path, and Autonomous activates eligible
+proposals without another prompt. All three modes still require an exact live
+turn initiated by the active organization owner and use the existing
+company-profile compare-and-swap lifecycle; workspace Learning mode and
+workspace-admin authority cannot widen this organization scope.
+
 Accepted conversation and tool content is preserved at its canonical boundary;
 OpenGeni does not centrally rewrite arbitrary text because it resembles a
 credential. Configured secrets are a separate concern: they are encrypted at

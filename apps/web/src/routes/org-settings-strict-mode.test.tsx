@@ -41,6 +41,36 @@ const createOrganizationApiKey = mock(async () => {
 const deleteOrganizationApiKey = mock(async () => {
   throw new Error("not used");
 });
+const listCompanyProfile = mock(async (_workspaceId: string, _options: { limit: number }) => ({
+  current: null,
+  activeRevision: null,
+  revisions: [],
+  activationEvents: [],
+  nextAfterRevision: null,
+}));
+const getCompanyProfileAgentPolicy = mock(async (_workspaceId: string) => ({
+  organizationId: accountId,
+  mode: "suggest" as const,
+  version: 0,
+  updatedAt: timestamp,
+}));
+const updateCompanyProfileAgentPolicy = mock(
+  async (
+    _workspaceId: string,
+    _request: {
+      mode: "off" | "suggest" | "automatic";
+      expectedVersion: number;
+      operationId: string;
+    },
+  ) => ({
+    organizationId: accountId,
+    mode: "automatic" as const,
+    version: 1,
+    updatedAt: timestamp,
+    changed: true,
+  }),
+);
+const getWorkspaceModelCatalog = mock(async (_workspaceId: string) => ({ models: [] }));
 const useBillingUsage = mock((_options: unknown) => ({
   loading: false,
   error: null,
@@ -57,6 +87,10 @@ const context = {
     listOrganizationApiKeys,
     createOrganizationApiKey,
     deleteOrganizationApiKey,
+    listCompanyProfile,
+    getCompanyProfileAgentPolicy,
+    updateCompanyProfileAgentPolicy,
+    getWorkspaceModelCatalog,
   } as unknown as OpenGeniBrowserClient,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
@@ -100,6 +134,11 @@ const context = {
   ],
   managedSelfContext: null,
   accessKeyVersion: 7,
+  model: "openai/gpt-5.6",
+  reasoningEffort: "low" as const,
+  latencyMode: "standard" as const,
+  busy: false,
+  startSession: async () => null,
   handleManagedSignOut: async () => undefined,
   revalidatePrincipalAccess: () => undefined,
 };
@@ -225,6 +264,49 @@ describe("organization billing StrictMode ownership", () => {
     ).toBe(true);
     expect(container.textContent).toContain("Organization API keys");
     expect(container.textContent).toContain("No organization API keys yet");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("updates the organization-wide agent identity mode with CAS", async () => {
+    getCompanyProfileAgentPolicy.mockClear();
+    updateCompanyProfileAgentPolicy.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <OrgSettingsRoute workspaceId={workspaceId} section="knowledge" />
+        </StrictMode>,
+      );
+    });
+    await flush();
+
+    expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("Agent-managed organization identity");
+    const automatic = container.querySelector<HTMLInputElement>(
+      'input[name="company-profile-agent-policy"][value="automatic"]',
+    );
+    if (!automatic) throw new Error("Missing Autonomous policy option");
+    await act(async () => automatic.click());
+    await act(async () => button(container, "Save autonomy mode").click());
+    await flush();
+
+    expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledTimes(1);
+    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[0]).toBe(workspaceId);
+    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[1]).toMatchObject({
+      mode: "automatic",
+      expectedVersion: 0,
+    });
+    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[1].operationId).toMatch(
+      /^[0-9a-f-]{36}$/,
+    );
+    expect(container.textContent).toContain(
+      "Autonomous organization identity updates are enabled.",
+    );
 
     await act(async () => root.unmount());
     container.remove();

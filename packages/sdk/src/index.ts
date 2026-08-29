@@ -194,6 +194,8 @@ export {
 } from "./company-profile";
 export type {
   ActivateCompanyProfileRevisionRequest,
+  CompanyProfileAgentPolicy,
+  CompanyProfileAgentPolicyMode,
   CompanyProfileActivationEvent,
   CompanyProfileContent,
   CompanyProfileDiffRequest,
@@ -207,6 +209,7 @@ export type {
   CompanyProfileRevisionIdentity,
   RollbackCompanyProfileRequest,
   UpdateCompanyProfileRequest,
+  UpdateCompanyProfileAgentPolicyRequest,
 } from "./company-profile";
 export type {
   ActivateWorkspaceInstructionPolicyRequest,
