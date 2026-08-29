@@ -544,7 +544,24 @@ link_macos_cli() {
   _app="$1"; _install_dir="$2"
   mkdir -p "$_install_dir" 2>/dev/null || die 2 "cannot create install dir $_install_dir"
   ln -sf "$_app/Contents/MacOS/opengeni-agent" "$_install_dir/opengeni-agent"
-  printf '%s' "$_install_dir/opengeni-agent"
+}
+
+# Prefer Apple's system xattr even when PATH contains another implementation.
+# The fallback keeps the bundle simulation portable on non-macOS CI. Quarantine
+# cleanup is best-effort and must never write into a caller's captured stdout.
+macos_xattr_path() {
+  if [ -x /usr/bin/xattr ]; then
+    printf '%s' /usr/bin/xattr
+    return 0
+  fi
+  command -v xattr 2>/dev/null
+}
+
+macos_clear_xattrs() {
+  _xattr_target="$1"
+  _xattr_bin="$(macos_xattr_path)" || return 0
+  [ -n "$_xattr_bin" ] || return 0
+  "$_xattr_bin" -cr "$_xattr_target" >/dev/null 2>&1 || true
 }
 
 # Probe the login keychain for a "Developer ID Application" code-signing identity
@@ -593,9 +610,7 @@ macos_sign_bundle() {
 
   # Strip quarantine/provenance xattrs the download or copy may have set — the
   # suspected cause of the in-place "invalid resource directory" verify failures.
-  if command -v xattr >/dev/null 2>&1; then
-    xattr -cr "$_bundle" 2>/dev/null || true
-  fi
+  macos_clear_xattrs "$_bundle"
 
   if ! command -v codesign >/dev/null 2>&1; then
     log "warning: codesign not found (unexpected on macOS); skipping signing + verification"
@@ -676,8 +691,8 @@ macos_swap_bundle_into_place() {
 # Assemble an app bundle around the verified binary and symlink the CLI into it.
 # Assembled in a temp dir, signed (Developer ID when available, else ad-hoc) +
 # verified there, then atomically swapped into ~/Applications — NEVER signed in
-# place (see macos_sign_bundle for why). Echoes the CLI path on stdout (logs go to
-# stderr via log()).
+# place (see macos_sign_bundle for why). The caller derives the deterministic CLI
+# path from its install directory instead of capturing this function's stdout.
 install_macos_local_bundle() {
   _bin="$1"; _install_dir="$2"; _runtime_source="${3:-}"; _icon_source="$4"
   _app="$HOME/Applications/$OPENGENI_APP_NAME.app"
@@ -752,8 +767,8 @@ bundle_asset_available() {
 
 # Download + verify (BOTH gates) + install the prebuilt Developer-ID/notarized
 # bundle. Preferred over local assembly when available because its grants SURVIVE
-# updates (a stable Apple identity), which an ad-hoc bundle cannot offer. Echoes
-# the CLI path on stdout.
+# updates (a stable Apple identity), which an ad-hoc bundle cannot offer. The
+# caller derives the deterministic CLI path without capturing function stdout.
 install_macos_prebuilt_bundle() {
   _install_dir="$1"
   _zip_url="$(asset_url "$OPENGENI_APP_BUNDLE_ASSET")"
@@ -800,9 +815,7 @@ install_macos_prebuilt_bundle() {
   do
     [ -x "$_required" ] || die 3 "the app bundle is missing executable $(basename "$_required")"
   done
-  if command -v xattr >/dev/null 2>&1; then
-    xattr -cr "$_staged_app" 2>/dev/null || true
-  fi
+  macos_clear_xattrs "$_staged_app"
   if command -v codesign >/dev/null 2>&1; then
     codesign --verify --deep --strict "$_staged_app" >/dev/null 2>&1 \
       || die 2 "codesign --verify --deep --strict FAILED for the prebuilt bundle; not installing"
@@ -830,7 +843,8 @@ main() {
     log "prebuilt macOS bundle available; installing it (version: $VERSION) from $BASE_URL"
     install_dir="$(resolve_install_dir)"
     _old_mac_version="$(agent_release_version "$HOME/Applications/$OPENGENI_APP_NAME.app/Contents/MacOS/opengeni-agent" 2>/dev/null || true)"
-    dest="$(install_macos_prebuilt_bundle "$install_dir")"
+    install_macos_prebuilt_bundle "$install_dir"
+    dest="$install_dir/opengeni-agent"
     mark_upgrade_if_changed "$_old_mac_version" "$dest"
     path_hint "$install_dir"
     finish "$dest"
@@ -882,7 +896,8 @@ main() {
     # identity (the anchor TCC grants attach to). See install_macos_local_bundle.
     _old_mac_version="$(agent_release_version "$HOME/Applications/$OPENGENI_APP_NAME.app/Contents/MacOS/opengeni-agent" 2>/dev/null || true)"
     app_icon="$(stage_macos_app_icon)"
-    dest="$(install_macos_local_bundle "$bin_tmp" "$install_dir" "$interaction_runtime" "$app_icon")"
+    install_macos_local_bundle "$bin_tmp" "$install_dir" "$interaction_runtime" "$app_icon"
+    dest="$install_dir/opengeni-agent"
     mark_upgrade_if_changed "$_old_mac_version" "$dest"
   else
     # Linux: atomic install — chmod then rename into place so a re-install never

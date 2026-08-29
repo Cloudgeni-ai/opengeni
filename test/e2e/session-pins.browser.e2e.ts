@@ -177,6 +177,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       extraHTTPHeaders: ownerHeaders,
     });
     const page = await context.newPage();
+    let releaseFirstAcknowledgement = () => {};
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
@@ -188,9 +189,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       const attentionPath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`;
       let acknowledgementAttempts = 0;
+      const firstAcknowledgementRelease = new Promise<void>((resolve) => {
+        releaseFirstAcknowledgement = resolve;
+      });
+      let markFirstAcknowledgementStarted = () => {};
+      const firstAcknowledgementStarted = new Promise<void>((resolve) => {
+        markFirstAcknowledgementStarted = resolve;
+      });
       await page.route(`**${attentionPath}`, async (route) => {
         acknowledgementAttempts += 1;
         if (acknowledgementAttempts === 1) {
+          markFirstAcknowledgementStarted();
+          await firstAcknowledgementRelease;
           await route.fulfill({
             status: 503,
             contentType: "application/json",
@@ -208,6 +218,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         { timeout: 10_000 },
       );
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      await firstAcknowledgementStarted;
+      const targetRow = page.locator(`a[data-session-row="${target.id}"]`);
+      await targetRow.waitFor({ state: "visible", timeout: 10_000 });
+      expect(await targetRow.getAttribute("aria-label")).not.toContain("unread");
+      releaseFirstAcknowledgement();
       const firstAcknowledgementResponse = await firstAcknowledgement;
       const firstReadThrough = Number(
         firstAcknowledgementResponse.request().postDataJSON().acknowledgedThroughSequence,
@@ -256,10 +271,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page
         .locator(`a[data-session-row="${target.id}"]`)
         .waitFor({ state: "visible", timeout: 10_000 });
-      expect(
-        await page.locator(`a[data-session-row="${target.id}"]`).getAttribute("aria-label"),
-      ).not.toContain("unread");
+      expect(await targetRow.getAttribute("aria-label")).not.toContain("unread");
     } finally {
+      releaseFirstAcknowledgement();
       await context.close();
     }
   }, 60_000);

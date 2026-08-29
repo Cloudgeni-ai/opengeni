@@ -153,6 +153,12 @@ API uses it when serving the installer, so an enrolled machine downloads the
 agent version baked into this deployment and connects back to that same external
 HTTPS origin rather than falling back to either public default.
 
+HTTPS/WSS is the supported private-edge posture. The web bootstrap retains a
+cryptographically random UUID compatibility path so a private HTTP origin can
+render the core workspace UI and useful diagnostics instead of crashing, but
+that fallback does not make HTTP feature-complete: browsers still withhold APIs
+used by voice, clipboard, and encrypted browser-side artifact operations.
+
 For a tailnet-only deployment, `OPENGENI_AUTH_REQUIRED=false` and
 `OPENGENI_PRODUCT_ACCESS_MODE=local` mean there is no shared deployment access
 key; tailnet membership is the outer access boundary. Internal database, NATS,
@@ -2207,6 +2213,14 @@ Service endpoints:
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
+API and worker health responses include the non-fatal warning
+`github_app_bot_identity_unavailable` when that process has partial workspace
+GitHub App configuration, cannot derive the App bot identity, and has no
+complete `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` fallback. Compare
+the warning across API and worker processes: a difference means attach and turn
+startup would declare different stable Git identity environment keys. The
+warning never includes provider credentials and does not change liveness.
+
 Useful settings:
 
 - `OPENGENI_OBSERVABILITY_STRUCTURED_LOGS=true` for JSON logs.
@@ -2228,7 +2242,7 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:
 

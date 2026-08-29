@@ -417,9 +417,10 @@ projection of legacy workspace instructions in one immutable turn-context
 snapshot. The first exact attempt creates a content-free selection receipt that
 binds that snapshot to the accepted logical turn. Its default `retrieval_only`
 (migration 0271; absent settings resolve to it) removes
-the broad Memory V1 working-set block and
-legacy preference-kind agent retrieval; canonical rows and human surfaces are
-unchanged. The former `legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
+the broad Memory V1 working-set block. Every existing Memory kind remains
+available through explicit agent search; legacy preference and procedure rows
+are historical context rather than behavioral authority. The former
+`legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
 omits it and retains mandatory instruction policy plus the always-visible
 structured preference and configured Skill descriptors. At the ordinary model
 request boundary, metadata-only telemetry records the exact attempt, existing
@@ -1025,6 +1026,10 @@ original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
 workspace mutation admission.
+If that process's durable row already records exit or loss, a later model-visible
+`write_stdin` remains fenced before provider dispatch but returns the stored
+terminal exit/loss banner. It never labels a permanently dead handle as a
+retryable platform fault or calls the provider again.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
@@ -1293,6 +1298,14 @@ single in-flight model step is lost, the same bound as a crash. This is an
 explicit checkpoint/resume, not an automatic Temporal retry. A newer control
 revision, terminal state, or successor attempt wins instead of being
 overwritten.
+
+The shared worker process owns its own fatality policy. The pinned Agents SDK
+is patched so its MCP lifecycle queue settles every submitted command even when
+an internal error value is hostile, and its tracing provider does not register
+process-global `unhandledRejection` termination behavior. No SDK background
+promise may escape into the process boundary. The worker listener remains an
+observational last resort; a genuinely unhealthy worker stops polling and uses
+the normal drain path rather than letting a dependency call `process.exit(1)`.
 
 An active-route filesystem-root change uses the same durable same-logical-turn
 boundary. A machine-primary attempt never pre-leases home. Clearing its pointer

@@ -24,4 +24,28 @@ describe("streaming health dashboard", () => {
     expect(serialized).not.toContain("requestId");
     expect(serialized).not.toContain("sessionId");
   });
+
+  test("shows the live first-token warning threshold on the latency chart", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./streaming-health.json", import.meta.url), "utf8"),
+    ) as {
+      panels: Array<{
+        title?: string;
+        fieldConfig?: {
+          defaults?: {
+            thresholds?: { steps?: Array<{ color?: string; value?: number | null }> };
+            custom?: { thresholdsStyle?: { mode?: string } };
+          };
+        };
+      }>;
+    };
+    const ttft = dashboard.panels.find(
+      (panel) => panel.title === "Time-to-first-token p99 / p95 / p50 by provider",
+    );
+    expect(ttft?.fieldConfig?.defaults?.thresholds?.steps).toContainEqual({
+      color: "red",
+      value: 8,
+    });
+    expect(ttft?.fieldConfig?.defaults?.custom?.thresholdsStyle?.mode).toBe("line");
+  });
 });

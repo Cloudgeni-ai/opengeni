@@ -6,8 +6,10 @@ import {
   localSessionDeliveryAttentionCounts,
   latestSessionAttentionProjection,
   notifySessionAttentionChanged,
+  restoreUnreadSessionAttentionProjection,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
+  shouldProjectActiveSessionRead,
   subscribeToSessionAttentionChanges,
   subscribeToLocalSessionDeliveryAttention,
   updateLocalSessionDeliveryAttention,
@@ -98,6 +100,16 @@ describe("active session read acknowledgement", () => {
     expect(sessionReadProjectionKey(session.id, 21)).not.toBe(acknowledged);
   });
 
+  test("restores the exact unread frontier when acknowledgement cannot start", () => {
+    expect(restoreUnreadSessionAttentionProjection(session, 23)).toEqual({
+      id: session.id,
+      workspaceId: session.workspaceId,
+      unread: true,
+      attentionVersion: session.attentionVersion,
+      lastSequence: 23,
+    });
+  });
+
   test("acknowledges the exact unread chat only at the foreground live tip", () => {
     expect(
       shouldAcknowledgeActiveSession({
@@ -109,6 +121,28 @@ describe("active session read acknowledgement", () => {
         liveTipLoaded: true,
       }),
     ).toBe(true);
+  });
+
+  test("clears the foreground route optimistically before its live tip finishes loading", () => {
+    expect(
+      shouldProjectActiveSessionRead({
+        activeSessionId: session.id,
+        workspaceId: session.workspaceId,
+        session,
+        documentVisible: true,
+        windowFocused: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAcknowledgeActiveSession({
+        activeSessionId: session.id,
+        workspaceId: session.workspaceId,
+        session,
+        documentVisible: true,
+        windowFocused: true,
+        liveTipLoaded: false,
+      }),
+    ).toBe(false);
   });
 
   test("does not consume unread state in the background or from a historical window", () => {

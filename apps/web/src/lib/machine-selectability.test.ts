@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { isMachineComputeSelectable } from "./machine-selectability";
+import {
+  isMachineComputeSelectable,
+  resolveSelectableMachineSandboxId,
+} from "./machine-selectability";
 
 // The session "Run on" pickers (sessions-index machine picker + the in-session
 // sandbox-switcher) gate selectability through this helper. The backend attach
@@ -28,5 +31,26 @@ describe("isMachineComputeSelectable", () => {
   test("reconnecting / enrolling stay gated", () => {
     expect(isMachineComputeSelectable("reconnecting")).toBe(false);
     expect(isMachineComputeSelectable("enrolling")).toBe(false);
+  });
+});
+
+describe("resolveSelectableMachineSandboxId", () => {
+  const machines = [
+    { sandboxId: "offline", state: "offline" },
+    { sandboxId: "online", state: "online" },
+  ];
+
+  test("keeps a reachable preferred machine", () => {
+    expect(resolveSelectableMachineSandboxId(machines, "online")).toBe("online");
+  });
+
+  test("replaces an offline preferred machine with a reachable one", () => {
+    expect(resolveSelectableMachineSandboxId(machines, "offline")).toBe("online");
+  });
+
+  test("returns no target when every machine is unreachable", () => {
+    expect(
+      resolveSelectableMachineSandboxId([{ sandboxId: "offline", state: "offline" }], null),
+    ).toBe(null);
   });
 });

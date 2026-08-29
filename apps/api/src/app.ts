@@ -44,6 +44,7 @@ import {
   withSessionRlsActorContext,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
+import { githubAppBotIdentityWarnings } from "@opengeni/github";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -734,15 +735,17 @@ export function createAppComposition(deps: AppDependencies): {
     });
   }
 
-  app.get("/healthz", (c) =>
-    c.json({
+  app.get("/healthz", (c) => {
+    const warnings = githubAppBotIdentityWarnings(deps.settings);
+    return c.json({
       service: deps.settings.serviceName,
       environment: deps.settings.environment,
       deploymentRevision: deps.settings.deploymentRevision,
       ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
       ok: true,
-    }),
-  );
+    });
+  });
 
   app.get("/readyz", async (c) => {
     const result = await runReadinessChecks(readinessChecks(deps), 2_000);
@@ -789,6 +792,7 @@ export function createAppComposition(deps: AppDependencies): {
           name: server.name ?? server.id,
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
+        defaultSandboxBackend: deps.settings.sandboxBackend,
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,

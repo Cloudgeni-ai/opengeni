@@ -256,7 +256,7 @@ describe("Company Brain learning-policy router (real PostgreSQL)", () => {
     expect(history.activations).toEqual([]);
   }, 180_000);
 
-  test("automatic records an instruction-policy decision but leaves activation to a human", async () => {
+  test("automatic activates an eligible instruction policy through its governed lifecycle", async () => {
     if (!shared || !client) return;
     const f = await fixture("automatic");
     const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
@@ -264,14 +264,14 @@ describe("Company Brain learning-policy router (real PostgreSQL)", () => {
       attempt: f.attempt,
       request: await noteRequest(f, "instruction_policy"),
     });
-    expect(result.decision).toBe("activation_requested");
+    expect(result.decision).toBe("activated");
     expect(result.write?.destination).toBe("instruction_policy");
     expect(result.learning).toMatchObject({ outcome: "automatic", automaticEligible: true });
     expect(result.activation).toMatchObject({
       requested: true,
-      activated: false,
-      boundary: "human_activation_required",
-      receiptId: null,
+      activated: true,
+      boundary: "activated",
+      destination: "instruction_policy",
     });
     const history = await listGovernedLearningActivationHistory(client.db, {
       workspaceId: f.grant.workspaceId,
@@ -279,7 +279,12 @@ describe("Company Brain learning-policy router (real PostgreSQL)", () => {
       principalKind: "human_session",
       limit: 10,
     });
-    expect(history.activations).toEqual([]);
+    expect(history.activations).toHaveLength(1);
+    expect(history.activations[0]).toMatchObject({
+      id: result.activation.receiptId,
+      destination: "instruction_policy",
+      authorityKind: "automatic",
+    });
   }, 180_000);
 
   test("a note longer than the destination budget cannot be promoted into a rule", async () => {

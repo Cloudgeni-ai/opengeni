@@ -751,6 +751,54 @@ describe("ordinary session Codex realtime control", () => {
     expect(requests).toBe(1);
   });
 
+  test("aborts a shared catalog read only after its final mounted consumer leaves", async () => {
+    const workspaceId = "99999999-9999-4999-8999-999999999999";
+    const nativeSignals: AbortSignal[] = [];
+    const client = {
+      getWorkspaceRealtimeModelCatalog: async (
+        _workspaceId: string,
+        options?: { signal?: AbortSignal },
+      ) => {
+        const nativeSignal = options?.signal;
+        if (nativeSignal) nativeSignals.push(nativeSignal);
+        return await new Promise((_resolve, reject) => {
+          nativeSignal?.addEventListener(
+            "abort",
+            () => reject(nativeSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    } as unknown as OpenGeniClient;
+
+    function Selection() {
+      useRealtimeModelSelection({ client, workspaceId, codexConnected: true });
+      return null;
+    }
+
+    await act(async () =>
+      root.render(
+        <>
+          <Selection key="first" />
+          <Selection key="second" />
+        </>,
+      ),
+    );
+    expect(nativeSignals).toHaveLength(1);
+    expect(nativeSignals[0]?.aborted).toBe(false);
+
+    await act(async () => root.render(<Selection key="second" />));
+    expect(nativeSignals[0]?.aborted).toBe(false);
+
+    await act(async () => root.render(null));
+    expect(nativeSignals[0]?.aborted).toBe(true);
+
+    await act(async () => root.render(<Selection key="retry" />));
+    expect(nativeSignals).toHaveLength(2);
+    expect(nativeSignals[1]?.aborted).toBe(false);
+    await act(async () => root.render(null));
+  });
+
   test("does not cache a failed catalog load", async () => {
     const workspaceId = "88888888-8888-4888-8888-888888888888";
     let requests = 0;

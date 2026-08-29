@@ -826,6 +826,50 @@ describe("API helpers", () => {
     expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
   });
 
+  test("health omits configuration warnings when GitHub App bot identity is available", async () => {
+    const app = createApp({
+      settings: testSettings({ githubAppId: "12345", githubAppSlug: "opengeni-test-app" }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+
+    const response = await app.request("http://localhost/healthz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      service: "opengeni",
+      environment: "test",
+      deploymentRevision: "dev",
+      ok: true,
+    });
+  });
+
+  test("health exposes incomplete GitHub App bot identity without failing liveness", async () => {
+    const settings = {
+      ...testSettings(),
+      gitAuthorName: undefined,
+      gitAuthorEmail: undefined,
+      githubAppId: undefined,
+      githubAppSlug: undefined,
+      githubClientId: "configured-client",
+    };
+    const app = createApp({
+      settings,
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+
+    const response = await app.request("http://localhost/healthz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      warnings: ["github_app_bot_identity_unavailable"],
+    });
+  });
+
   test("readyz reports a failing dependency", async () => {
     const sentinel = "READYZ_PUBLIC_SENTINEL_9e3468";
     const app = createApp({

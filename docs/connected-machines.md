@@ -161,6 +161,11 @@ Rules to keep in mind:
 - `sandboxBackend` selects the backend for a **managed** sandbox; for a machine
   target the backend is the machine itself, so leave it off and point at the
   machine with `targetSandboxId`.
+- When the deployment default itself is `selfhosted`, the web composer starts on
+  Connected Machine and selects the first online machine. It does not offer a
+  fictional managed default, and submission stays blocked until a machine is
+  available. The API also rejects a targetless selfhosted create before writing
+  a session.
 - **A child spawn with `targetSandboxId` / `machineTarget` is an own-box
   machine-primary home**, even when the parent is `backend: none`. Omitted
   `sandbox` still shares the creator's box only when no machine is named.

@@ -706,6 +706,7 @@ export function useComposer(
   const targetGeneration = useRef(0);
   const draftReadGeneration = useRef(0);
   const draftReadInFlightRef = useRef<string | null>(null);
+  const draftReadAbortRef = useRef<AbortController | null>(null);
   const draftReadRetryRef = useRef<{
     targetKey: string;
     failures: number;
@@ -742,6 +743,8 @@ export function useComposer(
     if (draftReadRetryRef.current.timer !== null) {
       clearTimeout(draftReadRetryRef.current.timer);
     }
+    draftReadAbortRef.current?.abort();
+    draftReadAbortRef.current = null;
     draftReadRetryRef.current = { targetKey, failures: 0, timer: null };
     targetKeyRef.current = targetKey;
     targetGeneration.current += 1;
@@ -800,6 +803,11 @@ export function useComposer(
       if (draftReadRetryRef.current.timer !== null) {
         clearTimeout(draftReadRetryRef.current.timer);
       }
+      targetGeneration.current += 1;
+      draftReadGeneration.current += 1;
+      draftReadInFlightRef.current = null;
+      draftReadAbortRef.current?.abort();
+      draftReadAbortRef.current = null;
     },
     [],
   );
@@ -938,6 +946,9 @@ export function useComposer(
       draftReadInFlightRef.current = targetKey;
       const generation = targetGeneration.current;
       const readTicket = ++draftReadGeneration.current;
+      const requestAbort = new AbortController();
+      draftReadAbortRef.current?.abort();
+      draftReadAbortRef.current = requestAbort;
       const localAtStart = localEditRevision.current;
       const baseAtStart = draftRef.current;
       const policyAtStart = policyRef.current;
@@ -967,7 +978,9 @@ export function useComposer(
         setDraftLoading(true);
       }
       try {
-        const fetched = await client.getComposerDraft(workspaceId, sessionId);
+        const fetched = await client.getComposerDraft(workspaceId, sessionId, {
+          signal: requestAbort.signal,
+        });
         if (
           generation !== targetGeneration.current ||
           targetKeyRef.current !== targetKey ||
@@ -1057,6 +1070,9 @@ export function useComposer(
         }
         if (draftReadInFlightRef.current === targetKey) {
           draftReadInFlightRef.current = null;
+        }
+        if (draftReadAbortRef.current === requestAbort) {
+          draftReadAbortRef.current = null;
         }
       }
     },

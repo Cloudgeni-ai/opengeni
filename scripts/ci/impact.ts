@@ -188,6 +188,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/crypto-random-uuid.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/organization-workspace-administration.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/testing",

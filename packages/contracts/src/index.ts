@@ -942,15 +942,8 @@ const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
  * trustworthy logical-delivery identity. Server-owned Slack delivery paths
  * call the internal client directly with their own durable operation IDs.
  */
-// Names kept so previously written data still parses - immutable scheduled-task
-// execution snapshots recorded the tool set that was default at the time, and
-// they are strictly re-parsed on replay. Retiring a tool must not strand an
-// accepted occurrence. These are never registered, never default, and never
-// authorized; they exist so history stays readable.
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
-  "memory_save",
-  "memory_correct",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -983,10 +976,6 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
-    // Memory V1 writes are retired entirely; `remember` and task-note
-    // promotion own durable agent writes.
-    name !== "memory_save" &&
-    name !== "memory_correct" &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -7661,6 +7650,48 @@ export const VariableSetVariableName = z
   .regex(/^[A-Z][A-Z0-9_]*$/)
   .max(128);
 export type VariableSetVariableName = z.infer<typeof VariableSetVariableName>;
+
+export const VARIABLE_SET_RESERVED_EXACT_NAMES = [
+  "HOME",
+  "PATH",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "IFS",
+  "ENV",
+  "BASH_ENV",
+  "NODE_OPTIONS",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PERL5OPT",
+  "PERL5LIB",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GITLAB_TOKEN",
+  "AZURE_DEVOPS_EXT_PAT",
+  "GIT_ASKPASS",
+  "GIT_TERMINAL_PROMPT",
+] as const;
+
+export const VARIABLE_SET_RESERVED_PREFIXES = [
+  "OPENGENI_",
+  "GIT_CONFIG_",
+  "GIT_AUTHOR_",
+  "GIT_COMMITTER_",
+  "LD_",
+  "DYLD_",
+] as const;
+
+export function variableSetVariableNameReservation(
+  name: string,
+): { kind: "exact" | "prefix"; value: string } | null {
+  if ((VARIABLE_SET_RESERVED_EXACT_NAMES as readonly string[]).includes(name)) {
+    return { kind: "exact", value: name };
+  }
+  const prefix = VARIABLE_SET_RESERVED_PREFIXES.find((candidate) => name.startsWith(candidate));
+  return prefix ? { kind: "prefix", value: prefix } : null;
+}
 
 function withVariableSetIdAlias<T extends z.ZodRawShape>(
   shape: T,
@@ -15799,6 +15830,10 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         default: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
         allowed: [...FIRST_PARTY_MCP_TOOL_NAMES],
       }),
+    // Client-safe placement default. A selfhosted-primary deployment has no
+    // anonymous managed box: the composer must bind an explicit Connected
+    // Machine instead of sending a targetless selfhosted create.
+    defaultSandboxBackend: SandboxBackend.optional(),
     fileUploads: z.object({
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),

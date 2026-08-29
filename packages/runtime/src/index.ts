@@ -1786,7 +1786,7 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "When the user explicitly asks you to remember or learn something, use the remember tool when it is available and route it by purpose: lane=knowledge for facts, decisions, incidents, bug fixes, and outcomes that should become searchable Memory; lane=preference (a Skill) for reusable conditional how-to guidance; lane=instruction_policy only for the shortest universal rules every agent must follow. After a confirmed lane=knowledge save, retrieve it later with memory_search. Do not store the same material in multiple authorities.",
+    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Use remember lane=preference for reusable conditional guidance (a Skill), lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -3353,7 +3353,13 @@ export async function connectMcpServersInBatches(
             ...(options.connectTimeoutMs === undefined
               ? {}
               : { connectTimeoutMs: options.connectTimeoutMs }),
-            connectInParallel: true,
+            // OpenGeni already bounds lifecycle work in batches. The Agents SDK
+            // parallel path additionally starts a detached `void drain()` task;
+            // a best-effort server rejection can escape that task as a process-
+            // level unhandled rejection even though the session records and
+            // degrades the failed server. Keep lifecycle ownership on the
+            // awaited serial path inside each bounded batch.
+            connectInParallel: false,
             strict: options.strict,
           }),
         );
