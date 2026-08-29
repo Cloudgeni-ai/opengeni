@@ -7,6 +7,7 @@ import {
   MAX_SELECTED_VARIABLE_SETS,
   Permission,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  WORK_DISCOVERY_QUERY_MAX_CHARS,
   type AccessGrant,
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
@@ -211,7 +212,7 @@ describe("first-party MCP tool visibility policy", () => {
     expect(databaseTouches).toBe(0);
   });
 
-  test("MCP discovery counts Unicode code points in the shared normalization path", async () => {
+  test("MCP discovery pre-bounds raw input and counts Unicode in shared normalization", async () => {
     const routeDeps = deps();
     routeDeps.settings = testSettings({ workDiscoveryEnabled: true });
     const server = buildOpenGeniMcpServer(routeDeps, grant(["sessions:read"], ["sessions_list"]));
@@ -220,6 +221,11 @@ describe("first-party MCP tool visibility policy", () => {
       registeredToolInputSchema(server, "sessions_list").safeParse({ query: "😀".repeat(200) })
         .success,
     ).toBe(true);
+    expect(
+      registeredToolInputSchema(server, "sessions_list").safeParse({
+        query: "x".repeat(WORK_DISCOVERY_QUERY_MAX_CHARS * 8 + 1),
+      }).success,
+    ).toBe(false);
     await expect(
       listSessionDiscoverySummaries({} as never, workspaceId, {
         limit: 1,

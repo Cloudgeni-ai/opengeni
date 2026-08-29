@@ -51,6 +51,7 @@ import {
   WORK_CLAIM_DISCOVERY_LIMIT,
   WORK_CLAIM_NAMESPACE_MAX_BYTES,
   WORK_CLAIM_VERSION_VALUE_MAX_BYTES,
+  WORK_DISCOVERY_QUERY_MAX_CHARS,
   WORK_DISCOVERY_RECENT_HOURS_MAX,
   WorkClaimSubjectType,
   type WorkClaimSubjectFilter,
@@ -284,6 +285,12 @@ export type McpServerOptions = {
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
 const ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
+// Keep pathological raw MCP payloads away from Unicode normalization while
+// leaving the shared DB normalizer authoritative for the exact post-NFKC
+// code-point limit. The multiplier admits supplementary-plane characters,
+// decomposed forms, and ordinary whitespace folding without reopening the
+// API-wide request-body ceiling for this 200-code-point field.
+const MCP_DISCOVERY_QUERY_MAX_UTF16_CODE_UNITS = WORK_DISCOVERY_QUERY_MAX_CHARS * 8;
 
 type OrchestrationToolName = "session_create" | "session_send_message";
 
@@ -4411,7 +4418,7 @@ function registerWorkspaceOrchestrationTools(
           includeLastMessage: z4.boolean().optional(),
           orderBy: z4.enum(["createdAt", "updatedAt", "relevance"]).optional(),
           updatedAfter: z4.string().max(64).optional(),
-          query: z4.string().optional(),
+          query: z4.string().max(MCP_DISCOVERY_QUERY_MAX_UTF16_CODE_UNITS).optional(),
           statuses: z4
             .array(
               z4.enum([
