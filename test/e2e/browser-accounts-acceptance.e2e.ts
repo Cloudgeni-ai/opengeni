@@ -347,6 +347,22 @@ type DocumentReplacementRetirementInput = {
   workspaceId: string;
 };
 
+type LogoutAllFiniteReadRetirementInput = {
+  acceptedActorTransitions: readonly ActorMutationAcceptance[];
+  actorEpoch: string | null;
+  confirmedActorEpoch: string;
+  confirmedAt: number;
+  currentSessionSetAuthorityHash: string | null;
+  dispatchPhase: string;
+  logoutAllAcceptedAt: number;
+  method: string;
+  oldWorkspaceId: string;
+  pathname: string;
+  requestSessionSetAuthorityHash: string | null;
+  responseSeen: boolean;
+  startedAt: number;
+};
+
 const ACTOR_CHANGING_ACCEPTANCE_PATHS = new Set([
   "/v1/auth/session-set/logout-all",
   "/v1/auth/session-set/logout-one",
@@ -590,6 +606,43 @@ function finiteReadMayRetireAfterDocumentReplacement(
     Number.isFinite(input.startedAt) &&
     Number.isFinite(input.replacementStartedAt) &&
     input.startedAt <= input.replacementStartedAt
+  );
+}
+
+function finiteReadMayRetireAfterLogoutAllAuthorityReset(
+  input: LogoutAllFiniteReadRetirementInput,
+): boolean {
+  // Chromium can omit every Playwright terminal for a finite request that was
+  // still queued when logout-all synchronously aborted the old actor. Retire
+  // only a pre-acceptance read whose old HttpOnly authority is bound to the
+  // exact accepted reset and differs from the confirmed replacement set.
+  const exactOldWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.oldWorkspaceId)}/`;
+  const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
+    "logout-all-response-loss-replay",
+  );
+  return (
+    new Set(["GET", "HEAD"]).has(input.method) &&
+    input.actorEpoch !== null &&
+    input.actorEpoch !== input.confirmedActorEpoch &&
+    !input.responseSeen &&
+    input.pathname.startsWith(exactOldWorkspacePrefix) &&
+    allowedDispatchPhases?.has(input.dispatchPhase) === true &&
+    input.currentSessionSetAuthorityHash !== null &&
+    input.requestSessionSetAuthorityHash !== null &&
+    input.requestSessionSetAuthorityHash !== input.currentSessionSetAuthorityHash &&
+    Number.isFinite(input.startedAt) &&
+    Number.isFinite(input.logoutAllAcceptedAt) &&
+    Number.isFinite(input.confirmedAt) &&
+    input.startedAt <= input.logoutAllAcceptedAt &&
+    input.logoutAllAcceptedAt <= input.confirmedAt &&
+    input.acceptedActorTransitions.some(
+      (transition) =>
+        transition.path === "/v1/auth/session-set/logout-all" &&
+        transition.acceptedAt === input.logoutAllAcceptedAt &&
+        transition.actorEpoch !== null &&
+        transition.actorEpoch !== input.actorEpoch &&
+        transition.sessionSetAuthorityHash === input.requestSessionSetAuthorityHash,
+    )
   );
 }
 
@@ -1110,6 +1163,65 @@ async function retirePendingReadsAfterConfirmedDocumentReplacement(
     problems.retiredFiniteReads.push(
       `${pending.description} [retired=confirmed-document-replacement]`,
     );
+    problems.pendingFiniteReads.delete(request);
+  }
+}
+
+async function retirePendingReadsAfterConfirmedLogoutAllAuthorityReset(
+  page: Page,
+  problems: BrowserProblems,
+  input: {
+    confirmedActorEpoch: string;
+    confirmedAt: number;
+    logoutAllAcceptedAt: number;
+    oldWorkspaceId: string;
+  },
+): Promise<void> {
+  const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
+    await browserCookieHeader(page.context()),
+  );
+  for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
+    const requestSessionSetAuthorityHash =
+      pending.sessionSetAuthorityHashImmediate ??
+      (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
+    const mayRetire = finiteReadMayRetireAfterLogoutAllAuthorityReset({
+      acceptedActorTransitions: actorMutationAcceptances,
+      actorEpoch: pending.actorEpoch,
+      confirmedActorEpoch: input.confirmedActorEpoch,
+      confirmedAt: input.confirmedAt,
+      currentSessionSetAuthorityHash,
+      dispatchPhase: pending.dispatchPhase,
+      logoutAllAcceptedAt: input.logoutAllAcceptedAt,
+      method: pending.method,
+      oldWorkspaceId: input.oldWorkspaceId,
+      pathname: pending.pathname,
+      requestSessionSetAuthorityHash,
+      responseSeen: pending.responseSeen,
+      startedAt: pending.startedAt,
+    });
+    problems.retirementChecks.push(
+      JSON.stringify({
+        actorEpoch: pending.actorEpoch,
+        confirmedActorEpoch: input.confirmedActorEpoch,
+        currentSessionSetAuthorityPresent: currentSessionSetAuthorityHash !== null,
+        dispatchPhase: pending.dispatchPhase,
+        logoutAllAcceptedAt: input.logoutAllAcceptedAt,
+        method: pending.method,
+        pathname: pending.pathname,
+        requestSessionSetAuthorityChanged:
+          requestSessionSetAuthorityHash !== null &&
+          requestSessionSetAuthorityHash !== currentSessionSetAuthorityHash,
+        requestSessionSetAuthorityPresent: requestSessionSetAuthorityHash !== null,
+        responseSeen: pending.responseSeen,
+        result: mayRetire ? "retired-after-logout-all" : "kept-after-logout-all",
+        startedAt: pending.startedAt,
+      }),
+    );
+    if (!mayRetire) continue;
+    problems.retiredFiniteReads.push(
+      `${pending.description} [retired=confirmed-logout-all-authority-reset]`,
+    );
+    problems.retiredFiniteReadTombstones.set(request, pending.description);
     problems.pendingFiniteReads.delete(request);
   }
 }
@@ -2715,7 +2827,10 @@ describe("provider-neutral browser account acceptance", () => {
     };
     expect(requestFailureProblem(evidenceSessionPageRead)).toBeNull();
     expect(
-      requestFailureProblem({ ...evidenceSessionPageRead, failure: "NS_ERROR_NET_RESET" }),
+      requestFailureProblem({
+        ...evidenceSessionPageRead,
+        failure: "NS_ERROR_NET_RESET",
+      }),
     ).toContain("/sessions");
     expect(
       requestFailureProblem({
@@ -2884,7 +2999,11 @@ describe("provider-neutral browser account acceptance", () => {
     ).toBe(0);
     expect(
       correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
-        { ...acceptedWebKitCancellation, observedAt: 151, terminal: "finished" },
+        {
+          ...acceptedWebKitCancellation,
+          observedAt: 151,
+          terminal: "finished",
+        },
       ]),
     ).toBe(0);
     expect(
@@ -2906,7 +3025,11 @@ describe("provider-neutral browser account acceptance", () => {
     expect(
       correlatedWebKitReauthenticationTerminalIndex(correlatedWebKitPageError, [
         acceptedWebKitCancellation,
-        { ...acceptedWebKitCancellation, observedAt: 125, terminal: "finished" },
+        {
+          ...acceptedWebKitCancellation,
+          observedAt: 125,
+          terminal: "finished",
+        },
       ]),
     ).toBeNull();
     const consumableWebKitFailures = [acceptedWebKitCancellation];
@@ -3132,6 +3255,87 @@ describe("provider-neutral browser account acceptance", () => {
       expect(finiteReadMayRetireAfterDocumentReplacement(invalid)).toBe(false);
     }
 
+    const logoutAllRetirement = {
+      acceptedActorTransitions: [
+        {
+          acceptedAt: 200,
+          actorEpoch: "accepted-reset-epoch",
+          path: "/v1/auth/session-set/logout-all",
+          sessionSetAuthorityHash: "a".repeat(64),
+        },
+      ],
+      actorEpoch: "old-actor-epoch",
+      confirmedActorEpoch: "new-neutral-epoch",
+      confirmedAt: 300,
+      currentSessionSetAuthorityHash: "b".repeat(64),
+      dispatchPhase: "slot-revocation-reauthentication",
+      logoutAllAcceptedAt: 200,
+      method: "GET",
+      oldWorkspaceId: "00000000-0000-0000-0000-000000000001",
+      pathname:
+        "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/00000000-0000-4000-8000-000000000002/queue",
+      requestSessionSetAuthorityHash: "a".repeat(64),
+      responseSeen: false,
+      startedAt: 100,
+    } satisfies LogoutAllFiniteReadRetirementInput;
+    expect(finiteReadMayRetireAfterLogoutAllAuthorityReset(logoutAllRetirement)).toBe(true);
+    for (const invalid of [
+      { ...logoutAllRetirement, method: "POST" },
+      { ...logoutAllRetirement, actorEpoch: null },
+      { ...logoutAllRetirement, actorEpoch: "new-neutral-epoch" },
+      { ...logoutAllRetirement, responseSeen: true },
+      { ...logoutAllRetirement, dispatchPhase: "cross-slot-deep-link" },
+      {
+        ...logoutAllRetirement,
+        pathname: "/v1/workspaces/another-workspace/sessions",
+      },
+      { ...logoutAllRetirement, pathname: "/v1/workspaces" },
+      { ...logoutAllRetirement, requestSessionSetAuthorityHash: null },
+      {
+        ...logoutAllRetirement,
+        currentSessionSetAuthorityHash: "a".repeat(64),
+      },
+      { ...logoutAllRetirement, startedAt: 201 },
+      { ...logoutAllRetirement, confirmedAt: 199 },
+      { ...logoutAllRetirement, logoutAllAcceptedAt: 201 },
+      { ...logoutAllRetirement, acceptedActorTransitions: [] },
+      {
+        ...logoutAllRetirement,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "old-actor-epoch",
+            path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "a".repeat(64),
+          },
+        ],
+      },
+      {
+        ...logoutAllRetirement,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "accepted-reset-epoch",
+            path: "/v1/auth/session-set/select",
+            sessionSetAuthorityHash: "a".repeat(64),
+          },
+        ],
+      },
+      {
+        ...logoutAllRetirement,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "accepted-reset-epoch",
+            path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "c".repeat(64),
+          },
+        ],
+      },
+    ]) {
+      expect(finiteReadMayRetireAfterLogoutAllAuthorityReset(invalid)).toBe(false);
+    }
+
     expect(
       actorTransitionResponseDispatchPhaseMatches({
         dispatchPhase: "second-tab-bootstrap",
@@ -3215,13 +3419,22 @@ describe("provider-neutral browser account acceptance", () => {
     expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 10_099 })).toBe(false);
     expect(isExpectedBoundedHttp1NativeSeam({ ...expected, failedAt: 15_101 })).toBe(false);
     expect(
-      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "net::ERR_CONNECTION_RESET" }),
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        failure: "net::ERR_CONNECTION_RESET",
+      }),
     ).toBe(false);
     expect(
-      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "cancelled: connection reset" }),
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        failure: "cancelled: connection reset",
+      }),
     ).toBe(false);
     expect(
-      isExpectedBoundedHttp1NativeSeam({ ...expected, failure: "canceled: transport failure" }),
+      isExpectedBoundedHttp1NativeSeam({
+        ...expected,
+        failure: "canceled: transport failure",
+      }),
     ).toBe(false);
     expect(
       isExpectedBoundedHttp1NativeSeam({
@@ -3801,6 +4014,21 @@ describe("provider-neutral browser account acceptance", () => {
           acceptedAt: logoutAllResponseLoss!.acceptedAt!,
           actorEpoch: projectionBeforeLogoutAll.actorEpoch,
           workspaceId: beta.workspaceId,
+        }),
+      ]);
+      const logoutAllConfirmedAt = performance.now();
+      await Promise.all([
+        retirePendingReadsAfterConfirmedLogoutAllAuthorityReset(page, pageProblems, {
+          confirmedActorEpoch: signedOutProjection.actorEpoch,
+          confirmedAt: logoutAllConfirmedAt,
+          logoutAllAcceptedAt: logoutAllResponseLoss!.acceptedAt!,
+          oldWorkspaceId: beta.workspaceId,
+        }),
+        retirePendingReadsAfterConfirmedLogoutAllAuthorityReset(secondTab, secondTabProblems, {
+          confirmedActorEpoch: signedOutSecondTabProjection.actorEpoch,
+          confirmedAt: logoutAllConfirmedAt,
+          logoutAllAcceptedAt: logoutAllResponseLoss!.acceptedAt!,
+          oldWorkspaceId: beta.workspaceId,
         }),
       ]);
       setBrowserPhase(pageProblems, "signed-out-settled");
