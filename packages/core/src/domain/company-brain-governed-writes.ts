@@ -67,6 +67,26 @@ export const DEFAULT_AUTOMATIC_LEARNING_DESTINATIONS: ReadonlyArray<GovernedLear
   ["preference"];
 
 /**
+ * Start a non-authoritative post-activation notification without making the
+ * durable activation receipt wait for its settlement. The callback is invoked
+ * synchronously so immediate enqueue work begins before the router returns;
+ * both synchronous throws and later promise rejections are contained.
+ *
+ * Exact retries intentionally dispatch again: the publication sink owns an
+ * activation-receipt idempotency key, while the activation receipt remains the
+ * caller-facing source of truth even if notification delivery stalls forever.
+ */
+export function dispatchBestEffortGovernedLearningNotification(
+  notify: () => Promise<unknown>,
+): void {
+  try {
+    void notify().catch(() => undefined);
+  } catch {
+    // Notification is best-effort; the durable activation receipt already exists.
+  }
+}
+
+/**
  * Transport-neutral facade for explicit governed Company Brain proposals.
  * It intentionally exposes no generic remember call, selector, activation,
  * rollback token, or personal/organization destination.
@@ -297,16 +317,14 @@ export function createCompanyBrainLearningPolicyRouter(
           learningFailure: classifyLearningFailure("activation", error),
         });
       }
-      try {
-        await notifyActivation({
+      dispatchBestEffortGovernedLearningNotification(() =>
+        notifyActivation({
           db: options.db,
           receipt: activation,
           sessionId: attempt.sessionId,
           attemptId: attempt.attemptId,
-        });
-      } catch {
-        // Notification is best-effort; the durable receipts already exist.
-      }
+        }),
+      );
       return CompanyBrainLearningPolicyRouteReceipt.parse({
         operationId: request.operationId,
         workspaceId: attempt.workspaceId,
