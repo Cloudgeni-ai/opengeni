@@ -8214,6 +8214,19 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("a rejected optional connection group fails open without weakening required MCP", () => {
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    const settlement = source.slice(
+      source.indexOf("const connectEntryGroups = async"),
+      source.indexOf("const connectedEager = await connectEntryGroups"),
+    );
+    expect(settlement).toContain('if (requiredResult.status === "rejected")');
+    expect(settlement).toContain("throw requiredResult.reason");
+    expect(settlement).toContain('if (bestEffortResult.status === "rejected")');
+    expect(settlement).toContain("entry.server.releaseAggregateBudget()");
+    expect(settlement.match(/throw /g)).toHaveLength(1);
+  });
+
   test("waits only for session-eager MCP preparation and defers strict and optional servers", async () => {
     let releaseOptional!: () => void;
     const optionalConnect = new Promise<void>((resolve) => {

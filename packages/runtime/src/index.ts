@@ -3788,21 +3788,18 @@ export async function prepareAgentTools(
       connectEntries(required, true, "required_connect"),
       connectEntries(bestEffort, false, "optional_connect"),
     ]);
-    const connectedRequired = requiredResult.status === "fulfilled" ? requiredResult.value : null;
     const connectedBestEffort =
       bestEffortResult.status === "fulfilled" ? bestEffortResult.value : null;
-    const failure =
-      requiredResult.status === "rejected"
-        ? requiredResult.reason
-        : bestEffortResult.status === "rejected"
-          ? bestEffortResult.reason
-          : undefined;
-    if (failure !== undefined) {
+    if (requiredResult.status === "rejected") {
       await connectedBestEffort?.close().catch(() => undefined);
-      await connectedRequired?.close().catch(() => undefined);
-      throw failure;
+      throw requiredResult.reason;
     }
-    return { required: connectedRequired, bestEffort: connectedBestEffort };
+    if (bestEffortResult.status === "rejected") {
+      for (const entry of bestEffort) {
+        if (entry.server instanceof PrefixedMcpServer) entry.server.releaseAggregateBudget();
+      }
+    }
+    return { required: requiredResult.value, bestEffort: connectedBestEffort };
   };
   const connectedEager = await connectEntryGroups(eagerRequiredEntries, eagerBestEffortEntries);
   const connectedEagerRequired = connectedEager.required;
