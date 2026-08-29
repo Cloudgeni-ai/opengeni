@@ -385,7 +385,7 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         expect(pendingDuringReconciliation?.state).toBe(
           encodePendingActivityState("CANCEL_REQUESTED"),
         );
-        expect(heartbeats).toBeGreaterThan(beatsBeforeReconciliationWindow);
+        expect(heartbeats).toBeGreaterThanOrEqual(beatsBeforeReconciliationWindow + 3);
         expect(replacementDispatches).toBe(0);
         expect(model.calls).toBe(0);
       } finally {
@@ -620,7 +620,7 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         const ticksAtStop = hungTicks;
         await Bun.sleep(6_000);
         expect(heartbeats).toBe(beatsAtStop);
-        expect(hungTicks).toBeGreaterThan(ticksAtStop);
+        expect(hungTicks).toBeGreaterThanOrEqual(ticksAtStop + 3);
         const reconcilingDescription = await handle.describe();
         expect(reconcilingDescription.status.name).toBe("RUNNING");
         const pendingDuringReconciliation = reconcilingDescription.raw.pendingActivities?.find(
