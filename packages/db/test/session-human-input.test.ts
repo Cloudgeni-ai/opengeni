@@ -396,6 +396,14 @@ describe("durable structured human input", () => {
     if (!laterFollowUp.added) {
       throw new Error(`later follow-up was not added: ${laterFollowUp.reason}`);
     }
+    // A producer transaction can begin before the resume claim, wait on the
+    // session lock, and commit afterward with an older transaction timestamp.
+    // The durable pending-event sequence, not created_at, owns the boundary.
+    await shared.admin`
+      update session_system_updates
+      set created_at = '2000-01-01T00:00:00.000Z'
+      where id = ${laterFollowUp.update.id}
+    `;
 
     const nextPosition = await nextSessionHistoryPosition(
       client.db,

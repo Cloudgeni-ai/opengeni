@@ -275,6 +275,7 @@ import {
   asc,
   desc,
   eq,
+  exists,
   getTableColumns,
   gt,
   gte,
@@ -57157,9 +57158,11 @@ export type ClaimSessionWorkForAttemptInput = {
   /**
    * A requires-action resume first persists its open tool-call result, then
    * re-enters this exact attempt to attach machine input that arrived while the
-   * session was blocked. Keeping this opt-in prevents an ordinary activity
-   * retry from inserting a system message ahead of the required call/result
-   * pair in canonical history.
+   * session was blocked. The dispatch metadata freezes the session's durable
+   * pending-event sequence at attempt claim; timestamps cannot own this fence
+   * because a producer transaction may wait on the session lock. Keeping this
+   * opt-in prevents an ordinary activity retry from inserting a system message
+   * ahead of the required call/result pair in canonical history.
    */
   attachPendingUpdatesToRunningAttempt?: boolean;
 };
@@ -57538,7 +57541,7 @@ export async function claimSessionWorkForAttempt(
           options: {
             supersedeGoalContinuations?: boolean;
             deliverUpdates?: boolean;
-            createdBeforeOrAt?: Date;
+            pendingEventSequenceBeforeOrAt?: number;
           } = {},
         ): Promise<{
           count: number;
@@ -57552,6 +57555,23 @@ export async function claimSessionWorkForAttempt(
           events: SessionEventInsertWithPayload[];
           event: SessionEventInsertWithPayload | null;
         }> => {
+          const withinPendingUpdateBoundary =
+            options.pendingEventSequenceBeforeOrAt === undefined
+              ? undefined
+              : exists(
+                  tx
+                    .select({ value: sql`1` })
+                    .from(schema.sessionEvents)
+                    .where(
+                      and(
+                        eq(schema.sessionEvents.workspaceId, workspaceId),
+                        eq(schema.sessionEvents.sessionId, sessionId),
+                        eq(schema.sessionEvents.type, "system.update.pending"),
+                        lte(schema.sessionEvents.sequence, options.pendingEventSequenceBeforeOrAt),
+                        sql`${schema.sessionEvents.payload} ->> 'updateId' = ${schema.sessionSystemUpdates.id}::text`,
+                      ),
+                    ),
+                );
           const [agentSteer] =
             options.deliverUpdates === false
               ? []
@@ -57564,9 +57584,7 @@ export async function claimSessionWorkForAttempt(
                       eq(schema.sessionSystemUpdates.sessionId, sessionId),
                       eq(schema.sessionSystemUpdates.state, "pending"),
                       eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-                      options.createdBeforeOrAt
-                        ? lte(schema.sessionSystemUpdates.createdAt, options.createdBeforeOrAt)
-                        : undefined,
+                      withinPendingUpdateBoundary,
                     ),
                   )
                   .orderBy(
@@ -57586,6 +57604,7 @@ export async function claimSessionWorkForAttempt(
                       eq(schema.sessionSystemUpdates.sessionId, sessionId),
                       eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
                       eq(schema.sessionSystemUpdates.state, "pending"),
+                      withinPendingUpdateBoundary,
                     ),
                   )
                   .returning({
@@ -57626,9 +57645,7 @@ export async function claimSessionWorkForAttempt(
                       eq(schema.sessionSystemUpdates.sessionId, sessionId),
                       eq(schema.sessionSystemUpdates.state, "pending"),
                       ne(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
-                      options.createdBeforeOrAt
-                        ? lte(schema.sessionSystemUpdates.createdAt, options.createdBeforeOrAt)
-                        : undefined,
+                      withinPendingUpdateBoundary,
                     ),
                   )
                   .orderBy(
@@ -58373,9 +58390,11 @@ export async function claimSessionWorkForAttempt(
           ) {
             if (input.attachPendingUpdatesToRunningAttempt) {
               const now = new Date();
-              if (!activeTurn.startedAt) {
+              const pendingEventSequenceBeforeOrAt =
+                parsedDispatch.attempt?.pendingUpdateBoundarySequence;
+              if (pendingEventSequenceBeforeOrAt === undefined) {
                 throw new SessionControlInvariantError(
-                  `Running turn ${activeTurn.id} has no attempt-start boundary`,
+                  `Running turn ${activeTurn.id} has no pending-update attempt boundary`,
                 );
               }
               const xaiSnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
@@ -58398,7 +58417,7 @@ export async function claimSessionWorkForAttempt(
                           : null))
                       : null,
                 },
-                { createdBeforeOrAt: activeTurn.startedAt },
+                { pendingEventSequenceBeforeOrAt },
               );
               await persistDeliveredUpdateBatch(delivered, session.accountId, activeTurn.id);
               await acknowledgeConsumedChildLifecycleNotices(tx as unknown as Database, {
@@ -58480,6 +58499,7 @@ export async function claimSessionWorkForAttempt(
                   id: input.dispatchId,
                   generation: dispatchGeneration,
                   triggerEventId: input.trigger.triggerEventId,
+                  pendingUpdateBoundarySequence: session.lastSequence,
                 }),
                 version: sql`${schema.sessionTurns.version} + 1`,
                 startedAt: now,
@@ -62061,6 +62081,7 @@ type TurnDispatchAttempt = {
   id: string;
   generation: number;
   triggerEventId: string;
+  pendingUpdateBoundarySequence?: number;
 };
 
 type TurnDispatchMetadata =
@@ -62112,6 +62133,7 @@ function readTurnDispatchMetadata(metadata: unknown): TurnDispatchMetadata {
     return { kind: "malformed", reason: "dispatchAttempt is not an object" };
   }
   const attempt = value as Record<string, unknown>;
+  const pendingUpdateBoundarySequence = attempt.pendingUpdateBoundarySequence;
   if (
     typeof attempt.id !== "string" ||
     attempt.id.length === 0 ||
@@ -62119,7 +62141,11 @@ function readTurnDispatchMetadata(metadata: unknown): TurnDispatchMetadata {
     !Number.isSafeInteger(attempt.generation) ||
     attempt.generation < 1 ||
     typeof attempt.triggerEventId !== "string" ||
-    attempt.triggerEventId.length === 0
+    attempt.triggerEventId.length === 0 ||
+    (pendingUpdateBoundarySequence !== undefined &&
+      (typeof pendingUpdateBoundarySequence !== "number" ||
+        !Number.isSafeInteger(pendingUpdateBoundarySequence) ||
+        pendingUpdateBoundarySequence < 0))
   ) {
     return {
       kind: "malformed",
@@ -62139,6 +62165,7 @@ function readTurnDispatchMetadata(metadata: unknown): TurnDispatchMetadata {
       id: attempt.id,
       generation: attempt.generation,
       triggerEventId: attempt.triggerEventId,
+      ...(pendingUpdateBoundarySequence === undefined ? {} : { pendingUpdateBoundarySequence }),
     },
   };
 }

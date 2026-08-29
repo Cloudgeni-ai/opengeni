@@ -17,8 +17,8 @@ an activity-local system message.
    `delivered`.
    A `requires_action` resume is the one two-phase form of that boundary: the
    resumed attempt first persists the interrupted call/result pair, then
-   idempotently re-enters its exact claim to attach only machine inputs that
-   were already pending when that resumed attempt started. This keeps provider
+   idempotently re-enters its exact claim to attach only machine inputs whose
+   pending-event sequence was frozen when that resumed attempt started. This keeps provider
    call/result ordering valid, prevents a second inference for pre-resume
    input, and leaves later arrivals pending for the next turn.
 4. The worker builds the first and every subsequent model request from active

@@ -1514,7 +1514,7 @@ audit reads may return it, so it is never a secret boundary.
    fence, or rejection), promotes reasoning + call + bounded result as one pair,
    and either stays `requires_action` without a model call or continues from
    history. Before that continued model call, the exact resumed attempt
-   idempotently attaches machine input that was pending at its attempt-start
+   idempotently attaches machine input inside its frozen pending-event sequence
    boundary, after the paired result in canonical history; input accepted later
    remains pending for the next turn. Missing suffix rows fail closed. It does
    not reconstruct SDK `RunState`.

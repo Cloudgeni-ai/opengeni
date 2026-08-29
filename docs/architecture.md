@@ -546,7 +546,8 @@ queue surface; machine-origin inputs remain typed records and join a turn only
 through the claim transaction. A `requires_action` resume preserves that rule
 without violating provider protocol: it first writes the interrupted
 call/result pair, then re-enters the exact attempt claim to attach only machine
-input that was pending at the resume attempt's start boundary. Pause blocks
+input whose durable pending-event sequence was inside the resume attempt's
+frozen start boundary. Pause blocks
 admission without pretending that physical execution has already stopped.
 Cancel fences a session subtree and is terminal for the affected sessions.
 
