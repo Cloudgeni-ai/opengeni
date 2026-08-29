@@ -957,6 +957,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "pr_review_managed_github_authority_nonces",
       "pr_review_managed_github_routes",
       "remember_knowledge_memory_materializations",
+      "session_event_cursors",
       "session_work_claim_revisions",
       "session_work_claim_write_capabilities",
       "session_work_claims",
