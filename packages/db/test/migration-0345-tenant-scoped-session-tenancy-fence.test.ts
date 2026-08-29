@@ -21,6 +21,10 @@ const migrationUrl = new URL(
   "../drizzle/0345_tenant_scoped_session_tenancy_fence.sql",
   import.meta.url,
 );
+const sessionEventCursorMigrationUrl = new URL(
+  "../drizzle/0374_session_event_cursors.sql",
+  import.meta.url,
+);
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let owned: OwnerMigratedTestDatabase | null = null;
@@ -250,10 +254,13 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
           applied_at timestamptz not null default now()
         );
         insert into schema_migrations(name)
-        values ('0345_tenant_scoped_session_tenancy_fence.sql')
+        values
+          ('0345_tenant_scoped_session_tenancy_fence.sql'),
+          ('0374_session_event_cursors.sql')
       `);
       await migrate(driftOwned.ownerUrl);
       const migration = await readFile(migrationUrl, "utf8");
+      const sessionEventCursorMigration = await readFile(sessionEventCursorMigrationUrl, "utf8");
       const blockStart = migration.indexOf("DO $repair_owner_fenced_access_scopes$");
       const blockTerminator = "$repair_owner_fenced_access_scopes$;";
       const blockEnd = migration.indexOf(blockTerminator, blockStart);
@@ -264,6 +271,7 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
       const repairBlock = migration.slice(0 + blockStart, blockEnd + blockTerminator.length);
       await setup.unsafe("set search_path = public, opengeni_private");
       await setup.unsafe(repairPrefix);
+      await setup.unsafe(sessionEventCursorMigration);
 
       const expectDefinitionDrift = async (
         signature: string,
