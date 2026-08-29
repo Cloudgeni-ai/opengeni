@@ -17500,10 +17500,7 @@ async function loadRigHealthByActiveVersion(
     pushCandidate({
       versionId,
       checkHealth: passed ? "passing" : "failing",
-      verifiedAt:
-        typeof metadata.finishedAt === "string"
-          ? metadata.finishedAt
-          : row.occurredAt.toISOString(),
+      verifiedAt: row.occurredAt.toISOString(),
     });
   }
 
