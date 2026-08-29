@@ -1422,7 +1422,7 @@ describe("contracts", () => {
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
     expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     expect(payload.managedAuthSessionSetMode).toBe("legacy");
-    expect(payload.defaultSandboxBackend).toBeUndefined();
+    expect(payload.defaultSandboxBackend).toBe("modal");
     // models defaults to [] for back-compat (callers reading only allowedModels
     // are unaffected when the host hasn't populated the richer list).
     expect(payload.models).toEqual([]);
