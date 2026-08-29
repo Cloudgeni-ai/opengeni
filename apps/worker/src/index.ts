@@ -1036,8 +1036,9 @@ export async function startWorker() {
   const settings = getSettings();
   const observability = createObservability(settings, { component: `worker-${role}` });
   // The Agents SDK also listens for unhandled rejections and exits the process.
-  // Keep its detached duplicate of an already-handled MCP lifecycle failure from
-  // restarting the whole turn-worker pod; every unknown rejection remains fatal.
+  // Keep detached SDK/transport promises observational here: durable turn
+  // activity boundaries own failures, while process exit causes cross-session
+  // lease loss for every turn assigned to this shared worker pod.
   const disposeUnhandledRejectionBoundary = installWorkerUnhandledRejectionBoundary();
   const retryOptions = startupRetryOptions(settings);
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>

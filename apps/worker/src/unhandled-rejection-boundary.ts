@@ -1,8 +1,11 @@
 export type WorkerUnhandledRejectionProcess = {
   on: (event: "unhandledRejection", listener: (reason: unknown) => void) => void;
   off: (event: "unhandledRejection", listener: (reason: unknown) => void) => void;
-  exit: (code: number) => never | void;
 };
+
+export type WorkerUnhandledRejectionClassification =
+  | "detached_runtime_mcp_lifecycle"
+  | "detached_unknown";
 
 type RuntimeMcpLifecycleError = {
   name: "McpLifecycleError";
@@ -36,14 +39,34 @@ export function isDetachedRuntimeMcpLifecycleRejection(
   }
 }
 
-/** Keep known duplicate MCP lifecycle rejections non-fatal; preserve fail-fast
- * behavior for every unknown process-level rejection. */
+function reportIsolatedUnhandledRejection(
+  classification: WorkerUnhandledRejectionClassification,
+): void {
+  // Never render the rejection itself: provider and transport errors can carry
+  // request bodies or credentials. The durable activity path owns exact errors.
+  console.error("[worker] isolated detached unhandled rejection", { classification });
+}
+
+/**
+ * Keep process-global promise rejection handling observational. Turn activities
+ * have their own durable failure/lease boundary; killing the shared worker here
+ * converts one detached SDK/transport promise into unrelated lease losses across
+ * every session assigned to the pod. The Agents SDK also checks for a consumer
+ * listener before applying its own process.exit(1), so this boundary must never
+ * reintroduce that fail-fast behavior for an unknown rejection shape.
+ */
 export function installWorkerUnhandledRejectionBoundary(
   runtimeProcess: WorkerUnhandledRejectionProcess = process,
+  report: (
+    classification: WorkerUnhandledRejectionClassification,
+  ) => void = reportIsolatedUnhandledRejection,
 ): () => void {
   const onUnhandledRejection = (reason: unknown): void => {
-    if (isDetachedRuntimeMcpLifecycleRejection(reason)) return;
-    runtimeProcess.exit(1);
+    report(
+      isDetachedRuntimeMcpLifecycleRejection(reason)
+        ? "detached_runtime_mcp_lifecycle"
+        : "detached_unknown",
+    );
   };
   runtimeProcess.on("unhandledRejection", onUnhandledRejection);
   return () => runtimeProcess.off("unhandledRejection", onUnhandledRejection);
