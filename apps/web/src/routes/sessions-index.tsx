@@ -97,7 +97,10 @@ import {
 import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
-import { isMachineComputeSelectable } from "@/lib/machine-selectability";
+import {
+  isMachineComputeSelectable,
+  resolveSelectableMachineSandboxId,
+} from "@/lib/machine-selectability";
 import {
   effortOptionsForModel,
   findPickerRow,
@@ -1736,7 +1739,8 @@ function ComputeTargetControl(props: {
   // the composer, so a stale draft must not keep forcing a sandbox type.
   useEffect(() => {
     if (selfhostedPrimary && draft.compute.kind === "sandbox") {
-      const firstSelectable = machines.find((machine) => isMachineComputeSelectable(machine.state));
+      const firstSelectableId = resolveSelectableMachineSandboxId(machines, null);
+      const firstSelectable = machines.find((machine) => machine.sandboxId === firstSelectableId);
       onChange({
         ...draft,
         compute: {
@@ -1763,7 +1767,8 @@ function ComputeTargetControl(props: {
       draft.compute.kind === "machine" &&
       selectedMachineSandboxId === null
     ) {
-      const firstSelectable = machines.find((machine) => isMachineComputeSelectable(machine.state));
+      const firstSelectableId = resolveSelectableMachineSandboxId(machines, null);
+      const firstSelectable = machines.find((machine) => machine.sandboxId === firstSelectableId);
       if (firstSelectable) {
         onChange({
           ...draft,
@@ -1784,9 +1789,14 @@ function ComputeTargetControl(props: {
       !fleet.loading &&
       draft.compute.kind === "machine" &&
       selectedMachineSandboxId !== null &&
-      !machines.some((machine) => machine.sandboxId === selectedMachineSandboxId)
+      !machines.some(
+        (machine) =>
+          machine.sandboxId === selectedMachineSandboxId &&
+          isMachineComputeSelectable(machine.state),
+      )
     ) {
-      const fallback = machines.find((machine) => isMachineComputeSelectable(machine.state));
+      const fallbackId = resolveSelectableMachineSandboxId(machines, selectedMachineSandboxId);
+      const fallback = machines.find((machine) => machine.sandboxId === fallbackId);
       onChange({
         ...draft,
         compute: fallback
@@ -1799,7 +1809,9 @@ function ComputeTargetControl(props: {
                 fallback.sandboxId,
               ),
             }
-          : { kind: "sandbox", backend: "" },
+          : selfhostedPrimary
+            ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
+            : { kind: "sandbox", backend: "" },
       });
       return;
     }
