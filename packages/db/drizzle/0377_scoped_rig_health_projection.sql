@@ -48,10 +48,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path FROM CURRENT AS $$
           UNION ALL
           SELECT CASE event.action WHEN 'rig.verification.passed' THEN 'passing'
               ELSE 'failing' END,
-            coalesce(
-              nullif(event.metadata ->> 'finishedAt', '')::timestamptz,
-              event.occurred_at
-            )
+            event.occurred_at
           FROM audit_events event
           WHERE event.account_id = active_version.account_id
             AND event.workspace_id = active_version.workspace_id
