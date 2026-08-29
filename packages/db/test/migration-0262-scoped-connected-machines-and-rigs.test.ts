@@ -135,7 +135,11 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
       const otherB = { ...ownerB, subjectId: otherSubject };
       const createRig = async (scope: "organization" | "workspace" | "user", allowOrg: boolean) =>
         await asActor(app!, ownerA, async (tx) => {
-          const [row] = await tx<Array<{ value: { id: string; scope: string } }>>`
+          const [row] = await tx<
+            Array<{
+              value: { id: string; scope: string; activeVersion: { id: string } };
+            }>
+          >`
             select create_scoped_rig(
               ${ownerA.accountId}::uuid, ${ownerA.workspaceId}::uuid, ${scope},
               ${`${scope} rig`}, null, ${ownerSubject},
@@ -163,6 +167,43 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
       expect(await rigNames(otherB)).toEqual(["organization rig"]);
       expect(organizationRig.scope).toBe("organization");
       expect(personalRig.scope).toBe("user");
+
+      const verificationFinishedAt = "2026-08-29T18:16:46.181Z";
+      await admin`
+        insert into audit_events (
+          account_id, workspace_id, subject_id, action, target_type, target_id,
+          metadata, occurred_at
+        ) values (
+          ${ownerA.accountId}, ${ownerA.workspaceId}, 'system:rig-verification',
+          'rig.verification.passed', 'rig', ${organizationRig.id},
+          ${admin.json({
+            rigId: organizationRig.id,
+            versionId: organizationRig.activeVersion.id,
+            finishedAt: verificationFinishedAt,
+            passed: true,
+          })}::jsonb,
+          ${verificationFinishedAt}::timestamptz
+        )
+      `;
+      const organizationRigHealth = await asActor(app, ownerB, async (tx) => {
+        const [row] = await tx<
+          Array<{
+            value: {
+              activeVersionHealth: { checkHealth: string; lastVerifiedAt: string | null };
+            };
+          }>
+        >`
+          select value from list_scoped_rigs(
+            ${ownerB.accountId}::uuid, ${ownerB.workspaceId}::uuid,
+            ${organizationRig.id}::uuid, null, null
+          ) value
+        `;
+        return row!.value.activeVersionHealth;
+      });
+      expect(organizationRigHealth.checkHealth).toBe("passing");
+      expect(new Date(organizationRigHealth.lastVerifiedAt!).toISOString()).toBe(
+        verificationFinishedAt,
+      );
 
       const machine = await asActor(app, ownerA, async (tx) => {
         const [row] = await tx<Array<{ enrollmentId: string; sandboxId: string }>>`
