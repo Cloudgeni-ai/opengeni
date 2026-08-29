@@ -1,5 +1,17 @@
 # @opengeni/worker-bundle
 
+## 0.22.12
+
+### Patch Changes
+
+- da6708a: Keep detached duplicates of already-handled MCP lifecycle failures from restarting turn workers.
+- Updated dependencies [227c54c]
+- Updated dependencies [499cc48]
+- Updated dependencies [37faec3]
+  - @opengeni/github@0.6.4
+  - @opengeni/runtime@1.4.6
+  - @opengeni/core@2.5.7
+
 ## 0.22.11
 
 ### Patch Changes

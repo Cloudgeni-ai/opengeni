@@ -1,5 +1,12 @@
 # @opengeni/runtime
 
+## 1.4.6
+
+### Patch Changes
+
+- 499cc48: Keep MCP lifecycle work on the awaited SDK path so optional server failures cannot leak from detached parallel workers.
+- 37faec3: Replace the Agents SDK default batch trace exporter with OpenGeni's in-process preparation processor.
+
 ## 1.4.5
 
 ### Patch Changes
