@@ -631,6 +631,13 @@ describe("API helpers", () => {
     ).toBe(
       "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation",
     );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/computer-sessions/computer-1/targets/window-1/screenshot`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/screenshot",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/computer-sessions/computer-1/clipboard`)).toBe(
       "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard",
     );

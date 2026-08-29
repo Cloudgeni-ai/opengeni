@@ -111,6 +111,8 @@ type ComputerPlacement = {
   lease: LeaseSnapshot | null;
 };
 
+const MODEL_COMPUTER_FRAME_MAX_BYTES = 256 * 1024;
+
 /** Public ComputerSession resource surface. Physical app/window authority stays
  * in the same placement controller used by BrowserSession; this route owns only
  * durable authorization, placement fencing, lifecycle receipts, and routing. */
@@ -386,6 +388,55 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         async ({ sessionClient }) => await sessionClient.observe(targetId),
       );
       return context.json(result);
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/screenshot",
+    async (context) => {
+      const { workspaceId, grant, computerSessionId } = await routePreamble(
+        context,
+        "sessions:read",
+      );
+      const targetId = requireOpaqueParam(context, "targetId");
+      const frame = await withActiveComputerController(
+        context,
+        grant,
+        workspaceId,
+        computerSessionId,
+        "session.read",
+        "computer.read",
+        async ({ sessionClient }) => {
+          let captured = await sessionClient.capture(targetId, {
+            format: "jpeg",
+            quality: 55,
+            maxWidth: 1_024,
+            maxHeight: 768,
+          });
+          if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
+            captured = await sessionClient.capture(targetId, {
+              format: "jpeg",
+              quality: 30,
+              maxWidth: 640,
+              maxHeight: 480,
+            });
+          }
+          if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
+            throw new BrowserControlProtocolError(
+              "computer screenshot could not honor the model image byte bound",
+            );
+          }
+          return captured;
+        },
+      );
+      return new Response(frame.data.slice().buffer, {
+        status: 200,
+        headers: {
+          "cache-control": "no-store",
+          "content-type": frame.mediaType,
+          "x-opengeni-computer-frame": frame.metadataHeader,
+        },
+      });
     },
   );
 

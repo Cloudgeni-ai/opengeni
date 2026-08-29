@@ -7,4 +7,4 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Move agent computer interaction to managed ComputerSession tools. Remove the legacy model-bound desktop capability and automatic on-turn recording path while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+Move agent computer interaction to managed ComputerSession tools. Preserve the runtime 1.x legacy desktop API as a deprecated, fail-closed compatibility shell while removing its model-bound tools and automatic on-turn recording path. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
