@@ -346,6 +346,12 @@ const budgets = {
   // Advance the policy-derived raw envelope to 2,189 KiB and gzip to 615 KiB,
   // retaining 1,539 raw bytes and the established 1.5-KiB compressed platform-
   // skew allowance. Every unrelated cap remains fixed.
+  // Autonomous Workspace Memory converges with session-attention, Variable Set,
+  // and Connected Machine changes on protected main. Independent Linux/x64 Bun
+  // 1.4 production builds measure 2,241,834-2,241,876 raw bytes across 31 files.
+  // Advance only the policy-derived raw envelope to 2,191 KiB, retaining 1,708
+  // bytes above the high observation. Gzip, file-count, initial, lazy, CSS, and
+  // unrelated per-file caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
