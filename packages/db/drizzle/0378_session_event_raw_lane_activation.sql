@@ -14,6 +14,8 @@ BEGIN
     session.id AS session_id,
     session.last_sequence AS projected_sequence,
     cursor.last_sequence AS cursor_sequence,
+    COUNT(event.sequence)::integer AS event_count,
+    MIN(event.sequence)::integer AS first_event_sequence,
     COALESCE(MAX(event.sequence), 0)::integer AS event_sequence
   INTO mismatch
   FROM sessions session
@@ -26,7 +28,16 @@ BEGIN
    AND event.workspace_id = session.workspace_id
    AND event.session_id = session.id
   GROUP BY session.id, session.last_sequence, cursor.last_sequence
-  HAVING cursor.last_sequence <> COALESCE(MAX(event.sequence), 0)::integer
+  HAVING COUNT(event.sequence)::integer <> cursor.last_sequence
+    OR cursor.last_sequence <> COALESCE(MAX(event.sequence), 0)::integer
+    OR (
+      cursor.last_sequence = 0
+      AND MIN(event.sequence) IS NOT NULL
+    )
+    OR (
+      cursor.last_sequence > 0
+      AND MIN(event.sequence)::integer <> 1
+    )
     OR session.last_sequence > cursor.last_sequence
   LIMIT 1;
 
@@ -35,10 +46,12 @@ BEGIN
       ERRCODE = '55000',
       MESSAGE = 'session event raw-lane activation refused because cursor parity failed',
       DETAIL = pg_catalog.format(
-        'session_id=%s session=%s cursor=%s event=%s',
+        'session_id=%s session=%s cursor=%s count=%s first=%s event=%s',
         mismatch.session_id,
         mismatch.projected_sequence,
         mismatch.cursor_sequence,
+        mismatch.event_count,
+        mismatch.first_event_sequence,
         mismatch.event_sequence
       );
   END IF;
@@ -137,7 +150,11 @@ BEGIN
       ERRCODE = '55000',
       MESSAGE = 'session event cursor is missing for a session projection update';
   END IF;
-  NEW.last_sequence := pg_catalog.greatest(NEW.last_sequence, current_sequence);
+  -- Event insertion is the only cursor advance. A semantic writer that updates
+  -- session state before its event is snapped to the current cursor, and the
+  -- validated AFTER INSERT trigger advances the compatibility projection once
+  -- the event exists. No direct/manual update may lead or regress authority.
+  NEW.last_sequence := current_sequence;
   RETURN NEW;
 END
 $prevent_session_event_projection_regression$;
@@ -227,10 +244,7 @@ BEGIN
     -- synchronized here even when they started from a stale projection.
     IF inserted_group.advances_activity THEN
       UPDATE sessions session
-      SET last_sequence = pg_catalog.greatest(
-        session.last_sequence,
-        inserted_group.last_sequence
-      )
+      SET last_sequence = inserted_group.last_sequence
       WHERE session.account_id = inserted_group.account_id
         AND session.workspace_id = inserted_group.workspace_id
         AND session.id = inserted_group.session_id;

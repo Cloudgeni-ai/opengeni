@@ -14,6 +14,8 @@ describe("migration 0378 session event raw lane activation", () => {
     expect(source).toContain(
       "session event raw-lane activation refused because cursor parity failed",
     );
+    expect(source).toContain("COUNT(event.sequence)::integer <> cursor.last_sequence");
+    expect(source).toContain("MIN(event.sequence)::integer <> 1");
     expect(source).toContain("normalize_legacy_session_event_sequence_from_cursor");
     expect(source).toContain("prevent_session_event_projection_regression");
     expect(source).toContain("NEW.sequence <= current_sequence");
@@ -21,6 +23,9 @@ describe("migration 0378 session event raw lane activation", () => {
     expect(source).toContain("IF inserted_group.advances_activity THEN");
     expect(source).toContain("session_events_normalize_legacy_cursor_sequence");
     expect(source).toContain("sessions_prevent_event_projection_regression");
+    expect(source).not.toContain("pg_catalog.greatest");
+    expect(source).not.toMatch(/\bGREATEST\s*\(/u);
+    expect(source).toContain("NEW.last_sequence := current_sequence");
     expect(source.match(/SET search_path = pg_catalog, %I, pg_temp/gu)).toHaveLength(3);
     for (const eventType of SESSION_EVENT_RAW_DELTA_TYPES) {
       expect(source.match(new RegExp(`'${eventType.replaceAll(".", "\\.")}'`, "gu"))).toHaveLength(
