@@ -340,6 +340,12 @@ const budgets = {
   // the Linux/arm64 Bun 1.3 graph measures 2,226,468 raw / 622,642 gzip bytes
   // across 31 files. Advance only the policy-derived raw envelope to 2,176 KiB,
   // retaining 1,756 bytes of headroom; every other cap remains fixed.
+  // Abandoned session detail, lineage, and goal reads now cancel their native
+  // requests after the final mounted consumer leaves. The exact Linux/x64 Bun
+  // 1.4 graph measures 2,239,997 raw / 627,707 gzip bytes across 32 files.
+  // Advance the policy-derived raw envelope to 2,189 KiB and gzip to 615 KiB,
+  // retaining 1,539 raw bytes and the established 1.5-KiB compressed platform-
+  // skew allowance. Every unrelated cap remains fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
@@ -348,6 +354,17 @@ const budgets = {
   // Member roster and permission-editor selectors bring the single compiled
   // stylesheet to 32,221 gzip bytes. Keep the next whole-KiB envelope.
   cssGzip: 32 * kib,
+} as const;
+
+// The canonical sensitive-preview policy measures 626,021 gzip bytes across
+// 32 files. The policy-derived envelopes above include the later bounded
+// HTTP/1 browser-stream and abandoned-read cancellation graphs; keep the gzip
+// platform-skew and file-count allowances here while leaving every initial,
+// per-file, lazy, and CSS cap unchanged.
+const effectiveBudgets = {
+  ...budgets,
+  directSessionGzip: Math.max(budgets.directSessionGzip, 615 * kib),
+  directSessionFiles: Math.max(budgets.directSessionFiles, 32),
 } as const;
 
 const repoRoot = path.resolve(import.meta.dir, "..");
@@ -448,7 +465,7 @@ const report = {
     largestGzip: largestLazyGzip,
   },
   css: { files: cssMetrics.length, largestGzip: largestCss },
-  budgets,
+  budgets: effectiveBudgets,
 };
 console.log(JSON.stringify(report, null, 2));
 
@@ -461,9 +478,13 @@ enforce("initial raw graph", initialTotal.raw, budgets.initialRaw);
 enforce("initial gzip graph", initialTotal.gzip, budgets.initialGzip);
 enforce("largest initial gzip asset", largestInitial.gzip, budgets.initialFileGzip);
 enforce("initial graph file count", initialMetrics.length, budgets.initialFiles);
-enforce("direct session raw graph", directSessionTotal.raw, budgets.directSessionRaw);
-enforce("direct session gzip graph", directSessionTotal.gzip, budgets.directSessionGzip);
-enforce("direct session graph file count", directSessionMetrics.length, budgets.directSessionFiles);
+enforce("direct session raw graph", directSessionTotal.raw, effectiveBudgets.directSessionRaw);
+enforce("direct session gzip graph", directSessionTotal.gzip, effectiveBudgets.directSessionGzip);
+enforce(
+  "direct session graph file count",
+  directSessionMetrics.length,
+  effectiveBudgets.directSessionFiles,
+);
 enforce("largest lazy raw chunk", largestLazyRaw.raw, budgets.lazyChunkRaw);
 enforce("largest lazy gzip chunk", largestLazyGzip.gzip, budgets.lazyChunkGzip);
 enforce("largest CSS gzip asset", largestCss.gzip, budgets.cssGzip);

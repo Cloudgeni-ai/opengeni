@@ -45,11 +45,11 @@ function identity(principal: string) {
   };
 }
 
-function variableSet() {
+function variableSet(originWorkspaceId = personalWorkspaceId) {
   return {
     id: variableSetId,
     accountId: organizationId,
-    workspaceId: personalWorkspaceId,
+    workspaceId: originWorkspaceId,
     scope: "user" as const,
     generation: 1,
     status: "active" as const,
@@ -86,7 +86,11 @@ function fixedResource(kind: ResourceKind, scope?: ResourceAuthorityScope | null
     : { variableSetId: null, rigId, rigScope: scope, connectedMachine: null };
 }
 
-function authorityPage(active: boolean, kind: ResourceKind) {
+function authorityPage(
+  active: boolean,
+  kind: ResourceKind,
+  originWorkspaceId = personalWorkspaceId,
+) {
   return {
     scope: "user" as const,
     authorities: active
@@ -95,7 +99,7 @@ function authorityPage(active: boolean, kind: ResourceKind) {
             authorityId: "55555555-5555-4555-8555-555555555555",
             resourceKind: kind,
             resourceId: kind === "variable_set" ? variableSetId : rigId,
-            originWorkspaceId: personalWorkspaceId,
+            originWorkspaceId,
             generation: 1,
             status: "active" as const,
             grants: [],
@@ -301,6 +305,45 @@ describe("usePersonalResourceAttachment", () => {
     expect(hook.result.current.requiresDecision).toBe(true);
     expect(hook.result.current.intent).toBeUndefined();
     expect(hook.result.current.mode).toBeNull();
+    await hook.unmount();
+  });
+
+  test("recognizes a personal Variable Set created outside the Personal workspace", async () => {
+    const client = {
+      listVariableSets: async () => [variableSet(workspaceId)],
+      listRigs: async () => [],
+      listUserResourceAuthorities: async (
+        _workspaceId: string,
+        options: { resourceKind: ResourceKind },
+      ) => authorityPage(true, options.resourceKind, workspaceId),
+    } as unknown as OpenGeniBrowserClient;
+    const current = identity("owner");
+    const hook = await renderHook(
+      () =>
+        usePersonalResourceAttachment({
+          client,
+          authMode: "managedSession",
+          authSession: current.authSession,
+          accessSubjectId: "user:owner",
+          managedSelfContext: current.managedSelfContext,
+          workspace,
+          fixed: {
+            variableSetId,
+            variableSetScope: "user",
+            rigId: null,
+            connectedMachine: null,
+          },
+          personalWorkspaceTarget: false,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.selected.variableSets.map((resource) => resource.id)).toEqual([
+      variableSetId,
+    ]);
+    expect(hook.result.current.selected.resourceCount).toBe(1);
+    expect(hook.result.current.requiresDecision).toBe(true);
     await hook.unmount();
   });
 

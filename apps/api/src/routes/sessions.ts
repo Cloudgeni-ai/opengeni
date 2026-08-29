@@ -284,7 +284,7 @@ import {
   validateVariableSetAttachment,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
-import { sseSessionStream } from "../http/sse";
+import { browserSseDeliveryOptions, sseSessionStream } from "../http/sse";
 import {
   serveWorkspaceCapture,
   serveWorkspaceCaptureFile,
@@ -2659,6 +2659,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       Number.isFinite(after) ? after : 0,
       c.req.raw.signal,
       {
+        ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
         reauthorizeAfterMs:

@@ -86,6 +86,8 @@ import {
   type RoutingSandboxSession,
 } from "@opengeni/runtime/sandbox";
 import {
+  managedSessionGroupBackend,
+  managedSessionGroupOs,
   providerSettingsForSessionSandboxRuntime,
   relayConfigFromSettings,
   resolveSessionSandboxRuntime,
@@ -643,15 +645,19 @@ async function withChannelAOperation<T>(
         // A machine-home session with no selected machine uses the deployment's
         // managed group box, exactly like the worker turn path. Keep the durable
         // home label honest; only this request's effective backend changes.
-        if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "selfhosted") {
+        const groupBackend = managedSessionGroupBackend(
+          settings.sandboxBackend,
+          session.sandboxBackend,
+        );
+        if (groupBackend) {
           return await withChannelAOperation(
             services,
             {
               ...ctx,
               session: {
                 ...session,
-                sandboxBackend: settings.sandboxBackend,
-                sandboxOs: "linux",
+                sandboxBackend: groupBackend,
+                sandboxOs: managedSessionGroupOs(session.sandboxBackend, session.sandboxOs),
               },
             },
             readOnly,
@@ -659,7 +665,7 @@ async function withChannelAOperation<T>(
           );
         }
         throw new HTTPException(409, {
-          message: "machine-home session has no active Connected Machine",
+          message: "machine-home session has no active Connected Machine or managed sandbox",
         });
       }
       const sandbox = await getSandbox(

@@ -50,12 +50,20 @@ export default defineConfig({
     // that limit and production additionally gates every asset by gzip size.
     chunkSizeWarningLimit: 800,
     rollupOptions: {
-      // Pages: the full component harness (index.html), the timeline tool-call
-      // renderer harness (timeline.html), the queue presentation browser
-      // regression (queue.html), and the Machines / enrollment UI screenshot
-      // harness (machines.html — M9 / V12), all static.
+      // The timeline-scroll browser lane repeatedly navigates among these
+      // harnesses. Build every page into one production graph so the lane tests
+      // shipped chunks without accumulating a fresh dev-module graph on each
+      // navigation. The ordinary demo build continues to use the full input set.
       input: timelineScrollTestBuild
-        ? { timelineScrollTest: resolve(__dirname, "timeline-scroll-test.html") }
+        ? {
+            timelineScrollTest: resolve(__dirname, "timeline-scroll-test.html"),
+            timelineScrollMergeTest: resolve(__dirname, "timeline-scroll-merge-test.html"),
+            timelineCollapsedHistoryTest: resolve(
+              __dirname,
+              "timeline-collapsed-history-test.html",
+            ),
+            timelineHeldTurnTest: resolve(__dirname, "timeline-held-turn-test.html"),
+          }
         : demoInputs,
     },
   },

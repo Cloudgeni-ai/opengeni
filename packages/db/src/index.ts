@@ -20080,11 +20080,21 @@ async function getVariableSetValuesForRunInTransaction(
       } else {
         await scopedDb.execute(sql`select set_config('opengeni.subject_id', '', true)`);
       }
-      if (input.authority.initiatingHumanSubjectId) {
-        await scopedDb.execute(sql`select set_config(
-          'opengeni.initiating_human_subject_id',
-          ${input.authority.initiatingHumanSubjectId}, true)`);
-      }
+      // Always replace the causal-human GUC. A nested/reused transaction can
+      // otherwise retain an earlier actor and let a later direct attach borrow
+      // that actor's personal-resource grant. The authenticated user is the
+      // default causal human; an explicit null still clears inherited state.
+      await scopedDb.execute(sql`select set_config(
+        'opengeni.initiating_human_subject_id',
+        ${
+          input.authority.initiatingHumanSubjectId === undefined
+            ? input.authority.subjectId?.startsWith("user:")
+              ? input.authority.subjectId
+              : ""
+            : (input.authority.initiatingHumanSubjectId ?? "")
+        },
+        true
+      )`);
     }
     if (input.authority.kind === "agent_attempt") {
       await setSubjectRlsContext(scopedDb, input.authority.subjectId);

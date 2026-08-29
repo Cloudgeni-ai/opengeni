@@ -65,7 +65,7 @@ import {
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
-import { sseWorkspaceControlStream } from "../http/sse";
+import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
 import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-cleanup";
 import {
@@ -404,6 +404,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       after,
       c.req.raw.signal,
       {
+        ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
         reauthorize: async () => {

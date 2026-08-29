@@ -81,6 +81,8 @@ import {
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
 import {
+  managedSessionGroupBackend,
+  managedSessionGroupOs,
   providerSettingsForSessionSandboxRuntime,
   relayConfigFromSettings,
   resolveSessionSandboxRuntime,
@@ -246,7 +248,24 @@ export async function attachViewer(
   },
 ): Promise<ViewerAttachResult> {
   const { db, settings } = services;
-  const { accountId, workspaceId, session } = input;
+  const { accountId, workspaceId } = input;
+  const groupBackend = managedSessionGroupBackend(
+    settings.sandboxBackend,
+    input.session.sandboxBackend,
+  );
+  if (!groupBackend) {
+    throw new HTTPException(409, {
+      message: "session has no managed sandbox group to attach",
+    });
+  }
+  const session =
+    groupBackend === input.session.sandboxBackend
+      ? input.session
+      : {
+          ...input.session,
+          sandboxBackend: groupBackend,
+          sandboxOs: managedSessionGroupOs(input.session.sandboxBackend, input.session.sandboxOs),
+        };
   const viewerId = input.viewerId ?? crypto.randomUUID();
   const attachSubjectId = claimableSubjectId(input.viewerSubjectId ?? null);
   const attachAuthorityEpoch = attachSubjectId

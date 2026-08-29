@@ -1,6 +1,6 @@
 // apps/api/src/sandbox/fleet.ts — the FLEET service backing the fleet MCP tools
 // (M7): list / attach / swap / run_on / provision over the heterogeneous fleet
-// (the session's Modal group box + the workspace's enrolled selfhosted machines).
+// (the session's managed group box + the workspace's enrolled selfhosted machines).
 //
 // Each operation is workspace-scoped (the caller's grant) and, for the
 // session-pointer mutations (attach/swap), session-scoped (the worker-signed
@@ -12,6 +12,7 @@
 // single op WITHOUT touching the active pointer.
 
 import type { Settings } from "@opengeni/config";
+import type { SandboxBackend } from "@opengeni/contracts";
 import {
   authorizePersonalMachineForAttempt,
   getEnrollment,
@@ -45,6 +46,7 @@ import {
   type SelfhostedOperationResourcePolicy,
 } from "@opengeni/runtime/sandbox";
 import { relayConfigFromSettings } from "./routing";
+import { managedSessionGroupBackend } from "./runtime-settings";
 
 export type FleetServices = {
   db: Database;
@@ -74,8 +76,8 @@ export type FleetContext = {
   /** The calling session (the pointer the attach/swap mutates + whose group box
    *  is the default fleet member). */
   sessionId: string;
-  /** The session's own group sandbox backend (modal/selfhosted/…). */
-  sessionBackend: string;
+  /** The session's durable home-compute policy. */
+  sessionBackend: SandboxBackend;
   /** The session's own group sandbox id (the lease group). */
   sessionGroupId: string;
 };
@@ -264,8 +266,9 @@ async function probeEnrollment(
  * List the fleet: the session's own group box when it has one (a synthetic
  * entry) + the workspace's first-class selfhosted sandboxes (each probed for
  * liveness), each with an `active` marker derived from the session's active
- * pointer. A backend:none session has no synthetic home entry; a null pointer
- * then means no compute is attached.
+ * pointer. A backend:none session and a machine-home session on a deployment
+ * without a managed provider have no synthetic group entry; a null pointer then
+ * means no compute is attached.
  */
 export async function listFleet(
   services: FleetServices,
@@ -285,8 +288,12 @@ export async function listFleet(
   };
 
   const entries: FleetSandboxEntry[] = [];
+  const groupBackend = managedSessionGroupBackend(
+    services.settings.sandboxBackend,
+    ctx.sessionBackend,
+  );
 
-  if (ctx.sessionBackend !== "none") {
+  if (groupBackend) {
     // The session's own group box (the default/home sandbox; null active pointer ==
     // this box). A session/group row is not provider existence. Online requires a
     // warm lease, observed provider existence, and verified workspace readiness.
@@ -317,17 +324,10 @@ export async function listFleet(
         ? "unavailable"
         : groupRecovering
           ? "recovering"
-          : ctx.sessionBackend === "selfhosted"
-            ? "unavailable"
-            : "wakeable";
+          : "wakeable";
     entries.push({
       id: ctx.sessionGroupId,
-      kind:
-        ctx.sessionBackend === "selfhosted"
-          ? "selfhosted"
-          : ctx.sessionBackend === "opensandbox"
-            ? "opensandbox"
-            : "modal",
+      kind: groupBackend === "opensandbox" ? "opensandbox" : "modal",
       name: "session sandbox",
       liveness: groupOnline ? "online" : groupRecovering ? "reconnecting" : "offline",
       active: groupActive,
@@ -467,10 +467,13 @@ async function resolveTarget(
 > {
   // The session's own group box → the default pointer (null).
   if (target === ctx.sessionGroupId || target === "session" || target === "default") {
-    if (ctx.sessionBackend === "none") {
+    if (!managedSessionGroupBackend(services.settings.sandboxBackend, ctx.sessionBackend)) {
       return {
         ok: false,
-        reason: "this session has no home sandbox; attach a Connected Machine",
+        reason:
+          ctx.sessionBackend === "none"
+            ? "this session has no home sandbox; attach a Connected Machine"
+            : "this deployment has no managed session sandbox; select an enrolled machine",
         code: "unsupported_backend_context",
       };
     }
