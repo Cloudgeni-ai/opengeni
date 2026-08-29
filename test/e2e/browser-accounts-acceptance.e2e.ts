@@ -194,6 +194,14 @@ const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlyS
   ],
 ]);
 
+const LOGOUT_ALL_FINITE_READ_RETIREMENT_DISPATCH_PHASES = new Set([
+  "cross-slot-deep-link",
+  "slot-revocation-reauthentication",
+  "logout-one",
+  "csrf-fail-closed",
+  "logout-all-response-loss-replay",
+]);
+
 const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<string, ReadonlySet<string>>([
   // These phases intentionally create or reload a whole document. React can
   // cancel only its configuration/session bootstrap reads while replacing
@@ -632,16 +640,13 @@ function finiteReadMayRetireAfterLogoutAllAuthorityReset(
   // only a pre-acceptance read whose old HttpOnly authority is bound to the
   // exact accepted reset and differs from the confirmed replacement set.
   const exactOldWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.oldWorkspaceId)}/`;
-  const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
-    "logout-all-response-loss-replay",
-  );
   return (
     new Set(["GET", "HEAD"]).has(input.method) &&
     input.actorEpoch !== null &&
     input.actorEpoch !== input.confirmedActorEpoch &&
     !input.responseSeen &&
     input.pathname.startsWith(exactOldWorkspacePrefix) &&
-    allowedDispatchPhases?.has(input.dispatchPhase) === true &&
+    LOGOUT_ALL_FINITE_READ_RETIREMENT_DISPATCH_PHASES.has(input.dispatchPhase) &&
     input.currentSessionSetAuthorityHash !== null &&
     input.requestSessionSetAuthorityHash !== null &&
     input.requestSessionSetAuthorityHash !== input.currentSessionSetAuthorityHash &&
@@ -3354,12 +3359,21 @@ describe("provider-neutral browser account acceptance", () => {
       startedAt: 100,
     } satisfies LogoutAllFiniteReadRetirementInput;
     expect(finiteReadMayRetireAfterLogoutAllAuthorityReset(logoutAllRetirement)).toBe(true);
+    expect(
+      finiteReadMayRetireAfterLogoutAllAuthorityReset({
+        ...logoutAllRetirement,
+        dispatchPhase: "cross-slot-deep-link",
+      }),
+    ).toBe(true);
     for (const invalid of [
       { ...logoutAllRetirement, method: "POST" },
       { ...logoutAllRetirement, actorEpoch: null },
       { ...logoutAllRetirement, actorEpoch: "new-neutral-epoch" },
       { ...logoutAllRetirement, responseSeen: true },
-      { ...logoutAllRetirement, dispatchPhase: "cross-slot-deep-link" },
+      {
+        ...logoutAllRetirement,
+        dispatchPhase: "late-old-epoch-primary-settled-before-old-release",
+      },
       {
         ...logoutAllRetirement,
         pathname: "/v1/workspaces/another-workspace/sessions",
