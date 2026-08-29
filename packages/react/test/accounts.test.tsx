@@ -423,6 +423,62 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
+  test("restores from neutral authority when refresh supersedes the initiating fence", async () => {
+    const before = projection();
+    let mutationAttempts = 0;
+    let announceFenceStarted!: () => void;
+    let releaseFence!: () => void;
+    const fenceStarted = new Promise<void>((resolve) => {
+      announceFenceStarted = resolve;
+    });
+    const fenceRelease = new Promise<void>((resolve) => {
+      releaseFence = resolve;
+    });
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => before,
+        reconcileSessionSetAuthority: async () => before,
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          return projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (transition.from?.selectedSlotId === SLOT_A && transition.to === null) {
+          announceFenceStarted();
+          await fenceRelease;
+        }
+      },
+    );
+    transitions.length = 0;
+
+    let selection!: Promise<boolean>;
+    await act(async () => {
+      selection = accounts.current.selectSlot(SLOT_B);
+      await fenceStarted;
+    });
+    expect(accounts.current.projection).toBeNull();
+    expect(accounts.current.phase).toBe("loading");
+
+    await act(async () => {
+      expect(await accounts.current.refresh()).toEqual(before);
+    });
+    await act(async () => {
+      releaseFence();
+      expect(await selection).toBe(false);
+    });
+
+    expect(mutationAttempts).toBe(0);
+    expect(transitions).toHaveLength(2);
+    expect(transitions[0]).toMatchObject({ from: before, to: null });
+    expect(transitions[1]).toMatchObject({ kind: "cross_tab", from: null, to: before });
+    expect(accounts.current.projection).toEqual(before);
+    expect(accounts.current.phase).toBe("ready");
+    await accounts.unmount();
+  });
+
   test("lets logout-all own settlement when its SSE actor-loss signal arrives concurrently", async () => {
     const before = projection({ generation: "4", actorEpoch: "3" });
     const empty = projection({ selectedSlotId: null, slotIds: [] });

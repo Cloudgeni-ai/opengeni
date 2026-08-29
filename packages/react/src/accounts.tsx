@@ -416,6 +416,8 @@ export function BrowserAccountsProvider({
           transitionAbortRef.current?.abort();
           const controller = new AbortController();
           transitionAbortRef.current = controller;
+          projectionRef.current = null;
+          setProjection(null);
           setPhase("loading");
           // The host can synchronously clear its actor surface before its
           // transition promise later rejects. From this point on, every
