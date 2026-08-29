@@ -137,6 +137,13 @@ operation id, so exact retries converge on the same receipts. The public
 receipt exposes only the effective source-specific decision and snapshot
 identity/hash, not the snapshot's other source overrides.
 
+Optional post-activation Slack publication starts only after the activation
+receipt is durable and is never awaited by the proposal or `remember` router. A
+stalled notification sink therefore cannot withhold the activated receipt.
+Exact retries return the same durable activation outcome and may dispatch the
+publication again; the publication outbox deduplicates on the activation
+receipt identity.
+
 The first-party proposal surface is intentionally explicit:
 `knowledge_propose`, `knowledge_correct`, `task_note_promote_knowledge`,
 `task_note_promote_instruction_policy`, `task_note_promote_preference`,
