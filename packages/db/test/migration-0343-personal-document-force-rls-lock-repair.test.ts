@@ -112,6 +112,27 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       sandboxBackend: "modal",
       firstPartyMcpTools: [],
     });
+    // The current claim adapter locks the durable cursor while this fixture
+    // intentionally holds the database below 0343. Supply only the later row
+    // shape it needs, then remove it before the deferred chain runs so 0374
+    // still owns the real table, policies, trigger, and history backfill.
+    await admin`
+      create table session_event_cursors (
+        session_id uuid primary key,
+        account_id uuid not null,
+        workspace_id uuid not null,
+        last_sequence integer not null default 0,
+        revision bigint not null default 0,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now()
+      )`;
+    await admin`
+      insert into session_event_cursors (
+        session_id, account_id, workspace_id, last_sequence
+      )
+      select id, account_id, workspace_id, last_sequence
+      from sessions
+      where id = ${session.id}`;
     const [sessionAuthority] = await admin<
       Array<{ visibility: string; epoch: number; membershipId: string | null }>
     >`
@@ -200,6 +221,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     // the required application-writer drain instead of weakening its fail-closed guard.
     await app.end({ timeout: 5 });
     expect(await applicationSessionCount()).toBe(0);
+    await admin`drop table session_event_cursors`;
     await admin`alter table sessions drop column variable_set_ids`;
     await migrate(ownerUrl);
     app = openApp();
