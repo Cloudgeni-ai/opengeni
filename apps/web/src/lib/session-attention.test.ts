@@ -6,6 +6,7 @@ import {
   localSessionDeliveryAttentionCounts,
   latestSessionAttentionProjection,
   notifySessionAttentionChanged,
+  restoreUnreadSessionAttentionProjection,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
   shouldProjectActiveSessionRead,
@@ -97,6 +98,16 @@ describe("active session read acknowledgement", () => {
     const acknowledged = sessionReadProjectionKey(session.id, 20);
     expect(sessionReadProjectionKey(session.id, 20)).toBe(acknowledged);
     expect(sessionReadProjectionKey(session.id, 21)).not.toBe(acknowledged);
+  });
+
+  test("restores the exact unread frontier when acknowledgement cannot start", () => {
+    expect(restoreUnreadSessionAttentionProjection(session, 23)).toEqual({
+      id: session.id,
+      workspaceId: session.workspaceId,
+      unread: true,
+      attentionVersion: session.attentionVersion,
+      lastSequence: 23,
+    });
   });
 
   test("acknowledges the exact unread chat only at the foreground live tip", () => {

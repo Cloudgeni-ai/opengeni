@@ -113,6 +113,7 @@ import {
   updateLocalSessionDeliveryAttention,
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
+  restoreUnreadSessionAttentionProjection,
   shouldAcknowledgeActiveSession,
   shouldProjectActiveSessionRead,
 } from "@/lib/session-attention";
@@ -488,7 +489,13 @@ export function SessionRoute({
     const timer = window.setTimeout(() => {
       if (document.visibilityState !== "visible" || !document.hasFocus()) return;
       const acceptedTransition = captureWorkspaceInvocation(workspaceId);
-      if (!acceptedTransition) return;
+      if (!acceptedTransition) {
+        failedProjectionRef.current = projectionKey;
+        projectSessionAttention(
+          restoreUnreadSessionAttentionProjection(targetSession, readThroughSequence),
+        );
+        return;
+      }
       acknowledgedProjectionRef.current = projectionKey;
       void client
         .updateSessionAttention(workspaceId, targetSession.id, {
@@ -523,13 +530,9 @@ export function SessionRoute({
           }
           if (active && ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
             failedProjectionRef.current = projectionKey;
-            projectSessionAttention({
-              id: targetSession.id,
-              workspaceId: targetSession.workspaceId,
-              unread: true,
-              attentionVersion: targetSession.attentionVersion,
-              lastSequence: readThroughSequence,
-            });
+            projectSessionAttention(
+              restoreUnreadSessionAttentionProjection(targetSession, readThroughSequence),
+            );
           }
         });
     }, 750);

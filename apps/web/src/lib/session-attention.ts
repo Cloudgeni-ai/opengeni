@@ -76,6 +76,19 @@ export function sessionReadProjectionKey(sessionId: string, latestEventSequence:
   return `${sessionId}:${latestEventSequence}`;
 }
 
+export function restoreUnreadSessionAttentionProjection(
+  session: Pick<Session, "id" | "workspaceId" | "attentionVersion">,
+  lastSequence: number,
+): SessionAttentionProjection {
+  return {
+    id: session.id,
+    workspaceId: session.workspaceId,
+    unread: true,
+    attentionVersion: session.attentionVersion,
+    lastSequence,
+  };
+}
+
 type ActiveSessionReadEligibility = {
   activeSessionId: string | null;
   workspaceId: string;
