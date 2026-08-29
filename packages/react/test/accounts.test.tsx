@@ -376,6 +376,109 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
+  test("restores reconciled authority when the initiating surface fence rejects", async () => {
+    const before = projection();
+    let mutationAttempts = 0;
+    let reconciliationAttempts = 0;
+    let rejectFence = true;
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => before,
+        reconcileSessionSetAuthority: async () => {
+          reconciliationAttempts += 1;
+          return before;
+        },
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          return projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (rejectFence && transition.from?.selectedSlotId === SLOT_A && transition.to === null) {
+          rejectFence = false;
+          throw new Error("host fence failed");
+        }
+      },
+    );
+    transitions.length = 0;
+    const initialReconciliationAttempts = reconciliationAttempts;
+
+    await expect(actRun(() => accounts.current.selectSlot(SLOT_B))).rejects.toThrow(
+      "host fence failed",
+    );
+    await flush();
+
+    expect(mutationAttempts).toBe(0);
+    // Recovery first discovers the current authority, then confirms it again
+    // after the host has restored the actor-owned surface.
+    expect(reconciliationAttempts - initialReconciliationAttempts).toBe(2);
+    expect(transitions).toHaveLength(2);
+    expect(transitions[0]).toMatchObject({ from: before, to: null });
+    expect(transitions[1]).toMatchObject({ from: null, to: before });
+    expect(accounts.current.projection).toEqual(before);
+    expect(accounts.current.phase).toBe("recoverable_error");
+    expect(accounts.current.hasPendingTransition).toBe(true);
+    await accounts.unmount();
+  });
+
+  test("restores from neutral authority when refresh supersedes the initiating fence", async () => {
+    const before = projection();
+    let mutationAttempts = 0;
+    let announceFenceStarted!: () => void;
+    let releaseFence!: () => void;
+    const fenceStarted = new Promise<void>((resolve) => {
+      announceFenceStarted = resolve;
+    });
+    const fenceRelease = new Promise<void>((resolve) => {
+      releaseFence = resolve;
+    });
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => before,
+        reconcileSessionSetAuthority: async () => before,
+        selectLoginSlot: async () => {
+          mutationAttempts += 1;
+          return projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (transition.from?.selectedSlotId === SLOT_A && transition.to === null) {
+          announceFenceStarted();
+          await fenceRelease;
+        }
+      },
+    );
+    transitions.length = 0;
+
+    let selection!: Promise<boolean>;
+    await act(async () => {
+      selection = accounts.current.selectSlot(SLOT_B);
+      await fenceStarted;
+    });
+    expect(accounts.current.projection).toBeNull();
+    expect(accounts.current.phase).toBe("loading");
+
+    await act(async () => {
+      expect(await accounts.current.refresh()).toEqual(before);
+    });
+    await act(async () => {
+      releaseFence();
+      expect(await selection).toBe(false);
+    });
+
+    expect(mutationAttempts).toBe(0);
+    expect(transitions).toHaveLength(2);
+    expect(transitions[0]).toMatchObject({ from: before, to: null });
+    expect(transitions[1]).toMatchObject({ kind: "cross_tab", from: null, to: before });
+    expect(accounts.current.projection).toEqual(before);
+    expect(accounts.current.phase).toBe("ready");
+    await accounts.unmount();
+  });
+
   test("lets logout-all own settlement when its SSE actor-loss signal arrives concurrently", async () => {
     const before = projection({ generation: "4", actorEpoch: "3" });
     const empty = projection({ selectedSlotId: null, slotIds: [] });
@@ -409,7 +512,7 @@ describe("BrowserAccountsProvider", () => {
       logout = accounts.current.logoutAll();
       await postStarted;
     });
-    expect(accounts.current.phase).toBe("committing");
+    expect(accounts.current.phase).toBe("loading");
 
     await act(async () => {
       expect(await accounts.current.invalidateActor()).toBeNull();
@@ -707,7 +810,7 @@ describe("BrowserAccountsProvider", () => {
           },
         }),
         async (transition) => {
-          if (transition.from !== null && transition.to?.selectedSlotId === SLOT_B) {
+          if (transition.to?.selectedSlotId === SLOT_B) {
             await transitionSettled;
           }
         },
@@ -784,6 +887,7 @@ describe("BrowserAccountsProvider", () => {
 
     let current = projection();
     const peerTransitions: BrowserAccountTransition[] = [];
+    const initiatorTransitions: BrowserAccountTransition[] = [];
     let peer: Awaited<ReturnType<typeof renderAccounts>> | null = null;
     let initiator: Awaited<ReturnType<typeof renderAccounts>> | null = null;
     try {
@@ -800,6 +904,7 @@ describe("BrowserAccountsProvider", () => {
           getSessionSet: async () => current,
           selectLoginSlot: async () => {
             expect(peerTransitions.at(-1)?.to).toBeNull();
+            expect(initiatorTransitions.at(-1)?.to).toBeNull();
             current = projection({
               generation: "2",
               actorEpoch: "2",
@@ -808,13 +913,17 @@ describe("BrowserAccountsProvider", () => {
             return current;
           },
         }),
-        async () => undefined,
+        async (transition) => {
+          initiatorTransitions.push(transition);
+        },
         "accounts-precommit-hold-test",
       );
+      initiatorTransitions.length = 0;
 
       expect(await actRun(() => initiator!.current.selectSlot(SLOT_B))).toBe(true);
       await flush();
       expect(peerTransitions[0]?.to).toBeNull();
+      expect(initiatorTransitions[0]?.to).toBeNull();
       expect(peer.current.projection?.selectedSlotId).toBe(SLOT_B);
       expect(peer.current.projection?.actorEpoch).toBe("2");
     } finally {
@@ -1113,8 +1222,8 @@ describe("BrowserAccountsProvider", () => {
     expect(await actRun(() => accounts.current.selectSlot(SLOT_A))).toBe(true);
     expect(accounts.current.projection?.actorEpoch).toBe("3");
     expect(accounts.current.projection?.selectedSlotId).toBe(SLOT_B);
-    expect(transitionCount).toBe(initialTransitions);
-    expect(readCount).toBe(3);
+    expect(transitionCount).toBe(initialTransitions + 2);
+    expect(readCount).toBe(4);
     await accounts.unmount();
   });
 

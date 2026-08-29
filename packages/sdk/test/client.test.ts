@@ -474,6 +474,54 @@ describe("OpenGeniClient", () => {
     ]);
   });
 
+  test("route-owned finite reads forward one lifecycle AbortSignal", async () => {
+    const received: Array<{ path: string; signal: AbortSignal | undefined }> = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const signal = init?.signal ?? undefined;
+        received.push({ path: new URL(String(input)).pathname, signal });
+        return await new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const abort = new AbortController();
+    const settled = Promise.allSettled([
+      client.listTurns(WORKSPACE_ID, SESSION_ID, {
+        latestStarted: true,
+        signal: abort.signal,
+      }),
+      client.getComposerDraft(WORKSPACE_ID, SESSION_ID, { signal: abort.signal }),
+      client.getClientConfig({ signal: abort.signal }),
+      client.listSessionPage(WORKSPACE_ID, { limit: 12, signal: abort.signal }),
+      client.getWorkspaceModelCatalog(WORKSPACE_ID, { signal: abort.signal }),
+      client.getWorkspaceRealtimeModelCatalog(WORKSPACE_ID, { signal: abort.signal }),
+    ]);
+    abort.abort();
+
+    expect(received).toEqual([
+      { path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/turns`, signal: abort.signal },
+      {
+        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/composer-draft`,
+        signal: abort.signal,
+      },
+      { path: "/v1/config/client", signal: abort.signal },
+      { path: `/v1/workspaces/${WORKSPACE_ID}/sessions`, signal: abort.signal },
+      { path: `/v1/workspaces/${WORKSPACE_ID}/model-catalog`, signal: abort.signal },
+      { path: `/v1/workspaces/${WORKSPACE_ID}/realtime-model-catalog`, signal: abort.signal },
+    ]);
+    for (const result of await settled) {
+      expect(result).toEqual(
+        expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+      );
+    }
+  });
+
   test("submits one exact revision-fenced established-session draft", async () => {
     const response = {
       accepted: makeEvent(9),

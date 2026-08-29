@@ -33,6 +33,7 @@ import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
 import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
+import { useLastStartedTurnPolicy } from "../src/hooks/use-last-started-turn-policy";
 import { usePacks } from "../src/hooks/use-packs";
 import { useWorkspaceSessions } from "../src/hooks/use-workspace-sessions";
 import { useSessionControl } from "../src/hooks/use-session-control";
@@ -164,6 +165,31 @@ function queueSnapshot(
 }
 
 describe("useWorkspaceSessions", () => {
+  test("unmount aborts its native session-page read", async () => {
+    let nativeSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        nativeSignal = options?.signal;
+        return await new Promise<SessionListResponse>((_resolve, reject) => {
+          nativeSignal?.addEventListener(
+            "abort",
+            () => reject(nativeSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(nativeSignal?.aborted).toBe(false);
+
+    await hook.unmount();
+    expect(nativeSignal?.aborted).toBe(true);
+  });
+
   test("forwards pins-only mode without changing the historical visible-row projection", async () => {
     const pinned = { id: "pin-only", pinned: true } as never;
     let observedPinsOnly = false;
@@ -3309,6 +3335,31 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("unmount aborts the native durable-draft read", async () => {
+    let nativeSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, _sessionId, options) => {
+        nativeSignal = options?.signal;
+        return await new Promise<ComposerDraft>((_resolve, reject) => {
+          nativeSignal?.addEventListener(
+            "abort",
+            () => reject(nativeSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(nativeSignal?.aborted).toBe(false);
+
+    await hook.unmount();
+    expect(nativeSignal?.aborted).toBe(true);
+  });
+
   test("durable policy hydration does not trigger a write-back", async () => {
     let resolveDraft!: (draft: ComposerDraft) => void;
     const saved: unknown[] = [];
@@ -5654,14 +5705,56 @@ describe("useAvailableModels", () => {
   });
 
   test("starts with empty models and a null default before the config loads", async () => {
+    let nativeSignal: AbortSignal | undefined;
     const client = fakeClient({
-      getClientConfig: async () => new Promise(() => {}) as never,
+      getClientConfig: async (options) => {
+        nativeSignal = options?.signal;
+        return (await new Promise((_resolve, reject) => {
+          nativeSignal?.addEventListener(
+            "abort",
+            () => reject(nativeSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        })) as never;
+      },
     });
     const hook = await renderHook(() => useAvailableModels({ client }), undefined);
     expect(hook.result.current.loading).toBe(true);
     expect(hook.result.current.models).toEqual([]);
     expect(hook.result.current.defaultModel).toBeNull();
     await hook.unmount();
+    expect(nativeSignal?.aborted).toBe(true);
+  });
+});
+
+describe("useLastStartedTurnPolicy", () => {
+  test("unmount aborts its latest-turn read", async () => {
+    let nativeSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      listTurns: async (_workspaceId, _sessionId, options) => {
+        nativeSignal = options?.signal;
+        return await new Promise<SessionTurn[]>((_resolve, reject) => {
+          nativeSignal?.addEventListener(
+            "abort",
+            () => reject(nativeSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useLastStartedTurnPolicy(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(nativeSignal?.aborted).toBe(false);
+
+    await hook.unmount();
+    expect(nativeSignal?.aborted).toBe(true);
   });
 });
 

@@ -36,6 +36,65 @@ type UiState = {
   }>;
 };
 
+describe("custom API control center diagnostics", () => {
+  const sessionsUrl = `http://127.0.0.1:9/v1/workspaces/${workspaceId}/sessions`;
+
+  test("allows only the route-owned paged session requests cancelled during replacement", () => {
+    expect(
+      isExpectedSessionPageCancellation(
+        "GET",
+        `${sessionsUrl}?view=page&limit=50&parentSessionId=null`,
+        "net::ERR_ABORTED",
+      ),
+    ).toBe(true);
+    expect(
+      isExpectedSessionPageCancellation(
+        "GET",
+        `${sessionsUrl}?parentSessionId=null&archivedOnly=true&limit=50&view=page`,
+        "net::ERR_ABORTED",
+      ),
+    ).toBe(true);
+    expect(
+      isExpectedSessionPageCancellation(
+        "GET",
+        `${sessionsUrl}?pinsOnly=true&limit=1&view=page`,
+        "net::ERR_ABORTED",
+      ),
+    ).toBe(true);
+  });
+
+  test("retains other request failures as diagnostics", () => {
+    expect(
+      isExpectedSessionPageCancellation(
+        "GET",
+        `${sessionsUrl}?view=array&limit=50&parentSessionId=null`,
+        "net::ERR_ABORTED",
+      ),
+    ).toBe(false);
+    expect(
+      isExpectedSessionPageCancellation(
+        "GET",
+        `${sessionsUrl}?view=page&limit=50&parentSessionId=null`,
+        "net::ERR_CONNECTION_RESET",
+      ),
+    ).toBe(false);
+    expect(
+      isExpectedSessionPageCancellation(
+        "POST",
+        `${sessionsUrl}?view=page&limit=50&parentSessionId=null`,
+        "net::ERR_ABORTED",
+      ),
+    ).toBe(false);
+    expect(
+      isExpectedSessionPageCancellation(
+        "GET",
+        `${sessionsUrl}?view=page&limit=50&parentSessionId=null&unexpected=true`,
+        "net::ERR_ABORTED",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("custom API control center browser acceptance", () => {
   let browser: Browser;
   let web: StartedProcess;
@@ -398,11 +457,42 @@ function collectRuntimeDiagnostics(page: Page): string[] {
   });
   page.on("pageerror", (error) => diagnostics.push(`page:${error.message}`));
   page.on("requestfailed", (request) => {
-    diagnostics.push(
-      `request:${request.method()} ${request.url()} ${request.failure()?.errorText ?? "failed"}`,
-    );
+    const errorText = request.failure()?.errorText ?? "failed";
+    if (isExpectedSessionPageCancellation(request.method(), request.url(), errorText)) return;
+    diagnostics.push(`request:${request.method()} ${request.url()} ${errorText}`);
   });
   return diagnostics;
+}
+
+function isExpectedSessionPageCancellation(
+  method: string,
+  requestUrl: string,
+  errorText: string,
+): boolean {
+  if (method !== "GET" || errorText !== "net::ERR_ABORTED") return false;
+
+  let url: URL;
+  try {
+    url = new URL(requestUrl);
+  } catch {
+    return false;
+  }
+  if (
+    url.origin !== "http://127.0.0.1:9" ||
+    url.pathname !== `/v1/workspaces/${workspaceId}/sessions`
+  ) {
+    return false;
+  }
+
+  const actual = [...url.searchParams.entries()]
+    .map(([key, value]) => `${key}=${value}`)
+    .sort()
+    .join("&");
+  return new Set([
+    "limit=50&parentSessionId=null&view=page",
+    "archivedOnly=true&limit=50&parentSessionId=null&view=page",
+    "limit=1&pinsOnly=true&view=page",
+  ]).has(actual);
 }
 
 async function openCapabilities(page: Page): Promise<void> {
