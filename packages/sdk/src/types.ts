@@ -3507,6 +3507,9 @@ export type ClientConfig = {
       }
     | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
+  /** Governed internal AI application factory availability for this deployment. */
+  sites?: { enabled: boolean } | undefined;
+  advancedDeployments?: { enabled: boolean } | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;

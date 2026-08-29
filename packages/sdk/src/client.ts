@@ -102,6 +102,33 @@ import {
   type WorkspaceInteractionRevisionEvent,
 } from "./interaction";
 import type {
+  ApplyInternalApplicationDeploymentRequest,
+  ApproveInternalApplicationDeploymentRequest,
+  CreateInternalApplicationAiSessionRequest,
+  CreateInternalApplicationBuildSessionRequest,
+  CreateInternalApplicationRequest,
+  InternalApplicationAiSessionReceipt,
+  InternalApplicationBundle,
+  InternalApplicationBuildSessionReceipt,
+  InternalApplicationDataSource,
+  InternalApplicationDeployment,
+  InternalApplicationDeploymentActionResponse,
+  InternalApplicationDeploymentOperation,
+  InternalApplicationDeploymentTarget,
+  InternalApplicationDetail,
+  InternalApplicationEvent,
+  InternalApplicationSummary,
+  ObserveInternalApplicationDeploymentRequest,
+  PlanInternalApplicationDeploymentRequest,
+  RegisterInternalApplicationBundleRequest,
+  ReconcileInternalApplicationDeploymentOperationRequest,
+  RetireInternalApplicationDeploymentRequest,
+  RollbackInternalApplicationDeploymentRequest,
+  UpdateInternalApplicationRequest,
+  UpsertInternalApplicationDataSourceRequest,
+  UpsertInternalApplicationDeploymentTargetRequest,
+} from "./internal-applications";
+import type {
   AccessContext,
   ActivateCodexRealtimeConnectionRequest,
   AddWorkspaceMemberRequest,
@@ -4384,6 +4411,271 @@ export class OpenGeniClient {
 
   async getWorkspace(workspaceId: string): Promise<Workspace> {
     return await this.requestJson<Workspace>("GET", `/v1/workspaces/${workspaceId}`);
+  }
+
+  // --- Governed internal applications (deployment feature-gated) -------------------------------
+
+  async listInternalApplications(workspaceId: string): Promise<InternalApplicationSummary[]> {
+    const response = await this.requestJson<{
+      applications: InternalApplicationSummary[];
+    }>("GET", `/v1/workspaces/${workspaceId}/internal-applications`);
+    return response.applications;
+  }
+
+  async createInternalApplication(
+    workspaceId: string,
+    request: CreateInternalApplicationRequest,
+  ): Promise<InternalApplicationDetail> {
+    return await this.requestJson<InternalApplicationDetail>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-applications`,
+      request,
+    );
+  }
+
+  async getInternalApplication(
+    workspaceId: string,
+    applicationId: string,
+  ): Promise<InternalApplicationDetail> {
+    return await this.requestJson<InternalApplicationDetail>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/internal-applications/${applicationId}`,
+    );
+  }
+
+  async updateInternalApplication(
+    workspaceId: string,
+    applicationId: string,
+    request: UpdateInternalApplicationRequest,
+  ): Promise<InternalApplicationDetail> {
+    return await this.requestJson<InternalApplicationDetail>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/internal-applications/${applicationId}`,
+      request,
+    );
+  }
+
+  async listInternalApplicationDataSources(
+    workspaceId: string,
+  ): Promise<InternalApplicationDataSource[]> {
+    const response = await this.requestJson<{
+      dataSources: InternalApplicationDataSource[];
+    }>("GET", `/v1/workspaces/${workspaceId}/internal-application-data-sources`);
+    return response.dataSources;
+  }
+
+  async putInternalApplicationDataSource(
+    workspaceId: string,
+    dataSourceId: string,
+    request: UpsertInternalApplicationDataSourceRequest,
+  ): Promise<InternalApplicationDataSource> {
+    return await this.requestJson<InternalApplicationDataSource>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/internal-application-data-sources/${dataSourceId}`,
+      request,
+    );
+  }
+
+  async listInternalApplicationTargets(
+    workspaceId: string,
+  ): Promise<InternalApplicationDeploymentTarget[]> {
+    const response = await this.requestJson<{
+      targets: InternalApplicationDeploymentTarget[];
+    }>("GET", `/v1/workspaces/${workspaceId}/internal-application-targets`);
+    return response.targets;
+  }
+
+  async putInternalApplicationTarget(
+    workspaceId: string,
+    targetId: string,
+    request: UpsertInternalApplicationDeploymentTargetRequest,
+  ): Promise<InternalApplicationDeploymentTarget> {
+    return await this.requestJson<InternalApplicationDeploymentTarget>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/internal-application-targets/${targetId}`,
+      request,
+    );
+  }
+
+  async listInternalApplicationBundles(
+    workspaceId: string,
+    applicationId: string,
+  ): Promise<InternalApplicationBundle[]> {
+    const response = await this.requestJson<{
+      bundles: InternalApplicationBundle[];
+    }>("GET", `/v1/workspaces/${workspaceId}/internal-applications/${applicationId}/bundles`);
+    return response.bundles;
+  }
+
+  async registerInternalApplicationBundle(
+    workspaceId: string,
+    applicationId: string,
+    request: RegisterInternalApplicationBundleRequest,
+  ): Promise<InternalApplicationBundle> {
+    return await this.requestJson<InternalApplicationBundle>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-applications/${applicationId}/bundles`,
+      request,
+    );
+  }
+
+  /** Start a durable OpenGeni generation/test/preview session for a frozen app revision. */
+  async createInternalApplicationBuildSession(
+    workspaceId: string,
+    applicationId: string,
+    request: CreateInternalApplicationBuildSessionRequest,
+  ): Promise<InternalApplicationBuildSessionReceipt> {
+    return await this.requestJson<InternalApplicationBuildSessionReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-applications/${applicationId}/build/sessions`,
+      request,
+    );
+  }
+
+  async listInternalApplicationDeployments(
+    workspaceId: string,
+    applicationId?: string,
+  ): Promise<InternalApplicationDeployment[]> {
+    const response = await this.requestJson<{
+      deployments: InternalApplicationDeployment[];
+    }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/internal-application-deployments`,
+      undefined,
+      applicationId ? { applicationId } : {},
+    );
+    return response.deployments;
+  }
+
+  async planInternalApplicationDeployment(
+    workspaceId: string,
+    request: PlanInternalApplicationDeploymentRequest,
+  ): Promise<InternalApplicationDeploymentActionResponse> {
+    return await this.requestJson<InternalApplicationDeploymentActionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-application-deployments/plan`,
+      request,
+    );
+  }
+
+  async approveInternalApplicationDeploymentPlan(
+    workspaceId: string,
+    operationId: string,
+    request: ApproveInternalApplicationDeploymentRequest,
+  ): Promise<InternalApplicationDeploymentOperation> {
+    return await this.requestJson<InternalApplicationDeploymentOperation>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-application-operations/${operationId}/approve`,
+      request,
+    );
+  }
+
+  async applyInternalApplicationDeployment(
+    workspaceId: string,
+    request: ApplyInternalApplicationDeploymentRequest,
+  ): Promise<InternalApplicationDeploymentActionResponse> {
+    return await this.requestJson<InternalApplicationDeploymentActionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-application-deployments/apply`,
+      request,
+    );
+  }
+
+  async observeInternalApplicationDeployment(
+    workspaceId: string,
+    deploymentId: string,
+    request: ObserveInternalApplicationDeploymentRequest,
+  ): Promise<InternalApplicationDeploymentActionResponse> {
+    return await this.requestJson<InternalApplicationDeploymentActionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-application-deployments/${deploymentId}/observe`,
+      request,
+    );
+  }
+
+  async rollbackInternalApplicationDeployment(
+    workspaceId: string,
+    deploymentId: string,
+    request: RollbackInternalApplicationDeploymentRequest,
+  ): Promise<InternalApplicationDeploymentActionResponse> {
+    return await this.requestJson<InternalApplicationDeploymentActionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-application-deployments/${deploymentId}/rollback`,
+      request,
+    );
+  }
+
+  async retireInternalApplicationDeployment(
+    workspaceId: string,
+    deploymentId: string,
+    request: RetireInternalApplicationDeploymentRequest,
+  ): Promise<InternalApplicationDeploymentActionResponse> {
+    return await this.requestJson<InternalApplicationDeploymentActionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-application-deployments/${deploymentId}/retire`,
+      request,
+    );
+  }
+
+  async listInternalApplicationDeploymentOperations(
+    workspaceId: string,
+    deploymentId: string,
+  ): Promise<InternalApplicationDeploymentOperation[]> {
+    const response = await this.requestJson<{
+      operations: InternalApplicationDeploymentOperation[];
+    }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/internal-application-deployments/${deploymentId}/operations`,
+    );
+    return response.operations;
+  }
+
+  async listInternalApplicationEvents(
+    workspaceId: string,
+    applicationId: string,
+  ): Promise<InternalApplicationEvent[]> {
+    const response = await this.requestJson<{
+      events: InternalApplicationEvent[];
+    }>("GET", `/v1/workspaces/${workspaceId}/internal-applications/${applicationId}/events`);
+    return response.events;
+  }
+
+  async getInternalApplicationOperation(
+    workspaceId: string,
+    operationId: string,
+  ): Promise<InternalApplicationDeploymentOperation> {
+    return await this.requestJson<InternalApplicationDeploymentOperation>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/internal-application-operations/${operationId}`,
+    );
+  }
+
+  async reconcileInternalApplicationDeploymentOperation(
+    workspaceId: string,
+    operationId: string,
+    request: ReconcileInternalApplicationDeploymentOperationRequest,
+  ): Promise<InternalApplicationDeploymentActionResponse> {
+    return await this.requestJson<InternalApplicationDeploymentActionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-application-operations/${operationId}/reconcile`,
+      request,
+    );
+  }
+
+  /**
+   * Start a durable AI session through an application's frozen model policy.
+   * Continue and stream it with the ordinary session methods using sessionId.
+   */
+  async createInternalApplicationAiSession(
+    workspaceId: string,
+    applicationId: string,
+    request: CreateInternalApplicationAiSessionRequest,
+  ): Promise<InternalApplicationAiSessionReceipt> {
+    return await this.requestJson<InternalApplicationAiSessionReceipt>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/internal-applications/${applicationId}/ai/sessions`,
+      request,
+    );
   }
 
   /** Read-time, secret-safe inventory of policy heads and visible workspace knowledge. */

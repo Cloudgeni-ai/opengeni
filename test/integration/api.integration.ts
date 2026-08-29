@@ -177,6 +177,244 @@ describe("API component integration", () => {
     );
   });
 
+  test("publishes and runs an authenticated static Site through durable OpenGeni sessions", async () => {
+    workflow = new FakeWorkflowClient();
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      sitesEnabled: true,
+      advancedDeploymentsEnabled: false,
+      objectStorageEndpoint: services.objectStorageEndpoint,
+      objectStorageSandboxEndpoint: services.objectStorageSandboxEndpoint,
+      objectStorageAccessKeyId: "minioadmin",
+      objectStorageSecretAccessKey: "minioadmin",
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const config = (await (await app.request("/v1/config/client")).json()) as {
+      sites: { enabled: boolean };
+      advancedDeployments: { enabled: boolean };
+    };
+    expect(config.sites.enabled).toBe(true);
+    expect(config.advancedDeployments.enabled).toBe(false);
+
+    const artifactResponse = await app.request(workspacePath(workspaceId, "/published-artifacts"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        title: "SINTEF local data explorer",
+        description: "Static SPA using the OpenGeni Site runtime",
+        html: '<!doctype html><button id="ask">Ask local data</button><script>OpenGeniSite.connect()</script>',
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(artifactResponse.status).toBe(201);
+    const artifact = (await artifactResponse.json()) as {
+      artifact: { id: string };
+      version: { id: string };
+    };
+    const manifest = {
+      schemaVersion: 1,
+      ai: {
+        enabled: true,
+        defaultModel: "scripted-model",
+        allowedModels: ["scripted-model"],
+        reasoningEffort: "medium",
+        instructions: "Answer only from approved local workspace data.",
+        monthlyBudgetMicros: 1_000_000,
+      },
+      integrations: {
+        firstPartyPermissions: ["workspace:read", "documents:search", "connections:read"],
+        firstPartyTools: ["memory_search"],
+        mcpServers: [],
+        allowedPersonalConnectionServerIds: [],
+      },
+      approvals: { writeActions: "platform_prompt" },
+      access: { audience: "workspace" },
+    };
+    const releaseResponse = await app.request(
+      workspacePath(workspaceId, `/sites/${artifact.artifact.id}/releases`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedCurrentReleaseId: null,
+          artifactVersionId: artifact.version.id,
+          manifest,
+          reason: "Integration test release",
+        }),
+      },
+    );
+    expect(releaseResponse.status).toBe(201);
+    const release = (await releaseResponse.json()) as {
+      site: { id: string; currentReleaseId: string };
+      release: { id: string; artifactVersionId: string };
+    };
+    expect(release.site.id).toBe(artifact.artifact.id);
+    expect(release.site.currentReleaseId).toBe(release.release.id);
+
+    const runtimeOperationId = crypto.randomUUID();
+    const runtimeResponse = await app.request(
+      workspacePath(workspaceId, `/sites/${artifact.artifact.id}/runtime/sessions`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operationId: runtimeOperationId,
+          initialMessage: "Summarize the approved local dataset.",
+        }),
+      },
+    );
+    expect(runtimeResponse.status).toBe(202);
+    const receipt = (await runtimeResponse.json()) as {
+      sessionId: string;
+      runtimeSession: { id: string; releaseId: string; sessionId: string };
+      eventsPath: string;
+    };
+    expect(receipt.runtimeSession.releaseId).toBe(release.release.id);
+    expect(receipt.runtimeSession.sessionId).toBe(receipt.sessionId);
+    expect(receipt.eventsPath).toContain(`/sessions/${receipt.sessionId}/events/stream`);
+    expect(
+      (await listSessionEvents(dbClient.db, workspaceId, receipt.sessionId)).map(
+        (event) => event.type,
+      ),
+    ).toEqual(["session.created", "user.message", "turn.queued", "session.status.changed"]);
+
+    const followup = await app.request(
+      workspacePath(
+        workspaceId,
+        `/sites/${artifact.artifact.id}/runtime/sessions/${receipt.runtimeSession.id}/messages`,
+      ),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          text: "Now compare the two highest values.",
+          clientEventId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(followup.status).toBe(202);
+
+    const aiOnlyArtifactResponse = await app.request(
+      workspacePath(workspaceId, `/published-artifacts/${artifact.artifact.id}/versions`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expectedCurrentVersionId: artifact.version.id,
+          html: '<!doctype html><button id="ask">Ask AI</button><script>OpenGeniSite.connect()</script>',
+          idempotencyKey: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(aiOnlyArtifactResponse.status).toBe(200);
+    const aiOnlyArtifact = (await aiOnlyArtifactResponse.json()) as {
+      version: { id: string };
+    };
+    const aiOnlyReleaseResponse = await app.request(
+      workspacePath(workspaceId, `/sites/${artifact.artifact.id}/releases`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedCurrentReleaseId: release.release.id,
+          artifactVersionId: aiOnlyArtifact.version.id,
+          manifest: {
+            ...manifest,
+            integrations: {
+              firstPartyPermissions: [],
+              firstPartyTools: [],
+              mcpServers: [],
+              allowedPersonalConnectionServerIds: [],
+            },
+            approvals: { writeActions: "deny" },
+          },
+          reason: "AI-only integration test release",
+        }),
+      },
+    );
+    expect(aiOnlyReleaseResponse.status).toBe(201);
+    const aiOnlyRelease = (await aiOnlyReleaseResponse.json()) as { release: { id: string } };
+    const aiOnlyRuntimeResponse = await app.request(
+      workspacePath(workspaceId, `/sites/${artifact.artifact.id}/runtime/sessions`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          initialMessage: "Answer without integration tools.",
+        }),
+      },
+    );
+    expect(aiOnlyRuntimeResponse.status).toBe(202);
+    const supersededFollowup = await app.request(
+      workspacePath(
+        workspaceId,
+        `/sites/${artifact.artifact.id}/runtime/sessions/${receipt.runtimeSession.id}/messages`,
+      ),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "The old release must no longer accept Site work." }),
+      },
+    );
+    expect(supersededFollowup.status).toBe(409);
+
+    const usage = await app.request(
+      workspacePath(workspaceId, `/sites/${artifact.artifact.id}/usage`),
+    );
+    expect(usage.status).toBe(200);
+    expect(await usage.json()).toMatchObject({
+      modelCalls: 0,
+      totalTokens: 0,
+      budgetMicros: 1_000_000,
+    });
+
+    const archive = await app.request(
+      workspacePath(workspaceId, `/sites/${artifact.artifact.id}/archive`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedCurrentReleaseId: aiOnlyRelease.release.id,
+          reason: "Integration test complete",
+        }),
+      },
+    );
+    expect(archive.status).toBe(200);
+    expect((await archive.json()) as { site: { status: string } }).toMatchObject({
+      site: { status: "archived" },
+    });
+    const archivedFollowup = await app.request(
+      workspacePath(
+        workspaceId,
+        `/sites/${artifact.artifact.id}/runtime/sessions/${receipt.runtimeSession.id}/messages`,
+      ),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "This must not run after archive." }),
+      },
+    );
+    expect(archivedFollowup.status).toBe(409);
+
+    const disabled = createApp({
+      settings: { ...settings, sitesEnabled: false, advancedDeploymentsEnabled: true },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    expect((await disabled.request(workspacePath(workspaceId, "/sites"))).status).toBe(404);
+  }, 180_000);
+
   test("creates sessions, persists initial events, and starts workflow", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({

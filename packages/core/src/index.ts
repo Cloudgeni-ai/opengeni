@@ -98,6 +98,7 @@ export * from "./domain/workspace-members";
 export * from "./domain/video-generation";
 export * from "./domain/video-generation-capabilities";
 export * from "./domain/organization-membership-lifecycle";
+export * from "./domain/internal-applications";
 export * from "./application/new-session-drafts";
 export * from "./application/composer-submit";
 export * from "./application/session-commands";

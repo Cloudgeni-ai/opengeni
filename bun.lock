@@ -632,6 +632,14 @@
         "zod": "^4.2.1",
       },
     },
+    "packages/site-runtime": {
+      "name": "@opengeni/site-runtime",
+      "version": "0.1.0",
+      "devDependencies": {
+        "tsup": "^8.5.0",
+        "typescript": "7.0.2",
+      },
+    },
     "packages/storage": {
       "name": "@opengeni/storage",
       "version": "0.2.105",
@@ -1356,6 +1364,8 @@
     "@opengeni/runtime": ["@opengeni/runtime@workspace:packages/runtime"],
 
     "@opengeni/sdk": ["@opengeni/sdk@workspace:packages/sdk"],
+
+    "@opengeni/site-runtime": ["@opengeni/site-runtime@workspace:packages/site-runtime"],
 
     "@opengeni/storage": ["@opengeni/storage@workspace:packages/storage"],
 

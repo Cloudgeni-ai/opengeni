@@ -8,6 +8,8 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/rigs"
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
+  | "/workspaces/$workspaceId/sites"
+  | "/workspaces/$workspaceId/applications"
   | "/workspaces/$workspaceId/schedules"
   | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/memory"
@@ -35,6 +37,8 @@ export type WorkspaceConfigItem = {
   description: string;
   /** When true, only include for subjects with workspace:admin. */
   requiresAdmin?: boolean;
+  /** Deployment capability gate projected by /v1/config/client. */
+  feature?: "sites" | "advancedDeployments";
 };
 
 export type WorkspaceConfigGroup = {
@@ -74,6 +78,20 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     icon: "panels-top-left",
     label: "Artifacts",
     description: "Live pages and tools built by agents",
+  },
+  {
+    to: "/workspaces/$workspaceId/sites",
+    icon: "panels-top-left",
+    label: "Sites",
+    description: "Authenticated static apps with native AI and integrations",
+    feature: "sites",
+  },
+  {
+    to: "/workspaces/$workspaceId/applications",
+    icon: "panels-top-left",
+    label: "Advanced deployments",
+    description: "Deploy arbitrary full-stack apps to connected infrastructure",
+    feature: "advancedDeployments",
   },
 ];
 
@@ -155,13 +173,32 @@ export const WORKSPACE_BROWSE_ITEMS: WorkspaceConfigItem[] = WORKSPACE_CONFIG_GR
 export function filterWorkspaceConfigGroups(
   groups: WorkspaceConfigGroup[],
   canReadInsights: boolean,
+  sitesEnabled = false,
+  advancedDeploymentsEnabled = false,
 ): WorkspaceConfigGroup[] {
   return groups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => !item.requiresAdmin || canReadInsights),
+      items: group.items.filter(
+        (item) =>
+          (!item.requiresAdmin || canReadInsights) &&
+          (item.feature !== "sites" || sitesEnabled) &&
+          (item.feature !== "advancedDeployments" || advancedDeploymentsEnabled),
+      ),
     }))
     .filter((group) => group.items.length > 0);
+}
+
+export function filterWorkspaceItemsByFeatures(
+  items: WorkspaceConfigItem[],
+  sitesEnabled = false,
+  advancedDeploymentsEnabled = false,
+): WorkspaceConfigItem[] {
+  return items.filter(
+    (item) =>
+      (item.feature !== "sites" || sitesEnabled) &&
+      (item.feature !== "advancedDeployments" || advancedDeploymentsEnabled),
+  );
 }
 
 function configPathSuffix(to: WorkspaceConfigTarget): string {

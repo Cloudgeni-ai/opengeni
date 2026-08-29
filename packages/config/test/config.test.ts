@@ -106,6 +106,20 @@ describe("goal continuation pacing settings", () => {
   });
 });
 
+describe("Sites and Advanced Deployments feature gates", () => {
+  test("are independently disabled by default and require explicit activation", () => {
+    expect(withEnv({}, () => getSettings()).sitesEnabled).toBe(false);
+    expect(withEnv({}, () => getSettings()).advancedDeploymentsEnabled).toBe(false);
+    expect(withEnv({ OPENGENI_SITES_ENABLED: "true" }, () => getSettings()).sitesEnabled).toBe(
+      true,
+    );
+    expect(
+      withEnv({ OPENGENI_ADVANCED_DEPLOYMENTS_ENABLED: "true" }, () => getSettings())
+        .advancedDeploymentsEnabled,
+    ).toBe(true);
+  });
+});
+
 describe("browser analytics configuration", () => {
   test("is disabled and consent-gated by default", () => {
     const settings = withEnv({}, () => getSettings());

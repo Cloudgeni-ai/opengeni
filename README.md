@@ -136,6 +136,67 @@ customer-side coding agents the same decision path. The
 [in-process embedding guide](docs/embedding.md) is for advanced hosts that
 intentionally bind OpenGeni runtime infrastructure into their own process.
 
+## Preview: Sites first, Advanced Deployments second
+
+OpenGeni can feel like "Lovable for internal teams," but with native AI and
+internal-data authority supplied by the platform rather than copied into each
+generated application. The product has two intentionally different lanes.
+
+### OpenGeni Sites
+
+**Sites** are the common path: self-contained static SPAs hosted as immutable
+workspace artifacts. A generated Site receives a stable workspace-authenticated
+URL and calls durable OpenGeni AI through a browser-safe page bridge. Approved
+Connections and first-party tools run server-side; model keys, integration
+credentials, Variable Set values, and OpenGeni product keys never enter the
+iframe.
+
+```text
+Describe Site
+  -> build and preview in a durable OpenGeni session
+  -> review model, instructions, integrations, approvals, access, and budget
+  -> publish an immutable release
+  -> open the authenticated internal URL
+  -> stream durable AI and approved tools through the shared gateway
+  -> inspect usage/activity, update, roll back, or archive
+```
+
+There is no Kubernetes workload, Azure Function, serverless backend, database,
+or API key Secret per Site. The Site Runtime Gateway maps the exact release to
+ordinary OpenGeni sessions, SSE/replay, model routing, MCP/Connections,
+platform-owned approvals, usage, and audit. Phase one supports self-contained
+HTML SPAs under a network-disabled CSP and opaque-origin iframe.
+
+Site HTML resides in the deployment's configured object storage. Release and
+session evidence resides in OpenGeni Postgres. Source data stays in local
+OpenGeni files/knowledge or its existing approved system of record and is read
+through a governed server-side adapter. A truly local deployment must also use
+a local approved inference route.
+
+Sites are disabled by default behind `OPENGENI_SITES_ENABLED`. See the
+[Sites architecture and operator guide](docs/sites.md), the
+[`@opengeni/site-runtime`](packages/site-runtime/README.md) browser SDK, and the
+[SINTEF local-data reference](deploy/examples/sites/sintef-local-data/README.md).
+
+### Advanced Deployments
+
+Applications that need arbitrary backend code, dedicated state, custom network
+access, or their own serving topology use **Advanced Deployments**. This keeps
+the existing OCI bundle, Data Source, target, deterministic plan/approve/apply,
+Kubernetes observe/reconcile/rollback/retire, SBOM, provenance, and conformance
+work without putting infrastructure in the Sites happy path.
+
+Advanced Deployments are independently disabled behind
+`OPENGENI_ADVANCED_DEPLOYMENTS_ENABLED`. Enabling Sites grants no cloud or
+Kubernetes authority; enabling Advanced Deployments does not expose Sites. See
+the [Advanced Deployments guide](docs/internal-applications.md) and its optional
+[SINTEF Kubernetes overlay](deploy/examples/internal-applications/sintef/README.md).
+
+Strict locality in either lane covers the complete data path: OpenGeni control
+plane, artifacts/session history, data adapters, and inference route. A
+Connected Machine keeps command execution local but does not by itself prevent
+selected content from reaching the configured model provider.
+
 ## Quick Start
 
 Prerequisites:
@@ -548,6 +609,9 @@ The project license is Apache-2.0. Optional curated Skills under `packages/runti
 
 ## Roadmap
 
+- Expand the [governed internal AI application](#preview-governed-internal-ai-applications)
+  preview with trusted OCI publication, clone/provision data adapters, GitOps
+  promotion, generated-app SSO, and managed/Connected Machine providers.
 - First-class `agents` and `environments` API resources.
 - Outbound webhooks for event delivery.
 - A provider-neutral stock repository picker; embedded hosts can already submit
