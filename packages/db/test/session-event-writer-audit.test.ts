@@ -594,6 +594,26 @@ function functionCalls(functionNode: FunctionLikeDeclaration, expectedName: stri
   return found;
 }
 
+function functionCallHasProperty(
+  functionNode: FunctionLikeDeclaration,
+  expectedName: string,
+  propertyName: string,
+): boolean {
+  let found = false;
+  const visit = (node: t.Node): void => {
+    if (
+      isCallExpression(node) &&
+      callName(node) === expectedName &&
+      callHasProperty(node, propertyName)
+    ) {
+      found = true;
+    }
+    if (!found) forEachChild(node, visit);
+  };
+  forEachChild(functionNode, visit);
+  return found;
+}
+
 function callHasProperty(node: t.CallExpression, propertyName: string): boolean {
   return node.arguments.some(
     (argument) =>
@@ -1074,6 +1094,9 @@ describe("session_events writer inventory", () => {
         } else if (callerOwnedControlWriters.has(key)) {
           const writerName = key.slice(key.lastIndexOf("#") + 1);
           expect(Object.hasOwn(expectedOwnedSuffixCallers, writerName)).toBe(true);
+          expect(
+            functionCallHasProperty(writer.functionNode, "lockSessionEventWriteRows", "sessionIds"),
+          ).toBe(true);
         } else {
           const prefixes = controlAwarePrefixPositions(writer.functionNode);
           expect(prefixes.length).toBeGreaterThan(0);

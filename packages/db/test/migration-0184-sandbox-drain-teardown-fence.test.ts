@@ -19,6 +19,7 @@ const withheldMigrationNames = [
   "0299_organization_membership_lock_order.sql",
   "0315_personal_github_repository_selection.sql",
   "0345_tenant_scoped_session_tenancy_fence.sql",
+  "0374_session_event_cursors.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
@@ -94,7 +95,8 @@ describe("migration 0184 sandbox drain teardown fence", () => {
       // with the pre-0184 bridge and replayed through the real filename ledger
       // in dependency order once the legacy claim exists. 0299 must repair the
       // replayed 0275 membership definitions before 0345 extends that exact
-      // prefix with the session-tenancy fences.
+      // prefix with the session-tenancy fences. 0374 consumes the helper
+      // created by 0345, so it must remain behind the same withheld boundary.
       await sql`
         insert into schema_migrations (name)
         select unnest(${withheldMigrationNames}::text[])`;
@@ -250,7 +252,10 @@ describe("migration 0184 sandbox drain teardown fence", () => {
       const [stillOwned] = await sql<Array<{ liveness: string; captureId: string }>>`
         select liveness, archive_capture_id as "captureId"
         from sandbox_leases where id = ${leaseId}`;
-      expect(stillOwned).toEqual({ liveness: "draining", captureId: successorCaptureId });
+      expect(stillOwned).toEqual({
+        liveness: "draining",
+        captureId: successorCaptureId,
+      });
 
       // The exact new owner can atomically settle the same transition.
       await sql.begin(async (tx) => {

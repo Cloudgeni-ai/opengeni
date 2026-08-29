@@ -636,6 +636,7 @@ export type SessionEventWriteLocks = {
   control: WorkspaceControlRow | null;
   workspace: typeof schema.workspaces.$inferSelect | null;
   sessions: Array<typeof schema.sessions.$inferSelect>;
+  cursors: Array<typeof schema.sessionEventCursors.$inferSelect>;
   turns: Array<typeof schema.sessionTurns.$inferSelect>;
   attempts: Array<typeof schema.sessionTurnAttempts.$inferSelect>;
 };
@@ -647,6 +648,7 @@ export type SessionEventWriteLocks = {
  *     (when control-aware; see `lockWorkspaceInferenceControl`)
  *     -> actual workspaces row FOR KEY SHARE
  *     -> session rows FOR NO KEY UPDATE, UUID ordered
+ *     -> session event cursor rows FOR UPDATE, UUID ordered
  *     -> exact turn rows FOR UPDATE, UUID ordered
  *     -> exact attempt rows FOR UPDATE, UUID ordered
  *
@@ -713,6 +715,52 @@ export async function lockSessionEventWriteRows(
           .for("no key update")
       : [];
 
+  const cursors =
+    sessions.length > 0
+      ? await db
+          .select()
+          .from(schema.sessionEventCursors)
+          .where(
+            and(
+              eq(schema.sessionEventCursors.workspaceId, input.workspaceId),
+              inArray(
+                schema.sessionEventCursors.sessionId,
+                sessions.map((session) => session.id),
+              ),
+            ),
+          )
+          .orderBy(schema.sessionEventCursors.sessionId)
+          .for("update")
+      : [];
+  if (cursors.length !== sessions.length) {
+    throw new SessionControlInvariantError(
+      `Session event cursor lock set was incomplete for workspace ${input.workspaceId}`,
+    );
+  }
+  const canonicalSessions = sessions.map((session, index) => {
+    const cursor = cursors[index]!;
+    if (
+      cursor.sessionId !== session.id ||
+      cursor.accountId !== session.accountId ||
+      cursor.workspaceId !== session.workspaceId
+    ) {
+      throw new SessionControlInvariantError(
+        `Session event cursor identity failed for session ${session.id}`,
+      );
+    }
+    // The cursor is the allocation authority. The wide session column remains
+    // a rolling compatibility/read projection until every reader is cut over.
+    // It may lag after the later pure-append activation, but it must never lead
+    // the durable cursor or an old writer could have committed an unverified
+    // sequence.
+    if (cursor.lastSequence < session.lastSequence) {
+      throw new SessionControlInvariantError(
+        `Session event cursor is behind session projection for session ${session.id}`,
+      );
+    }
+    return { ...session, lastSequence: cursor.lastSequence };
+  });
+
   const turnIds = [...new Set(input.turnIds ?? [])].sort();
   const turns =
     turnIds.length > 0
@@ -745,7 +793,7 @@ export async function lockSessionEventWriteRows(
           .for("update")
       : [];
 
-  return { control, workspace, sessions, turns, attempts };
+  return { control, workspace, sessions: canonicalSessions, cursors, turns, attempts };
 }
 
 export async function registerSessionTurnAttemptClaim(

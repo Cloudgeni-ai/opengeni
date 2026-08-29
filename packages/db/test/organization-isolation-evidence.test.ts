@@ -322,11 +322,19 @@ async function seedResources(
   });
   resources.push({ family: "session", table: "sessions", id: session.id });
 
-  const [event] = await db.admin<{ id: string }[]>`
-    insert into session_events (session_id, sequence, type, account_id, workspace_id)
-    values (${session.id}, 9000, 'evidence.probe', ${accountId}, ${workspaceId})
-    returning id
-  `;
+  const [event] = await db.admin.begin(async (tx) => {
+    const inserted = await tx<Array<{ id: string }>>`
+      insert into session_events (session_id, sequence, type, account_id, workspace_id)
+      values (${session.id}, 1, 'evidence.probe', ${accountId}, ${workspaceId})
+      returning id
+    `;
+    await tx`
+      update sessions
+      set last_sequence = 1
+      where workspace_id = ${workspaceId} and id = ${session.id}
+    `;
+    return inserted;
+  });
   resources.push({ family: "session event", table: "session_events", id: event!.id });
 
   const [variableSet] = await db.admin<{ id: string }[]>`

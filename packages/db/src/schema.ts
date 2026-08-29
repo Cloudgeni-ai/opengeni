@@ -7800,6 +7800,43 @@ export const xaiCapacityWaiters = pgTable(
   }),
 );
 
+export const sessionEventCursors = pgTable(
+  "session_event_cursors",
+  {
+    sessionId: uuid("session_id")
+      .primaryKey()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    lastSequence: integer("last_sequence").notNull().default(0),
+    revision: bigint("revision", { mode: "number" }).notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_event_cursors_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_event_cursors_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    workspaceIdentity: uniqueIndex("session_event_cursors_workspace_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+    ),
+    sequenceValid: check("session_event_cursors_sequence_check", sql`${table.lastSequence} >= 0`),
+    revisionValid: check("session_event_cursors_revision_check", sql`${table.revision} >= 0`),
+  }),
+);
+
 export const sessionEvents = pgTable(
   "session_events",
   {

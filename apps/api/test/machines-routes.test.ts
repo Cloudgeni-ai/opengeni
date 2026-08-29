@@ -1485,15 +1485,14 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
       "eeeeeeee-0000-4000-8000-000000000002",
     );
 
-    // Rig sessionA's NEXT append to REJECT: pre-occupy its next sequence slot so the
-    // unique (workspace, session, sequence) index throws on sessionA's fan-out
-    // append — a faithful stand-in for the session-specific / racing-writer failure
-    // the isolation must survive. sessionB is untouched.
-    const [{ last_sequence: lastSeqA }] = await admin<{ last_sequence: number }[]>`
-      select last_sequence from sessions where id = ${sessionA.id}`;
+    // Rig sessionA's NEXT append to REJECT: move the compatibility projection
+    // ahead of its durable cursor. Cursor-authoritative writers fail closed on
+    // that exact mixed-version invariant before inserting events. sessionB is
+    // untouched, so the fan-out must continue after sessionA's isolated error.
     await admin`
-      insert into session_events (account_id, workspace_id, session_id, sequence, type)
-      values (${accountId}, ${workspaceId}, ${sessionA.id}, ${lastSeqA + 1}, 'user.message')`;
+      update sessions
+      set last_sequence = last_sequence + 1
+      where id = ${sessionA.id}`;
 
     // Capture warns; call the handler directly so the per-session log is observable.
     const warns: Array<{ message: string; meta?: Record<string, unknown> }> = [];
