@@ -340,6 +340,12 @@ const budgets = {
   // the Linux/arm64 Bun 1.3 graph measures 2,226,468 raw / 622,642 gzip bytes
   // across 31 files. Advance only the policy-derived raw envelope to 2,176 KiB,
   // retaining 1,756 bytes of headroom; every other cap remains fixed.
+  // Abandoned session detail, lineage, and goal reads now cancel their native
+  // requests after the final mounted consumer leaves. The exact Linux/x64 Bun
+  // 1.4 graph measures 2,239,997 raw / 627,707 gzip bytes across 32 files.
+  // Advance the policy-derived raw envelope to 2,189 KiB and gzip to 615 KiB,
+  // retaining 1,539 raw bytes and the established 1.5-KiB compressed platform-
+  // skew allowance. Every unrelated cap remains fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
@@ -351,13 +357,13 @@ const budgets = {
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
-// 32 files. The policy-derived raw envelope above includes the later bounded
-// HTTP/1 browser-stream graph; keep the gzip platform-skew and file-count
-// allowances here while leaving every initial, per-file, lazy, and CSS cap
-// unchanged.
+// 32 files. The policy-derived envelopes above include the later bounded
+// HTTP/1 browser-stream and abandoned-read cancellation graphs; keep the gzip
+// platform-skew and file-count allowances here while leaving every initial,
+// per-file, lazy, and CSS cap unchanged.
 const effectiveBudgets = {
   ...budgets,
-  directSessionGzip: Math.max(budgets.directSessionGzip, 613 * kib),
+  directSessionGzip: Math.max(budgets.directSessionGzip, 615 * kib),
   directSessionFiles: Math.max(budgets.directSessionFiles, 32),
 } as const;
 

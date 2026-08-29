@@ -596,6 +596,12 @@ export type SharedSessionReadOptions = {
    * client has a `beginSharedRead` clock.
    */
   onRequestStart?: ((readGeneration?: number) => void) | undefined;
+  /**
+   * Stop this caller's interest in the shared read. The native request is
+   * aborted only after every caller that joined the same generation has
+   * stopped waiting for it.
+   */
+  signal?: AbortSignal | undefined;
 };
 
 export type GetSessionOptions = SharedSessionReadOptions & {
@@ -609,6 +615,8 @@ export type GetSessionOptions = SharedSessionReadOptions & {
 export type GetSessionLineageOptions = SharedSessionReadOptions;
 
 type SingleFlightReadEntry = {
+  controller: AbortController;
+  consumers: number;
   generation: number;
   promise: Promise<unknown>;
   resolve: (value: unknown) => void;
@@ -629,6 +637,8 @@ function createSingleFlightReadEntry(
     reject = entryReject;
   });
   return {
+    controller: new AbortController(),
+    consumers: 0,
     generation,
     promise,
     resolve,
@@ -983,7 +993,11 @@ export class OpenGeniClient {
     options: GetSessionOptions = {},
   ): Promise<Session> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
-    return await this.sharedRead(path, () => this.requestJson<Session>("GET", path), options);
+    return await this.sharedRead(
+      path,
+      (signal) => this.requestJson<Session>("GET", path, undefined, {}, { signal }),
+      options,
+    );
   }
 
   async updateSession(
@@ -1305,30 +1319,35 @@ export class OpenGeniClient {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
     return await this.sharedRead(
       path,
-      () => this.requestJson<SessionLineageResponse>("GET", path),
+      (signal) => this.requestJson<SessionLineageResponse>("GET", path, undefined, {}, { signal }),
       options,
     );
   }
 
   private sharedRead<T>(
     key: string,
-    read: () => Promise<T>,
+    read: (signal: AbortSignal) => Promise<T>,
     options: GetSessionOptions = {},
   ): Promise<T> {
+    if (options.signal?.aborted) {
+      return Promise.reject(
+        options.signal.reason ?? new DOMException("Request aborted", "AbortError"),
+      );
+    }
     const existing = this.active.get(key);
     if (existing) {
       if (!options.fresh) {
         this.observeRead(existing, options.onRequestStart);
-        return existing.promise as Promise<T>;
+        return this.consumeSharedRead(key, existing, options.signal);
       }
       const requiredGeneration = existing.generation + 1;
       const queued = this.queued.get(key);
       if (queued && queued.generation >= requiredGeneration) {
         this.observeRead(queued, options.onRequestStart);
-        return queued.promise as Promise<T>;
+        return this.consumeSharedRead(key, queued, options.signal);
       }
       const predecessor = queued?.promise ?? existing.promise;
-      return this.queueRead(key, predecessor, requiredGeneration, read, options.onRequestStart);
+      return this.queueRead(key, predecessor, requiredGeneration, read, options);
     }
     // The active entry clears in its finally before reactions on its public
     // promise run. During that settlement gap a successor may already be
@@ -1337,31 +1356,27 @@ export class OpenGeniClient {
     const queued = this.queued.get(key);
     if (queued && (!options.fresh || !queued.started)) {
       this.observeRead(queued, options.onRequestStart);
-      return queued.promise as Promise<T>;
+      return this.consumeSharedRead(key, queued, options.signal);
     }
     if (queued) {
-      return this.queueRead(
-        key,
-        queued.promise,
-        queued.generation + 1,
-        read,
-        options.onRequestStart,
-      );
+      return this.queueRead(key, queued.promise, queued.generation + 1, read, options);
     }
     const generation = (this.generations.get(key) ?? 0) + 1;
     const entry = createSingleFlightReadEntry(generation, options.onRequestStart);
+    const consumed = this.consumeSharedRead<T>(key, entry, options.signal);
     this.launchRead(key, entry, read);
-    return entry.promise as Promise<T>;
+    return consumed;
   }
 
   private queueRead<T>(
     key: string,
     predecessor: Promise<unknown>,
     generation: number,
-    read: () => Promise<T>,
-    onRequestStart?: (readGeneration?: number) => void,
+    read: (signal: AbortSignal) => Promise<T>,
+    options: GetSessionOptions,
   ): Promise<T> {
-    const entry = createSingleFlightReadEntry(generation, onRequestStart);
+    const entry = createSingleFlightReadEntry(generation, options.onRequestStart);
+    const consumed = this.consumeSharedRead<T>(key, entry, options.signal);
     this.queued.set(key, entry);
     const launch = () => this.launchRead(key, entry, read);
     void predecessor.then(launch, launch);
@@ -1371,10 +1386,15 @@ export class OpenGeniClient {
       if (!this.active.has(key)) this.generations.delete(key);
     };
     void entry.promise.then(clear, clear);
-    return entry.promise as Promise<T>;
+    return consumed;
   }
 
-  private launchRead<T>(key: string, entry: SingleFlightReadEntry, read: () => Promise<T>): void {
+  private launchRead<T>(
+    key: string,
+    entry: SingleFlightReadEntry,
+    read: (signal: AbortSignal) => Promise<T>,
+  ): void {
+    if (entry.controller.signal.aborted) return;
     entry.started = true;
     this.generations.set(key, entry.generation);
     this.active.set(key, entry);
@@ -1398,7 +1418,7 @@ export class OpenGeniClient {
     };
     let request: Promise<T>;
     try {
-      request = read();
+      request = read(entry.controller.signal);
     } catch (error) {
       settle();
       entry.reject(error);
@@ -1414,6 +1434,33 @@ export class OpenGeniClient {
         entry.reject(error);
       },
     );
+  }
+
+  private consumeSharedRead<T>(
+    key: string,
+    entry: SingleFlightReadEntry,
+    signal: AbortSignal | undefined,
+  ): Promise<T> {
+    entry.consumers += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      entry.consumers -= 1;
+      if (!signal?.aborted || entry.consumers > 0) return;
+      const reason = signal.reason;
+      entry.controller.abort(reason);
+      if (this.active.get(key) === entry) this.active.delete(key);
+      if (this.queued.get(key) === entry) this.queued.delete(key);
+      if (!this.active.has(key) && !this.queued.has(key)) this.generations.delete(key);
+      entry.reject(reason);
+    };
+    signal?.addEventListener("abort", release, { once: true });
+    const consumed = awaitWithAbort(entry.promise as Promise<T>, signal);
+    return consumed.finally(() => {
+      signal?.removeEventListener("abort", release);
+      release();
+    });
   }
 
   private observeRead(
@@ -2426,9 +2473,17 @@ export class OpenGeniClient {
   // --- Goals -------------------------------------------------------------------
 
   /** The session's goal. 404s when the session never had one. */
-  async getGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
+  async getGoal(
+    workspaceId: string,
+    sessionId: string,
+    options: SharedSessionReadOptions = {},
+  ): Promise<SessionGoal> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`;
-    return await this.sharedRead(path, () => this.requestJson<SessionGoal>("GET", path));
+    return await this.sharedRead(
+      path,
+      (signal) => this.requestJson<SessionGoal>("GET", path, undefined, {}, { signal }),
+      options,
+    );
   }
 
   async updateGoal(

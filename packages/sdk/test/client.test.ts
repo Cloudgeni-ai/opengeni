@@ -602,6 +602,105 @@ describe("OpenGeniClient", () => {
     expect(requests).toBe(4);
   });
 
+  test("keeps a shared session read alive while another caller is still waiting", async () => {
+    let requests = 0;
+    let requestSignal: AbortSignal | undefined;
+    let resolveRequest!: (response: Response) => void;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (_input, init) => {
+        requests += 1;
+        requestSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((resolve) => {
+          resolveRequest = resolve;
+        });
+      },
+    });
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    const first = client.getSession(WORKSPACE_ID, SESSION_ID, { signal: firstAbort.signal });
+    const second = client.getSession(WORKSPACE_ID, SESSION_ID, { signal: secondAbort.signal });
+
+    firstAbort.abort();
+
+    await expect(first).rejects.toHaveProperty("name", "AbortError");
+    expect(requests).toBe(1);
+    expect(requestSignal?.aborted).toBe(false);
+    resolveRequest(jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID }));
+    expect((await second).id).toBe(SESSION_ID);
+    expect(requests).toBe(1);
+  });
+
+  test("aborts an abandoned shared session read and lets a later caller retry", async () => {
+    let requests = 0;
+    const requestSignals: AbortSignal[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (_input, init) => {
+        requests += 1;
+        const signal = init?.signal;
+        if (!signal) throw new Error("expected a native request signal");
+        requestSignals.push(signal);
+        if (requests === 1) {
+          return await new Promise<Response>((_resolve, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID });
+      },
+    });
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    const first = client.getSession(WORKSPACE_ID, SESSION_ID, { signal: firstAbort.signal });
+    const second = client.getSession(WORKSPACE_ID, SESSION_ID, { signal: secondAbort.signal });
+
+    firstAbort.abort();
+    expect(requestSignals[0]?.aborted).toBe(false);
+    secondAbort.abort();
+
+    expect(requestSignals[0]?.aborted).toBe(true);
+    expect(await Promise.allSettled([first, second])).toEqual([
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+    ]);
+    expect((await client.getSession(WORKSPACE_ID, SESSION_ID)).id).toBe(SESSION_ID);
+    expect(requests).toBe(2);
+    expect(requestSignals[1]?.aborted).toBe(false);
+  });
+
+  test("does not launch a queued fresh read after its only caller leaves", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        if (requests === 1) await initialGate;
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID });
+      },
+    });
+    const active = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const queuedAbort = new AbortController();
+    const queued = client.getSession(WORKSPACE_ID, SESSION_ID, {
+      fresh: true,
+      signal: queuedAbort.signal,
+    });
+
+    queuedAbort.abort();
+    await expect(queued).rejects.toHaveProperty("name", "AbortError");
+    releaseInitial();
+    await active;
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+  });
+
   test("replays a pre-settlement lineage start generation without restamping a late joiner", async () => {
     let requests = 0;
     let releaseInitial!: () => void;
