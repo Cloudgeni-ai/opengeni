@@ -437,6 +437,7 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     workspaceLock: "already_locked",
+    sessionIds: [input.sessionId],
     turnIds: [input.activeTurnId],
     attemptIds: preview?.activeAttemptId ? [preview.activeAttemptId] : [],
   });
