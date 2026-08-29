@@ -1519,24 +1519,67 @@ describe("clean session control plane", () => {
     expect(turn).not.toBeNull();
     await setBaseline(attempt.grant.workspaceId!, attempt.session.id);
     const attemptBefore = await activity(attempt.grant.workspaceId!, attempt.session.id);
-    expect(
-      (
-        await appendSessionEventsForTurnAttempt(
-          client.db,
-          attempt.grant.workspaceId!,
-          attempt.session.id,
-          turn!.id,
-          turn!.executionGeneration,
-          attemptId,
-          rawDeltas(),
-        )
-      ).accepted,
-    ).toBeTrue();
+    const [cursorBefore] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${attempt.grant.workspaceId!}
+        and session_id = ${attempt.session.id}`;
+    expect(cursorBefore?.lastSequence).toBe(attemptBefore.lastSequence);
+
+    let releaseSessionRow!: () => void;
+    let sessionRowLocked!: () => void;
+    const sessionRowLockReleased = new Promise<void>((resolve) => {
+      releaseSessionRow = resolve;
+    });
+    const sessionRowLockAcquired = new Promise<void>((resolve) => {
+      sessionRowLocked = resolve;
+    });
+    const sessionRowHolder = shared.admin.begin(async (tx) => {
+      await tx`
+        select id from sessions
+        where workspace_id = ${attempt.grant.workspaceId!}
+          and id = ${attempt.session.id}
+        for no key update`;
+      sessionRowLocked();
+      await sessionRowLockReleased;
+    });
+    await sessionRowLockAcquired;
+    const rawAppend = appendSessionEventsForTurnAttempt(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      turn!.id,
+      turn!.executionGeneration,
+      attemptId,
+      rawDeltas(),
+    );
+    let rawResult: Awaited<typeof rawAppend> | null = null;
+    try {
+      rawResult = await Promise.race([rawAppend, Bun.sleep(1_500).then(() => null)]);
+      expect(rawResult).not.toBeNull();
+    } finally {
+      releaseSessionRow();
+      await sessionRowHolder;
+      await rawAppend;
+    }
+    if (!rawResult) throw new Error("raw append waited on sessions FOR NO KEY UPDATE");
+    expect(rawResult.accepted).toBeTrue();
     expect(await activity(attempt.grant.workspaceId!, attempt.session.id)).toEqual({
-      lastSequence: attemptBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      lastSequence: attemptBefore.lastSequence,
       updatedAt: baseline,
       activityRevision: attemptBefore.activityRevision,
     });
+    const [cursorAfterRaw] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${attempt.grant.workspaceId!}
+        and session_id = ${attempt.session.id}`;
+    expect(cursorAfterRaw?.lastSequence).toBe(
+      attemptBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+    );
+    expect(
+      (await getSession(client.db, attempt.grant.workspaceId!, attempt.session.id))?.lastSequence,
+    ).toBe(cursorAfterRaw?.lastSequence);
     await appendSessionEventsForTurnAttempt(
       client.db,
       attempt.grant.workspaceId!,
@@ -1547,6 +1590,7 @@ describe("clean session control plane", () => {
       [{ type: "agent.message.completed", payload: { text: "semantic" } }],
     );
     const attemptSemantic = await activity(attempt.grant.workspaceId!, attempt.session.id);
+    expect(attemptSemantic.lastSequence).toBe((cursorAfterRaw?.lastSequence ?? 0) + 1);
     expect(attemptSemantic.updatedAt).not.toBe(baseline);
     expect(BigInt(attemptSemantic.activityRevision)).toBeGreaterThan(
       BigInt(attemptBefore.activityRevision),

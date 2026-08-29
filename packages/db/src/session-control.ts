@@ -639,6 +639,13 @@ export type SessionEventWriteLockInput = {
   controlLock: WorkspaceControlLockMode | "already_locked" | "none";
   /** Used only when a staged caller already established the workspace prefix. */
   workspaceLock?: "key_share" | "already_locked";
+  /**
+   * Semantic writers retain FOR NO KEY UPDATE. Cursor-authoritative raw-only
+   * appends need only the FK-compatible identity hold; KEY SHARE is compatible
+   * with semantic NO KEY UPDATE and therefore removes the wide session row as
+   * their serialization mutex without inverting the rolling lock order.
+   */
+  sessionLock?: "no_key_update" | "key_share";
   sessionIds?: string[];
   turnIds?: string[];
   attemptIds?: string[];
@@ -659,7 +666,7 @@ export type SessionEventWriteLocks = {
  *   workspace-control advisory lock + workspace_inference_controls row
  *     (when control-aware; see `lockWorkspaceInferenceControl`)
  *     -> actual workspaces row FOR KEY SHARE
- *     -> session rows FOR NO KEY UPDATE, UUID ordered
+ *     -> session rows FOR NO KEY UPDATE (semantic) or KEY SHARE (raw), UUID ordered
  *     -> session event cursor rows FOR UPDATE, UUID ordered
  *     -> exact turn rows FOR UPDATE, UUID ordered
  *     -> exact attempt rows FOR UPDATE, UUID ordered
@@ -675,10 +682,12 @@ export type SessionEventWriteLocks = {
  * `FOR UPDATE` lock serialized unrelated sessions and inverted the activity
  * path's session -> implicit workspace-FK edge.
  *
- * `FOR NO KEY UPDATE` is equally deliberate for sessions. Session primary and
- * composite identity keys are immutable, so writers need to exclude only concurrent
- * non-key mutation. Keeping FK `FOR KEY SHARE` checks compatible prevents the
- * activity finalizer's workspace counter from participating in a lock cycle.
+ * `FOR NO KEY UPDATE` is equally deliberate for semantic session writers.
+ * Cursor-authoritative raw-only writers use `FOR KEY SHARE`: it preserves the
+ * session identity against deletion while remaining compatible with semantic
+ * `FOR NO KEY UPDATE`. Keeping this rolling session-before-cursor order avoids
+ * an inversion with old binaries and quiescent cascade deletion; the compact
+ * cursor row, not the wide session row, is the raw ordering mutex.
  *
  * Complex lifecycle transactions may acquire allocator/control locks before
  * this helper and may discover exact turn IDs only after locking the session.
@@ -712,6 +721,7 @@ export async function lockSessionEventWriteRows(
   }
 
   const sessionIds = [...new Set(input.sessionIds ?? [])].sort();
+  const sessionLock = input.sessionLock ?? "no_key_update";
   const sessions =
     sessionIds.length > 0
       ? await db
@@ -724,7 +734,7 @@ export async function lockSessionEventWriteRows(
             ),
           )
           .orderBy(schema.sessions.id)
-          .for("no key update")
+          .for(sessionLock === "key_share" ? "key share" : "no key update")
       : [];
 
   const cursors =
@@ -3338,6 +3348,11 @@ export async function mutateSessionControlInTransaction(
     }
   }
 
+  const targetSession = locks.sessions.find((session) => session.id === input.sessionId);
+  if (!targetSession) {
+    throw new SessionControlInvariantError(`Session ${input.sessionId} disappeared`);
+  }
+
   const revision = nextRevision(workspace);
   await advanceWorkspaceRevision(db, input.workspaceId, revision);
   const updatedRows = await db
@@ -3378,10 +3393,7 @@ export async function mutateSessionControlInTransaction(
           : eq(schema.sessions.id, input.sessionId),
       ),
     )
-    .returning({
-      id: schema.sessions.id,
-      lastSequence: schema.sessions.lastSequence,
-    });
+    .returning({ id: schema.sessions.id });
   const updated = updatedRows.find((row) => row.id === input.sessionId);
   if (!updated) throw new SessionControlInvariantError(`Session ${input.sessionId} disappeared`);
 
@@ -3444,7 +3456,7 @@ export async function mutateSessionControlInTransaction(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          sequence: updated.lastSequence + 1,
+          sequence: targetSession.lastSequence + 1,
           type:
             input.action === "pause" || input.action === "cancel"
               ? "session.control.paused"
@@ -3468,7 +3480,7 @@ export async function mutateSessionControlInTransaction(
     throw new SessionControlInvariantError("Session control event was not inserted");
   await db
     .update(schema.sessions)
-    .set({ lastSequence: updated.lastSequence + 1, updatedAt: new Date() })
+    .set({ lastSequence: targetSession.lastSequence + 1, updatedAt: new Date() })
     .where(eq(schema.sessions.id, input.sessionId));
   await db.insert(schema.auditEvents).values(
     withLosslessContentWriteVersion(

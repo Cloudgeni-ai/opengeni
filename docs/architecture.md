@@ -104,15 +104,19 @@ Connected Machine streams, but it is not the event store and is never evidence
 that a mutation committed.
 
 Session events have a monotonic per-session sequence. The narrow
-`session_event_cursors` row mirrors and transactionally verifies every append;
-every canonical event/control writer now locks it immediately after the matching
-`sessions` row and uses the cursor as its sequence authority.
-`sessions.last_sequence` remains a rolling compatibility/read projection until
-every reader and pure append path moves to the narrow lock boundary. SSE clients
-begin with durable replay, subscribe to live fanout, and backfill from Postgres
-whenever a sequence gap appears. A NATS restart may interrupt live delivery or
-machine reachability, but it must not erase session history or queued
-obligations.
+`session_event_cursors` row transactionally verifies every append and is the
+sequence authority. Semantic writers retain the session row because state and
+event truth commit together. Accepted raw exact-attempt batches hold only the
+session identity with `FOR KEY SHARE`, serialize on the compact cursor, retain
+the exact turn/attempt fence, and do not update the wide session row. Public
+`lastSequence`, unread, child acknowledgment, and tree projections read the
+cursor; `sessions.last_sequence` remains only a semantic/legacy compatibility
+projection. Legacy SQL writers are rebased at the database boundary, and late
+raw events roll back and retry through the semantic gate before becoming
+rejected audit evidence. SSE clients begin with durable replay, subscribe to
+live fanout, and backfill from Postgres whenever a sequence gap appears. A NATS
+restart may interrupt live delivery or machine reachability, but it must not
+erase session history or queued obligations.
 
 Interactive commands acknowledge their durable transaction. NATS publication
 and immediate Temporal signalling are replayable follow-up work. Never make a

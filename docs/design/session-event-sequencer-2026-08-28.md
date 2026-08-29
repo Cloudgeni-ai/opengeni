@@ -1,6 +1,6 @@
 # Session event sequencer architecture
 
-Status: staged remediation design; phase diagnostics implemented, cursor cutover pending.
+Status: Phase C raw-lane isolation implemented; compatibility projection retained.
 
 Date: 2026-08-28.
 
@@ -120,6 +120,14 @@ events continue to lock `sessions` and commit state plus event atomically.
 
 Unread and list projections read the cursor through a join or a denormalized
 read model refreshed in the same transaction. They never infer order from NATS.
+
+The activation is maintenance-classified because old API readers expose
+`sessions.last_sequence` directly. The database boundary remains mixed-writer
+safe: legacy SQL/event writers are rebased against the cursor, semantic batches
+refresh the compatibility projection, and attempts to regress that projection
+are clamped to the cursor. Accepted raw exact-attempt batches hold only a
+session identity `FOR KEY SHARE`, then the cursor/turn/attempt suffix; rejected
+late raw input rolls back and retries through the semantic activity gate.
 
 ### Phase D: contract
 
