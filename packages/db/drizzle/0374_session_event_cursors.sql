@@ -40,6 +40,12 @@ CREATE POLICY workspace_isolation ON session_event_cursors
   USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
   WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
 
+-- The cursor is a direct session reference and must preserve private-session
+-- visibility just like every other FORCE-RLS session-owned runtime table.
+CREATE POLICY session_visibility_isolation ON session_event_cursors AS RESTRICTIVE
+  USING (session_reference_visible(account_id, workspace_id, session_id))
+  WITH CHECK (session_reference_visible(account_id, workspace_id, session_id));
+
 DO $session_event_cursor_owner_policies$
 DECLARE
   target_schema text := pg_catalog.current_schema();

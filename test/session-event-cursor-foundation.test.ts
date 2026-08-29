@@ -70,6 +70,12 @@ describe("session event cursor foundation", () => {
 
     expect(migration).toContain("ALTER TABLE session_event_cursors FORCE ROW LEVEL SECURITY");
     expect(migration).toContain("CREATE POLICY workspace_isolation ON session_event_cursors");
+    expect(migration).toContain(
+      "CREATE POLICY session_visibility_isolation ON session_event_cursors AS RESTRICTIVE",
+    );
+    expect(migration).toContain(
+      "session_reference_visible(account_id, workspace_id, session_id)",
+    );
     expect(migration).toContain("session_tenancy_fence_inventory_read");
     expect(migration).toContain("session_tenancy_fenced_owner_write");
     expect(migration).toContain(

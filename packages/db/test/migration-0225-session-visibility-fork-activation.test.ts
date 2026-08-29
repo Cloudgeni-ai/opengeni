@@ -196,8 +196,14 @@ async function sessionVisibilityFixture() {
         id, account_id, workspace_id, session_id, sequence, type, payload
       ) values (
         ${eventId}, ${ownerGrant.accountId}, ${ownerGrant.workspaceId}, ${session.id},
-        0, 'user.message', '{"text":"private event"}'::jsonb
+        1, 'user.message', '{"text":"private event"}'::jsonb
       )
+    `;
+    await sql`
+      update sessions
+      set last_sequence = 1
+      where workspace_id = ${ownerGrant.workspaceId}
+        and id = ${session.id}
     `;
     await sql`
       insert into session_turns (
