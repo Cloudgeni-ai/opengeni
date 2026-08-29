@@ -8,6 +8,17 @@ import { modelCatalogDatabaseSearchPath } from "./upsert-model-catalog";
 const repoRoot = new URL("..", import.meta.url).pathname;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
+function operatorTestEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    // These fixtures intentionally contain only built-in models. Do not let a
+    // deployment-wide policy for unrelated Gateway/OpenRouter models change
+    // what the operator integration tests are validating.
+    OPENGENI_MODEL_COST_POLICY_JSON: "{}",
+    ...overrides,
+  };
+}
+
 describe("model catalog operator CLI", () => {
   test("uses the validated dedicated-schema runtime search path", () => {
     expect(modelCatalogDatabaseSearchPath({ OPENGENI_DB_SCHEMA: "embedded_catalog" })).toBe(
@@ -88,11 +99,10 @@ describe("model catalog operator CLI", () => {
         ],
         {
           cwd: repoRoot,
-          env: {
-            ...process.env,
+          env: operatorTestEnv({
             OPENGENI_MIGRATIONS_DATABASE_URL: shared.adminUrl,
             OPENGENI_DB_SCHEMA: schema,
-          },
+          }),
           stdout: "pipe",
           stderr: "pipe",
         },
@@ -112,11 +122,10 @@ describe("model catalog operator CLI", () => {
         ],
         {
           cwd: repoRoot,
-          env: {
-            ...process.env,
+          env: operatorTestEnv({
             OPENGENI_MIGRATIONS_DATABASE_URL: shared.adminUrl,
             OPENGENI_DB_SCHEMA: schema,
-          },
+          }),
           stdout: "pipe",
           stderr: "pipe",
         },
@@ -146,11 +155,10 @@ describe("model catalog operator CLI", () => {
         ],
         {
           cwd: repoRoot,
-          env: {
-            ...process.env,
+          env: operatorTestEnv({
             OPENGENI_MIGRATIONS_DATABASE_URL: shared.adminUrl,
             OPENGENI_DB_SCHEMA: schema,
-          },
+          }),
           stdout: "pipe",
           stderr: "pipe",
         },
@@ -180,11 +188,10 @@ describe("model catalog operator CLI", () => {
         ],
         {
           cwd: repoRoot,
-          env: {
-            ...process.env,
+          env: operatorTestEnv({
             OPENGENI_MIGRATIONS_DATABASE_URL: shared.adminUrl,
             OPENGENI_DB_SCHEMA: schema,
-          },
+          }),
           stdout: "pipe",
           stderr: "pipe",
         },
@@ -260,11 +267,10 @@ describe("model catalog operator CLI", () => {
           ],
           {
             cwd: repoRoot,
-            env: {
-              ...process.env,
+            env: operatorTestEnv({
               OPENGENI_MIGRATIONS_DATABASE_URL: shared.adminUrl,
               OPENGENI_DB_SCHEMA: schema,
-            },
+            }),
             stdout: "pipe",
             stderr: "pipe",
           },
