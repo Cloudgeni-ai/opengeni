@@ -1517,6 +1517,64 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
 });
 
 describe("retained-process stdin faults stay model-visible", () => {
+  test("a durable terminal retained process replays its known result without a retryable fault", async () => {
+    for (const terminal of [
+      {
+        sessionId: 42,
+        state: "exited",
+        exitCode: 23,
+        expected: "Process exited with code 23\n\nOutput:\n",
+      },
+      {
+        sessionId: 43,
+        state: "lost",
+        exitCode: null,
+        expected: "write_stdin failed: session not found: 43",
+      },
+    ] as const) {
+      const controller = createTurnToolCancellationController();
+      const exec = functionTool("exec_command", async () => running(terminal.sessionId));
+      let rawWrites = 0;
+      const write = functionTool("write_stdin", async () => {
+        rawWrites += 1;
+        return exited(0);
+      });
+      const terminalFence = Object.assign(new Error("retained process is terminal"), {
+        name: "SandboxRetainedProcessTerminalError",
+        code: "process_fenced",
+        state: terminal.state,
+        exitCode: terminal.exitCode,
+      });
+      let mutations = 0;
+      const session = {
+        hasRetainedProcess: (sessionId: number) => sessionId === terminal.sessionId,
+        writeStdinForProcessMutation: async () => {
+          mutations += 1;
+          throw terminalFence;
+        },
+        writeStdinForProcessControl: async () => terminal.expected,
+      };
+      const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
+        Extract<Tool<unknown>, { type: "function" }>
+      >;
+      await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }));
+
+      const result = await wrappedWrite!.invoke(
+        runContext,
+        JSON.stringify({
+          session_id: terminal.sessionId,
+          chars: "status\n",
+          yield_time_ms: 100,
+        }),
+      );
+
+      expect(result).toBe(terminal.expected);
+      expect(mutations).toBe(1);
+      expect(rawWrites).toBe(0);
+      await controller.waitForQuiescence().catch(() => undefined);
+    }
+  });
+
   test("a fenced retained-process stdin write is rendered as the tool's error string, never thrown", async () => {
     const controller = createTurnToolCancellationController();
     const exec = functionTool("exec_command", async () => running(44));

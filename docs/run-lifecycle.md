@@ -1025,6 +1025,10 @@ original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
 workspace mutation admission.
+If that process's durable row already records exit or loss, a later model-visible
+`write_stdin` remains fenced before provider dispatch but returns the stored
+terminal exit/loss banner. It never labels a permanently dead handle as a
+retryable platform fault or calls the provider again.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
