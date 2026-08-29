@@ -1558,6 +1558,12 @@ export interface InteractionTransport {
     targetId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerObservation>;
+  captureComputerTarget(
+    workspaceId: string,
+    computerSessionId: string,
+    targetId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerFrame>;
   actInComputer(
     workspaceId: string,
     computerSessionId: string,
@@ -2402,6 +2408,10 @@ export class ComputerSessionResource {
     return await this.transport.observeComputerTarget(this.workspaceId, this.id, targetId, options);
   }
 
+  async capture(targetId: string, options: OpenGeniRequestOptions = {}): Promise<ComputerFrame> {
+    return await this.transport.captureComputerTarget(this.workspaceId, this.id, targetId, options);
+  }
+
   async act(
     request: ComputerActionRequest,
     options: OpenGeniRequestOptions = {},
@@ -2789,6 +2799,28 @@ export function parseComputerFrameMetadata(value: unknown): ComputerFrameMetadat
     throw new Error("computer frame digest is invalid");
   }
   return metadata;
+}
+
+export function decodeComputerFrameMetadataHeader(value: string): ComputerFrameMetadata {
+  if (!value || value.length > 32 * 1024 || !/^[A-Za-z0-9_-]+$/u.test(value)) {
+    throw new Error("computer frame metadata header is invalid");
+  }
+  const normalized = value.replace(/-/gu, "+").replace(/_/gu, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  let decoded: string;
+  try {
+    decoded = atob(padded);
+  } catch {
+    throw new Error("computer frame metadata header is invalid");
+  }
+  const bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error("computer frame metadata header is invalid");
+  }
+  return parseComputerFrameMetadata(metadata);
 }
 
 function newestRelevantBrowser(

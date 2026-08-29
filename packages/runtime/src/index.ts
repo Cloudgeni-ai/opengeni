@@ -242,6 +242,7 @@ import {
   withRetainableSessionImageOutputHook,
   type RetainableSessionImageOutputHook,
 } from "./retained-session-image";
+import type { ComputerToolMode } from "./legacy-computer-compat";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import {
   MultiProviderModelProvider,
@@ -401,6 +402,19 @@ export {
   type RetainableSessionImageOutputHook,
   type RetainableSessionImageToolName,
 } from "./retained-session-image";
+export {
+  SandboxComputer,
+  ComputerUseCapability,
+  computerUse,
+  ComputerUnavailableError,
+  ScreenshotReadError,
+  ComputerReadOnlyError,
+  ComputerActionError,
+  type SandboxComputerOptions,
+  type ComputerUseArgs,
+  type ComputerToolMode,
+  type ScreenshotReadErrorCode,
+} from "./legacy-computer-compat";
 
 // The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
 // helpers + the config-owned env/port re-exports). Re-exported verbatim so the
@@ -1534,6 +1548,10 @@ export type BuildAgentOptions = {
   supportsImageInput?: boolean;
   /** Exact typed `input_file` MIME allow-list; omitted preserves legacy behavior. */
   inputFileMediaTypes?: readonly string[];
+  /** @deprecated Managed ComputerSession tools replace model-bound desktop capability tools. */
+  computerToolMode?: ComputerToolMode;
+  /** @deprecated Managed ComputerSession tools replace model-bound desktop readiness hooks. */
+  onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
   /** Persist intentional image outputs before the SDK can add them to history. */
   onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
   // The LIVE, by-reference connector-namespace Set from prepareAgentTools
@@ -2984,6 +3002,10 @@ export function buildAgentCapabilities(
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
+    /** @deprecated Managed ComputerSession tools replace model-bound desktop capability tools. */
+    computerToolMode?: ComputerToolMode;
+    /** @deprecated Managed ComputerSession tools replace model-bound desktop readiness hooks. */
+    onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
     onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
@@ -3008,6 +3030,8 @@ function buildAgentCapabilitiesFromComposition(
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
+    computerToolMode?: ComputerToolMode;
+    onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
     onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;

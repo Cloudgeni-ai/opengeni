@@ -23,6 +23,7 @@ import {
 } from "./workspace-live-stream";
 import {
   OpenGeniInteractionClient,
+  decodeComputerFrameMetadataHeader,
   type AuthRun,
   type AuthRunListOptions,
   type AuthRunListResponse,
@@ -57,6 +58,7 @@ import {
   type ComputerActionReceipt,
   type ComputerActionRequest,
   type ComputerClipboard,
+  type ComputerFrame,
   type ComputerObservation,
   type ComputerSession,
   type ComputerSessionAttachment,
@@ -3883,6 +3885,47 @@ export class OpenGeniClient {
       {},
       options,
     );
+  }
+
+  async captureComputerTarget(
+    workspaceId: string,
+    computerSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerFrame> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot`,
+      {},
+      options,
+    );
+    const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    if (mediaType !== "image/jpeg" && mediaType !== "image/png") {
+      await cancelResponseBody(response, "computer frame media type is invalid");
+      throw new OpenGeniApiError(502, "computer frame media type is invalid");
+    }
+    const metadataHeader = response.headers.get("x-opengeni-computer-frame");
+    if (!metadataHeader || metadataHeader.length > 32 * 1024) {
+      await cancelResponseBody(response, "computer frame metadata is invalid");
+      throw new OpenGeniApiError(502, "computer frame metadata is invalid");
+    }
+    let metadata: ReturnType<typeof decodeComputerFrameMetadataHeader>;
+    try {
+      metadata = decodeComputerFrameMetadataHeader(metadataHeader);
+    } catch {
+      await cancelResponseBody(response, "computer frame metadata is invalid");
+      throw new OpenGeniApiError(502, "computer frame metadata is invalid");
+    }
+    const bytes = await readBoundedResponseBytes(response, 256 * 1024, null);
+    if (
+      metadata.computerSessionId !== computerSessionId ||
+      metadata.targetId !== targetId ||
+      metadata.mediaType !== mediaType ||
+      metadata.sha256 !== (await sha256Hex(bytes))
+    ) {
+      throw new OpenGeniApiError(502, "computer frame evidence does not match its request");
+    }
+    return { ...metadata, data: bytes };
   }
 
   async actInComputer(
