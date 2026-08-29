@@ -87,6 +87,7 @@ import {
   type TurnWorkerMemoryPressureGuard,
 } from "./memory-pressure-guard";
 import { assertSandboxReaperActivityTimeout } from "./sandbox-reaper-timeout";
+import { installWorkerUnhandledRejectionBoundary } from "./unhandled-rejection-boundary";
 import {
   SANDBOX_REAPER_V2_WORKFLOW_ID,
   sandboxLifecycleTaskQueue,
@@ -1034,6 +1035,10 @@ export async function startWorker() {
   }
   const settings = getSettings();
   const observability = createObservability(settings, { component: `worker-${role}` });
+  // The Agents SDK also listens for unhandled rejections and exits the process.
+  // Keep its detached duplicate of an already-handled MCP lifecycle failure from
+  // restarting the whole turn-worker pod; every unknown rejection remains fatal.
+  const disposeUnhandledRejectionBoundary = installWorkerUnhandledRejectionBoundary();
   const retryOptions = startupRetryOptions(settings);
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
@@ -1092,6 +1097,7 @@ export async function startWorker() {
     });
   } finally {
     await Promise.allSettled([bus?.close(), readinessDbClient.close(), dbClient.close()]);
+    disposeUnhandledRejectionBoundary();
   }
 }
 
