@@ -567,9 +567,18 @@ function finiteReadMayRetireAfterDocumentReplacement(
 ): boolean {
   const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`;
   const documentOwnedSessionRead = new RegExp(
-    `^${exactWorkspacePrefix.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}sessions/[0-9a-f-]+(?:/lineage)?$`,
+    `^${exactWorkspacePrefix.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}sessions/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}(?:/lineage)?$`,
     "u",
   ).test(input.pathname);
+  // Chromium may omit the HttpOnly Cookie header from Playwright metadata
+  // after destroying the old document. The only headerless exception is the
+  // exact same-actor deep-link document replaced before re-authentication;
+  // that interval cannot replace the session-set authority, and every other
+  // actor, phase, path, method, and timing check remains mandatory.
+  const requestAuthorityMatches =
+    input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash ||
+    (input.requestSessionSetAuthorityHash === null &&
+      input.expectedDispatchPhase === "cross-slot-deep-link");
   return (
     new Set(["GET", "HEAD"]).has(input.method) &&
     input.actorEpoch !== null &&
@@ -577,7 +586,7 @@ function finiteReadMayRetireAfterDocumentReplacement(
     input.dispatchPhase === input.expectedDispatchPhase &&
     documentOwnedSessionRead &&
     input.currentSessionSetAuthorityHash !== null &&
-    input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash &&
+    requestAuthorityMatches &&
     Number.isFinite(input.startedAt) &&
     Number.isFinite(input.replacementStartedAt) &&
     input.startedAt <= input.replacementStartedAt
@@ -1010,17 +1019,7 @@ async function retirePendingReadsAfterConfirmedActorTransition(
   const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
     await browserCookieHeader(page.context()),
   );
-  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`;
   for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
-    if (
-      (pending.method !== "GET" && pending.method !== "HEAD") ||
-      pending.actorEpoch !== input.confirmedActorEpoch ||
-      pending.dispatchPhase !== input.dispatchPhase ||
-      !pending.pathname.startsWith(exactWorkspacePrefix) ||
-      pending.startedAt > input.replacementStartedAt
-    ) {
-      continue;
-    }
     const requestSessionSetAuthorityHash =
       pending.sessionSetAuthorityHashImmediate ??
       (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
@@ -1080,7 +1079,17 @@ async function retirePendingReadsAfterConfirmedDocumentReplacement(
   const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
     await browserCookieHeader(page.context()),
   );
+  const exactWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.workspaceId)}/sessions/`;
   for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
+    if (
+      (pending.method !== "GET" && pending.method !== "HEAD") ||
+      pending.actorEpoch !== input.confirmedActorEpoch ||
+      pending.dispatchPhase !== input.dispatchPhase ||
+      !pending.pathname.startsWith(exactWorkspacePrefix) ||
+      pending.startedAt > input.replacementStartedAt
+    ) {
+      continue;
+    }
     const requestSessionSetAuthorityHash =
       pending.sessionSetAuthorityHashImmediate ??
       (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
@@ -1319,7 +1328,7 @@ function logoutAllActorFenceResponseProblem(
     response.pathname === `${expectedWorkspacePrefix}/sessions` && response.search === "";
   const isBoundedLiveStream =
     response.pathname === `${expectedWorkspacePrefix}/live-events/stream` &&
-    new URLSearchParams(response.search).get("transport") === "http1-bounded";
+    exactBoundedWorkspaceLiveStreamSearch(response.search);
   const exactShape =
     response.actorEpoch === input.actorEpoch &&
     response.dispatchPhase === "logout-all-response-loss-replay" &&
@@ -1336,6 +1345,26 @@ function logoutAllActorFenceResponseProblem(
   return exactShape && exactTiming
     ? null
     : `unexpected logout-all actor fence: ${JSON.stringify({ input, response })}`;
+}
+
+function exactBoundedWorkspaceLiveStreamSearch(search: string): boolean {
+  const params = new URLSearchParams(search);
+  const exactSingleton = (name: string, value: string): boolean => {
+    const values = params.getAll(name);
+    return values.length === 1 && values[0] === value;
+  };
+  const exactCursor = (name: string): boolean => {
+    const values = params.getAll(name);
+    if (values.length !== 1 || !/^(?:0|[1-9][0-9]*)$/u.test(values[0] ?? "")) return false;
+    const value = Number(values[0]);
+    return Number.isSafeInteger(value) && value >= 0;
+  };
+  return (
+    [...params.keys()].length === 3 &&
+    exactSingleton("transport", "http1-bounded") &&
+    exactCursor("controlAfter") &&
+    exactCursor("interactionAfter")
+  );
 }
 
 async function expectAndConsumeLogoutAllActorFenceResponses(
@@ -1357,10 +1386,9 @@ async function expectAndConsumeLogoutAllActorFenceResponses(
   await page.waitForTimeout(1_000);
   const validationInput = { ...input, settledAt: performance.now() };
   expect(problems.actorFenceResponses.length).toBeLessThanOrEqual(2);
-  expect(
-    new Set(problems.actorFenceResponses.map(({ pathname, search }) => `${pathname}${search}`))
-      .size,
-  ).toBe(problems.actorFenceResponses.length);
+  expect(new Set(problems.actorFenceResponses.map(({ pathname }) => pathname)).size).toBe(
+    problems.actorFenceResponses.length,
+  );
   for (const response of problems.actorFenceResponses) {
     expect(logoutAllActorFenceResponseProblem(response, validationInput)).toBeNull();
   }
@@ -3050,13 +3078,20 @@ describe("provider-neutral browser account acceptance", () => {
       dispatchPhase: "cross-slot-deep-link",
       expectedDispatchPhase: "cross-slot-deep-link",
       method: "GET",
-      pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/session-id/lineage",
+      pathname:
+        "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions/00000000-0000-4000-8000-000000000002/lineage",
       replacementStartedAt: 200,
       requestSessionSetAuthorityHash: "a".repeat(64),
       startedAt: 100,
       workspaceId: "00000000-0000-0000-0000-000000000001",
     } satisfies DocumentReplacementRetirementInput;
     expect(finiteReadMayRetireAfterDocumentReplacement(documentReplacementRetirement)).toBe(true);
+    expect(
+      finiteReadMayRetireAfterDocumentReplacement({
+        ...documentReplacementRetirement,
+        requestSessionSetAuthorityHash: null,
+      }),
+    ).toBe(true);
     for (const invalid of [
       { ...documentReplacementRetirement, method: "POST" },
       { ...documentReplacementRetirement, actorEpoch: null },
@@ -3079,6 +3114,8 @@ describe("provider-neutral browser account acceptance", () => {
       },
       {
         ...documentReplacementRetirement,
+        dispatchPhase: "slot-revocation-reauthentication",
+        expectedDispatchPhase: "slot-revocation-reauthentication",
         requestSessionSetAuthorityHash: null,
       },
       {
@@ -3217,7 +3254,7 @@ describe("provider-neutral browser account acceptance", () => {
         {
           ...logoutAllFence,
           pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
-          search: "?after=12&transport=http1-bounded",
+          search: "?controlAfter=12&interactionAfter=34&transport=http1-bounded",
         },
         logoutAllFenceInput,
       ),
@@ -3232,6 +3269,21 @@ describe("provider-neutral browser account acceptance", () => {
         ...logoutAllFence,
         pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
         search: "?transport=h2",
+      },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        search: "?controlAfter=12&interactionAfter=34&transport=http1-bounded&transport=h2",
+      },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        search: "?controlAfter=12&interactionAfter=34&transport=http1-bounded&unexpected=1",
+      },
+      {
+        ...logoutAllFence,
+        pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        search: "?controlAfter=012&interactionAfter=34&transport=http1-bounded",
       },
       {
         ...logoutAllFence,
