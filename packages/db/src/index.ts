@@ -16109,6 +16109,206 @@ export async function markScheduledTaskRunFailedIfQueued(
   });
 }
 
+export type FailScheduledGeneratedSessionRouteResult =
+  | {
+      action: "failed";
+      events: SessionEvent[];
+      sessionReclaimed: boolean;
+      error: string;
+    }
+  | {
+      action: "terminal";
+      events: [];
+      sessionReclaimed: false;
+      status: "failed" | "skipped";
+      error: string | null;
+    }
+  | {
+      action: "advanced";
+      events: [];
+      sessionReclaimed: false;
+      status: "dispatched" | "succeeded";
+    };
+
+/**
+ * Fail a queued scheduled run after its selected Connected Machine could not be
+ * established. If the exact scheduler-created session has not acquired any
+ * turn, fail that otherwise-orphaned session in the same transaction. A user
+ * cancellation wins for the session row, but the machine failure still owns
+ * the run settlement in this one durable boundary.
+ *
+ * The external liveness probe and sandbox CAS must happen before this DB-only
+ * seam. This transaction serializes the resulting failure with initialization,
+ * cancellation, and a concurrent dispatcher under the canonical
+ * control -> workspace -> session -> scheduled-run lock order.
+ */
+export async function failScheduledGeneratedSessionRoute(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    taskId: string;
+    runId: string;
+    sessionId: string;
+    error: string;
+  },
+): Promise<FailScheduledGeneratedSessionRouteResult> {
+  return await withSessionActivityRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const locks = await lockSessionEventWriteRows(scopedDb, {
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        sessionIds: [input.sessionId],
+      });
+      const session = locks.sessions[0];
+      if (!locks.workspace || !session || session.accountId !== input.accountId) {
+        throw new SessionControlInvariantError(
+          `Scheduled generated session ${input.sessionId} is unavailable`,
+        );
+      }
+      const [run] = await scopedDb
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.accountId, input.accountId),
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.id, input.runId),
+            eq(schema.scheduledTaskRuns.taskId, input.taskId),
+            eq(schema.scheduledTaskRuns.actionKind, "agent_turn"),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!run || run.sessionId !== input.sessionId) {
+        throw new SessionControlInvariantError(
+          `Scheduled run ${input.runId} is not bound to generated session ${input.sessionId}`,
+        );
+      }
+      if (run.status === "failed" || run.status === "skipped") {
+        return {
+          action: "terminal",
+          events: [],
+          sessionReclaimed: false,
+          status: run.status,
+          error: run.error,
+        };
+      }
+      if (run.status === "dispatched" || run.status === "succeeded") {
+        return {
+          action: "advanced",
+          events: [],
+          sessionReclaimed: false,
+          status: run.status,
+        };
+      }
+      if (run.status !== "queued") {
+        throw new SessionControlInvariantError(
+          `Scheduled run ${input.runId} has unsupported status ${run.status}`,
+        );
+      }
+
+      const [existingTurn] = await scopedDb
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+          ),
+        )
+        .limit(1);
+      const [existingSystemUpdate] = await scopedDb
+        .select({ id: schema.sessionSystemUpdates.id })
+        .from(schema.sessionSystemUpdates)
+        .where(
+          and(
+            eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+            eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          ),
+        )
+        .limit(1);
+      const schedulerCreatedForRun =
+        session.createdByKind === "service" &&
+        session.createdBySubjectId === "scheduler" &&
+        session.createdByContext?.scheduledTaskId === input.taskId &&
+        session.createdByContext?.scheduledTaskRunId === input.runId &&
+        session.metadata?.scheduledTaskId === input.taskId &&
+        session.metadata?.scheduledTaskRunId === input.runId;
+      const reclaimSession =
+        schedulerCreatedForRun &&
+        session.status === "queued" &&
+        session.activeTurnId === null &&
+        existingTurn === undefined &&
+        existingSystemUpdate === undefined;
+
+      let events: SessionEvent[] = [];
+      if (reclaimSession) {
+        const now = new Date();
+        const [inserted] = await scopedDb
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "session.status.changed" as const,
+                payload: { status: "failed", code: input.error },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!inserted) {
+          throw new SessionControlInvariantError(
+            `Scheduled generated session ${input.sessionId} failure event was not inserted`,
+          );
+        }
+        await scopedDb
+          .update(schema.sessions)
+          .set({
+            status: "failed",
+            activeTurnId: null,
+            compactRequested: false,
+            lastSequence: inserted.sequence,
+            queueVersion: session.queueVersion + 1,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.accountId, input.accountId),
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        events = [mapEvent(inserted)];
+      }
+
+      await scopedDb.execute(sql`select transition_scheduled_agent_run(
+        ${input.accountId}::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.runId}::uuid,
+        ${input.sessionId}::uuid,
+        null::uuid,
+        'failed'::text,
+        ${input.error}::text
+      )`);
+      return {
+        action: "failed",
+        events,
+        sessionReclaimed: reclaimSession,
+        error: input.error,
+      };
+    },
+  );
+}
+
 export async function markScheduledTaskRunSkippedIfQueued(
   db: Database,
   input: {

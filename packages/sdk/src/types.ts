@@ -2624,6 +2624,7 @@ export type ScheduledTaskAgentConfig = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflight | undefined;
@@ -3496,6 +3497,7 @@ export type ClientConfig = {
   models: ClientModel[];
   defaultReasoningEffort: ReasoningEffort;
   allowedReasoningEfforts: ReasoningEffort[];
+  defaultSandboxBackend?: SandboxBackend | undefined;
   mcpServers: { id: string; name: string }[];
   /** Deployment defaults and hard maximum for built-in OpenGeni session tools. */
   firstPartyMcpTools?:
@@ -3504,8 +3506,6 @@ export type ClientConfig = {
         allowed: FirstPartyMcpToolName[];
       }
     | undefined;
-  /** Deployment default used to choose the truthful initial compute target. */
-  defaultSandboxBackend?: SandboxBackend | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
@@ -4799,6 +4799,7 @@ export type ScheduledTaskAgentConfigInput = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflightInput | undefined;

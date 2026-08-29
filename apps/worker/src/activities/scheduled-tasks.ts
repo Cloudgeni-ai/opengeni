@@ -19,6 +19,7 @@ import {
   requireOpenGeniSlackBotConnection,
   resolveSessionToolPolicy,
   scheduledSlackBotConnectionId,
+  swapActiveSandbox,
 } from "@opengeni/core";
 import {
   appendSessionEvents,
@@ -28,6 +29,7 @@ import {
   createSession,
   createSessionWithIdempotencyKeyResult,
   enqueueSessionWorkflowWakeIfRunnable,
+  failScheduledGeneratedSessionRoute,
   getScheduledTask,
   getScheduledTaskRunAcceptedExecution,
   getScheduledTaskRunByProducerKey,
@@ -38,6 +40,8 @@ import {
   getScheduledTaskPersonalResourceAuthoritySubject,
   getScheduledTaskRevisionAuthority,
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
+  getEnrollment,
+  getSandbox,
   getRig,
   getScheduledScopedRigVersionMetadata,
   getNestedAgentDepthDeploymentPolicy,
@@ -442,12 +446,41 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskConnectionAuthoritySubjectId;
       const model = task.agentConfig.model ?? settings.openaiModel;
       const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
-      const sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
+      let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
+      let sandboxOs: "linux" | "macos" | "windows" = "linux";
       const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
       const firstPartyMcpTools = resolveFirstPartyMcpToolPolicy(settings).default;
       const generatedTarget =
         task.runMode === "new_session_per_run" ||
         (task.runMode === "reusable_session" && task.reusableSessionId === null);
+      if (generatedTarget && task.agentConfig.machineTarget) {
+        const access = {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          subjectId: taskAuthoritySubjectId ?? task.createdBy.subjectId,
+        };
+        const machine = await getSandbox(
+          db,
+          access,
+          task.agentConfig.machineTarget.targetSandboxId,
+        );
+        if (
+          !machine ||
+          machine.kind !== "selfhosted" ||
+          !machine.enrollmentId ||
+          machine.scope === "user"
+        ) {
+          throw new Error("scheduled Connected Machine target is unavailable");
+        }
+        const enrollment = await getEnrollment(db, access, machine.enrollmentId);
+        if (!enrollment || enrollment.status !== "active") {
+          throw new Error("scheduled Connected Machine enrollment is unavailable");
+        }
+        sandboxBackend = "selfhosted";
+        sandboxOs = enrollment.os;
+      } else if (generatedTarget && sandboxBackend === "selfhosted") {
+        throw new Error("self-hosted scheduled task has no Connected Machine target");
+      }
       const generatedSessionDepthPolicy = generatedTarget
         ? await (async () => {
             const workspace = await requireWorkspace(db, task.workspaceId);
@@ -730,7 +763,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           resolvedReasoningEffort: reasoningEffort,
           resolvedLatencyMode: "standard",
           resolvedSandboxBackend: sandboxBackend,
-          resolvedSandboxOs: "linux",
+          resolvedSandboxOs: sandboxOs,
           resolvedTools: taskTools,
           resolvedFirstPartyMcpTools: firstPartyMcpTools,
           resolvedFirstPartyMcpPermissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
@@ -972,7 +1005,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 reasoningEffort,
                 latencyMode: "standard",
                 sandboxBackend,
-                sandboxOs: "linux",
+                sandboxOs,
                 variableSetId: task.variableSetId ?? null,
                 rigId: frozenRigId,
                 rigVersionId: frozenRigVersionId,
@@ -1079,6 +1112,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 );
               }
             }
+            session = await seedScheduledGeneratedSessionRoute({
+              db: dispatchDb,
+              bus,
+              settings,
+              task,
+              runId: run.id,
+              session,
+              deferPublications,
+              deferredEvents,
+            });
             let workflowId: string;
             if (alertOccurrence) {
               const started = await initializeSessionStartAtomically(dispatchDb, {
@@ -1539,7 +1582,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           acceptedExecution: dispatchOutcome.acceptedExecution,
         });
       }
-      if (dispatchOutcome.kind === "blocked") return dispatchOutcome.result;
       for (const deferred of deferredEvents) {
         await publishDurableSessionEvents(
           bus,
@@ -1548,6 +1590,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           deferred.events,
         );
       }
+      if (dispatchOutcome.kind === "blocked") return dispatchOutcome.result;
       const result = dispatchOutcome.result;
       if (wakeSessionWorkflow && result.workflowWakeRevision !== null) {
         await wakeSessionWorkflow({
@@ -1773,6 +1816,74 @@ async function recordScheduledTaskFiredUsage(
   });
 }
 
+async function seedScheduledGeneratedSessionRoute(input: {
+  db: Database;
+  bus: ControlActivityServices["bus"];
+  settings: ControlActivityServices["settings"];
+  task: ScheduledTask;
+  runId: string;
+  session: Awaited<ReturnType<typeof createSession>>;
+  deferPublications: boolean;
+  deferredEvents: Array<{
+    sessionId: string;
+    events: Awaited<ReturnType<typeof appendSessionEvents>>;
+  }>;
+}): Promise<Awaited<ReturnType<typeof createSession>>> {
+  const target = input.task.agentConfig.machineTarget;
+  if (!target) return input.session;
+  const seeded = await swapActiveSandbox(
+    {
+      db: input.db,
+      settings: input.settings,
+      bus: input.bus,
+    },
+    {
+      accountId: input.task.accountId,
+      workspaceId: input.task.workspaceId,
+      sessionId: input.session.id,
+      sessionBackend: input.session.sandboxBackend,
+      sessionGroupId: input.session.sandboxGroupId,
+    },
+    target.targetSandboxId,
+    target.workingDir ?? null,
+  );
+  if (seeded.swapped) {
+    return await requireSession(input.db, input.task.workspaceId, input.session.id);
+  }
+
+  const failed = await failScheduledGeneratedSessionRoute(input.db, {
+    accountId: input.task.accountId,
+    workspaceId: input.task.workspaceId,
+    taskId: input.task.id,
+    runId: input.runId,
+    sessionId: input.session.id,
+    error: "scheduled_machine_unavailable",
+  });
+  if (failed.action === "advanced") {
+    throw new Error(
+      `scheduled run advanced to ${failed.status} while its Connected Machine route was being established`,
+    );
+  }
+  if (failed.events.length > 0) {
+    if (input.deferPublications) {
+      input.deferredEvents.push({ sessionId: input.session.id, events: failed.events });
+    } else {
+      await publishDurableSessionEvents(
+        input.bus,
+        input.task.workspaceId,
+        input.session.id,
+        failed.events,
+      );
+    }
+  }
+  const error =
+    failed.action === "terminal" ? (failed.error ?? "scheduled_run_terminal") : failed.error;
+  throw new ScheduledRunTerminalAuthorityError(
+    error,
+    seeded.reason ?? "scheduled Connected Machine target is unavailable",
+  );
+}
+
 async function recoverBoundScheduledTaskDispatch(input: {
   db: Database;
   bus: ControlActivityServices["bus"];
@@ -1952,6 +2063,18 @@ async function recoverBoundScheduledTaskDispatch(input: {
       sessionId: session.id,
     });
   }
+  if (generatedSession) {
+    session = await seedScheduledGeneratedSessionRoute({
+      db: input.db,
+      bus: input.bus,
+      settings: input.settings,
+      task,
+      runId: input.run.id,
+      session,
+      deferPublications: false,
+      deferredEvents: [],
+    });
+  }
   if (session.status === "cancelled") {
     await markScheduledTaskRunSkippedIfQueued(input.db, {
       workspaceId: task.workspaceId,
@@ -2024,6 +2147,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
       session.latencyMode !== input.acceptedExecution.resolvedLatencyMode ||
       session.sandboxBackend !== input.acceptedExecution.resolvedSandboxBackend ||
       session.sandboxOs !== input.acceptedExecution.resolvedSandboxOs ||
+      session.activeSandboxId !== (task.agentConfig.machineTarget?.targetSandboxId ?? null) ||
       stableJson(session.resources) !== stableJson(task.agentConfig.resources) ||
       stableJson(session.tools) !== stableJson(input.acceptedExecution.resolvedTools) ||
       stableJson(session.firstPartyMcpTools) !==

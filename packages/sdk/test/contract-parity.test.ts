@@ -118,6 +118,7 @@ import {
   ViewerHolder as ContractViewerHolder,
   ReasoningEffort as ContractReasoningEffort,
   ScheduledTask as ContractScheduledTask,
+  ScheduledTaskAgentConfigInput as ContractScheduledTaskAgentConfigInput,
   ScheduledTaskOverlapPolicy as ContractScheduledTaskOverlapPolicy,
   ScheduledTaskRunMode as ContractScheduledTaskRunMode,
   ScheduledTaskStatus as ContractScheduledTaskStatus,
@@ -226,6 +227,7 @@ import type {
   ScheduledTask,
   ScheduledTaskOverlapPolicy,
   ScheduledTaskRunMode,
+  ScheduledTaskAgentConfigInput,
   ScheduledTaskStatus,
   Rig,
   RigVersion,
@@ -644,7 +646,27 @@ describe("SDK / contracts parity", () => {
     // Server -> client: anything the contract produces, the SDK type accepts.
     const acceptScheduledTask = (value: z.infer<typeof ContractScheduledTask>): ScheduledTask =>
       value;
-    expect(typeof acceptScheduledTask).toBe("function");
+    const acceptScheduledTaskMachineTarget = (
+      value: NonNullable<ScheduledTaskAgentConfigInput["machineTarget"]>,
+    ): NonNullable<z.input<typeof ContractScheduledTaskAgentConfigInput>["machineTarget"]> => value;
+    const machineConfig: ScheduledTaskAgentConfigInput = {
+      prompt: "Run on the selected machine",
+      resources: [],
+      tools: [],
+      metadata: {},
+      machineTarget: {
+        targetSandboxId: "00000000-0000-4000-8000-000000000001",
+        workingDir: "repos/app",
+      },
+    };
+    expect(ContractScheduledTaskAgentConfigInput.parse(machineConfig).machineTarget).toEqual(
+      machineConfig.machineTarget,
+    );
+    expect(
+      [acceptScheduledTask, acceptScheduledTaskMachineTarget].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
   });
 
   test("rig literals and shapes match the contracts (compile-time + runtime, M2)", () => {

@@ -2,6 +2,7 @@ import { localDateTimeValue, formatTimestamp } from "@/lib/format";
 import type {
   ReasoningEffort,
   ResourceRef,
+  SandboxBackend,
   ScheduledTask,
   ScheduledTaskAgentConfig,
   ScheduledTaskRun,
@@ -74,6 +75,10 @@ export type ScheduledTaskFormState = {
   timeZone: string;
   runMode: ScheduledTask["runMode"];
   targetSessionId: string;
+  executionTarget: "managed" | "machine";
+  sandboxBackend: SandboxBackend | "";
+  machineSandboxId: string;
+  workingDir: string;
   overlapPolicy: ScheduledTask["overlapPolicy"];
   includeOpenGeniTool: boolean;
   slackBotConnectionId: string;
@@ -122,8 +127,11 @@ export function newScheduledTaskFormState(
   defaults: {
     model?: string;
     reasoningEffort?: ReasoningEffort;
+    defaultSandboxBackend?: SandboxBackend;
+    defaultMachineSandboxId?: string;
   } = {},
 ): ScheduledTaskFormState {
+  const machineDefault = defaults.defaultSandboxBackend === "selfhosted";
   return {
     name: "",
     description: "",
@@ -138,6 +146,10 @@ export function newScheduledTaskFormState(
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     runMode: "new_session_per_run",
     targetSessionId: "",
+    executionTarget: machineDefault ? "machine" : "managed",
+    sandboxBackend: "",
+    machineSandboxId: machineDefault ? (defaults.defaultMachineSandboxId ?? "") : "",
+    workingDir: "",
     overlapPolicy: "allow_concurrent",
     includeOpenGeniTool,
     slackBotConnectionId: "",
@@ -156,6 +168,8 @@ export function recurringSessionTaskFormState(
   defaults: {
     model?: string;
     reasoningEffort?: ReasoningEffort;
+    defaultSandboxBackend?: SandboxBackend;
+    defaultMachineSandboxId?: string;
   } = {},
 ): ScheduledTaskFormState {
   return {
@@ -175,6 +189,8 @@ export function formStateFromScheduledTask(
   defaults: {
     model?: string;
     reasoningEffort?: ReasoningEffort;
+    defaultSandboxBackend?: SandboxBackend;
+    defaultMachineSandboxId?: string;
   } = {},
 ): ScheduledTaskFormState {
   const schedule = task.schedule;
@@ -208,6 +224,16 @@ export function formStateFromScheduledTask(
     reasoningEffort: task.agentConfig.reasoningEffort ?? defaults.reasoningEffort ?? "high",
     runMode: task.runMode,
     targetSessionId: task.targetSessionId ?? "",
+    executionTarget:
+      task.agentConfig.machineTarget || task.agentConfig.sandboxBackend === "selfhosted"
+        ? "machine"
+        : "managed",
+    sandboxBackend:
+      task.agentConfig.sandboxBackend && task.agentConfig.sandboxBackend !== "selfhosted"
+        ? task.agentConfig.sandboxBackend
+        : "",
+    machineSandboxId: task.agentConfig.machineTarget?.targetSandboxId ?? "",
+    workingDir: task.agentConfig.machineTarget?.workingDir ?? "",
     overlapPolicy: task.overlapPolicy,
     slackBotConnectionId: task.agentConfig.slackBotConnectionId ?? "",
   };
@@ -324,9 +350,18 @@ export function agentConfigFromFormState(
     ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
     ...(form.model ? { model: form.model } : {}),
     reasoningEffort: form.reasoningEffort,
-    ...(existingTask?.agentConfig.sandboxBackend
-      ? { sandboxBackend: existingTask.agentConfig.sandboxBackend }
-      : {}),
+    ...(form.runMode !== "existing_session" &&
+    form.executionTarget === "machine" &&
+    form.machineSandboxId
+      ? {
+          machineTarget: {
+            targetSandboxId: form.machineSandboxId,
+            ...(form.workingDir.trim() ? { workingDir: form.workingDir.trim() } : {}),
+          },
+        }
+      : form.runMode !== "existing_session" && form.sandboxBackend
+        ? { sandboxBackend: form.sandboxBackend }
+        : {}),
   };
 }
 

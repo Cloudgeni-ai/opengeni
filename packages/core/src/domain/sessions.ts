@@ -126,6 +126,7 @@ import {
   SessionAuthorizationDeniedError,
 } from "../session-authorization";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
+import { managedSessionGroupBackend } from "../sandbox/runtime-settings";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
@@ -2038,6 +2039,8 @@ export async function createSessionForRequestWithOutcome(
     payload.sandbox ?? (payload.targetSandboxId ? "new" : parentSessionId ? "shared" : "new");
   let sandboxGroupId: string | null = null;
   let inheritedBackend: Session["sandboxBackend"] | undefined;
+  let inheritedSandboxOs: Session["sandboxOs"] | undefined;
+  let inheritedActiveTarget: { sandboxId: string; workingDir: string | null } | null = null;
   // ENV-AWARE GROUPING: under the CURRENT mechanics the workspace VariableSet is
   // creation-time box state — the box's manifest env is fixed when it is cold-
   // created, and the SDK's provided-session guard rejects any manifest-env delta
@@ -2112,6 +2115,17 @@ export async function createSessionForRequestWithOutcome(
     } else {
       sandboxGroupId = parent.sandboxGroupId;
       inheritedBackend = parent.sandboxBackend;
+      inheritedSandboxOs = parent.sandboxOs;
+      // A Connected Machine route is session-local even when two sessions share
+      // one logical sandbox group. Copy the trusted parent's exact active route
+      // so an omitted child sandbox really does share the creator's current box
+      // instead of creating a selfhosted row with no bound agent.
+      inheritedActiveTarget = parent.activeSandboxId
+        ? {
+            sandboxId: parent.activeSandboxId,
+            workingDir: parent.workingDir,
+          }
+        : null;
     }
   } else if (typeof sandboxChoice === "object") {
     const member = await getAnySessionInGroup(db, workspaceId, sandboxChoice.groupId);
@@ -2160,6 +2174,7 @@ export async function createSessionForRequestWithOutcome(
     }
     sandboxGroupId = sandboxChoice.groupId;
     inheritedBackend = member.sandboxBackend;
+    inheritedSandboxOs = member.sandboxOs;
   }
   // else "new": leave sandboxGroupId null → own singleton group (group ≡ id).
   // A working dir is only meaningful for a TARGETED machine (it is the chosen
@@ -2243,6 +2258,25 @@ export async function createSessionForRequestWithOutcome(
       }
     }
   }
+  const effectiveSandboxBackend =
+    inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend;
+  const effectiveSandboxOs = inheritedSandboxOs ?? machineHomeOs;
+  const effectiveSeedTarget = payload.targetSandboxId
+    ? {
+        sandboxId: payload.targetSandboxId,
+        workingDir: payload.workingDir ?? null,
+      }
+    : inheritedActiveTarget;
+  if (
+    effectiveSandboxBackend === "selfhosted" &&
+    effectiveSeedTarget === null &&
+    managedSessionGroupBackend(settings.sandboxBackend, effectiveSandboxBackend) === null
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "self-hosted execution runs on a Connected Machine, but no machine was selected or inherited; connect the parent session to a machine or provide machineTarget",
+    });
+  }
   if (payload.startMode !== "realtime") {
     await requireLimit(deps, {
       accountId: grant.accountId,
@@ -2279,11 +2313,10 @@ export async function createSessionForRequestWithOutcome(
       // machine-targeted create (top-level or own-box child) labels the home
       // "selfhosted" (machineHomeBackend), overriding the caller/deployment
       // default so the row matches where the session actually runs.
-      sandboxBackend:
-        inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
+      sandboxBackend: effectiveSandboxBackend,
       // Mirror the backend relabel on the OS axis: a machine-targeted own-box
-      // create carries a derived OS; shared spawns keep the parent-box behavior.
-      ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
+      // create carries a derived OS; shared spawns inherit the exact parent box.
+      ...(effectiveSandboxOs ? { sandboxOs: effectiveSandboxOs } : {}),
       sandboxGroupId,
       metadata: payload.metadata,
       ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
@@ -2320,11 +2353,11 @@ export async function createSessionForRequestWithOutcome(
       // active-sandbox pointer is seeded race-free inside createAndStartSession
       // (after the row exists, before the first turn dispatches). Validation
       // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
-      seedTargetSandbox: payload.targetSandboxId
+      seedTargetSandbox: effectiveSeedTarget
         ? {
-            sandboxId: payload.targetSandboxId,
+            sandboxId: effectiveSeedTarget.sandboxId,
             settings,
-            workingDir: payload.workingDir ?? null,
+            workingDir: effectiveSeedTarget.workingDir,
             resourceSubjectId: personalResourceSubjectId,
           }
         : null,
