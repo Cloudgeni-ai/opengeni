@@ -58773,6 +58773,7 @@ export async function claimSessionWorkForAttempt(
                   id: input.dispatchId,
                   generation: dispatchGeneration,
                   triggerEventId: activeTurn.triggerEventId,
+                  pendingUpdateBoundarySequence: session.lastSequence,
                 }),
                 version: sql`${schema.sessionTurns.version} + 1`,
                 startedAt: now,
