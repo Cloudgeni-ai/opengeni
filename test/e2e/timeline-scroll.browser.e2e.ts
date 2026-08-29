@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing";
 import { chromium, type Browser, type Page } from "playwright";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -41,29 +41,15 @@ function observeBrowserErrors(page: Page, browserErrors: string[]): void {
 }
 
 describe("timeline scroll ownership browser regression", () => {
-  let web: StartedProcess;
   let productionServer: ReturnType<typeof Bun.serve> | undefined;
   let browser: Browser;
   let page: Page;
   let baseUrl: string;
-  let productionBaseUrl: string;
   let productionBuildDir: string | undefined;
   let networkRequests = 0;
   const browserErrors: string[] = [];
 
   beforeAll(async () => {
-    const port = await freePort();
-    baseUrl = `http://127.0.0.1:${port}`;
-    web = await startProcess(
-      ["bun", "run", "vite", ".", "--port", String(port), "--strictPort", "--host", "127.0.0.1"],
-      {
-        cwd: demoRoot,
-        ready: async () =>
-          (await fetch(baseUrl, { signal: AbortSignal.timeout(2_000) }).catch(() => null))?.ok ===
-          true,
-        timeoutMs: 45_000,
-      },
-    );
     productionBuildDir = await mkdtemp(join(tmpdir(), "opengeni-timeline-scroll-"));
     const productionEnvironment = {
       OPENGENI_REACT_DEMO_OUT_DIR: productionBuildDir,
@@ -85,7 +71,7 @@ describe("timeline scroll ownership browser regression", () => {
       );
     }
     const productionPort = await freePort();
-    productionBaseUrl = `http://127.0.0.1:${productionPort}`;
+    baseUrl = `http://127.0.0.1:${productionPort}`;
     productionServer = Bun.serve({
       hostname: "127.0.0.1",
       port: productionPort,
@@ -124,7 +110,7 @@ describe("timeline scroll ownership browser regression", () => {
     try {
       expect(browserErrors).toEqual([]);
     } finally {
-      await Promise.allSettled([browser?.close(), web?.stop(), productionServer?.stop(true)]);
+      await Promise.allSettled([browser?.close(), productionServer?.stop(true)]);
       if (productionBuildDir) {
         await rm(productionBuildDir, { recursive: true, force: true });
       }
@@ -258,7 +244,7 @@ describe("timeline scroll ownership browser regression", () => {
     const performancePage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     observeBrowserErrors(performancePage, browserErrors);
     try {
-      await performancePage.goto(`${productionBaseUrl}/timeline-scroll-test.html`);
+      await performancePage.goto(`${baseUrl}/timeline-scroll-test.html`);
       await performancePage.waitForFunction(() => window.timelineScrollHarness !== undefined);
       await performancePage.locator('[data-timeline-row="row-1000"]').waitFor({ timeout: 15_000 });
       await performancePage.locator('[data-timeline-row="row-1040"]').evaluate((node) => {
