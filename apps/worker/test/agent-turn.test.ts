@@ -168,6 +168,21 @@ describe("approval RunState materialization boundary", () => {
     expect(source).toContain("settleOpenSuffixResumeIfNeeded");
   });
 
+  test("resume attaches blocked machine input after the open suffix and before model input", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
+    const suffixAt = source.indexOf(
+      "const openSuffixResume = await settleOpenSuffixResumeIfNeeded",
+    );
+    const attachAt = source.indexOf("await attachPendingUpdatesAfterOpenSuffix()", suffixAt);
+    const prepareAt = source.indexOf("await prepareRunAttemptInput()", attachAt);
+
+    expect(suffixAt).toBeGreaterThan(-1);
+    expect(attachAt).toBeGreaterThan(suffixAt);
+    expect(prepareAt).toBeGreaterThan(attachAt);
+  });
+
   test("approval and human-input resume require open-suffix rows", async () => {
     const source = await Bun.file(
       new URL("../src/activities/run-input.ts", import.meta.url),

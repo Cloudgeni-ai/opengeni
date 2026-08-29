@@ -471,6 +471,27 @@ describe("durable structured human input", () => {
       "message",
     ]);
     expect(JSON.stringify(history.at(-1)?.item)).toContain("FOLLOWUP-ACK");
+
+    const replayed = await claimSessionWorkForAttempt(client.db, frozen.grant.workspaceId!, {
+      ...resumedInput,
+      attachPendingUpdatesToRunningAttempt: true,
+    });
+    expect(replayed).toMatchObject({
+      action: "claimed",
+      turn: { id: resumed.turn.id, executionGeneration: resumed.turn.executionGeneration },
+    });
+    expect(
+      await getActiveSessionHistoryItems(client.db, frozen.grant.workspaceId!, frozen.session.id),
+    ).toEqual(history);
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(
+          client.db,
+          frozen.grant.workspaceId!,
+          frozen.session.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([laterFollowUp.update.id]);
   });
 
   test("accepts an empty optional answer and a permitted Skip without weakening required validation", async () => {
