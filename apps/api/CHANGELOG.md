@@ -1,5 +1,31 @@
 # @opengeni/api-router
 
+## 2.6.1
+
+### Patch Changes
+
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. Remove the legacy model-bound desktop capability and automatic on-turn recording path while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+- Updated dependencies [c3b43a5]
+- Updated dependencies [fab355b]
+- Updated dependencies [973b1dd]
+- Updated dependencies [e41285f]
+- Updated dependencies [1f289a0]
+- Updated dependencies [96624a7]
+- Updated dependencies [fab355b]
+- Updated dependencies [fab355b]
+  - @opengeni/db@3.7.1
+  - @opengeni/runtime@1.5.1
+  - @opengeni/events@0.4.9
+  - @opengeni/config@0.22.4
+  - @opengeni/contracts@2.9.1
+  - @opengeni/core@2.6.1
+  - @opengeni/documents@0.8.11
+  - @opengeni/github@0.6.6
+  - @opengeni/storage@0.2.114
+  - @opengeni/artifact-tool@0.3.13
+  - @opengeni/codemode@0.4.21
+  - @opengeni/observability@0.8.13
+
 ## 2.6.0
 
 ### Minor Changes

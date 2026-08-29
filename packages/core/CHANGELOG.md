@@ -1,5 +1,26 @@
 # @opengeni/core
 
+## 2.6.1
+
+### Patch Changes
+
+- Updated dependencies [c3b43a5]
+- Updated dependencies [fab355b]
+- Updated dependencies [973b1dd]
+- Updated dependencies [e41285f]
+- Updated dependencies [1f289a0]
+- Updated dependencies [96624a7]
+- Updated dependencies [fab355b]
+- Updated dependencies [fab355b]
+  - @opengeni/db@3.7.1
+  - @opengeni/runtime@1.5.1
+  - @opengeni/events@0.4.9
+  - @opengeni/config@0.22.4
+  - @opengeni/contracts@2.9.1
+  - @opengeni/documents@0.8.11
+  - @opengeni/storage@0.2.114
+  - @opengeni/observability@0.8.13
+
 ## 2.6.0
 
 ### Minor Changes

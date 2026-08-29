@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.22.4
+
+### Patch Changes
+
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. Remove the legacy model-bound desktop capability and automatic on-turn recording path while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+- Updated dependencies [96624a7]
+  - @opengeni/contracts@2.9.1
+
 ## 0.22.3
 
 ### Patch Changes
