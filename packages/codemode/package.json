@@ -35,7 +35,7 @@
   },
   "dependencies": {
     "@opengeni/contracts": "workspace:*",
-    "ajv": "^8.20.0"
+    "@opengeni/tool-runtime": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.5.0",

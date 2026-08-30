@@ -27,6 +27,7 @@ import {
 
 export * from "./bounded-object-read";
 export * from "./bounded-object-write";
+export * from "./immutable-raw-object-read";
 export * from "./object-storage-bounded";
 export * from "./retry-while-missing";
 

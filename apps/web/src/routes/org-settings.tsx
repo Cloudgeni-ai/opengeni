@@ -19,7 +19,6 @@ import {
   OrganizationPrivateSessionsSection,
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
-import { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { Button } from "@/components/ui/button";
@@ -58,6 +57,10 @@ import { useCompanyProfileInventory } from "./workspace-state-loader";
 const LazyOrganizationApiKeysSection = lazy(async () => {
   const module = await import("@/components/organization-api-keys-section");
   return { default: module.OrganizationApiKeysSection };
+});
+const LazyOrganizationCodexSubscriptions = lazy(async () => {
+  const module = await import("@/components/organization-codex-subscriptions");
+  return { default: module.OrganizationCodexSubscriptions };
 });
 
 const COMPANY_PROFILE_AGENT_MODE_COPY: Record<
@@ -604,10 +607,12 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "models" && canManageOrganizationCodex ? (
-          <OrganizationCodexSubscriptions
-            key={`${identityKey}:organization-codex`}
-            organizationId={accountId}
-          />
+          <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+            <LazyOrganizationCodexSubscriptions
+              key={`${identityKey}:organization-codex`}
+              organizationId={accountId}
+            />
+          </Suspense>
         ) : null}
 
         {section === "models" && !canManageOrganizationCodex ? (

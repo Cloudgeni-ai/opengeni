@@ -107,7 +107,7 @@ describe("runtime failures dashboard", () => {
     );
     expect(variables.get("environment")?.definition).toContain("opengeni_build_info");
     expect(variables.get("environment")?.definition).toContain(
-      'opengeni_workload_component=~"api|worker-control|worker-turns"',
+      'opengeni_workload_component=~"api|app-host|worker-control|worker-turns"',
     );
     expect(variables.get("release")?.definition).not.toContain("environment=");
 

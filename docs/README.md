@@ -27,6 +27,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Per-session MCP servers | `docs/session-mcp-servers.md` | `docs/architecture.md`, SDK/client examples should link instead of restating credential semantics. |
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |
+| Apps immutable origin hosting | `docs/apps.md` | `apps/app-host/README.md`, `docs/architecture.md`, and `docs/deployment.md` should link rather than restating the resolver, URL, or storage contract. |
 | Organization tenancy authority, activation, and rollback boundary | `docs/organization-tenancy.md` | `docs/deployment.md` owns the operator cutover procedure; `docs/architecture.md`, `AGENTS.md`, and chart/config comments should link instead of restating the boundary, the preconditions, or the pre-activation opt-out switch. |
 | Organization recovery custody, immutable workspace ownership, and rollout | `docs/organization-recovery.md` | `docs/organization-tenancy.md` owns the broader tenancy model; deployment, API, SDK, and UI notes should link instead of weakening the quorum, actor-fence, notification, or unsupported-operation boundaries. |
 | FORCE-RLS migration backfills | `docs/force-rls-migration-backfills.md` | `AGENTS.md`, `docs/deployment.md`, and migration comments should link instead of restating the owner-only `NO FORCE` window, the guard, or the classification inventory. |

@@ -100,3 +100,37 @@ spec:
         - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_instance]
           targetLabel: release
 {{- end }}
+{{- if and .Values.appHost.enabled ((.Values.observability).metrics).enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "opengeni.fullname" . }}-app-host
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app-host
+    {{- with ((.Values.observability).serviceMonitor).labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with ((.Values.observability).serviceMonitor).annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: app-host
+  endpoints:
+    - port: metrics
+      path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
+      interval: {{ ((.Values.observability).serviceMonitor).interval | default "30s" | quote }}
+      scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+        - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_instance]
+          targetLabel: release
+        - sourceLabels: [__meta_kubernetes_service_label_app_kubernetes_io_component]
+          targetLabel: opengeni_workload_component
+{{- end }}

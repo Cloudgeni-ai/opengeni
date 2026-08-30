@@ -8,11 +8,14 @@ ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
+COPY apps/app-host/package.json apps/app-host/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
+COPY packages/app-authoring/package.json packages/app-authoring/package.json
+COPY packages/app-sdk/package.json packages/app-sdk/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
 COPY packages/artifact-kernel-wasm-spreadsheet/package.json packages/artifact-kernel-wasm-spreadsheet/package.json
@@ -38,6 +41,7 @@ COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
 COPY packages/testing/package.json packages/testing/package.json
+COPY packages/tool-runtime/package.json packages/tool-runtime/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 
@@ -142,7 +146,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 USER bun
 ENV TESSDATA_PREFIX=/opt/opengeni/tessdata
-RUN bun scripts/build-runtime-processes.ts api
+RUN bun scripts/build-runtime-processes.ts api app-host
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by
 # the CI step scripts/bake-agent.sh BEFORE this build, and arrive in the image via
@@ -153,7 +157,7 @@ RUN bun scripts/build-runtime-processes.ts api
 # agent/install/baked/ holds only its placeholder and /agent/* 302-redirects to the
 # GitHub Release (the public archive + install.sh fallback). No Dockerfile change is
 # needed to switch between the two: it is purely whether the baked files are present.
-EXPOSE 8000
+EXPOSE 8000 8080
 CMD ["bun", "apps/api/dist/process/index.js"]
 
 # Dedicated durable live-hint outbox dispatcher. It has no native artifact

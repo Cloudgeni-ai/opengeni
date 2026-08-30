@@ -48,6 +48,11 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "POST" && path === "/v1/webhooks/pr-review/github") {
     return true;
   }
+  // The App Host has no deployment access key. This exact in-cluster route
+  // authenticates with its independent resolver secret before doing any work.
+  if (c.req.method === "POST" && path === "/internal/apps/resolve-launch") {
+    return true;
+  }
   if (
     path === "/v1/github/setup" ||
     path === "/v1/github/install/callback" ||

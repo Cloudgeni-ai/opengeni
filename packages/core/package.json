@@ -63,6 +63,7 @@
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
     "@opengeni/storage": "workspace:*",
+    "@opengeni/tool-runtime": "workspace:*",
     "hono": "^4.12.18",
     "zod": "^4.2.1"
   },

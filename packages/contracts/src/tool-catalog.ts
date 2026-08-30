@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Permission } from "./permissions";
 
 export const ATTEMPT_TOOL_CATALOG_VERSION = 1 as const;
 export const ATTEMPT_TOOL_CATALOG_MAX_ENTRIES = 4_096;
@@ -35,15 +36,19 @@ const namespaceSegment = z
 const jsonObject = z.record(z.string().max(512), z.json());
 
 /** Opaque authority identity. Display/wire names must never be parsed as authority. */
-export const AttemptToolIdentity = z
+export const CanonicalToolIdentity = z
   .object({
     serverId: serverIdentifier,
     toolName: toolIdentifier,
   })
   .strict();
+export type CanonicalToolIdentity = z.infer<typeof CanonicalToolIdentity>;
+
+/** Attempt compatibility name for the caller-neutral canonical identity. */
+export const AttemptToolIdentity = CanonicalToolIdentity;
 export type AttemptToolIdentity = z.infer<typeof AttemptToolIdentity>;
 
-export const AttemptToolCatalogIcon = z
+export const CanonicalToolCatalogIcon = z
   .object({
     src: z.string().min(1).max(8_192),
     mimeType: z.string().min(1).max(128).optional(),
@@ -51,10 +56,14 @@ export const AttemptToolCatalogIcon = z
     theme: z.enum(["light", "dark"]).optional(),
   })
   .strict();
+export type CanonicalToolCatalogIcon = z.infer<typeof CanonicalToolCatalogIcon>;
+
+/** Attempt compatibility name for canonical tool icon metadata. */
+export const AttemptToolCatalogIcon = CanonicalToolCatalogIcon;
 export type AttemptToolCatalogIcon = z.infer<typeof AttemptToolCatalogIcon>;
 
 /** MCP annotations retained without inventing stronger effect guarantees. */
-export const AttemptToolAnnotations = z
+export const CanonicalToolAnnotations = z
   .object({
     title: z.string().max(512).optional(),
     readOnlyHint: z.boolean().optional(),
@@ -63,11 +72,108 @@ export const AttemptToolAnnotations = z
     openWorldHint: z.boolean().optional(),
   })
   .loose();
+export type CanonicalToolAnnotations = z.infer<typeof CanonicalToolAnnotations>;
+
+/** Attempt compatibility name for canonical descriptive annotations. */
+export const AttemptToolAnnotations = CanonicalToolAnnotations;
 export type AttemptToolAnnotations = z.infer<typeof AttemptToolAnnotations>;
 
 /** JSON Schema is preserved as received. Runtime byte/node guards remain authoritative. */
-export const AttemptToolJsonSchema = jsonObject;
+export const CanonicalToolJsonSchema = jsonObject;
+export type CanonicalToolJsonSchema = z.infer<typeof CanonicalToolJsonSchema>;
+
+/** Attempt compatibility name for canonical JSON Schema. */
+export const AttemptToolJsonSchema = CanonicalToolJsonSchema;
 export type AttemptToolJsonSchema = z.infer<typeof AttemptToolJsonSchema>;
+
+export const CanonicalToolEffect = z.enum(["read", "write", "destructive", "unknown"]);
+export type CanonicalToolEffect = z.infer<typeof CanonicalToolEffect>;
+
+export const CanonicalReplaySafety = z.enum(["safe", "unsafe", "unknown"]);
+export type CanonicalReplaySafety = z.infer<typeof CanonicalReplaySafety>;
+
+export const CanonicalToolSurface = z.enum(["model", "codemode", "app"]);
+export type CanonicalToolSurface = z.infer<typeof CanonicalToolSurface>;
+
+export const CanonicalToolSource = z.enum([
+  "opengeni",
+  "files",
+  "docs",
+  "mcp",
+  "codex_apps",
+  "interaction",
+]);
+export type CanonicalToolSource = z.infer<typeof CanonicalToolSource>;
+
+export const CanonicalToolApproval = z.enum(["none", "human", "policy"]);
+export type CanonicalToolApproval = z.infer<typeof CanonicalToolApproval>;
+
+export const CanonicalProgrammaticPath = z
+  .array(
+    z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z_$][A-Za-z0-9_$]*$/u)
+      .refine((value) => !["__proto__", "prototype", "constructor"].includes(value), {
+        message: "unsafe programmatic namespace segment",
+      }),
+  )
+  .min(2)
+  .max(ATTEMPT_TOOL_CATALOG_MAX_PATH_SEGMENTS);
+export type CanonicalProgrammaticPath = z.infer<typeof CanonicalProgrammaticPath>;
+
+/** Caller-neutral descriptor shared by model, Code Mode, and App projections. */
+export const CanonicalToolDescriptor = z
+  .object({
+    identity: CanonicalToolIdentity,
+    modelName: toolIdentifier,
+    programmaticPath: CanonicalProgrammaticPath,
+    title: z.string().min(1).max(512).optional(),
+    description: z.string().max(32_768).optional(),
+    inputSchema: CanonicalToolJsonSchema,
+    outputSchema: CanonicalToolJsonSchema.optional(),
+    annotations: CanonicalToolAnnotations.optional(),
+    icons: z.array(CanonicalToolCatalogIcon).max(16).optional(),
+    source: CanonicalToolSource,
+    effect: CanonicalToolEffect,
+    replaySafety: CanonicalReplaySafety,
+    /** Authoritative classification; missing metadata fails closed as open-world. */
+    openWorld: z.boolean().default(true),
+    approval: CanonicalToolApproval,
+    supportedSurfaces: z.array(CanonicalToolSurface).min(1).max(3),
+    requiredPermissions: z.array(Permission).max(256),
+  })
+  .strict()
+  .superRefine((descriptor, context) => {
+    const surfaces = new Set<string>();
+    for (const [index, surface] of descriptor.supportedSurfaces.entries()) {
+      if (surfaces.has(surface)) {
+        context.addIssue({
+          code: "custom",
+          path: ["supportedSurfaces", index],
+          message: "duplicate supported surface",
+        });
+      }
+      surfaces.add(surface);
+    }
+    const permissions = new Set<string>();
+    for (const [index, permission] of descriptor.requiredPermissions.entries()) {
+      if (permissions.has(permission)) {
+        context.addIssue({
+          code: "custom",
+          path: ["requiredPermissions", index],
+          message: "duplicate required permission",
+        });
+      }
+      permissions.add(permission);
+    }
+  });
+export type CanonicalToolDescriptor = z.infer<typeof CanonicalToolDescriptor>;
+
+/** Public catalog entry name used by caller-neutral programmatic surfaces. */
+export const CanonicalProgrammaticToolEntry = CanonicalToolDescriptor;
+export type CanonicalProgrammaticToolEntry = z.infer<typeof CanonicalProgrammaticToolEntry>;
 
 export const AttemptToolCatalogEntry = z
   .object({
@@ -82,8 +188,8 @@ export const AttemptToolCatalogEntry = z
     outputSchema: AttemptToolJsonSchema.optional(),
     annotations: AttemptToolAnnotations.optional(),
     icons: z.array(AttemptToolCatalogIcon).max(16).optional(),
-    source: z.enum(["opengeni", "files", "docs", "mcp", "codex_apps", "interaction"]),
-    approval: z.enum(["none", "human", "policy"]),
+    source: CanonicalToolSource,
+    approval: CanonicalToolApproval,
   })
   .strict();
 export type AttemptToolCatalogEntry = z.infer<typeof AttemptToolCatalogEntry>;
@@ -250,6 +356,24 @@ export const AttemptToolResult = z
   })
   .loose();
 export type AttemptToolResult = z.infer<typeof AttemptToolResult>;
+
+/** Caller-neutral names for the exact MCP-shaped tool result contract. */
+export const CanonicalToolTextContent = AttemptToolTextContent;
+export type CanonicalToolTextContent = z.infer<typeof CanonicalToolTextContent>;
+export const CanonicalToolImageContent = AttemptToolImageContent;
+export type CanonicalToolImageContent = z.infer<typeof CanonicalToolImageContent>;
+export const CanonicalToolAudioContent = AttemptToolAudioContent;
+export type CanonicalToolAudioContent = z.infer<typeof CanonicalToolAudioContent>;
+export const CanonicalToolResourceLinkContent = AttemptToolResourceLinkContent;
+export type CanonicalToolResourceLinkContent = z.infer<typeof CanonicalToolResourceLinkContent>;
+export const CanonicalToolEmbeddedResourceContent = AttemptToolEmbeddedResourceContent;
+export type CanonicalToolEmbeddedResourceContent = z.infer<
+  typeof CanonicalToolEmbeddedResourceContent
+>;
+export const CanonicalToolContent = AttemptToolContent;
+export type CanonicalToolContent = z.infer<typeof CanonicalToolContent>;
+export const CanonicalToolResult = AttemptToolResult;
+export type CanonicalToolResult = z.infer<typeof CanonicalToolResult>;
 
 export const CodemodeOperationState = z.enum([
   "queued",

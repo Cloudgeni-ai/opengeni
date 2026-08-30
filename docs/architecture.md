@@ -750,6 +750,7 @@ metadata.
 | Path | Package | Owns |
 | --- | --- | --- |
 | `apps/api` | `@opengeni/api-router` | Hono HTTP composition, middleware, routes, MCP transport, SSE, and API-side control adapters over core |
+| `apps/app-host` | standalone process | Dedicated-origin immutable Apps byte serving through a narrow launch resolver and conditional object-storage ranges |
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension and its control-plane protocol; a leaf client, not session authority |
@@ -777,6 +778,7 @@ handlers because its host owns process lifecycle.
 | `packages/storage` | `@opengeni/storage` | Object-storage abstraction for files, recordings, and retained bytes |
 | `packages/documents` | `@opengeni/documents` | Document parsing/indexing and authority-first hybrid retrieval |
 | `packages/capabilities` | `@opengeni/capabilities` | Integration definitions, facets, local MCP bridges, and protocol compilers |
+| `packages/tool-runtime` | `@opengeni/tool-runtime` | Caller-neutral canonical tool catalog, schema validation, declarations, results, and invocation mechanics |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
@@ -789,6 +791,8 @@ handlers because its host owns process lifecycle.
 | `packages/artifact-kernel-wasm-presentation` | `@opengeni/artifact-kernel-wasm-presentation` | Lazy presentation WASM kernel distribution |
 | `packages/artifact-kernel-wasm-spreadsheet` | `@opengeni/artifact-kernel-wasm-spreadsheet` | Lazy spreadsheet WASM kernel distribution |
 | `packages/agent-proto` | `@opengeni/agent-proto` | Generated TypeScript side of the Connected Machine wire protocol |
+| `packages/app-authoring` | `@opengeni/app-authoring` | Deterministic Apps source packaging, validation, build manifests, and resumable `og-app` CLI deployment |
+| `packages/app-sdk` | `@opengeni/app-sdk` | Typed private MessageChannel bridge for sandboxed Apps and host-mediated tool calls |
 | `packages/sdk` | `@opengeni/sdk` | Framework-neutral API client, event streaming, and transport helpers |
 | `packages/react` | `@opengeni/react` | React hooks and styled session, composer, artifact, and machine surfaces |
 | `packages/observability` | `@opengeni/observability` | Structured logs, traces, metrics, and Prometheus exposition |
@@ -1112,6 +1116,12 @@ Cloud Terraform roots and stack wrappers compose external infrastructure.
 Bundled Postgres, Temporal, NATS, and object-storage templates are development,
 CI, conformance, or explicitly documented single-machine fixtures—not a claim
 that those topologies are appropriate production defaults.
+
+Published Apps use a separate, storage-only origin process rather than the API
+or web workload. It resolves one tokenized launch path to exact frozen object
+identities and streams version-pinned ranges without database or user-session
+authority. The canonical hosting and operator boundary is
+[`apps.md`](apps.md).
 
 Deployment procedures, provider-specific requirements, activation boundaries,
 and recovery runbooks belong in [`deployment.md`](deployment.md). Advanced host

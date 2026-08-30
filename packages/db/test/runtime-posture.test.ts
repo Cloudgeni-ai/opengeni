@@ -320,6 +320,40 @@ function xaiAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+function appLifecycleAuthorityTables(): RuntimeTablePosture[] {
+  return [
+    "app_build_files",
+    "app_builds",
+    "app_gc_claims",
+    "app_launches",
+    "app_lifecycle_operations",
+    "app_object_tombstones",
+    "app_previews",
+    "app_publications",
+    "app_releases",
+    "app_source_revisions",
+    "app_tool_calls",
+    "app_tool_policy_revisions",
+    "apps",
+  ].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function safePosture(): RuntimeDatabasePosture {
   return {
     identity: {
@@ -374,6 +408,7 @@ function safePosture(): RuntimeDatabasePosture {
         references: false,
         trigger: false,
       },
+      ...appLifecycleAuthorityTables(),
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
@@ -557,15 +592,15 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 309],
+            [FORCE_RLS_TABLES, 322],
             [NON_RLS_RUNTIME_TABLES, 13],
             [RUNTIME_FULL_DML_TABLES, 153],
-            [RUNTIME_READ_ONLY_TABLES, 21],
+            [RUNTIME_READ_ONLY_TABLES, 31],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 46],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 69],
-            [RUNTIME_DML_TABLES, 253],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 72],
+            [RUNTIME_DML_TABLES, 263],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 205],
@@ -592,7 +627,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 322 : 216;
+      const tableCount = hasCurrentMainActivityLedger ? 335 : 216;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
@@ -958,7 +993,7 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
-  test("accepts public-schema authority owned by the two protected tables", () => {
+  test("accepts public-schema authority owned by protected table graphs", () => {
     const posture = safePosture();
     posture.schemas[0]!.owner = "pg_database_owner";
     for (const routine of posture.targetRoutines) {
@@ -981,6 +1016,27 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+  });
+
+  test("requires same-owner Apps lifecycle authority", () => {
+    const splitTables = safePosture();
+    splitTables.tables.find((table) => table.name === "app_object_tombstones")!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(splitTables, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "target-schema runtime capability create_workspace_app_command(jsonb) authority table owners do not match",
+        ),
+      ]),
+    );
+
+    const splitRoutine = safePosture();
+    splitRoutine.targetRoutines.find(
+      (routine) => routine.name === "create_workspace_app_command(jsonb)",
+    )!.owner = "another_owner";
+    expect(evaluateRuntimeDatabasePosture(splitRoutine, options)).toContain(
+      "target-schema runtime capability create_workspace_app_command(jsonb) owner another_owner does not match authority table owner opengeni_migrator",
+    );
   });
 
   test("keeps dedicated-schema same-owner authority accepted", () => {
@@ -1522,6 +1578,7 @@ describe("runtime database posture evaluator", () => {
             }
           : table,
       ),
+      ...appLifecycleAuthorityTables(),
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
@@ -1713,6 +1770,7 @@ describe("runtime database posture evaluator", () => {
         name,
         artifactMaterializerPolicy: true,
       })),
+      ...appLifecycleAuthorityTables(),
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),

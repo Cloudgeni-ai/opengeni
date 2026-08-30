@@ -6,14 +6,24 @@ import { useRail } from "@/components/rail/rail-context";
 import { NewSessionLink } from "@/components/rail/session-list";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import { isConfigItemActive, PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
+import { useAppContext } from "@/context";
 import { NEW_SESSION_SHORTCUT, shortcutLabel } from "@/lib/keyboard-shortcuts";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 
 /** Primary product navigation, kept separate from workspace administration. */
 export function PrimaryNav() {
   const rail = useRail();
+  const context = useAppContext();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
+  const directHuman =
+    context.managedSelfContext?.identity.subjectId === context.accessContext.subjectId;
+  const canReadApps =
+    directHuman && hasWorkspacePermission(context.accessContext, rail.workspaceId, "apps:read");
+  const primaryItems = PRIMARY_WORKSPACE_ITEMS.filter(
+    (item) => item.to !== "/workspaces/$workspaceId/apps" || canReadApps,
+  );
 
   return (
     <div className={cn("mt-2 grid gap-0.5 px-2", rail.collapsed && "justify-center")}>
@@ -39,7 +49,7 @@ export function PrimaryNav() {
 
       <ForYouLink embedded />
 
-      {PRIMARY_WORKSPACE_ITEMS.map((item) => (
+      {primaryItems.map((item) => (
         <WorkspaceConfigLink
           key={item.to}
           item={item}

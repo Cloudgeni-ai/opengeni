@@ -49,6 +49,9 @@ describe("organization administration surface", () => {
     expect(routeSource).toContain("canManageOrganizationCodex");
     expect(routeSource).toContain('actorRole === "owner" || actorRole === "admin"');
     expect(routeSource).toContain("showModels={canManageOrganizationCodex}");
+    expect(routeSource).toContain('import("@/components/organization-codex-subscriptions")');
+    expect(routeSource).toContain("<LazyOrganizationCodexSubscriptions");
+    expect(routeSource).not.toContain("import { OrganizationCodexSubscriptions }");
     expect(shellSource).toContain('item.id !== "models" || showModels');
     expect(organizationCodexSource).toContain("setLoadError(message)");
     expect(organizationCodexSource).toContain('role="alert"');

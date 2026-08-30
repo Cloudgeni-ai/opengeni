@@ -1018,6 +1018,7 @@ describe("api key permission options", () => {
       "Goals",
       "Rigs",
       "Artifacts",
+      "Apps",
       "Admin & account",
     ]);
   });

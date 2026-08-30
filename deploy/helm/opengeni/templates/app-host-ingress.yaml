@@ -1,0 +1,33 @@
+{{- if and .Values.appHost.enabled .Values.appHost.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "opengeni.fullname" . }}-app-host
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app-host
+  {{- with .Values.appHost.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- $className := default .Values.ingress.className .Values.appHost.ingress.className }}
+  {{- if $className }}
+  ingressClassName: {{ $className }}
+  {{- end }}
+  {{- with .Values.appHost.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ required "appHost.ingress.host is required when appHost.ingress.enabled=true" .Values.appHost.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "opengeni.fullname" . }}-app-host
+                port:
+                  name: http
+{{- end }}

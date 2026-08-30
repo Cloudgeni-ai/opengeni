@@ -449,3 +449,246 @@ describe("getFileRange (S3-compatible)", () => {
     }
   });
 });
+
+describe("raw immutable HEAD/range conformance (S3-compatible)", () => {
+  test("returns an opaque generation and conditionally reads only requested bytes", async () => {
+    const body = new TextEncoder().encode("immutable app release bytes");
+    const requests: Array<{ method: string; range: string | null; ifMatch: string | null }> = [];
+    const fake = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        requests.push({
+          method: request.method,
+          range: request.headers.get("range"),
+          ifMatch: request.headers.get("if-match"),
+        });
+        const key = decodeURIComponent(
+          new URL(request.url).pathname.replace(/^\/test-bucket\//, ""),
+        );
+        if (key !== "apps/releases/release/assets/index.html") {
+          return new Response("<Error><Code>NoSuchKey</Code><Message>missing</Message></Error>", {
+            status: 404,
+            headers: { "content-type": "application/xml" },
+          });
+        }
+        if (request.method === "HEAD") {
+          return new Response(null, {
+            status: 200,
+            headers: {
+              "content-length": String(body.byteLength),
+              "content-type": "text/html; charset=utf-8",
+              etag: '"generation-1"',
+            },
+          });
+        }
+        if (request.headers.get("if-match") !== '"generation-1"') {
+          return new Response(
+            "<Error><Code>PreconditionFailed</Code><Message>changed</Message></Error>",
+            { status: 412, headers: { "content-type": "application/xml" } },
+          );
+        }
+        const match = /^bytes=(\d+)-(\d+)$/u.exec(request.headers.get("range") ?? "");
+        if (!match) return new Response(null, { status: 400 });
+        const start = Number(match[1]);
+        const end = Number(match[2]);
+        return new Response(body.slice(start, end + 1), {
+          status: 206,
+          headers: {
+            "content-range": `bytes ${start}-${end}/${body.byteLength}`,
+            "content-type": "text/html; charset=utf-8",
+            etag: '"generation-1"',
+          },
+        });
+      },
+    });
+    try {
+      const storage = withEnv(
+        {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+          OPENGENI_OBJECT_STORAGE_ENDPOINT: `http://127.0.0.1:${fake.port}`,
+          OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
+          OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
+          OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
+          OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
+        },
+        () => createObjectStorage(getSettings()),
+      )!;
+      const key = "apps/releases/release/assets/index.html";
+      const head = await storage.headObject!(key);
+      expect(head).toMatchObject({
+        ContentLength: body.byteLength,
+        ContentType: "text/html; charset=utf-8",
+        VersionToken: '"generation-1"',
+      });
+
+      const selected = await storage.getObjectRange!({
+        key,
+        start: 10,
+        endInclusive: 12,
+        expectedVersionToken: head!.VersionToken!,
+      });
+      expect(new TextDecoder().decode(selected!.bytes)).toBe("app");
+      expect(selected!.versionToken).toBe(head!.VersionToken);
+      expect(requests).toEqual([
+        { method: "HEAD", range: null, ifMatch: null },
+        { method: "GET", range: "bytes=10-12", ifMatch: '"generation-1"' },
+      ]);
+
+      expect(
+        await storage.getObjectRange!({
+          key,
+          start: 0,
+          endInclusive: 2,
+          expectedVersionToken: '"stale"',
+        }),
+      ).toBeNull();
+      expect(await storage.headObject!(`${key}.missing`)).toBeNull();
+    } finally {
+      fake.stop(true);
+    }
+  });
+});
+
+describe("raw immutable HEAD/range conformance (Azure Blob)", () => {
+  test("returns an ETag and enforces it on the exact requested range", async () => {
+    const body = new TextEncoder().encode("immutable app release bytes");
+    const key = "apps/releases/release/assets/index.html";
+    const requests: Array<{
+      method: string;
+      pathname: string;
+      range: string | null;
+      ifMatch: string | null;
+    }> = [];
+    const serviceHeaders = {
+      date: "Sat, 29 Aug 2026 18:00:00 GMT",
+      etag: '"generation-1"',
+      "last-modified": "Sat, 29 Aug 2026 18:00:00 GMT",
+      "x-ms-blob-type": "BlockBlob",
+      "x-ms-request-id": "request-id",
+      "x-ms-version": "2024-11-04",
+    };
+    const fake = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        const range = request.headers.get("x-ms-range") ?? request.headers.get("range");
+        requests.push({
+          method: request.method,
+          pathname: decodeURIComponent(url.pathname),
+          range,
+          ifMatch: request.headers.get("if-match"),
+        });
+        if (!decodeURIComponent(url.pathname).endsWith(`/test-container/${key}`)) {
+          return new Response(
+            '<?xml version="1.0" encoding="utf-8"?><Error><Code>BlobNotFound</Code><Message>missing</Message></Error>',
+            {
+              status: 404,
+              headers: {
+                date: serviceHeaders.date,
+                "content-type": "application/xml",
+                "x-ms-error-code": "BlobNotFound",
+                "x-ms-request-id": "missing-request-id",
+                "x-ms-version": serviceHeaders["x-ms-version"],
+              },
+            },
+          );
+        }
+        if (request.method === "HEAD") {
+          return new Response(null, {
+            status: 200,
+            headers: {
+              ...serviceHeaders,
+              "content-length": String(body.byteLength),
+              "content-type": "text/html; charset=utf-8",
+            },
+          });
+        }
+        if (request.headers.get("if-match") !== serviceHeaders.etag) {
+          return new Response(
+            '<?xml version="1.0" encoding="utf-8"?><Error><Code>ConditionNotMet</Code><Message>changed</Message></Error>',
+            {
+              status: 412,
+              headers: {
+                date: serviceHeaders.date,
+                "content-type": "application/xml",
+                "x-ms-error-code": "ConditionNotMet",
+                "x-ms-request-id": "condition-request-id",
+                "x-ms-version": serviceHeaders["x-ms-version"],
+              },
+            },
+          );
+        }
+        const match = /^bytes=(\d+)-(\d+)$/u.exec(range ?? "");
+        if (!match) return new Response(null, { status: 400 });
+        const start = Number(match[1]);
+        const endInclusive = Number(match[2]);
+        const selected = body.slice(start, endInclusive + 1);
+        return new Response(selected, {
+          status: 206,
+          headers: {
+            ...serviceHeaders,
+            "accept-ranges": "bytes",
+            "content-length": String(selected.byteLength),
+            "content-range": `bytes ${start}-${endInclusive}/${body.byteLength}`,
+            "content-type": "text/html; charset=utf-8",
+          },
+        });
+      },
+    });
+    try {
+      const storage = withEnv(
+        {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
+          OPENGENI_OBJECT_STORAGE_BUCKET: "test-container",
+          OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: "opengeni",
+          OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY: Buffer.alloc(32, 1).toString("base64"),
+          OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT: `http://127.0.0.1:${fake.port}`,
+        },
+        () => createObjectStorage(getSettings()),
+      )!;
+      const head = await storage.headObject!(key);
+      expect(head).toMatchObject({
+        ContentLength: body.byteLength,
+        ContentType: "text/html; charset=utf-8",
+        VersionToken: serviceHeaders.etag,
+      });
+
+      const selected = await storage.getObjectRange!({
+        key,
+        start: 10,
+        endInclusive: 12,
+        expectedVersionToken: head!.VersionToken!,
+      });
+      expect(new TextDecoder().decode(selected!.bytes)).toBe("app");
+      expect(selected!.versionToken).toBe(head!.VersionToken);
+      expect(requests.slice(0, 2)).toEqual([
+        {
+          method: "HEAD",
+          pathname: `/test-container/${key}`,
+          range: null,
+          ifMatch: null,
+        },
+        {
+          method: "GET",
+          pathname: `/test-container/${key}`,
+          range: "bytes=10-12",
+          ifMatch: serviceHeaders.etag,
+        },
+      ]);
+
+      expect(
+        await storage.getObjectRange!({
+          key,
+          start: 0,
+          endInclusive: 2,
+          expectedVersionToken: '"stale"',
+        }),
+      ).toBeNull();
+      expect(await storage.headObject!(`${key}.missing`)).toBeNull();
+    } finally {
+      fake.stop(true);
+    }
+  });
+});

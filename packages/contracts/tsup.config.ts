@@ -5,6 +5,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/apps.ts",
     "src/atlassian.ts",
     "src/canonical-human-identities.ts",
     "src/connection-authority.ts",

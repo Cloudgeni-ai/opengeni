@@ -534,8 +534,45 @@ const XAI_AUTHORITY_TABLES = [
   "workspace_memberships",
   "xai_subscription_credentials",
 ] as const;
+const APP_LIFECYCLE_ROUTINES = [
+  "create_workspace_app_command(jsonb)",
+  "update_workspace_app_command(jsonb)",
+  "create_app_tool_policy_command(jsonb)",
+  "begin_app_source_upload_command(jsonb)",
+  "complete_app_source_upload_command(jsonb)",
+  "fail_app_source_upload_command(jsonb)",
+  "prepare_app_build_command(jsonb)",
+  "complete_app_build_command(jsonb)",
+  "fail_app_build_command(jsonb)",
+  "promote_app_build_command(jsonb)",
+  "create_app_preview_command(jsonb)",
+  "revoke_app_preview_command(jsonb)",
+  "publish_app_release_command(jsonb)",
+  "unpublish_workspace_app_command(jsonb)",
+  "archive_workspace_app_command(jsonb)",
+  "claim_archived_app_gc_command(jsonb)",
+  "settle_archived_app_gc_command(jsonb)",
+  "app_launch_command(jsonb)",
+  "app_tool_call_command(jsonb)",
+] as const;
+const APP_LIFECYCLE_AUTHORITY_TABLES = [
+  "app_build_files",
+  "app_builds",
+  "app_gc_claims",
+  "app_launches",
+  "app_lifecycle_operations",
+  "app_object_tombstones",
+  "app_previews",
+  "app_publications",
+  "app_releases",
+  "app_source_revisions",
+  "app_tool_calls",
+  "app_tool_policy_revisions",
+  "apps",
+] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  ...APP_LIFECYCLE_ROUTINES,
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   ...COMPANY_PROFILE_AGENT_ADMIN_ROUTINES,
@@ -622,6 +659,19 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
 export const FORCE_RLS_TABLES = [
   "agent_run_states",
   "api_keys",
+  "app_build_files",
+  "app_builds",
+  "app_gc_claims",
+  "app_launches",
+  "app_lifecycle_operations",
+  "app_object_tombstones",
+  "app_previews",
+  "app_publications",
+  "app_releases",
+  "app_source_revisions",
+  "app_tool_calls",
+  "app_tool_policy_revisions",
+  "apps",
   "attached_browser_devices",
   "attached_browser_inventories",
   "audit_events",
@@ -1153,6 +1203,16 @@ export const RUNTIME_FULL_DML_TABLES = [
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "app_build_files",
+  "app_builds",
+  "app_launches",
+  "app_previews",
+  "app_publications",
+  "app_releases",
+  "app_source_revisions",
+  "app_tool_calls",
+  "app_tool_policy_revisions",
+  "apps",
   "company_profile_activation_events",
   "company_profile_heads",
   "company_profile_snapshots",
@@ -1270,6 +1330,9 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
+  "app_gc_claims",
+  "app_lifecycle_operations",
+  "app_object_tombstones",
   "canonical_human_identities",
   "canonical_human_identity_operations",
   "canonical_human_identity_subjects",
@@ -2125,7 +2188,30 @@ export function evaluateRuntimeDatabasePosture(
     } else if (!routine.securityDefiner) {
       violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
     }
-    if (
+    if ((APP_LIFECYCLE_ROUTINES as readonly string[]).includes(routine.name)) {
+      const missingAuthorityTables = APP_LIFECYCLE_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = APP_LIFECYCLE_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (
       routine.name === GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE ||
       routine.name === GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE
     ) {

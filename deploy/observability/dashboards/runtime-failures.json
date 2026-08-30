@@ -31,10 +31,10 @@
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
         "query": {
-          "query": "label_values(up{opengeni_workload_component=~\"api|worker-control|worker-turns\"}, namespace)",
+          "query": "label_values(up{opengeni_workload_component=~\"api|app-host|worker-control|worker-turns\"}, namespace)",
           "refId": "namespace"
         },
-        "definition": "label_values(up{opengeni_workload_component=~\"api|worker-control|worker-turns\"}, namespace)",
+        "definition": "label_values(up{opengeni_workload_component=~\"api|app-host|worker-control|worker-turns\"}, namespace)",
         "current": {},
         "includeAll": false,
         "multi": false,
@@ -47,10 +47,10 @@
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
         "query": {
-          "query": "label_values(opengeni_build_info{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, environment)",
+          "query": "label_values(opengeni_build_info{namespace=\"$namespace\",opengeni_workload_component=~\"api|app-host|worker-control|worker-turns\"}, environment)",
           "refId": "environment"
         },
-        "definition": "label_values(opengeni_build_info{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, environment)",
+        "definition": "label_values(opengeni_build_info{namespace=\"$namespace\",opengeni_workload_component=~\"api|app-host|worker-control|worker-turns\"}, environment)",
         "current": {},
         "includeAll": false,
         "multi": false,
@@ -63,10 +63,10 @@
         "type": "query",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
         "query": {
-          "query": "label_values(up{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, release)",
+          "query": "label_values(up{namespace=\"$namespace\",opengeni_workload_component=~\"api|app-host|worker-control|worker-turns\"}, release)",
           "refId": "release"
         },
-        "definition": "label_values(up{namespace=\"$namespace\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}, release)",
+        "definition": "label_values(up{namespace=\"$namespace\",opengeni_workload_component=~\"api|app-host|worker-control|worker-turns\"}, release)",
         "current": {},
         "includeAll": false,
         "multi": false,
@@ -111,7 +111,11 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "targets": [
@@ -154,7 +158,11 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "targets": [
@@ -199,13 +207,17 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * avg(up{namespace=\"$namespace\",release=\"$release\",opengeni_workload_component=~\"api|worker-control|worker-turns\"})",
+          "expr": "100 * avg(up{namespace=\"$namespace\",release=\"$release\",opengeni_workload_component=~\"api|app-host|worker-control|worker-turns\"})",
           "legendFormat": "healthy",
           "editorMode": "code",
           "instant": true,
@@ -242,7 +254,11 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "targets": [
@@ -286,7 +302,11 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "targets": [
@@ -328,13 +348,17 @@
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
         "textMode": "auto"
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(opengeni_turn_worker_death_recoveries_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"exhausted\"}[$__range])) or on() (0 * count(up{namespace=\"$namespace\",release=\"$release\",opengeni_workload_component=~\"api|worker-control|worker-turns\"}))",
+          "expr": "sum(increase(opengeni_turn_worker_death_recoveries_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"exhausted\"}[$__range])) or on() (0 * count(up{namespace=\"$namespace\",release=\"$release\",opengeni_workload_component=~\"api|app-host|worker-control|worker-turns\"}))",
           "legendFormat": "exhausted",
           "editorMode": "code",
           "instant": true,
@@ -411,7 +435,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "sum"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -431,9 +459,16 @@
       "title": "Turn failure and recovery ratios",
       "description": "Failures and recoveries divided by all observed turn outcomes over the selected rate interval.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -470,7 +505,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "sum"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -492,7 +531,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "sum"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -514,7 +557,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -536,7 +583,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "sum"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -566,7 +617,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "sum"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -588,7 +643,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "sum"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -610,7 +669,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -632,7 +695,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -661,7 +728,11 @@
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "sum"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "sum"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [
@@ -681,9 +752,16 @@
       "title": "Incident delivery path",
       "description": "Managed deployments route alerts through obs-incident-translator. Desired/available replicas below one or failed Alertmanager webhooks mean Grafana can see incidents but the incident agent cannot receive them.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "min": 0 },
+        "overrides": []
+      },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
         "tooltip": { "mode": "multi", "sort": "desc" }
       },
       "targets": [

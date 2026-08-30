@@ -17,6 +17,9 @@
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/memory                   → durable workspace memory
+//   /workspaces/:id/apps                     → workspace Apps catalog
+//   /workspaces/:id/apps/:appId              → App release detail
+//   /workspaces/:id/apps/:appId/run          → isolated App runner
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
 //   /workspaces/:id/settings                 → workspace settings (name, API keys, danger zone)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
@@ -35,10 +38,14 @@ import {
   createRouter,
   lazyRouteComponent,
 } from "@tanstack/react-router";
+import type { OpenGeniAppsControlTransport } from "@opengeni/sdk/apps";
+import { AppsControlProvider } from "@/components/apps/apps-control-context";
+import { createOpenGeniAppsHttpTransport } from "@/lib/apps-control-transport";
 import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
@@ -124,6 +131,7 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   () => import("@/routes/workspace-state"),
   "WorkspaceStateRoute",
 );
+const LazyAppsRoute = lazyRouteComponent(() => import("@/routes/apps"), "AppsRoute");
 const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
 const LazyEditableArtifactRoute = lazyRouteComponent(
   () => import("@/routes/editable-artifact"),
@@ -395,6 +403,27 @@ const workspaceStateRoute = createRoute({
     search.view === "instructions" || search.view === "skills" ? { view: search.view } : {},
   component: WorkspaceState,
 });
+const workspaceAppsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "apps",
+  component: Apps,
+});
+const workspaceAppDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "apps/$appId",
+  component: AppDetail,
+});
+const workspaceAppRunRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "apps/$appId/run",
+  validateSearch: (search: Record<string, unknown>): { previewId?: string | null } => {
+    if (!Object.hasOwn(search, "previewId")) return {};
+    return typeof search.previewId === "string" && SCHEDULES_SEARCH_UUID.test(search.previewId)
+      ? { previewId: search.previewId }
+      : { previewId: null };
+  },
+  component: AppRun,
+});
 const workspaceArtifactsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts",
@@ -476,6 +505,9 @@ const routeTree = rootRoute.addChildren([
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
     workspaceStateRoute,
+    workspaceAppsRoute,
+    workspaceAppDetailRoute,
+    workspaceAppRunRoute,
     workspaceArtifactsRoute,
     workspaceArtifactDetailRoute,
     workspaceEditableArtifactRoute,
@@ -489,6 +521,7 @@ const routeTree = rootRoute.addChildren([
 // caught only by the root Outlet, briefly replacing the rail along with the
 // canvas. The leaf boundary keeps the persistent workspace chrome mounted.
 const router = createRouter({ routeTree, ...ROUTER_PENDING_OPTIONS });
+const defaultAppsControlTransport = createOpenGeniAppsHttpTransport();
 
 declare module "@tanstack/react-router" {
   interface Register {
@@ -496,8 +529,16 @@ declare module "@tanstack/react-router" {
   }
 }
 
-export function App() {
-  return <RouterProvider router={router} />;
+export function App({
+  appsControlTransport = defaultAppsControlTransport,
+}: {
+  appsControlTransport?: OpenGeniAppsControlTransport;
+} = {}) {
+  return (
+    <AppsControlProvider transport={appsControlTransport}>
+      <RouterProvider router={router} />
+    </AppsControlProvider>
+  );
 }
 
 function RootIndexRoute() {
@@ -679,6 +720,45 @@ function WorkspaceState() {
   const { workspaceId } = workspaceStateRoute.useParams();
   const { view } = workspaceStateRoute.useSearch();
   return <LazyWorkspaceStateRoute workspaceId={workspaceId} view={view} />;
+}
+
+function useAppsRouteAccess(workspaceId: string) {
+  const context = useAppContext();
+  const directHuman =
+    context.managedSelfContext?.identity.subjectId === context.accessContext.subjectId;
+  const can = (permission: string) =>
+    directHuman && hasWorkspacePermission(context.accessContext, workspaceId, permission);
+  return {
+    read: can("apps:read"),
+    write: can("apps:write"),
+    publish: can("apps:publish"),
+    run: can("apps:run"),
+    delete: can("apps:delete"),
+  };
+}
+
+function Apps() {
+  const params = workspaceAppsRoute.useParams();
+  return <LazyAppsRoute {...params} access={useAppsRouteAccess(params.workspaceId)} />;
+}
+
+function AppDetail() {
+  const params = workspaceAppDetailRoute.useParams();
+  return <LazyAppsRoute {...params} access={useAppsRouteAccess(params.workspaceId)} />;
+}
+
+function AppRun() {
+  const params = workspaceAppRunRoute.useParams();
+  const { previewId } = workspaceAppRunRoute.useSearch();
+  return (
+    <LazyAppsRoute
+      {...params}
+      previewId={previewId ?? undefined}
+      previewRequested={previewId !== undefined}
+      run
+      access={useAppsRouteAccess(params.workspaceId)}
+    />
+  );
 }
 
 function Artifacts() {

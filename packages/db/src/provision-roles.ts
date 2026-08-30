@@ -663,6 +663,35 @@ BEGIN
         );
       END IF;
     END LOOP;
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'create_workspace_app_command(jsonb)',
+      'update_workspace_app_command(jsonb)',
+      'create_app_tool_policy_command(jsonb)',
+      'begin_app_source_upload_command(jsonb)',
+      'complete_app_source_upload_command(jsonb)',
+      'fail_app_source_upload_command(jsonb)',
+      'prepare_app_build_command(jsonb)',
+      'complete_app_build_command(jsonb)',
+      'fail_app_build_command(jsonb)',
+      'promote_app_build_command(jsonb)',
+      'create_app_preview_command(jsonb)',
+      'revoke_app_preview_command(jsonb)',
+      'publish_app_release_command(jsonb)',
+      'unpublish_workspace_app_command(jsonb)',
+      'archive_workspace_app_command(jsonb)',
+      'claim_archived_app_gc_command(jsonb)',
+      'settle_archived_app_gc_command(jsonb)',
+      'app_launch_command(jsonb)',
+      'app_tool_call_command(jsonb)'
+    ] LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- Migration 0301 creates this target-schema capability before
     -- opengeni_app exists on a fresh migrate-then-provision installation. Its
     -- policy is evaluated for ordinary session-list snapshot writes, so the

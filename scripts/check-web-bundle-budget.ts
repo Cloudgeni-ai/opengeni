@@ -121,7 +121,11 @@ const budgets = {
   // 1,911 bytes of platform-skew headroom; the graph totals still bind the
   // aggregate.
   initialFileGzip: 79 * kib,
-  initialFiles: 17,
+  // Governed Apps management stays behind a second lazy boundary so ordinary
+  // sessions do not retain form/dialog code. That boundary adds one initial
+  // shared split on top of the pushed Apps parent graph's 18 files; keep the
+  // exact 19-file cap while the aggregate byte budgets remain unchanged.
+  initialFiles: 19,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
   // direct-session raw envelope to the next whole KiB; its gzip, file-count,
@@ -368,6 +372,14 @@ const budgets = {
   // graph measures 2,267,606 raw bytes. Advance only the policy-derived raw
   // envelope to 2,216 KiB, retaining 1,578 bytes of headroom; gzip, file-count,
   // initial, per-file, lazy-chunk, and CSS caps remain fixed.
+  // Governed Apps management adds the stock authoring and release lifecycle,
+  // but a nested lazy boundary removes its form/dialog dependencies from
+  // ordinary chat loads. The pushed parent measured 2,394,366 raw / 669,336
+  // gzip bytes across 35 direct-session files and fails these limits. The
+  // optimized exact Linux/x64 Bun 1.4 graph measures 2,290,849 raw / 641,851
+  // gzip bytes across 33 files. Advance raw through the shared policy envelope,
+  // gzip to 629 KiB (2,245 bytes of headroom), and file count to 33. Initial
+  // byte, per-file, lazy-chunk, and CSS caps remain fixed.
   // A browser acceptance build with its supported configured loopback API URL
   // exposes one additional direct-session chunk and measures 2,269,339 raw /
   // 637,787 gzip bytes across 33 files. Preserve a full KiB of raw and gzip
@@ -397,10 +409,12 @@ const effectiveBudgets = {
   ...budgets,
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    629 * kib,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
+    33,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
   ),
 } as const;
@@ -495,7 +509,11 @@ const cssMetrics = await metrics(
 const largestCss = largest(cssMetrics, "gzip");
 
 const report = {
-  initial: { ...initialTotal, files: initialMetrics.length, largestGzip: largestInitial },
+  initial: {
+    ...initialTotal,
+    files: initialMetrics.length,
+    largestGzip: largestInitial,
+  },
   directSession: { ...directSessionTotal, files: directSessionMetrics.length },
   lazy: {
     files: lazyMetrics.length,

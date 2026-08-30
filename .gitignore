@@ -13,6 +13,7 @@ htmlcov/
 node_modules/
 .turbo/
 .vite/
+.cache/
 coverage/
 tmp/
 *.tsbuildinfo

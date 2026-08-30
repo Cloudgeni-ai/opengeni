@@ -497,6 +497,29 @@ needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
 `OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
 checked before the invitation row commits and reported as `503`.
 
+### Governed Apps persistence cutover (0382)
+
+`0382_governed_apps_persistence.sql` adds the exact FORCE-RLS table and
+capability contract for governed OpenGeni Apps. The pre-0382 runtime-posture
+evaluator rejects those new protected tables because they are not present in
+its compiled allowlist, so this migration is a maintenance cutover rather than
+a mixed-version rolling migration.
+
+1. Stop every API, control worker, and turn worker using the target database.
+2. Supply the exact runtime login list through
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`.
+3. Prove those roles have zero other sessions in `pg_stat_activity`.
+4. Apply 0382 from the exact new image and require it in `schema_migrations`.
+5. Start only that image generation and require API and worker runtime-posture
+   readiness before reopening admission.
+
+The migration checks the configured role drain before and after taking
+exclusive locks on `managed_accounts` and `workspaces`. A live listed session
+fails the cutover with SQLSTATE `55000`. After commit, never restart a pre-0382
+image or attempt a mixed-version rollback; remain in maintenance and fix
+forward. Existing `workspace_artifacts` rows and published HTML remain
+unchanged.
+
 ### Browser login session-set rollout (0362)
 
 `0362_managed_auth_session_sets.sql` is rolling and deliberately activation-free.
@@ -1631,6 +1654,12 @@ Production self-hosted platform dependencies should use mature upstream projects
 
 The OpenGeni Helm chart owns OpenGeni API, web, worker, migrations, optional Terraform Registry MCP docs service, and integration resources such as `ServiceMonitor`, `PrometheusRule`, `ExternalSecret`, and workload NetworkPolicies. It must not become a replacement chart for NATS, Temporal, Postgres, cert-manager, or the observability platform.
 
+The chart also contains a disabled-by-default dedicated Apps origin workload.
+Its DNS/TLS, least-privilege storage IAM, resolver credential, ingress behavior,
+internal-only metrics listener, provider limitations, and acceptance procedure are defined in
+[`apps.md`](apps.md). Do not route Apps through the web/API origin or project the
+general runtime Secret into that workload.
+
 The stack wrapper may install upstream charts as a convenience layer. That
 keeps lifecycle commands visible and reversible without making those charts
 OpenGeni chart dependencies.
@@ -2238,6 +2267,7 @@ and storage objects, so it proves deeper behavior but is not a liveness probe.
 Service endpoints:
 
 - API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
+- App host: immutable bytes, `/healthz`, and `/readyz` use `OPENGENI_APP_HOST_PORT` (default `8080`); `GET /metrics` uses the separate internal `OPENGENI_APP_HOST_METRICS_PORT` (default `9090`) and is not routed by the Apps ingress.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
@@ -2253,6 +2283,7 @@ Useful settings:
 
 - `OPENGENI_OBSERVABILITY_STRUCTURED_LOGS=true` for JSON logs.
 - `OPENGENI_OBSERVABILITY_METRICS_ENABLED=true` to expose process and domain metrics.
+- `OPENGENI_APP_HOST_METRICS_PORT=9090` for the app-host internal Prometheus listener.
 - `OPENGENI_WORKER_HTTP_PORT=8001` for the worker metrics/health listener.
 - `OPENGENI_AUTH_ALLOW_HEALTH=true` allows `/healthz`, `/traffic-readyz`, and `/readyz` through the deployment-key gate.
 - `OPENGENI_AUTH_ALLOW_METRICS=true` allows API `/metrics` through the deployment-key gate for an internal scraper path.
@@ -2270,7 +2301,7 @@ helm upgrade --install opengeni deploy/helm/opengeni \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. ServiceMonitors cover API, workers, relay, and the enabled app-host internal metrics port. The canonical rules cover turns without durable progress (`opengeni_turn_oldest_no_progress_age_seconds > 900`), traffic-gated sandbox create failure ratio, warming timeouts, orphan sandbox growth, overdue finite-lifetime rotation, checkpoint deletion failures, terminal-owner retained-process backlog, expired drains, stale/absent inventory projections, scraped target availability, release-owned turn-worker restarts and crash loops, durable worker-death recovery and exhausted recovery, turn-worker memory-guard target/drain/failure signals, Google Drive sync failure ratio, reconnect-required events, and explicit Drive sync limit hits, plus node-relative memory/I/O PSI, swap activity, kubelet runtime errors, and NotReady state. Worker-death recovery outcomes are emitted by the fenced control activity after the durable recovery transaction wins, because the process-local metrics registry of the dead turn worker no longer exists. Drive rules are fenced to the exact namespace, Helm release, configured environment, and `google_drive` provider. Node alerts are joined to `kube_pod_info` so they retain only nodes hosting the current OpenGeni Helm release; deployments without node-exporter or kube-state-metrics produce no false series. `observability.prometheusRule.inventoryFreshnessSeconds` defaults to 300 seconds and must cover at least three configured sandbox-reaper periods; Helm rejects an unsafe pairing. Read-only inventory refresh remains active when sandbox ownership mutation is disabled, so an ownership fence does not silently age every inventory projection out. `observability.prometheusRule.rules` appends environment-specific rules; it never replaces the canonical safety catalog. The chart-managed OpenTelemetry Collector remains optional and can scrape app-host when using its default config; use direct Prometheus scraping for the canonical metrics path.
 
 Minimum production dashboards should cover:
 

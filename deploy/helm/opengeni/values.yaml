@@ -248,6 +248,104 @@ api:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
 
+# Dedicated immutable Apps origin. This workload reuses the released API image
+# but runs only the app-host process bundle. It receives no database URL,
+# browser session, deployment access key, model/provider credentials, or
+# general runtime Secret projection. The API callout resolves one launch and
+# normalized path to exact frozen object keys; object storage serves only those
+# keys through conditional HEAD/range reads.
+appHost:
+  enabled: false
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  image:
+    repository: opengeni-api
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  command:
+    - bun
+    - apps/app-host/dist/process/process.js
+  containerPort: 8080
+  # Internal-only Prometheus listener. The Apps ingress targets only service.port;
+  # ServiceMonitor/collector traffic uses this separate port.
+  metricsPort: 9090
+  resolverUrl: ""
+  resolverTimeoutMs: 2000
+  frameAncestors: []
+  credentialsSecret: ""
+  resolverKeySecretKey: OPENGENI_APP_HOST_RESOLVER_KEY
+  objectStorageAccessKeyIdSecretKey: OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID
+  objectStorageSecretAccessKeySecretKey: OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY
+  objectStorageAzureConnectionStringSecretKey: OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING
+  objectStorageAzureAccountNameSecretKey: OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME
+  objectStorageAzureAccountKeySecretKey: OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY
+  objectStorageGcsCredentialsJsonSecretKey: OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 30
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  probes:
+    readiness:
+      enabled: true
+      path: /readyz
+      initialDelaySeconds: 3
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 10
+      periodSeconds: 20
+      timeoutSeconds: 2
+      failureThreshold: 3
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  service:
+    type: ClusterIP
+    port: 8080
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    # Use a dedicated origin or wildcard Apps origin; never the control-plane
+    # web/API host. DNS and TLS are operator-owned.
+    host: ""
+    tls: []
+
 worker:
   enabled: true
   image:
@@ -1147,7 +1245,7 @@ observability:
     enabled: true
     path: /metrics
   serviceMonitor:
-    # Optional Prometheus Operator ServiceMonitors for api/worker/relay. The
+    # Optional Prometheus Operator ServiceMonitors for api/worker/relay/app-host. The
     # template is also guarded on monitoring.coreos.com/v1 being installed.
     enabled: false
     interval: 30s

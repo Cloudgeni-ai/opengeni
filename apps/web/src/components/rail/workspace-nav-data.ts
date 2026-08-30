@@ -12,6 +12,7 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/memory"
   | "/workspaces/$workspaceId/state"
+  | "/workspaces/$workspaceId/apps"
   | "/workspaces/$workspaceId/artifacts"
   | "/workspaces/$workspaceId/settings";
 
@@ -25,6 +26,7 @@ export type WorkspaceConfigIcon =
   | "map"
   | "plug"
   | "calendar-clock"
+  | "boxes"
   | "panels-top-left"
   | "settings";
 
@@ -68,6 +70,12 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     icon: "calendar-clock",
     label: "Schedules",
     description: "Run agents on a schedule",
+  },
+  {
+    to: "/workspaces/$workspaceId/apps",
+    icon: "boxes",
+    label: "Apps",
+    description: "Published applications with confirmed tool access",
   },
   {
     to: "/workspaces/$workspaceId/artifacts",
@@ -183,5 +191,9 @@ export function isConfigItemActive(
   workspaceId: string,
   to: WorkspaceConfigTarget,
 ): boolean {
-  return pathname === `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
+  const target = `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
+  return (
+    pathname === target ||
+    (to === "/workspaces/$workspaceId/apps" && pathname.startsWith(`${target}/`))
+  );
 }

@@ -1292,6 +1292,11 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "rigs:use",
   "artifacts:read",
   "artifacts:publish",
+  "apps:read",
+  "apps:write",
+  "apps:publish",
+  "apps:run",
+  "apps:delete",
 ];
 
 /**
@@ -71619,3 +71624,4 @@ export * from "./organization-recovery";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
+export * from "./apps";

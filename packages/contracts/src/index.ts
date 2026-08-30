@@ -40,6 +40,7 @@ export * from "./session-titles";
 export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
+export * from "./apps";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -745,6 +746,9 @@ export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
   "github:use",
   "artifacts:read",
   "artifacts:publish",
+  "apps:read",
+  "apps:write",
+  "apps:publish",
 ] as const satisfies readonly Permission[];
 
 /**
