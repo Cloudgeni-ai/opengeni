@@ -19,7 +19,6 @@ import {
   OrganizationMember,
   WorkspaceMember as WorkspaceMemberContract,
   SessionGoalSnapshot,
-  RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptSchema,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
   WORK_CLAIM_DISCOVERY_DEFAULT_LIMIT,
@@ -158,7 +157,6 @@ import type {
   Rig,
   RigProviderImage,
   RigProviderImages,
-  RigPlatformSurfaceValidationReceipt,
   RigVersion,
   RigVerificationHealth,
   RigChange,
@@ -174,6 +172,10 @@ import type {
   WorkClaimSubjectFilter,
   WorkDiscoveryProjection,
 } from "@opengeni/contracts";
+import {
+  RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptSchema,
+  type RigPlatformSurfaceValidationReceipt,
+} from "@opengeni/contracts/rig-platform-surface-validation";
 import {
   closePrivateSessionCreateCapability,
   openPrivateChildSessionCreateCapability,
@@ -17834,7 +17836,7 @@ export async function createRig(
       if (!versionRow) {
         throw new Error("Failed to create initial rig version");
       }
-      return mapRig(rigRow, mapRigVersion(versionRow), 1);
+      return mapRig(rigRow, versionRow.active ? mapRigVersion(versionRow) : null, 1);
     },
   );
 }

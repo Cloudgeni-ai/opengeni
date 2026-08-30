@@ -11,7 +11,6 @@ import type {
   McpServerConnectionRef,
   ModelContextContributionSummary,
   RigProviderImages,
-  RigPlatformSurfaceValidationReceipt,
   SessionMcpApprovalPolicy,
   SessionGoalChangeKind,
   SessionGoalMutationPolicy,
@@ -21,6 +20,7 @@ import type {
   UserResourceDelegation,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
+import type { RigPlatformSurfaceValidationReceipt } from "@opengeni/contracts/rig-platform-surface-validation";
 import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { SessionToolPolicy } from "@opengeni/contracts";

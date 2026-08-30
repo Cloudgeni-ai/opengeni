@@ -524,14 +524,25 @@ async function resolvePackRig(
     };
   }
   const rig = await getRig(db, workspaceId, selectedRigId);
-  if (!rig?.activeVersion) {
+  if (!rig) {
     return {
       required,
       status: "missing",
       requestedRigId: requestedRigId ?? null,
       rigId: selectedRigId,
       rigVersionId: null,
-      name: rig?.name ?? null,
+      name: null,
+      image: null,
+    };
+  }
+  if (!rig.activeVersion) {
+    return {
+      required,
+      status: "unverified",
+      requestedRigId: requestedRigId ?? null,
+      rigId: rig.id,
+      rigVersionId: null,
+      name: rig.name,
       image: null,
     };
   }

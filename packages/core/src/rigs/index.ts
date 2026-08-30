@@ -4,7 +4,7 @@
 // the raw RLS-scoped persistence lives in @opengeni/db. M4 adds verification /
 // auto-merge / promotion on top of the change substrate created here.
 
-import { RigPlatformSurfaceValidationReceipt } from "@opengeni/contracts";
+import { RigPlatformSurfaceValidationReceipt } from "@opengeni/contracts/rig-platform-surface-validation";
 import type {
   AccessGrant,
   CreateRigRequest,

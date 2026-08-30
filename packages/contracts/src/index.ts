@@ -19,6 +19,7 @@ import {
   SessionGoalStatus,
   SessionStatus,
 } from "./session-topology-primitives";
+import type { RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptValue } from "./rig-platform-surface-validation";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -38,6 +39,10 @@ export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./session-titles";
 export * from "./session-topology-primitives";
+export type {
+  RigPlatformSurfaceValidationBinding,
+  RigPlatformSurfaceValidationReceipt,
+} from "./rig-platform-surface-validation";
 export * from "./agent-topology";
 export * from "./work-claims";
 
@@ -8053,80 +8058,6 @@ export const RigVerificationHealth = z.object({
 });
 export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
 
-export const RigPlatformSurfaceValidationBinding = z
-  .object({
-    leaseId: z.string().uuid(),
-    sandboxGroupId: z.string().uuid(),
-    leaseEpoch: z.number().int().positive(),
-    workspaceGeneration: z.number().int().nonnegative(),
-    instanceId: z.string().min(1).max(512),
-    backendId: z.string().min(1).max(128),
-    rigVersionId: z.string().uuid(),
-  })
-  .strict();
-export type RigPlatformSurfaceValidationBinding = z.infer<
-  typeof RigPlatformSurfaceValidationBinding
->;
-
-export const RigPlatformSurfaceValidationReceipt = z
-  .object({
-    version: z.literal(1),
-    checkedAt: z.string().datetime(),
-    binding: RigPlatformSurfaceValidationBinding,
-    terminal: z.discriminatedUnion("status", [
-      z.object({ status: z.literal("disabled") }).strict(),
-      z
-        .object({
-          status: z.literal("passed"),
-          cwd: z.literal("/workspace"),
-          uid: z.literal(0),
-          bunVersion: z.literal("1.4.0"),
-          interactive: z.literal(true),
-        })
-        .strict(),
-    ]),
-    browser: z
-      .object({
-        status: z.literal("passed"),
-        browserSessionId: z.string().uuid(),
-        controllerGeneration: z.string().min(1).max(256),
-        targetId: z.string().min(1).max(512),
-        observedTargetGeneration: z.string().min(1).max(256),
-      })
-      .strict(),
-    computer: z.discriminatedUnion("status", [
-      z.object({ status: z.literal("disabled") }).strict(),
-      z
-        .object({
-          status: z.literal("passed"),
-          computerSessionId: z.string().uuid(),
-          controllerGeneration: z.string().min(1).max(256),
-          targetId: z.string().min(1).max(512),
-          targetGeneration: z.string().min(1).max(256),
-          frameId: z.string().min(1).max(256),
-          image: z
-            .object({
-              mediaType: z.enum(["image/jpeg", "image/png"]),
-              sizeBytes: z
-                .number()
-                .int()
-                .positive()
-                .max(32 * 1024 * 1024),
-              width: z.number().int().positive().max(4096),
-              height: z.number().int().positive().max(4096),
-              sha256: z.string().regex(/^[0-9a-f]{64}$/u),
-            })
-            .strict(),
-          actionOperationId: z.string().uuid(),
-        })
-        .strict(),
-    ]),
-  })
-  .strict();
-export type RigPlatformSurfaceValidationReceipt = z.infer<
-  typeof RigPlatformSurfaceValidationReceipt
->;
-
 export const Rig = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -8172,11 +8103,12 @@ export const RigChangeVerification = z
     finishedAt: z.string().optional(),
     log: z.string().optional(),
     platformCheckResults: z.array(RigCheckResult).optional(),
-    platformSurfaceValidation: RigPlatformSurfaceValidationReceipt.optional(),
     checkResults: z.array(RigCheckResult).optional(),
   })
   .passthrough();
-export type RigChangeVerification = z.infer<typeof RigChangeVerification>;
+export type RigChangeVerification = z.infer<typeof RigChangeVerification> & {
+  platformSurfaceValidation?: RigPlatformSurfaceValidationReceiptValue;
+};
 
 export const RigChange = z.object({
   id: z.string().uuid(),

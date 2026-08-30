@@ -417,6 +417,8 @@ try {
     "package/dist/editable-artifacts.d.ts",
     "package/dist/editable-artifact-live.js",
     "package/dist/editable-artifact-live.d.ts",
+    "package/dist/rig-platform-surface-validation.js",
+    "package/dist/rig-platform-surface-validation.d.ts",
     "package/dist/session-titles.js",
     "package/dist/session-titles.d.ts",
   ]) {
@@ -432,6 +434,16 @@ try {
     contractsLiveExport.import !== "./dist/editable-artifact-live.js"
   ) {
     throw new Error("contracts tarball has an invalid ./editable-artifact-live export");
+  }
+  const contractsRigSurfaceExport =
+    contracts.manifest.exports?.["./rig-platform-surface-validation"];
+  if (
+    !contractsRigSurfaceExport ||
+    typeof contractsRigSurfaceExport === "string" ||
+    contractsRigSurfaceExport.types !== "./dist/rig-platform-surface-validation.d.ts" ||
+    contractsRigSurfaceExport.import !== "./dist/rig-platform-surface-validation.js"
+  ) {
+    throw new Error("contracts tarball has an invalid ./rig-platform-surface-validation export");
   }
   const contractsSessionTitlesExport = contracts.manifest.exports?.["./session-titles"];
   if (
@@ -878,6 +890,38 @@ try {
       ].join("\n"),
     ),
     writeFile(
+      join(consumerRoot, "rig-platform-surface-validation-proof.ts"),
+      [
+        'import { RigPlatformSurfaceValidationReceipt } from "@opengeni/contracts/rig-platform-surface-validation";',
+        "",
+        "const receipt = RigPlatformSurfaceValidationReceipt.parse({",
+        "  version: 1,",
+        '  checkedAt: "2026-08-30T12:00:00.000Z",',
+        "  binding: {",
+        '    leaseId: "11111111-2222-4333-8444-555555555555",',
+        '    sandboxGroupId: "22222222-3333-4444-8555-666666666666",',
+        "    leaseEpoch: 2,",
+        "    workspaceGeneration: 1,",
+        '    instanceId: "sandbox-test",',
+        '    backendId: "modal",',
+        '    rigVersionId: "33333333-4444-4555-8666-777777777777",',
+        "  },",
+        '  terminal: { status: "disabled" },',
+        "  browser: {",
+        '    status: "passed",',
+        '    browserSessionId: "44444444-5555-4666-8777-888888888888",',
+        '    controllerGeneration: "consumer-proof",',
+        '    targetId: "page-1",',
+        '    observedTargetGeneration: "page-generation-1",',
+        "  },",
+        '  computer: { status: "disabled" },',
+        "});",
+        'if (receipt.binding.backendId !== "modal") throw new Error("packed Rig receipt schema changed the backend binding");',
+        "console.log(`RIG_SURFACE_PACKAGE_OK version=${receipt.version}`);",
+        "",
+      ].join("\n"),
+    ),
+    writeFile(
       join(consumerRoot, "session.ts"),
       await readFile(join(repoRoot, "packages/react/test/fixtures/session-consumer.ts"), "utf8"),
     ),
@@ -1194,6 +1238,7 @@ try {
   await run(["bun", "run", "artifact-codecs"], consumerRoot);
   await run(["bun", "run", "codemode-proof"], consumerRoot);
   await run(["bun", "run", "session-title-proof"], consumerRoot);
+  await run(["bun", "rig-platform-surface-validation-proof.ts"], consumerRoot);
   await run(["bun", "run", "runtime-proof.ts"], consumerRoot);
   process.stdout.write("[publish-consumer] installing spreadsheet-only artifact consumer\n");
   await run(["bun", "install"], minimalSpreadsheetRoot);

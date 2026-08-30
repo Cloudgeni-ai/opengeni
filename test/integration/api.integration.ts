@@ -14,6 +14,7 @@ import {
   claimCodemodeOperation,
   claimSessionWorkForAttempt,
   completeCodemodeOperation,
+  completeRigVersionVerification,
   isSessionCompactionRequested,
   createDb,
   createSession,
@@ -38,6 +39,7 @@ import {
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
   listInstalledPortableSkills,
+  listRigVersions,
   listSessionEvents,
   listScheduledTasks,
   listOutstandingSessionSystemUpdates,
@@ -101,6 +103,37 @@ import {
   searchDocuments,
 } from "../../packages/documents/src";
 import { submitTestHumanPrompt } from "./helpers/session-control";
+
+function rigSurfaceReceipt(versionId: string) {
+  return {
+    version: 1 as const,
+    checkedAt: "2026-08-30T12:00:00.000Z",
+    binding: {
+      leaseId: "11111111-2222-4333-8444-555555555555",
+      sandboxGroupId: versionId,
+      leaseEpoch: 2,
+      workspaceGeneration: 1,
+      instanceId: "sandbox-test",
+      backendId: "modal",
+      rigVersionId: versionId,
+    },
+    terminal: {
+      status: "passed" as const,
+      cwd: "/workspace" as const,
+      uid: 0 as const,
+      bunVersion: "1.4.0" as const,
+      interactive: true as const,
+    },
+    browser: {
+      status: "passed" as const,
+      browserSessionId: "22222222-3333-4444-8555-666666666666",
+      controllerGeneration: "integration-test",
+      targetId: "page-1",
+      observedTargetGeneration: "page-generation-1",
+    },
+    computer: { status: "disabled" as const },
+  };
+}
 
 async function setSessionStatus(
   db: Database,
@@ -4077,7 +4110,9 @@ describe("API component integration", () => {
       legacySandboxImage: null,
     });
 
-    const createRig = async (name: string): Promise<{ id: string }> => {
+    const createRig = async (
+      name: string,
+    ): Promise<{ id: string; name: string; activeVersion: null }> => {
       const response = await app.request(workspacePath(workspaceId, "/rigs"), {
         method: "POST",
         body: JSON.stringify({
@@ -4091,7 +4126,9 @@ describe("API component integration", () => {
       });
       const body = await response.text();
       expect(response.status, body).toBe(201);
-      return JSON.parse(body) as { id: string };
+      const rig = JSON.parse(body) as { id: string; name: string; activeVersion: null };
+      expect(rig).toMatchObject({ name, activeVersion: null });
+      return rig;
     };
     const [rigA, rigB] = await Promise.all([
       createRig(`Pack A ${suffix}`),
@@ -4105,6 +4142,14 @@ describe("API component integration", () => {
       manifestDigest: string;
       installationVersion: number | null;
       ready: boolean;
+      blockers: string[];
+      rig: {
+        status: string;
+        requestedRigId: string | null;
+        rigId: string | null;
+        rigVersionId: string | null;
+        name: string | null;
+      };
       components: Array<{
         key: string;
         kind: string;
@@ -4126,6 +4171,14 @@ describe("API component integration", () => {
         manifestDigest: string;
         installationVersion: number | null;
         ready: boolean;
+        blockers: string[];
+        rig: {
+          status: string;
+          requestedRigId: string | null;
+          rigId: string | null;
+          rigVersionId: string | null;
+          name: string | null;
+        };
         components: Array<{
           key: string;
           kind: string;
@@ -4159,6 +4212,34 @@ describe("API component integration", () => {
         version: number;
       };
     };
+
+    const pendingPreviewA = await previewPack(packA, rigA.id);
+    expect(pendingPreviewA).toMatchObject({
+      ready: false,
+      installationVersion: null,
+      blockers: ["Verify the selected compute environment before installing this Pack"],
+      rig: {
+        status: "unverified",
+        requestedRigId: rigA.id,
+        rigId: rigA.id,
+        rigVersionId: null,
+        name: rigA.name,
+      },
+    });
+
+    const activateCreatedRig = async (rigId: string): Promise<void> => {
+      const [version] = await listRigVersions(dbClient.db, workspaceId, rigId);
+      expect(version).toBeDefined();
+      const activation = await completeRigVersionVerification(dbClient.db, {
+        workspaceId,
+        rigId,
+        versionId: version!.id,
+        receipt: rigSurfaceReceipt(version!.id),
+      });
+      expect(activation).toMatchObject({ activated: true, stale: false });
+    };
+    await activateCreatedRig(rigA.id);
+    await activateCreatedRig(rigB.id);
 
     const previewA = await previewPack(packA, rigA.id);
     expect(previewA).toMatchObject({ ready: true, installationVersion: null });

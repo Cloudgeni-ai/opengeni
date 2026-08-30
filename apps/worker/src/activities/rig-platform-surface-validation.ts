@@ -1,14 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   COMPUTER_SCREENSHOT_MAX_BYTES,
-  RigPlatformSurfaceValidationReceipt,
   type BrowserObservation,
   type BrowserTarget,
   type ComputerActionReceipt,
   type ComputerObservation,
   type ComputerTarget,
-  type RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptValue,
 } from "@opengeni/contracts";
+import {
+  RigPlatformSurfaceValidationReceipt,
+  type RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptValue,
+} from "@opengeni/contracts/rig-platform-surface-validation";
 import { readLease, type Database, type LeaseSnapshot } from "@opengeni/db";
 import {
   provisionBrowserControlClient,

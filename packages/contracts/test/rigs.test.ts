@@ -11,6 +11,7 @@ import {
   RigVersion,
   UpdateRigRequest,
 } from "../src/index";
+import { RigPlatformSurfaceValidationReceipt } from "../src/rig-platform-surface-validation";
 
 describe("rig contracts", () => {
   test("RigCheck requires a non-empty name and command", () => {
@@ -96,6 +97,48 @@ describe("rig contracts", () => {
       "rejected",
       "verifying",
     ]);
+  });
+
+  test("platform-surface validation receipts remain strict on the server-only subpath", () => {
+    const receipt = {
+      version: 1,
+      checkedAt: "2026-08-30T12:00:00.000Z",
+      binding: {
+        leaseId: "11111111-2222-4333-8444-555555555555",
+        sandboxGroupId: "22222222-3333-4444-8555-666666666666",
+        leaseEpoch: 2,
+        workspaceGeneration: 1,
+        instanceId: "sandbox-test",
+        backendId: "modal",
+        rigVersionId: "22222222-3333-4444-8555-666666666666",
+      },
+      terminal: {
+        status: "passed",
+        cwd: "/workspace",
+        uid: 0,
+        bunVersion: "1.4.0",
+        interactive: true,
+      },
+      browser: {
+        status: "passed",
+        browserSessionId: "33333333-4444-4555-8666-777777777777",
+        controllerGeneration: "controller-generation",
+        targetId: "page-1",
+        observedTargetGeneration: "target-generation",
+      },
+      computer: { status: "disabled" },
+    };
+
+    expect(RigPlatformSurfaceValidationReceipt.safeParse(receipt).success).toBe(true);
+    expect(
+      RigPlatformSurfaceValidationReceipt.safeParse({
+        ...receipt,
+        terminal: { ...receipt.terminal, bunVersion: "1.4.1" },
+      }).success,
+    ).toBe(false);
+    expect(
+      RigPlatformSurfaceValidationReceipt.safeParse({ ...receipt, unexpected: true }).success,
+    ).toBe(false);
   });
 
   test("Rig / RigVersion / RigChange parse representative rows", () => {
