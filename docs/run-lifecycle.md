@@ -937,6 +937,13 @@ parent are settled authority: the result stays pending for a later human/new-goa
 turn and cannot manufacture a new inference or rewrite the settled public status
 by itself. A result arriving while the parent turn is live remains available to
 that turn's ordinary loop.
+The provider-neutral coordination contract creates a child only for concrete,
+bounded, independently useful work with a defined integration point. Parent
+work must stay disjoint from the delegated scope. A parent joining a child uses
+`session_wait` with `waitFor: "completion"` before committing or publishing
+dependent work: `goal.completed` is a durable goal fact, not proof that the
+child has emitted `agent.message.completed` or settled its turn. The ordinary
+`waitFor: "change"` mode remains available for progress monitoring.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
