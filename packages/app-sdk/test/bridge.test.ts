@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   OG_APP_BRIDGE_PROTOCOL,
   OgAppBridgeError,
+  connectOgApp,
   createOgAppHostBridge,
   isOgJsonValue,
   type OgMessageChannel,
@@ -68,7 +69,10 @@ describe("OpenGeni App bridge", () => {
         },
       },
       token: "0123456789abcdef",
-      targetOrigin: "https://11111111-1111-4111-8111-111111111111.apps.example.test",
+      delivery: {
+        kind: "exact_origin",
+        origin: "https://11111111-1111-4111-8111-111111111111.apps.example.test",
+      },
       context: {
         workspaceId: "workspace-1",
         appId: "app-1",
@@ -111,13 +115,43 @@ describe("OpenGeni App bridge", () => {
     await expect(bridge.ready).rejects.toBeInstanceOf(OgAppBridgeError);
   });
 
-  test("requires one exact bridge target origin and never falls back to wildcard delivery", () => {
+  test("uses wildcard delivery only for an explicitly opaque sandbox", async () => {
+    const testChannel = channel();
+    const deliveredOrigins: string[] = [];
+    const bridge = createOgAppHostBridge({
+      targetWindow: {
+        postMessage(_message: unknown, origin: string) {
+          deliveredOrigins.push(origin);
+        },
+      },
+      token: "0123456789abcdef",
+      delivery: { kind: "opaque_sandbox" },
+      context: {
+        workspaceId: "workspace-1",
+        appId: "app-1",
+        launchId: "22222222-2222-4222-8222-222222222222",
+        releaseId: "33333333-3333-4333-8333-333333333333",
+        catalogDigest: "a".repeat(64),
+        authorityGeneration: "actor:7",
+        appVersion: "1.0.0",
+        grantedCapabilities: [],
+      },
+      grantedCapabilities: [],
+      invoke: async () => null,
+      channelFactory: () => testChannel,
+    });
+    expect(deliveredOrigins).toEqual(["*"]);
+    bridge.close();
+    await expect(bridge.ready).rejects.toBeInstanceOf(OgAppBridgeError);
+  });
+
+  test("rejects malformed exact delivery origins", () => {
     const testChannel = channel();
     expect(() =>
       createOgAppHostBridge({
         targetWindow: { postMessage() {} },
         token: "0123456789abcdef",
-        targetOrigin: "*",
+        delivery: { kind: "exact_origin", origin: "*" },
         context: {
           workspaceId: "workspace-1",
           appId: "app-1",
@@ -132,6 +166,51 @@ describe("OpenGeni App bridge", () => {
         invoke: async () => null,
         channelFactory: () => testChannel,
       }),
-    ).toThrow("exact HTTP(S) origin");
+    ).toThrow("exact delivery origin");
+  });
+
+  test("accepts a transferred app port only from the exact parent window", async () => {
+    const parent = {} as Window;
+    const listeners: Array<(event: MessageEvent<unknown>) => void> = [];
+    const appWindow = {
+      parent,
+      addEventListener(_type: string, next: EventListener) {
+        listeners.push(next as (event: MessageEvent<unknown>) => void);
+      },
+      removeEventListener(_type: string, current: EventListener) {
+        const index = listeners.indexOf(current as (event: MessageEvent<unknown>) => void);
+        if (index >= 0) listeners.splice(index, 1);
+      },
+    };
+    const testChannel = channel();
+    const readyMessages: unknown[] = [];
+    testChannel.port1.addEventListener("message", (event) => readyMessages.push(event.data));
+    const connected = connectOgApp({ window: appWindow, timeoutMs: 1_000 });
+    const connectMessage = {
+      protocol: OG_APP_BRIDGE_PROTOCOL,
+      kind: "connect",
+      token: "0123456789abcdef",
+    } as const;
+
+    listeners[0]?.({
+      source: {} as Window,
+      data: connectMessage,
+      ports: [testChannel.port2 as unknown as MessagePort],
+    } as unknown as MessageEvent<unknown>);
+    expect(listeners).toHaveLength(1);
+
+    listeners[0]?.({
+      source: parent,
+      data: connectMessage,
+      ports: [testChannel.port2 as unknown as MessagePort],
+    } as unknown as MessageEvent<unknown>);
+    const client = await connected;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(readyMessages).toContainEqual({
+      protocol: OG_APP_BRIDGE_PROTOCOL,
+      kind: "ready",
+      token: "0123456789abcdef",
+    });
+    client.close();
   });
 });

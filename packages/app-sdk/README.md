@@ -9,6 +9,12 @@ parent DOM handle, browser storage, OpenGeni credentials, or a general-purpose
 `postMessage` listener after connection. Capability calls are rejected locally
 unless the human confirmed that capability for the current run.
 
+Hosts must choose an explicit bridge delivery mode. Exact-origin frames use an
+HTTP(S) origin. Opaque sandbox frames use the dedicated `opaque_sandbox` mode,
+which targets the exact iframe `WindowProxy` and transfers the private channel
+with wildcard delivery because browsers expose those frames with a `null`
+origin. Arbitrary caller-provided wildcard origins are not accepted.
+
 Inside an app:
 
 ```ts

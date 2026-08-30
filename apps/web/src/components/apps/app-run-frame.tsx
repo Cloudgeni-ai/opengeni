@@ -85,7 +85,7 @@ export function AppRunFrame({
       const bridge = createOgAppHostBridge({
         targetWindow,
         token: launch.nonce,
-        targetOrigin: launch.appOrigin,
+        delivery: { kind: "opaque_sandbox" },
         context: {
           workspaceId,
           appId: app.id,

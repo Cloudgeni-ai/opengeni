@@ -108,6 +108,21 @@ export type OgAppHostWindow = {
   postMessage(message: unknown, targetOrigin: string, transfer: Transferable[]): void;
 };
 
+export type OgAppBridgeDelivery =
+  | Readonly<{
+      kind: "exact_origin";
+      origin: string;
+    }>
+  | Readonly<{
+      /**
+       * Sandboxed frames without `allow-same-origin` have an opaque origin, so
+       * browsers require wildcard postMessage delivery. Authority remains bound
+       * to the exact WindowProxy, one transferred MessagePort, and the launch
+       * token rather than to ambient window messaging.
+       */
+      kind: "opaque_sandbox";
+    }>;
+
 export type OgAppHostBridge = {
   readonly ready: Promise<void>;
   close(): void;
@@ -254,7 +269,7 @@ export function createOgAppHostBridge(options: {
   context: OgAppContext;
   grantedCapabilities: Iterable<string>;
   invoke: (request: OgCapabilityInvocation) => Promise<OgCapabilityInvocationResult>;
-  targetOrigin: string;
+  delivery: OgAppBridgeDelivery;
   readyTimeoutMs?: number;
   maxPendingRequests?: number;
   channelFactory?: () => OgMessageChannel;
@@ -262,22 +277,24 @@ export function createOgAppHostBridge(options: {
   if (!validToken(options.token)) {
     throw new TypeError("The Apps bridge token must be 16-256 URL-safe characters.");
   }
-  let targetOrigin: string;
-  try {
-    const parsedTargetOrigin = new URL(options.targetOrigin);
-    if (
-      (parsedTargetOrigin.protocol !== "https:" && parsedTargetOrigin.protocol !== "http:") ||
-      parsedTargetOrigin.username ||
-      parsedTargetOrigin.password ||
-      parsedTargetOrigin.pathname !== "/" ||
-      parsedTargetOrigin.search ||
-      parsedTargetOrigin.hash
-    ) {
-      throw new Error("invalid target origin");
+  let targetOrigin = "*";
+  if (options.delivery.kind === "exact_origin") {
+    try {
+      const parsedTargetOrigin = new URL(options.delivery.origin);
+      if (
+        (parsedTargetOrigin.protocol !== "https:" && parsedTargetOrigin.protocol !== "http:") ||
+        parsedTargetOrigin.username ||
+        parsedTargetOrigin.password ||
+        parsedTargetOrigin.pathname !== "/" ||
+        parsedTargetOrigin.search ||
+        parsedTargetOrigin.hash
+      ) {
+        throw new Error("invalid target origin");
+      }
+      targetOrigin = parsedTargetOrigin.origin;
+    } catch {
+      throw new TypeError("The Apps bridge exact delivery origin must be one HTTP(S) origin.");
     }
-    targetOrigin = parsedTargetOrigin.origin;
-  } catch {
-    throw new TypeError("The Apps bridge targetOrigin must be one exact HTTP(S) origin.");
   }
   if (!appContext(options.context) || !isOgJsonValue(options.context)) {
     throw new TypeError("The Apps bridge context must be JSON-safe.");
