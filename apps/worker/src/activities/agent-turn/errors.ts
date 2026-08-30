@@ -11,6 +11,7 @@ import {
   EmptyCompactionSummaryError,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
+  isModalTaskExecStartDnsResolutionError,
   RoutingWorkspaceRootChangedError,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
@@ -105,6 +106,7 @@ export function providerRecoveryResult(input: {
       ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
+          input.failureCode === "sandbox_command_start_unavailable" ||
           input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable" ||
           input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
@@ -870,6 +872,14 @@ export function agentRunFailurePayload(
       error:
         "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
       code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
+      retryable: true,
+    };
+  }
+  if (isModalTaskExecStartDnsResolutionError(error)) {
+    return {
+      error:
+        "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
+      code: "sandbox_command_start_unavailable",
       retryable: true,
     };
   }

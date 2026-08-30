@@ -7,14 +7,18 @@ subscription credentials. It does **not** activate personal credential use.
 ## Credential authority facts
 
 Every `codex_subscription_credentials` row now has an explicit
-`workspace|user` authority scope. Existing rows and omitted new-writer values
-are classified as `workspace`.
+`workspace|user|organization` authority scope. Existing rows and omitted
+workspace-writer values are classified as `workspace`.
 
 - `workspace` requires null owner-membership and user-resource authority facts.
 - `user` requires one active same-account organization membership and the exact
   active `organization_user_resource_authorities` tuple whose resource kind is
   `codex_subscription`, resource id is the credential row id, and generation is
   the stored positive generation.
+- `organization` requires `workspace_id = NULL`, `organization_id = account_id`,
+  and no personal-authority tuple. Migration
+  `0381_organization_codex_subscription_inheritance.sql` activates this scope
+  for managed organization owners/admins and inheriting shared workspaces.
 
 The validation trigger intentionally uses invoker rights. The runtime role has
 no direct visibility or DML on the FORCE-RLS organization authority tables, so
@@ -42,10 +46,9 @@ on accepted logical turns, scheduled tasks, system updates, and child-result
 system-update outbox rows. All legacy rows backfill to the workspace form, and
 current writers continue to receive that default.
 
-## Deliberately not activated
+## Personal authority remains deliberately unactivated
 
-This slice does not change credential connection, discovery, listing,
-selection, allocation, leases, token loading or refresh, pin/failover,
-capacity, connected Apps, reset-credit redemption, realtime, transcription,
-usage, billing, or consumption. Those paths remain workspace-scoped until a
-later activation revalidates an opaque snapshot against exact live authority.
+The `user` snapshot and personal credential lifecycle remain inert. Migration
+0381 activates organization-owned pools through an explicit workspace source
+preference, not through the personal authority snapshot. Connected Apps and
+reset-credit redemption intentionally remain workspace-credential-only.

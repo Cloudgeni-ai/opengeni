@@ -252,7 +252,17 @@ describe("PATCH /codex/settings — rotation settings", () => {
     ensure: ReturnType<typeof spyOn>;
     update: ReturnType<typeof spyOn>;
     mutation: ReturnType<typeof spyOn>;
+    source: ReturnType<typeof spyOn>;
   } {
+    const source = spyOn(opengeniDb, "getWorkspaceCodexSubscriptionSource").mockResolvedValue({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      workspaceKind: "shared",
+      mode: "workspace",
+      effectiveSource: "workspace",
+      workspaceAvailable: true,
+      organizationAvailable: false,
+    });
     const ensure = spyOn(opengeniDb, "ensureCodexRotationSettings").mockResolvedValue(undefined);
     const update = spyOn(opengeniDb, "updateCodexRotationSettings").mockResolvedValue({
       activeCredentialId: ID_A,
@@ -269,7 +279,8 @@ describe("PATCH /codex/settings — rotation settings", () => {
     restores.push(() => ensure.mockRestore());
     restores.push(() => update.mockRestore());
     restores.push(() => mutation.mockRestore());
-    return { ensure, update, mutation };
+    restores.push(() => source.mockRestore());
+    return { ensure, update, mutation, source };
   }
 
   test("enables rotation and returns the effective settings", async () => {
@@ -324,6 +335,31 @@ describe("PATCH /codex/settings — rotation settings", () => {
     expect(res.status).toBe(400);
   });
 
+  test("rejects workspace rotation mutations when the effective pool is organization-managed", async () => {
+    const { ensure, update, mutation, source } = spySettings();
+    source.mockResolvedValue({
+      accountId: ACCOUNT,
+      workspaceId: WS,
+      workspaceKind: "shared",
+      mode: "organization",
+      effectiveSource: "organization",
+      workspaceAvailable: false,
+      organizationAvailable: true,
+    });
+    const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
+      method: "PATCH",
+      headers: {
+        authorization: await bearer(["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ rotationEnabled: true }),
+    });
+    expect(res.status).toBe(409);
+    expect(ensure).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(mutation).not.toHaveBeenCalled();
+  });
+
   test("requires connections:write (read-only token is 403/401)", async () => {
     spySettings();
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
@@ -335,5 +371,32 @@ describe("PATCH /codex/settings — rotation settings", () => {
       body: JSON.stringify({ rotationEnabled: true }),
     });
     expect([401, 403]).toContain(res.status);
+  });
+});
+
+describe("PATCH /codex/source — active lease fencing", () => {
+  test("returns 409 when an active turn prevents changing the effective source", async () => {
+    const mutation = spyOn(opengeniDb, "setWorkspaceCodexSubscriptionMode").mockRejectedValue(
+      new Error("Codex subscription source cannot change while active turns are using it"),
+    );
+    restores.push(() => mutation.mockRestore());
+
+    const res = await app().request(`/v1/workspaces/${WS}/codex/source`, {
+      method: "PATCH",
+      headers: {
+        authorization: await bearer(["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ mode: "organization" }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        message: "Codex subscription source cannot change while active turns are using it",
+        status: 409,
+      },
+    });
   });
 });

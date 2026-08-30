@@ -45,6 +45,7 @@ import type { DocumentAuthorityKind } from "@opengeni/sdk";
 type OrganizationAdminSection =
   | "overview"
   | "knowledge"
+  | "models"
   | "people"
   | "recovery"
   | "retention"
@@ -421,6 +422,7 @@ const workspaceOrganizationRoute = createRoute({
     const section =
       search.section === "overview" ||
       search.section === "knowledge" ||
+      search.section === "models" ||
       search.section === "people" ||
       search.section === "recovery" ||
       search.section === "retention" ||

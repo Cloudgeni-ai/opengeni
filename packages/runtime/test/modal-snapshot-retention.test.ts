@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, mock, spyOn, test } from "bun:test";
+import { ToolCallError } from "@openai/agents-core";
 import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
 import { testSettings } from "@opengeni/testing";
@@ -11,12 +12,29 @@ import {
   OpenGeniModalSandboxClient,
   installOpenGeniModalSnapshotPolicy,
   isModalExecAlreadyCompletedError,
+  isModalTaskExecStartDnsResolutionError,
   modalProvider,
 } from "../src/sandbox/providers/modal";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 
 type Persistence = "tar" | "snapshot_filesystem" | "snapshot_directory";
 const SNAPSHOT_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
+const MODAL_TASK_EXEC_START_PATH = "/modal.task_command_router.TaskCommandRouter/TaskExecStart";
+const MODAL_TASK_EXEC_START_DNS_DETAILS =
+  "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443";
+
+function modalTaskExecStartDnsError(overrides: Record<string, unknown> = {}) {
+  return Object.assign(
+    new Error(`${MODAL_TASK_EXEC_START_PATH} UNAVAILABLE: ${MODAL_TASK_EXEC_START_DNS_DETAILS}`),
+    {
+      name: "ClientError",
+      path: MODAL_TASK_EXEC_START_PATH,
+      code: 14,
+      details: MODAL_TASK_EXEC_START_DNS_DETAILS,
+    },
+    overrides,
+  );
+}
 
 function fakeSession(
   persistence: Persistence,
@@ -126,6 +144,95 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     } finally {
       modal.close();
     }
+  });
+
+  test("matches the exact TaskExecStart DNS ClientError with numeric or string UNAVAILABLE", () => {
+    expect(isModalTaskExecStartDnsResolutionError(modalTaskExecStartDnsError())).toBe(true);
+    expect(
+      isModalTaskExecStartDnsResolutionError(modalTaskExecStartDnsError({ code: "UNAVAILABLE" })),
+    ).toBe(true);
+  });
+
+  test("traverses ToolCallError.error, cause, and all AggregateError leaves", () => {
+    const toolWrapped = new ToolCallError(
+      "Failed to run function tools",
+      modalTaskExecStartDnsError(),
+    );
+    const causeWrapped = new Error("outer", { cause: toolWrapped });
+    const aggregate = new AggregateError(
+      [
+        causeWrapped,
+        new ToolCallError(
+          "second tool failed",
+          modalTaskExecStartDnsError({ code: "UNAVAILABLE" }),
+        ),
+      ],
+      "parallel tools failed",
+    );
+
+    expect(isModalTaskExecStartDnsResolutionError(toolWrapped)).toBe(true);
+    expect(isModalTaskExecStartDnsResolutionError(causeWrapped)).toBe(true);
+    expect(isModalTaskExecStartDnsResolutionError(aggregate)).toBe(true);
+  });
+
+  test("rejects every near match and any HTTP status metadata", () => {
+    for (const nearMatch of [
+      modalTaskExecStartDnsError({ name: "Error" }),
+      modalTaskExecStartDnsError({ path: "/other.TaskCommandRouter/TaskExecStart" }),
+      modalTaskExecStartDnsError({ code: 13 }),
+      modalTaskExecStartDnsError({ code: "14" }),
+      modalTaskExecStartDnsError({ code: "unavailable" }),
+      modalTaskExecStartDnsError({
+        details:
+          "Name resolution failed for target task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443",
+      }),
+      modalTaskExecStartDnsError({
+        details:
+          "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19T.w.modal.host:443",
+      }),
+      modalTaskExecStartDnsError({
+        details:
+          "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7-bk19t.w.modal.host:443",
+      }),
+      modalTaskExecStartDnsError({
+        details:
+          "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:80",
+      }),
+      modalTaskExecStartDnsError({ details: `${MODAL_TASK_EXEC_START_DNS_DETAILS}.` }),
+      modalTaskExecStartDnsError({ status: 400 }),
+      modalTaskExecStartDnsError({ status: 503 }),
+      modalTaskExecStartDnsError({ statusCode: "404" }),
+      modalTaskExecStartDnsError({ response: { status: 422 } }),
+    ]) {
+      expect(isModalTaskExecStartDnsResolutionError(nearMatch)).toBe(false);
+    }
+  });
+
+  test("rejects mixed siblings, message-only lookalikes, shutdown, and over-deep wrappers", () => {
+    const mixedAggregate = new AggregateError(
+      [modalTaskExecStartDnsError(), new Error("another tool may have started")],
+      "parallel tools failed",
+    );
+    const mixedLinks = Object.assign(new Error("wrapper", { cause: new Error("sibling") }), {
+      error: modalTaskExecStartDnsError(),
+    });
+    const messageOnly = new Error(
+      `${MODAL_TASK_EXEC_START_PATH} UNAVAILABLE: ${MODAL_TASK_EXEC_START_DNS_DETAILS}`,
+    );
+    const shutdown = modalTaskExecStartDnsError({
+      code: 9,
+      details: "Modal Sandbox is shutting down",
+    });
+    let overDeep: unknown = modalTaskExecStartDnsError();
+    for (let depth = 0; depth < 80; depth += 1) {
+      overDeep = new Error("wrapper", { cause: overDeep });
+    }
+
+    expect(isModalTaskExecStartDnsResolutionError(mixedAggregate)).toBe(false);
+    expect(isModalTaskExecStartDnsResolutionError(mixedLinks)).toBe(false);
+    expect(isModalTaskExecStartDnsResolutionError(messageOnly)).toBe(false);
+    expect(isModalTaskExecStartDnsResolutionError(shutdown)).toBe(false);
+    expect(isModalTaskExecStartDnsResolutionError(overDeep)).toBe(false);
   });
 
   test("translates snapshot_filesystem timeout and disables provider expiry", async () => {

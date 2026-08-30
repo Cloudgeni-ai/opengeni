@@ -153,6 +153,16 @@ describe("codex connect routes", () => {
 });
 
 describe("codex multi-account routes (auth + validation)", () => {
+  test("organization Codex accounts require a managed human session", async () => {
+    const res = await app().request(`/v1/organizations/${ACCOUNT}/codex/accounts`);
+    expect(res.status).toBe(401);
+  });
+
+  test("workspace Codex source reads require workspace access", async () => {
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/source`);
+    expect([401, 403]).toContain(res.status);
+  });
+
   test("GET /codex/accounts requires auth (route exists, db untouched on the reject)", async () => {
     const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts`);
     expect([401, 403]).toContain(res.status);

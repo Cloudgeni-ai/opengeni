@@ -91,6 +91,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "list_organization_administration_members(uuid, text)",
   "get_organization_administration_overview(uuid, text)",
   "get_workspace_kind(uuid, uuid)",
+  "resolve_workspace_codex_subscription_source(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
   "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
@@ -605,6 +606,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "resolve_workspace_codex_subscription_source(uuid, uuid)",
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
 ] as const;
@@ -776,6 +778,7 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_invitation_binding_events",
@@ -937,6 +940,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_artifact_versions",
   "workspace_artifacts",
   "workspace_captures",
+  "workspace_codex_subscription_preferences",
   "workspace_control_events",
   "workspace_inference_controls",
   "workspace_instruction_policy_activation_events",
@@ -1062,6 +1066,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publications",
   "model_call_facts",
   "new_session_drafts",
+  "organization_codex_rotation_settings",
   "pack_installation_components",
   "pack_installations",
   "pr_review_app_registrations",
@@ -1128,6 +1133,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "video_generation_references",
   "workspace_artifacts",
   "workspace_captures",
+  "workspace_codex_subscription_preferences",
   "workspace_control_events",
   "workspace_inference_controls",
   "workspace_instruction_policy_heads",

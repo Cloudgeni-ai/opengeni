@@ -11,8 +11,8 @@ rather than choose. The canonical product boundary is in
 | Credential | Prefix / transport | Issued by | Verified by | Lifetime | Intended holder |
 | --- | --- | --- | --- | --- | --- |
 | Deployment access key | `x-opengeni-access-key` header | Operator (env) | API perimeter middleware | Static | Ordinary callers and deployment-only surfaces of a key-gated deployment (coarse perimeter, not identity) |
-| Organization API key | `ogk_…` bearer | Organization key administration via `POST /v1/organizations/:organizationId/api-keys` | Hash lookup (stored hashed, shown once) plus organization/workspace authorization | Until revoked | An external product backend calling organization-workspace routes; never a browser or Personal workspace |
-| Workspace API key | `ogk_…` bearer | Authorized caller via `POST /v1/workspaces/:workspaceId/api-keys` | Hash lookup plus exact workspace authorization | Until revoked | A backend or automation constrained to one organization workspace |
+| Organization API key | `ogk_…` bearer | Organization key administration via `POST /v1/organizations/:organizationId/api-keys` | Hash lookup (stored hashed, shown once) plus organization/workspace authorization | Until expiration or revocation | An external product backend calling organization-workspace routes; never a browser or Personal workspace |
+| Workspace API key | `ogk_…` bearer | Authorized caller via `POST /v1/workspaces/:workspaceId/api-keys` | Hash lookup plus exact workspace authorization | Until expiration or revocation | A backend or automation constrained to one organization workspace |
 | Delegated access token | `ogd_…` bearer; domain-bound `ogd2_…` when it asserts service provenance | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
 | Browser session-set authority | Opaque 43-character `HttpOnly`, `SameSite=Lax` cookie; hash-only at rest | Session-set API | Hash lookup plus CSRF, generation, actor-epoch, and exact-origin admission | 30-day idle / 180-day absolute | One managed browser installation; never browser JavaScript |
@@ -24,7 +24,7 @@ rather than choose. The canonical product boundary is in
 | NATS user JWT / callout | NATS credentials | API auth-callout service | NATS server (callout account) | Connection | Machine agents and internal services on the message bus |
 | Session MCP headers | Arbitrary headers, authenticated-encrypted at rest | Embedding host per session (`mcpServers` on create; rotatable per user turn) | Worker-side decrypt for execution; ordinary projections are metadata-only. Dedicated tenant-scoped `secrets:read` with metadata-only audit is an approved release-held follow-up, not part of the current emergency head | Host-defined; version-bumped on rotation | Host's own MCP server called from a session |
 | Capability MCP headers | Arbitrary headers, authenticated-encrypted at rest | Workspace admin when configuring a capability | Worker-side decrypt for execution; ordinary projections are metadata-only. Dedicated tenant-scoped `secrets:read` with metadata-only audit is an approved release-held follow-up, not part of the current emergency head | Until reconfigured | Third-party MCP servers enabled workspace-wide |
-| Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow | OpenAI; OpenGeni stores encrypted, never returns them | Provider-defined, auto-refreshed | Workspaces using a ChatGPT/Codex subscription as a model provider |
+| Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow in Workspace or Organization settings | OpenAI; OpenGeni stores encrypted, never returns them | Provider-defined, auto-refreshed | One workspace pool, or one organization pool inherited by current and future shared workspaces; personal workspaces remain local |
 | Git credential-binding secret | Contained GitHub/GitLab/Azure DevOps provider token, or host smart-Git broker bearer | OpenGeni or embedding host per repository binding | Git provider or host HTTPS smart-Git broker | Provider/host-defined, independently renewed during active managed-sandbox turns | Sandbox git operations; direct provider tokens may also reach the matching provider CLI, while broker bearers are Git-only (delivered via hashed binding files, never baked into manifests/config/remote URIs) |
 | Personal GitHub Git broker bearer | Encrypted opaque `oggh1.…` password used only by Git smart HTTP | OpenGeni worker from an exact accepted personal repository snapshot | OpenGeni API broker plus live connection/repository/provider revalidation | Five minutes, proactively renewed without changing routes | One active managed-sandbox attempt; delivered through private editor/file ingress, never provider CLIs, Connected Machines, model context, manifests, remotes, argv, logs, events, or audit text |
 | Host run credentials | Provider-neutral environment values and credential files | Embedding host through `ConnectionCredentialsPort.runCredentials` | Upstream cloud/service CLIs and SDKs | Host-defined, proactively renewed during the active attempt | Agent commands and session-scoped Channel-A terminal processes; never the box-global shared `ttyd` process |
@@ -40,6 +40,12 @@ Rules that hold across the table:
   Personal workspaces are excluded. Store the token in a secret manager, map
   product tenants to opaque workspace ids, and proxy browser operations through
   the product backend. See [`product-integration.md`](product-integration.md).
+
+- **Ambiguous legacy account keys are revoked on upgrade.** Migration 0382
+  marks historical null-workspace keys without explicit organization provenance
+  as `legacy_account` and revokes them so a pre-change API instance cannot keep
+  accepting them during a rolling deployment. Reissue the integration through
+  the organization API-key control plane; do not reuse a legacy token.
 
 - **Managed browser slots do not expose provider credentials.** In `dual` and
   `broker`, a safe browser projection names bounded slot display metadata and one

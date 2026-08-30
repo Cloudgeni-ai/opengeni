@@ -453,7 +453,15 @@ duration-based caps on legitimate run length; fix the pathology instead.
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
 required-MCP connectivity failures resume the same accepted turn after a pacing
-delay. Required first-party connect/tools-list also treats a rolling API
+delay. The exact Modal `TaskExecStart` `ClientError` for DNS resolution of a
+`task-*.w.modal.host:443` command router is also recovery-safe after Modal's own
+ten `UNAVAILABLE` retries: DNS failed before the command transport connected, so
+OpenGeni resumes the same accepted turn through the connectivity backoff.
+Generic `TaskExecStart` `UNAVAILABLE`, mixed failure batches, message-only
+lookalikes, any attached HTTP status metadata, and the exact
+`FAILED_PRECONDITION: Modal Sandbox is shutting down` condition remain
+non-retryable because pre-command safety is not proven. Required first-party
+connect/tools-list also treats a rolling API
 replacement's temporary `404` or statusless plain transport `Error` as
 recovery-safe. That narrow exception does not apply to external MCP servers,
 tool invocation, explicit non-404 client responses, or typed
@@ -937,6 +945,15 @@ parent are settled authority: the result stays pending for a later human/new-goa
 turn and cannot manufacture a new inference or rewrite the settled public status
 by itself. A result arriving while the parent turn is live remains available to
 that turn's ordinary loop.
+The provider-neutral coordination contract creates a child only for concrete,
+bounded, independently useful work with a defined integration point. Parent
+work must stay disjoint from the delegated scope. A parent joining a child uses
+`session_wait` with `waitFor: "completion"` before committing or publishing
+dependent work. `goal.completed` is a durable goal fact, not proof that the
+child has emitted its final result. Completed commentary messages, maintenance
+turns, and continuation segment settlements are also ignored until an ordinary
+result-bearing turn settles. The ordinary `waitFor: "change"` mode remains
+available for progress monitoring.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
@@ -1034,7 +1051,11 @@ workspace mutation admission.
 If that process's durable row already records exit or loss, a later model-visible
 `write_stdin` remains fenced before provider dispatch but returns the stored
 terminal exit/loss banner. It never labels a permanently dead handle as a
-retryable platform fault or calls the provider again.
+retryable platform fault or calls the provider again. If provider polling and a
+lease-loss reconciler race to settle the same terminal state, the first durable
+state and evidence reason win; a later matching state/exit proof is idempotent
+and unpins the local route even when its bounded evidence reason differs, while
+a contradictory state or exit code remains outcome-unknown and pinned.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from

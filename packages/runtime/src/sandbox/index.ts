@@ -150,6 +150,7 @@ export {
   ensureModalRegistryImage,
   deleteModalCheckpointSnapshot,
   inspectModalSandboxLifecycle,
+  isModalTaskExecStartDnsResolutionError,
   modalSessionMatchesCheckpointProviderBinding,
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,

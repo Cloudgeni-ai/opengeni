@@ -947,6 +947,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "company_profile_agent_automatic_activation_receipts",
       "organization_company_profile_agent_policies",
       "organization_company_profile_agent_policy_events",
+      "organization_codex_rotation_settings",
       "organization_recovery_approvals",
       "organization_recovery_command_receipts",
       "organization_recovery_custodian_acceptances",
@@ -964,6 +965,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "session_work_claim_revisions",
       "session_work_claim_write_capabilities",
       "session_work_claims",
+      "workspace_codex_subscription_preferences",
     ]);
     // The current runtime evaluator intentionally requires every capability in
     // today's schema. A database frozen immediately after 0353 predates the
@@ -1018,6 +1020,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     const post0353CapabilityRoutines = new Set([
       ...sessionSetRoutines,
       "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
+      "resolve_workspace_codex_subscription_source(uuid, uuid)",
     ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(

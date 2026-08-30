@@ -2247,9 +2247,16 @@ export async function createWorkspace(
     externalSource?: string | null;
     externalId?: string | null;
     agentInstructions?: string | null;
+    maxWorkspacesPerAccount?: number | null;
   },
 ): Promise<Workspace> {
   return await db.transaction(async (tx) => {
+    const transaction = tx as unknown as Database;
+    if (workspaceLimitConfigured(input.maxWorkspacesPerAccount)) {
+      await setRlsContext(transaction, { accountId: input.accountId, workspaceId: null });
+    }
+    await acquireWorkspaceLimitLock(transaction, input.accountId, input.maxWorkspacesPerAccount);
+    await assertWorkspaceCapacity(transaction, input.accountId, input.maxWorkspacesPerAccount);
     const [row] = await tx
       .insert(schema.workspaces)
       .values({
@@ -2264,7 +2271,7 @@ export async function createWorkspace(
     if (!row) {
       throw new Error("Failed to create workspace");
     }
-    await setRlsContext(tx as unknown as Database, {
+    await setRlsContext(transaction, {
       accountId: row.accountId,
       workspaceId: row.id,
     });
@@ -2293,6 +2300,65 @@ export class WorkspaceExternalIdentityConflictError extends Error {
   }
 }
 
+export async function findWorkspaceByExternalIdentity(
+  db: Database,
+  input: {
+    externalSource: string;
+    externalId: string;
+  },
+): Promise<Workspace | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaces)
+    .where(
+      and(
+        eq(schema.workspaces.externalSource, input.externalSource),
+        eq(schema.workspaces.externalId, input.externalId),
+      ),
+    )
+    .limit(1);
+  if (!row) return null;
+  const kind = await workspaceKindProjection(db, row);
+  return mapWorkspace(row, await workspaceControlProjection(db, row.id), kind);
+}
+
+export class WorkspaceLimitExceededError extends Error {
+  constructor(readonly limit: number) {
+    super(`Workspace limit reached (${limit})`);
+    this.name = "WorkspaceLimitExceededError";
+  }
+}
+
+function workspaceLimitConfigured(limit: number | null | undefined): limit is number {
+  return limit !== null && limit !== undefined;
+}
+
+async function acquireWorkspaceLimitLock(
+  db: Database,
+  accountId: string,
+  limit: number | null | undefined,
+): Promise<void> {
+  if (!workspaceLimitConfigured(limit)) return;
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-limit:${accountId}`}, 0))`,
+  );
+}
+
+async function assertWorkspaceCapacity(
+  db: Database,
+  accountId: string,
+  limit: number | null | undefined,
+): Promise<void> {
+  if (!workspaceLimitConfigured(limit)) return;
+  const [{ count } = { count: 0 }] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.accountId, accountId));
+  if (Number(count) >= limit) {
+    throw new WorkspaceLimitExceededError(limit);
+  }
+}
+
 /**
  * Create an organization workspace exactly once for a stable external tenant
  * identity. The global unique index is the concurrency arbiter. A replay never
@@ -2307,9 +2373,44 @@ export async function ensureWorkspaceByExternalIdentity(
     name: string;
     slug?: string | null;
     agentInstructions?: string | null;
+    maxWorkspacesPerAccount?: number | null;
   },
 ): Promise<{ workspace: Workspace; created: boolean }> {
   return await db.transaction(async (tx) => {
+    const transaction = tx as unknown as Database;
+    await setRlsContext(transaction, { accountId: input.accountId, workspaceId: null });
+    await acquireWorkspaceLimitLock(transaction, input.accountId, input.maxWorkspacesPerAccount);
+
+    const [existingBeforeCreate] = await tx
+      .select()
+      .from(schema.workspaces)
+      .where(
+        and(
+          eq(schema.workspaces.externalSource, input.externalSource),
+          eq(schema.workspaces.externalId, input.externalId),
+        ),
+      )
+      .limit(1);
+    if (existingBeforeCreate) {
+      if (existingBeforeCreate.accountId !== input.accountId) {
+        throw new WorkspaceExternalIdentityConflictError();
+      }
+      const kind = await workspaceKindProjection(transaction, existingBeforeCreate);
+      if (kind !== "shared") {
+        throw new WorkspaceExternalIdentityConflictError();
+      }
+      return {
+        workspace: mapWorkspace(
+          existingBeforeCreate,
+          await workspaceControlProjection(transaction, existingBeforeCreate.id),
+          kind,
+        ),
+        created: false,
+      };
+    }
+
+    await assertWorkspaceCapacity(transaction, input.accountId, input.maxWorkspacesPerAccount);
+
     const [inserted] = await tx
       .insert(schema.workspaces)
       .values({
@@ -2326,7 +2427,7 @@ export async function ensureWorkspaceByExternalIdentity(
       .returning();
 
     if (inserted) {
-      await setRlsContext(tx as unknown as Database, {
+      await setRlsContext(transaction, {
         accountId: inserted.accountId,
         workspaceId: inserted.id,
       });
@@ -2363,14 +2464,14 @@ export async function ensureWorkspaceByExternalIdentity(
     if (!existing || existing.accountId !== input.accountId) {
       throw new WorkspaceExternalIdentityConflictError();
     }
-    const kind = await workspaceKindProjection(tx as unknown as Database, existing);
+    const kind = await workspaceKindProjection(transaction, existing);
     if (kind !== "shared") {
       throw new WorkspaceExternalIdentityConflictError();
     }
     return {
       workspace: mapWorkspace(
         existing,
-        await workspaceControlProjection(tx as unknown as Database, existing.id),
+        await workspaceControlProjection(transaction, existing.id),
         kind,
       ),
       created: false,
@@ -3611,17 +3712,99 @@ export async function createApiKey(
     keyHash: string;
     permissions: Permission[];
     expiresAt?: Date | null;
+    credentialKind?: schema.ApiKeyCredentialKind;
+  },
+): Promise<ApiKey> {
+  const workspaceId = input.workspaceId ?? null;
+  const credentialKind = input.credentialKind ?? (workspaceId ? "workspace" : "legacy_account");
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb
+      .insert(schema.apiKeys)
+      .values({
+        accountId: input.accountId,
+        workspaceId,
+        name: input.name,
+        description: input.description ?? null,
+        credentialKind,
+        prefix: input.prefix,
+        keyHash: input.keyHash,
+        permissions: input.permissions,
+        expiresAt: input.expiresAt ?? null,
+      })
+      .returning();
+    if (!row) {
+      throw new Error("Failed to create API key");
+    }
+    return mapApiKey(row);
+  });
+}
+
+export class OrganizationApiKeyLimitExceededError extends Error {
+  constructor(readonly limit: number) {
+    super(`API key limit reached (${limit})`);
+    this.name = "OrganizationApiKeyLimitExceededError";
+  }
+}
+
+/**
+ * Create an explicitly proven organization key under one account-scoped lock.
+ * An authenticating organization key may open exactly one temporary overlap
+ * slot at the configured cap so it can create a replacement before revocation.
+ */
+export async function createOrganizationApiKey(
+  db: Database,
+  input: {
+    accountId: string;
+    name: string;
+    description?: string | null;
+    prefix: string;
+    keyHash: string;
+    permissions: Permission[];
+    expiresAt?: Date | null;
+    maxActiveKeys?: number | null;
+    rotationSourceApiKeyId?: string | null;
   },
 ): Promise<ApiKey> {
   return await withRlsContext(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
+    { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
+      if (input.maxActiveKeys !== null && input.maxActiveKeys !== undefined) {
+        await scopedDb.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`organization-api-key:${input.accountId}`}, 0))`,
+        );
+        const activePredicate = and(
+          eq(schema.apiKeys.accountId, input.accountId),
+          isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
+          isNull(schema.apiKeys.revokedAt),
+          or(isNull(schema.apiKeys.expiresAt), gt(schema.apiKeys.expiresAt, new Date())),
+        );
+        const [{ count } = { count: 0 }] = await scopedDb
+          .select({ count: sql<number>`count(*)::int` })
+          .from(schema.apiKeys)
+          .where(activePredicate);
+        const activeCount = Number(count);
+        let rotationOverlapAllowed = false;
+        if (activeCount === input.maxActiveKeys && input.rotationSourceApiKeyId) {
+          const [rotationSource] = await scopedDb
+            .select({ id: schema.apiKeys.id })
+            .from(schema.apiKeys)
+            .where(and(activePredicate, eq(schema.apiKeys.id, input.rotationSourceApiKeyId)))
+            .limit(1);
+          rotationOverlapAllowed = Boolean(rotationSource);
+        }
+        if (activeCount >= input.maxActiveKeys && !rotationOverlapAllowed) {
+          throw new OrganizationApiKeyLimitExceededError(input.maxActiveKeys);
+        }
+      }
+
       const [row] = await scopedDb
         .insert(schema.apiKeys)
         .values({
           accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
+          workspaceId: null,
+          credentialKind: "organization",
           name: input.name,
           description: input.description ?? null,
           prefix: input.prefix,
@@ -3630,9 +3813,7 @@ export async function createApiKey(
           expiresAt: input.expiresAt ?? null,
         })
         .returning();
-      if (!row) {
-        throw new Error("Failed to create API key");
-      }
+      if (!row) throw new Error("Failed to create organization API key");
       return mapApiKey(row);
     },
   );
@@ -3654,7 +3835,13 @@ export async function listOrganizationApiKeys(db: Database, accountId: string): 
     const rows = await scopedDb
       .select()
       .from(schema.apiKeys)
-      .where(and(eq(schema.apiKeys.accountId, accountId), isNull(schema.apiKeys.workspaceId)))
+      .where(
+        and(
+          eq(schema.apiKeys.accountId, accountId),
+          isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
+        ),
+      )
       .orderBy(desc(schema.apiKeys.createdAt));
     return rows.map(mapApiKey);
   });
@@ -3695,6 +3882,7 @@ export async function countActiveOrganizationApiKeysForAccount(
         and(
           eq(schema.apiKeys.accountId, accountId),
           isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
           sql`${schema.apiKeys.revokedAt} is null`,
           sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
         ),
@@ -3740,6 +3928,7 @@ export async function revokeOrganizationApiKey(
         and(
           eq(schema.apiKeys.accountId, accountId),
           isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
           eq(schema.apiKeys.id, apiKeyId),
         ),
       )
@@ -3751,7 +3940,7 @@ export async function revokeOrganizationApiKey(
 export async function findActiveApiKeyByHash(
   db: Database,
   keyHash: string,
-): Promise<ApiKey | null> {
+): Promise<(ApiKey & { credentialKind: schema.ApiKeyCredentialKind }) | null> {
   return await db.transaction(async (tx) => {
     await tx.execute(sql`select set_config('opengeni.api_key_hash', ${keyHash}, true)`);
     const [row] = await tx
@@ -3773,7 +3962,10 @@ export async function findActiveApiKeyByHash(
       .update(schema.apiKeys)
       .set({ lastUsedAt: now, updatedAt: now })
       .where(eq(schema.apiKeys.id, row.id));
-    return mapApiKey({ ...row, lastUsedAt: now });
+    return {
+      ...mapApiKey({ ...row, lastUsedAt: now }),
+      credentialKind: row.credentialKind,
+    };
   });
 }
 
@@ -19621,6 +19813,7 @@ export type RigVersionVerificationAttempt = {
   attemptId: string;
   expectedActiveVersionId: string | null;
   requestedAt: string;
+  reused: boolean;
 };
 
 export type PendingInactiveRigVersionVerificationAttempt = {
@@ -19720,6 +19913,7 @@ export async function beginRigVersionVerificationAttempt(
         attemptId: state.attemptId,
         expectedActiveVersionId: state.expectedActiveVersionId,
         requestedAt: state.requestedAt,
+        reused: true,
       };
     }
 
@@ -19755,7 +19949,13 @@ export async function beginRigVersionVerificationAttempt(
       )
       .returning();
     if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
-    return { version: mapRigVersion(row), attemptId, expectedActiveVersionId, requestedAt };
+    return {
+      version: mapRigVersion(row),
+      attemptId,
+      expectedActiveVersionId,
+      requestedAt,
+      reused: false,
+    };
   });
 }
 
@@ -21345,6 +21545,270 @@ export type WorkspaceEnvironmentForRun = VariableSetForRun;
 // `getCodexCredentialStatus` returns metadata only (never the secret column).
 // ---------------------------------------------------------------------------
 
+export type WorkspaceCodexSubscriptionMode =
+  | "automatic"
+  | "workspace"
+  | "organization"
+  | "disabled";
+export type EffectiveCodexSubscriptionSource = "workspace" | "organization" | "disabled";
+
+export type WorkspaceCodexSubscriptionSource = {
+  accountId: string;
+  workspaceId: string;
+  workspaceKind: "personal" | "shared";
+  mode: WorkspaceCodexSubscriptionMode;
+  effectiveSource: EffectiveCodexSubscriptionSource;
+  workspaceAvailable: boolean;
+  organizationAvailable: boolean;
+};
+
+const workspaceCodexOrganizationInheritanceAvailable = new Map<string, boolean>();
+
+function rememberWorkspaceCodexOrganizationInheritance(
+  workspaceId: string,
+  available: boolean,
+): void {
+  workspaceCodexOrganizationInheritanceAvailable.set(workspaceId, available);
+  if (workspaceCodexOrganizationInheritanceAvailable.size > 10_000) {
+    const oldest = workspaceCodexOrganizationInheritanceAvailable.keys().next().value;
+    if (oldest) workspaceCodexOrganizationInheritanceAvailable.delete(oldest);
+  }
+}
+
+async function queryWorkspaceCodexSubscriptionSource(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<WorkspaceCodexSubscriptionSource> {
+  const rows = await scopedDb.execute<{
+    account_id: string;
+    workspace_kind: "personal" | "shared";
+    mode: WorkspaceCodexSubscriptionMode;
+    effective_source: EffectiveCodexSubscriptionSource;
+    workspace_available: boolean;
+    organization_available: boolean;
+  }>(sql`
+      select workspace.account_id,
+        get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
+        coalesce(preference.mode, 'automatic') as mode,
+        resolve_workspace_codex_subscription_source(workspace.account_id, workspace.id)
+          as effective_source,
+        exists (
+          select 1 from codex_subscription_credentials credential
+          where credential.account_id = workspace.account_id
+            and credential.workspace_id = workspace.id
+            and credential.authority_scope in ('workspace', 'user')
+        ) as workspace_available,
+        exists (
+          select 1 from codex_subscription_credentials credential
+          where credential.account_id = workspace.account_id
+            and credential.organization_id = workspace.account_id
+            and credential.authority_scope = 'organization'
+        ) as organization_available
+      from workspaces workspace
+      left join workspace_codex_subscription_preferences preference
+        on preference.account_id = workspace.account_id
+       and preference.workspace_id = workspace.id
+      where workspace.id = ${workspaceId}
+      limit 1
+    `);
+  const row = rows[0];
+  if (!row) throw new Error(`workspace not found for Codex source: ${workspaceId}`);
+  return {
+    accountId: row.account_id,
+    workspaceId,
+    workspaceKind: row.workspace_kind,
+    mode: row.mode,
+    effectiveSource: row.effective_source,
+    workspaceAvailable: row.workspace_available,
+    organizationAvailable: row.organization_available,
+  };
+}
+
+async function queryLegacyWorkspaceCodexSubscriptionSource(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<WorkspaceCodexSubscriptionSource> {
+  const rows = await scopedDb.execute<{
+    account_id: string;
+    workspace_available: boolean;
+  }>(sql`
+    select workspace.account_id,
+      exists (
+        select 1 from codex_subscription_credentials credential
+        where credential.account_id = workspace.account_id
+          and credential.workspace_id = workspace.id
+      ) as workspace_available
+    from workspaces workspace
+    where workspace.id = ${workspaceId}
+    limit 1
+  `);
+  const row = rows[0];
+  if (!row) throw new Error(`workspace not found for Codex source: ${workspaceId}`);
+  return {
+    accountId: row.account_id,
+    workspaceId,
+    workspaceKind: "shared",
+    mode: "automatic",
+    effectiveSource: "workspace",
+    workspaceAvailable: row.workspace_available,
+    organizationAvailable: false,
+  };
+}
+
+async function getWorkspaceCodexSubscriptionSourceScoped(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<WorkspaceCodexSubscriptionSource> {
+  const known = workspaceCodexOrganizationInheritanceAvailable.get(workspaceId);
+  if (known === false) {
+    return await queryLegacyWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
+  }
+  if (known === true) {
+    return await queryWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
+  }
+  try {
+    const source = await scopedDb.transaction(async (savepoint) =>
+      queryWorkspaceCodexSubscriptionSource(savepoint as unknown as Database, workspaceId),
+    );
+    rememberWorkspaceCodexOrganizationInheritance(workspaceId, true);
+    return source;
+  } catch (error) {
+    const state = nestedPostgresSqlState(error);
+    if (state !== "42P01" && state !== "42703" && state !== "42883") throw error;
+    rememberWorkspaceCodexOrganizationInheritance(workspaceId, false);
+    return await queryLegacyWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
+  }
+}
+
+export async function getWorkspaceCodexSubscriptionSource(
+  db: Database,
+  workspaceId: string,
+): Promise<WorkspaceCodexSubscriptionSource> {
+  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId),
+  );
+}
+
+async function lockWorkspaceCodexSubscriptionSource(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<void> {
+  await scopedDb.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`codex-subscription-source:${workspaceId}`}, 0))`,
+  );
+}
+
+function codexCredentialPoolCondition(input: {
+  accountId: string;
+  workspaceId: string;
+  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
+}): SQL {
+  return input.source === "organization"
+    ? and(
+        eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+        eq(schema.codexSubscriptionCredentials.organizationId, input.accountId),
+        eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
+      )!
+    : and(
+        eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
+        inArray(schema.codexSubscriptionCredentials.authorityScope, ["workspace", "user"]),
+      )!;
+}
+
+async function effectiveCodexCredentialPoolCondition(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<{ source: WorkspaceCodexSubscriptionSource; condition: SQL | null }> {
+  const source = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId);
+  return {
+    source,
+    condition:
+      source.effectiveSource === "disabled"
+        ? null
+        : codexCredentialPoolCondition({
+            accountId: source.accountId,
+            workspaceId,
+            source: source.effectiveSource,
+          }),
+  };
+}
+
+export async function setWorkspaceCodexSubscriptionModeInTransaction(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    mode: WorkspaceCodexSubscriptionMode;
+  },
+): Promise<WorkspaceCodexSubscriptionSource> {
+  await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
+  const current = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+  if (current.accountId !== input.accountId) {
+    throw new Error("Codex source account does not match the workspace account");
+  }
+  if (current.workspaceKind === "personal" && input.mode !== "automatic") {
+    throw new Error("personal workspaces always use workspace Codex subscriptions");
+  }
+  if (current.mode === input.mode) return current;
+  const [activeCodexTurn] = await scopedDb
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
+        sql`${schema.sessionTurns.model} like 'codex/%'`,
+      ),
+    )
+    .limit(1);
+  const [liveLease] = await scopedDb
+    .select({ id: schema.codexCredentialLeases.id })
+    .from(schema.codexCredentialLeases)
+    .where(
+      and(
+        eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
+        gt(schema.codexCredentialLeases.leasedUntil, new Date()),
+      ),
+    )
+    .limit(1);
+  if (activeCodexTurn || liveLease) {
+    throw new Error("Codex subscription source cannot change while active turns are using it");
+  }
+  await scopedDb
+    .insert(schema.workspaceCodexSubscriptionPreferences)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      mode: input.mode,
+      updatedBySubjectId: input.subjectId,
+    })
+    .onConflictDoUpdate({
+      target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
+      set: {
+        mode: input.mode,
+        updatedBySubjectId: input.subjectId,
+        updatedAt: new Date(),
+      },
+    });
+  return await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+}
+
+export async function setWorkspaceCodexSubscriptionMode(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    mode: WorkspaceCodexSubscriptionMode;
+  },
+): Promise<WorkspaceCodexSubscriptionSource> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, (scopedDb) =>
+    setWorkspaceCodexSubscriptionModeInTransaction(scopedDb, input),
+  );
+}
+
 /**
  * Login / rotation write (multi-account P1). Caller passes the PRE-encrypted
  * credential blob. Keyed on the composite partial index (workspace, chatgpt
@@ -21495,6 +21959,402 @@ export async function upsertCodexSubscriptionCredential(
       return { kind: "upserted", id: row.id, isNew };
     },
   );
+}
+
+async function withOrganizationCodexAdministrator<T>(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+  use: (scopedDb: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      await scopedDb.execute(sql`
+        select get_organization_administration_overview(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId}
+        )
+      `);
+      return await use(scopedDb);
+    },
+  );
+}
+
+export async function ensureOrganizationCodexRotationSettings(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<void> {
+  await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    await scopedDb
+      .insert(schema.organizationCodexRotationSettings)
+      .values({ accountId: input.organizationId, leaseRotationEnabled: false })
+      .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
+  });
+}
+
+export async function upsertOrganizationCodexSubscriptionCredential(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    credentialEncrypted: string;
+    chatgptAccountId: string | null;
+    scopes: string | null;
+    planType: string | null;
+    isFedramp: boolean;
+    expiresAt: Date | null;
+    lastRefreshAt: Date | null;
+    accountEmail?: string | null;
+    label?: string | null;
+  },
+): Promise<{ id: string; isNew: boolean; wakeTargets: CodexCapacityWakeTarget[] }> {
+  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`organization-codex-upsert:${input.organizationId}:${input.chatgptAccountId ?? "null"}`}, 0))`,
+    );
+    await scopedDb
+      .insert(schema.organizationCodexRotationSettings)
+      .values({ accountId: input.organizationId, leaseRotationEnabled: false })
+      .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
+    const [settings] = await scopedDb
+      .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .for("update")
+      .limit(1);
+    if (!settings) throw new Error("organization Codex rotation settings are unavailable");
+    const now = new Date();
+    const [row] = await scopedDb
+      .insert(schema.codexSubscriptionCredentials)
+      .values({
+        accountId: input.organizationId,
+        workspaceId: null,
+        organizationId: input.organizationId,
+        authorityScope: "organization",
+        credentialEncrypted: input.credentialEncrypted,
+        chatgptAccountId: input.chatgptAccountId,
+        scopes: input.scopes,
+        planType: input.planType,
+        isFedramp: input.isFedramp,
+        expiresAt: input.expiresAt,
+        lastRefreshAt: input.lastRefreshAt,
+        accountEmail: input.accountEmail ?? null,
+        label: input.label ?? null,
+        connectedBySubjectId: input.actorSubjectId,
+        status: "active",
+        lastError: null,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.codexSubscriptionCredentials.organizationId,
+          schema.codexSubscriptionCredentials.chatgptAccountId,
+        ],
+        targetWhere: sql`authority_scope = 'organization' and chatgpt_account_id is not null`,
+        set: {
+          credentialEncrypted: input.credentialEncrypted,
+          scopes: input.scopes,
+          planType: input.planType,
+          isFedramp: input.isFedramp,
+          expiresAt: input.expiresAt,
+          lastRefreshAt: input.lastRefreshAt,
+          accountEmail: input.accountEmail ?? null,
+          label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
+          connectedBySubjectId: input.actorSubjectId,
+          status: "active",
+          lastError: null,
+          version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
+          updatedAt: now,
+        },
+      })
+      .returning({
+        id: schema.codexSubscriptionCredentials.id,
+        createdAt: schema.codexSubscriptionCredentials.createdAt,
+        updatedAt: schema.codexSubscriptionCredentials.updatedAt,
+      });
+    if (!row) throw new Error("organization Codex credential upsert returned no row");
+    await scopedDb
+      .update(schema.organizationCodexRotationSettings)
+      .set({ activeCredentialId: row.id, updatedAt: now })
+      .where(
+        and(
+          eq(schema.organizationCodexRotationSettings.accountId, input.organizationId),
+          isNull(schema.organizationCodexRotationSettings.activeCredentialId),
+        ),
+      );
+    const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
+      accountId: input.organizationId,
+      reason: "organization_codex_credential_connected",
+      restoreWorkspaceId: null,
+    });
+    return {
+      id: row.id,
+      isNew: row.createdAt.getTime() === row.updatedAt.getTime(),
+      wakeTargets,
+    };
+  });
+}
+
+export async function listOrganizationCodexAccountStatuses(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<CodexAccountStatus[]> {
+  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const [rotation] = await scopedDb
+      .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .limit(1);
+    const rows = await scopedDb
+      .select({
+        id: schema.codexSubscriptionCredentials.id,
+        chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
+        label: schema.codexSubscriptionCredentials.label,
+        accountEmail: schema.codexSubscriptionCredentials.accountEmail,
+        planType: schema.codexSubscriptionCredentials.planType,
+        status: schema.codexSubscriptionCredentials.status,
+        allocatorEnabled: schema.codexSubscriptionCredentials.allocatorEnabled,
+        allocatorVersion: schema.codexSubscriptionCredentials.allocatorVersion,
+        allocatorUpdatedBySubjectId:
+          schema.codexSubscriptionCredentials.allocatorUpdatedBySubjectId,
+        allocatorUpdatedAt: schema.codexSubscriptionCredentials.allocatorUpdatedAt,
+        resetCreditAvailableCount: schema.codexSubscriptionCredentials.resetCreditAvailableCount,
+        resetCreditsCheckedAt: schema.codexSubscriptionCredentials.resetCreditsCheckedAt,
+        connectedBySubjectId: schema.codexSubscriptionCredentials.connectedBySubjectId,
+        expiresAt: schema.codexSubscriptionCredentials.expiresAt,
+        lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
+        lastError: schema.codexSubscriptionCredentials.lastError,
+        primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
+        primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
+        secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
+        secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
+        usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
+        exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
+      })
+      .from(schema.codexSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.accountId, input.organizationId),
+          eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
+          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
+        ),
+      )
+      .orderBy(
+        asc(schema.codexSubscriptionCredentials.createdAt),
+        asc(schema.codexSubscriptionCredentials.id),
+      );
+    return rows.map((row) => ({
+      ...row,
+      source: "organization" as const,
+      isActive: row.id === rotation?.activeCredentialId,
+      expiresAt: codexMetadataDate(row.expiresAt),
+      lastRefreshAt: codexMetadataDate(row.lastRefreshAt),
+      allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
+      resetCreditsCheckedAt: codexMetadataDate(row.resetCreditsCheckedAt),
+      primaryResetAt: codexMetadataDate(row.primaryResetAt),
+      secondaryResetAt: codexMetadataDate(row.secondaryResetAt),
+      usageCheckedAt: codexMetadataDate(row.usageCheckedAt),
+      exhaustedUntil: codexMetadataDate(row.exhaustedUntil),
+    }));
+  });
+}
+
+export async function getOrganizationCodexRotationSettings(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<CodexRotationSettings | null> {
+  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
+        rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
+        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
+        rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
+      })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .limit(1);
+    return row ?? null;
+  });
+}
+
+export async function setActiveOrganizationCodexCredential(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string; credentialId: string },
+): Promise<{ activated: boolean; wakeTargets: CodexCapacityWakeTarget[] }> {
+  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const [settings] = await scopedDb
+      .select({
+        id: schema.organizationCodexRotationSettings.id,
+        activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
+      })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .for("update")
+      .limit(1);
+    if (!settings) return { activated: false, wakeTargets: [] };
+    const [credential] = await scopedDb
+      .select({ id: schema.codexSubscriptionCredentials.id })
+      .from(schema.codexSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+          eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
+          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
+        ),
+      )
+      .limit(1);
+    if (!credential) return { activated: false, wakeTargets: [] };
+    const updated = await scopedDb
+      .update(schema.organizationCodexRotationSettings)
+      .set({ activeCredentialId: input.credentialId, updatedAt: new Date() })
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .returning({ id: schema.organizationCodexRotationSettings.id });
+    if (updated.length === 0) return { activated: false, wakeTargets: [] };
+    const wakeTargets =
+      settings.activeCredentialId === input.credentialId
+        ? []
+        : await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
+            accountId: input.organizationId,
+            reason: "organization_codex_active_credential_changed",
+            restoreWorkspaceId: null,
+          });
+    return { activated: true, wakeTargets };
+  });
+}
+
+export async function updateOrganizationCodexRotationSettings(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    rotationEnabled: boolean;
+  },
+): Promise<(CodexRotationSettings & { wakeTargets: CodexCapacityWakeTarget[] }) | null> {
+  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const [current] = await scopedDb
+      .select({
+        rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
+        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
+      })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .for("update")
+      .limit(1);
+    if (!current) return null;
+    const [row] = await scopedDb
+      .update(schema.organizationCodexRotationSettings)
+      .set({
+        rotationEnabled: input.rotationEnabled,
+        leaseRotationEnabled: input.rotationEnabled,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .returning({
+        activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
+        rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
+        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
+        rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
+      });
+    if (!row) return null;
+    const changed =
+      current.rotationEnabled !== input.rotationEnabled ||
+      current.leaseRotationEnabled !== input.rotationEnabled;
+    const wakeTargets = changed
+      ? await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
+          accountId: input.organizationId,
+          reason: "organization_codex_rotation_settings_changed",
+          restoreWorkspaceId: null,
+        })
+      : [];
+    return { ...row, wakeTargets };
+  });
+}
+
+export async function renameOrganizationCodexAccount(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    credentialId: string;
+    label: string | null;
+  },
+): Promise<boolean> {
+  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const updated = await scopedDb
+      .update(schema.codexSubscriptionCredentials)
+      .set({ label: input.label, updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+          eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
+          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
+        ),
+      )
+      .returning({ id: schema.codexSubscriptionCredentials.id });
+    return updated.length > 0;
+  });
+}
+
+export async function disconnectOrganizationCodexAccount(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string; credentialId: string },
+): Promise<{
+  removed: boolean;
+  newActiveCredentialId: string | null;
+  wakeTargets: CodexCapacityWakeTarget[];
+}> {
+  return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const [settings] = await scopedDb
+      .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .for("update")
+      .limit(1);
+    const removed = await scopedDb
+      .delete(schema.codexSubscriptionCredentials)
+      .where(
+        and(
+          eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+          eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
+          eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
+        ),
+      )
+      .returning({ id: schema.codexSubscriptionCredentials.id });
+    if (removed.length === 0) {
+      return {
+        removed: false,
+        newActiveCredentialId: settings?.activeCredentialId ?? null,
+        wakeTargets: [],
+      };
+    }
+    let newActiveCredentialId = settings?.activeCredentialId ?? null;
+    if (newActiveCredentialId === input.credentialId) {
+      const [replacement] = await scopedDb
+        .select({ id: schema.codexSubscriptionCredentials.id })
+        .from(schema.codexSubscriptionCredentials)
+        .where(
+          and(
+            eq(schema.codexSubscriptionCredentials.organizationId, input.organizationId),
+            eq(schema.codexSubscriptionCredentials.authorityScope, "organization"),
+          ),
+        )
+        .orderBy(desc(schema.codexSubscriptionCredentials.createdAt))
+        .limit(1);
+      newActiveCredentialId = replacement?.id ?? null;
+      await scopedDb
+        .update(schema.organizationCodexRotationSettings)
+        .set({ activeCredentialId: newActiveCredentialId, updatedAt: new Date() })
+        .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId));
+    }
+    const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
+      accountId: input.organizationId,
+      reason: "organization_codex_credential_disconnected",
+      restoreWorkspaceId: null,
+    });
+    return { removed: true, newActiveCredentialId, wakeTargets };
+  });
 }
 
 export type CodexAppsSettings = {
@@ -21863,15 +22723,12 @@ export async function loadCodexCredentialForRun(
     );
   }
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+    if (!pool.condition) return null;
     const [row] = await scopedDb
       .select()
       .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
+      .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
       .limit(1);
     if (!row) {
       return null;
@@ -21937,6 +22794,8 @@ export async function recordCodexTokenRefresh(
   },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, input.workspaceId);
+    if (!pool.condition) return false;
     const updated = await scopedDb
       .update(schema.codexSubscriptionCredentials)
       .set({
@@ -21951,6 +22810,7 @@ export async function recordCodexTokenRefresh(
       .where(
         and(
           eq(schema.codexSubscriptionCredentials.id, input.id),
+          pool.condition,
           eq(schema.codexSubscriptionCredentials.version, input.version),
           eq(schema.codexSubscriptionCredentials.status, "active"),
         ),
@@ -22001,12 +22861,15 @@ export async function setCodexCredentialStatus(
   target: { id: string; version: number },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+    if (!pool.condition) return false;
     const updated = await scopedDb
       .update(schema.codexSubscriptionCredentials)
       .set({ status, lastError, updatedAt: new Date() })
       .where(
         and(
           eq(schema.codexSubscriptionCredentials.id, target.id),
+          pool.condition,
           eq(schema.codexSubscriptionCredentials.version, target.version),
           eq(schema.codexSubscriptionCredentials.status, "active"),
         ),
@@ -22031,15 +22894,12 @@ export async function setCodexCredentialStatusById(
   lastError: string | null,
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+    if (!pool.condition) return false;
     const [row] = await scopedDb
       .select({ version: schema.codexSubscriptionCredentials.version })
       .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-        ),
-      )
+      .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
       .limit(1);
     if (!row) {
       return false;
@@ -22049,8 +22909,8 @@ export async function setCodexCredentialStatusById(
       .set({ status, lastError, updatedAt: new Date() })
       .where(
         and(
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
           eq(schema.codexSubscriptionCredentials.id, credentialId),
+          pool.condition,
           eq(schema.codexSubscriptionCredentials.version, row.version),
         ),
       )
@@ -22085,11 +22945,8 @@ async function getCodexCredentialStatusScoped(
   scopedDb: Database,
   workspaceId: string,
 ): Promise<CodexCredentialStatus | null> {
-  await scopedDb.execute(sql`
-    select id from codex_rotation_settings
-    where workspace_id = ${workspaceId}
-    for update
-  `);
+  const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+  if (!pool.condition || pool.source.effectiveSource === "disabled") return null;
   const cols = {
     id: schema.codexSubscriptionCredentials.id,
     chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
@@ -22100,13 +22957,24 @@ async function getCodexCredentialStatusScoped(
     lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
     lastError: schema.codexSubscriptionCredentials.lastError,
   } as const;
-  const [settingsRow] = await scopedDb
-    .select({
-      activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-    })
-    .from(schema.codexRotationSettings)
-    .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-    .limit(1);
+  const organizationSource = pool.source.effectiveSource === "organization";
+  const [settingsRow] = organizationSource
+    ? await scopedDb
+        .select({
+          activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
+        })
+        .from(schema.organizationCodexRotationSettings)
+        .where(eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId))
+        .for("update")
+        .limit(1)
+    : await scopedDb
+        .select({
+          activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+        })
+        .from(schema.codexRotationSettings)
+        .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
+        .for("update")
+        .limit(1);
 
   let row:
     | {
@@ -22127,7 +22995,7 @@ async function getCodexCredentialStatusScoped(
       .where(
         and(
           eq(schema.codexSubscriptionCredentials.id, settingsRow.activeCredentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+          pool.condition,
         ),
       )
       .limit(1);
@@ -22138,14 +23006,21 @@ async function getCodexCredentialStatusScoped(
     [row] = await scopedDb
       .select(cols)
       .from(schema.codexSubscriptionCredentials)
-      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
+      .where(pool.condition)
       .orderBy(desc(schema.codexSubscriptionCredentials.createdAt))
       .limit(1);
     if (row && settingsRow && settingsRow.activeCredentialId !== row.id) {
-      await scopedDb
-        .update(schema.codexRotationSettings)
-        .set({ activeCredentialId: row.id, updatedAt: new Date() })
-        .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
+      if (organizationSource) {
+        await scopedDb
+          .update(schema.organizationCodexRotationSettings)
+          .set({ activeCredentialId: row.id, updatedAt: new Date() })
+          .where(eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId));
+      } else {
+        await scopedDb
+          .update(schema.codexRotationSettings)
+          .set({ activeCredentialId: row.id, updatedAt: new Date() })
+          .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
+      }
     }
   }
   if (!row) {
@@ -22195,15 +23070,31 @@ export async function workspaceCodexSubscriptionActive(
   for (let attempt = 0; attempt < CODEX_ACTIVE_READ_ATTEMPTS; attempt++) {
     try {
       return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-        const [rotation] = await scopedDb
-          .select({
-            rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-            leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
-          })
-          .from(schema.codexRotationSettings)
-          .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-          .for("update")
-          .limit(1);
+        const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+        if (!pool.condition || pool.source.effectiveSource === "disabled") return false;
+        const [rotation] =
+          pool.source.effectiveSource === "organization"
+            ? await scopedDb
+                .select({
+                  rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
+                  leaseRotationEnabled:
+                    schema.organizationCodexRotationSettings.leaseRotationEnabled,
+                })
+                .from(schema.organizationCodexRotationSettings)
+                .where(
+                  eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId),
+                )
+                .for("update")
+                .limit(1)
+            : await scopedDb
+                .select({
+                  rotationEnabled: schema.codexRotationSettings.rotationEnabled,
+                  leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
+                })
+                .from(schema.codexRotationSettings)
+                .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
+                .for("update")
+                .limit(1);
         const leaseCutoverEnabled = Boolean(
           settings.codexCredentialLeasingEnabled &&
           rotation?.rotationEnabled &&
@@ -22223,12 +23114,7 @@ export async function workspaceCodexSubscriptionActive(
         const [row] = await scopedDb
           .select({ id: schema.codexSubscriptionCredentials.id })
           .from(schema.codexSubscriptionCredentials)
-          .where(
-            and(
-              eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-              eq(schema.codexSubscriptionCredentials.status, "active"),
-            ),
-          )
+          .where(and(pool.condition, eq(schema.codexSubscriptionCredentials.status, "active")))
           .limit(1);
         return Boolean(row);
       });
@@ -22300,6 +23186,7 @@ export async function isCodexBilledTurn(input: {
 
 export type CodexAccountStatus = {
   id: string;
+  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
   chatgptAccountId: string | null;
   label: string | null;
   accountEmail: string | null;
@@ -22343,6 +23230,7 @@ export type CodexLeaseAccountStatus = Omit<
   | "resetCreditAvailableCount"
   | "resetCreditsCheckedAt"
   | "connectedBySubjectId"
+  | "source"
 > & {
   activeLeaseCount: number;
   selectionCount: number;
@@ -22515,9 +23403,13 @@ async function listCodexLeaseCandidatesInTransaction(
     accountId: string;
     workspaceId: string;
     activeCredentialId: string | null;
+    source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
     excludeTurnId?: string | null;
   },
 ): Promise<CodexLeaseAccountStatus[]> {
+  const legacyWorkspaceOnly =
+    input.source === "workspace" &&
+    workspaceCodexOrganizationInheritanceAvailable.get(input.workspaceId) === false;
   const rows = await tx.execute(sql<CodexLeaseCandidateRow>`
     select
       c.id,
@@ -22538,14 +23430,29 @@ async function listCodexLeaseCandidatesInTransaction(
       c.exhausted_until,
       c.selection_count,
       c.last_selected_at,
-      count(l.id) filter (
-        where l.leased_until > now()
-          and (${input.excludeTurnId ?? null}::uuid is null or l.turn_id <> ${input.excludeTurnId ?? null})
-      )::int as active_lease_count
+      ${
+        input.source === "organization"
+          ? sql`opengeni_private.codex_organization_live_lease_count(
+              ${input.accountId}::uuid,
+              c.id,
+              ${input.excludeTurnId ?? null}::uuid
+            )`
+          : sql`count(l.id) filter (
+              where l.leased_until > now()
+                and (${input.excludeTurnId ?? null}::uuid is null or l.turn_id <> ${input.excludeTurnId ?? null})
+            )::int`
+      } as active_lease_count
     from codex_subscription_credentials c
     left join codex_credential_leases l
-      on l.workspace_id = c.workspace_id and l.credential_id = c.id
-    where c.account_id = ${input.accountId} and c.workspace_id = ${input.workspaceId}
+      on ${input.source === "organization" ? sql`false` : sql`l.workspace_id = ${input.workspaceId} and l.credential_id = c.id`}
+    where c.account_id = ${input.accountId}
+      and ${
+        input.source === "organization"
+          ? sql`c.authority_scope = 'organization' and c.organization_id = ${input.accountId}`
+          : legacyWorkspaceOnly
+            ? sql`c.workspace_id = ${input.workspaceId}`
+            : sql`c.authority_scope in ('workspace', 'user') and c.workspace_id = ${input.workspaceId}`
+      }
     group by c.id
     order by c.created_at asc, c.id asc
   `);
@@ -22614,20 +23521,47 @@ export async function acquireCodexCredentialLease<
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      // The singleton workspace row is the only serialization point. Never
-      // SKIP LOCKED: concurrent replicas wait, then observe the winner's lease.
-      await tx.execute(sql`
-        insert into codex_rotation_settings
-          (account_id, workspace_id, lease_rotation_enabled)
-        values (${input.accountId}, ${input.workspaceId}, false)
-        on conflict (workspace_id) do nothing
-      `);
-      const settingsRows = await tx.execute(sql<{
-        active_credential_id: string | null;
-        rotation_enabled: boolean;
-        lease_rotation_enabled: boolean;
-        rotation_strategy: string;
-      }>`
+      await lockWorkspaceCodexSubscriptionSource(tx, input.workspaceId);
+      const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
+      if (source.accountId !== input.accountId) {
+        throw new Error("Codex subscription source account does not match the turn account");
+      }
+      const disabledSource = source.effectiveSource === "disabled";
+      const organizationSource = source.effectiveSource === "organization";
+      if (organizationSource) {
+        await tx.execute(sql`
+          insert into organization_codex_rotation_settings
+            (account_id, lease_rotation_enabled)
+          values (${input.accountId}, false)
+          on conflict (account_id) do nothing
+        `);
+      } else {
+        await tx.execute(sql`
+          insert into codex_rotation_settings
+            (account_id, workspace_id, lease_rotation_enabled)
+          values (${input.accountId}, ${input.workspaceId}, false)
+          on conflict (workspace_id) do nothing
+        `);
+      }
+      const settingsRows = organizationSource
+        ? await tx.execute(sql<{
+            active_credential_id: string | null;
+            rotation_enabled: boolean;
+            lease_rotation_enabled: boolean;
+            rotation_strategy: string;
+          }>`
+            select active_credential_id, rotation_enabled,
+                   lease_rotation_enabled, rotation_strategy
+            from organization_codex_rotation_settings
+            where account_id = ${input.accountId}
+            for update
+          `)
+        : await tx.execute(sql<{
+            active_credential_id: string | null;
+            rotation_enabled: boolean;
+            lease_rotation_enabled: boolean;
+            rotation_strategy: string;
+          }>`
         select active_credential_id, rotation_enabled,
                lease_rotation_enabled, rotation_strategy
         from codex_rotation_settings
@@ -22692,12 +23626,15 @@ export async function acquireCodexCredentialLease<
         : [];
       const existingCredentialId = existingRows[0]?.credential_id ?? null;
 
-      const allAccounts = await listCodexLeaseCandidatesInTransaction(tx as unknown as Database, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        activeCredentialId,
-        excludeTurnId: input.turnId,
-      });
+      const allAccounts = disabledSource
+        ? []
+        : await listCodexLeaseCandidatesInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            activeCredentialId,
+            source: organizationSource ? "organization" : "workspace",
+            excludeTurnId: input.turnId,
+          });
       const sameTurnCredentialId = existingCredentialId;
       const selectionContext = (
         accounts: CodexLeaseAccountStatus[],
@@ -22773,11 +23710,19 @@ export async function acquireCodexCredentialLease<
       // pointer, but never create a lease or mutate fairness cursors.
       if (!leaseRotationEnabled) {
         if (advanceActivePointer && activeCredentialId !== selected.credentialId) {
-          await tx.execute(sql`
-            update codex_rotation_settings
-            set active_credential_id = ${selected.credentialId}, updated_at = now()
-            where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
-          `);
+          if (organizationSource) {
+            await tx.execute(sql`
+              update organization_codex_rotation_settings
+              set active_credential_id = ${selected.credentialId}, updated_at = now()
+              where account_id = ${input.accountId}
+            `);
+          } else {
+            await tx.execute(sql`
+              update codex_rotation_settings
+              set active_credential_id = ${selected.credentialId}, updated_at = now()
+              where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
+            `);
+          }
         }
         return {
           decision: selected.decision,
@@ -22829,16 +23774,23 @@ export async function acquireCodexCredentialLease<
           set selection_count = selection_count + 1,
               last_selected_at = now()
           where account_id = ${input.accountId}
-            and workspace_id = ${input.workspaceId}
             and id = ${selected.credentialId}
         `);
       }
       if (advanceActivePointer && activeCredentialId !== selected.credentialId) {
-        await tx.execute(sql`
-          update codex_rotation_settings
-          set active_credential_id = ${selected.credentialId}, updated_at = now()
-          where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
-        `);
+        if (organizationSource) {
+          await tx.execute(sql`
+            update organization_codex_rotation_settings
+            set active_credential_id = ${selected.credentialId}, updated_at = now()
+            where account_id = ${input.accountId}
+          `);
+        } else {
+          await tx.execute(sql`
+            update codex_rotation_settings
+            set active_credential_id = ${selected.credentialId}, updated_at = now()
+            where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
+          `);
+        }
       }
       return {
         decision: selected.decision,
@@ -23007,28 +23959,47 @@ async function lockExistingCodexRotationSettingsForCapacity(
   workspaceId: string,
 ): Promise<{
   accountId: string;
+  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
   activeCredentialId: string | null;
   rotationEnabled: boolean;
   leaseRotationEnabled: boolean;
   rotationStrategy: string;
 } | null> {
-  const rows = await tx.execute(sql<{
-    account_id: string;
-    active_credential_id: string | null;
-    rotation_enabled: boolean;
-    lease_rotation_enabled: boolean;
-    rotation_strategy: string;
-  }>`
-    select account_id, active_credential_id, rotation_enabled,
-           lease_rotation_enabled, rotation_strategy
-    from codex_rotation_settings
-    where workspace_id = ${workspaceId}
-    for update
-  `);
+  const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, workspaceId);
+  if (source.effectiveSource === "disabled") return null;
+  const rows =
+    source.effectiveSource === "organization"
+      ? await tx.execute(sql<{
+          account_id: string;
+          active_credential_id: string | null;
+          rotation_enabled: boolean;
+          lease_rotation_enabled: boolean;
+          rotation_strategy: string;
+        }>`
+        select account_id, active_credential_id, rotation_enabled,
+               lease_rotation_enabled, rotation_strategy
+        from organization_codex_rotation_settings
+        where account_id = ${source.accountId}
+        for update
+      `)
+      : await tx.execute(sql<{
+          account_id: string;
+          active_credential_id: string | null;
+          rotation_enabled: boolean;
+          lease_rotation_enabled: boolean;
+          rotation_strategy: string;
+        }>`
+        select account_id, active_credential_id, rotation_enabled,
+               lease_rotation_enabled, rotation_strategy
+        from codex_rotation_settings
+        where workspace_id = ${workspaceId}
+        for update
+      `);
   const row = rows[0];
   return row
     ? {
         accountId: row.account_id,
+        source: source.effectiveSource,
         activeCredentialId: row.active_credential_id,
         rotationEnabled: row.rotation_enabled,
         leaseRotationEnabled: row.rotation_enabled && row.lease_rotation_enabled,
@@ -23427,16 +24398,10 @@ type CodexCapacityMutationInput = {
   policyHash?: string | null;
 };
 
-async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
-  tx: TDatabase,
+async function wakeCodexCapacityWaitersInWorkspaceInTransaction(
+  tx: Database,
   input: CodexCapacityMutationInput,
-  mutate: (tx: TDatabase) => Promise<{ result: T; changed: boolean }>,
-): Promise<CodexCapacityMutationResult<T>> {
-  await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
-  const mutation = await mutate(tx);
-  if (!mutation.changed) {
-    return { result: mutation.result, wakeTargets: [] };
-  }
+): Promise<CodexCapacityWakeTarget[]> {
   const rows = await tx
     .update(schema.codexCapacityWaiters)
     .set({
@@ -23478,6 +24443,67 @@ async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
       workflowWakeRevision,
     });
   }
+  return wakeTargets;
+}
+
+async function wakeOrganizationCodexCapacityWaitersInTransaction(
+  tx: Database,
+  input: {
+    accountId: string;
+    reason: string;
+    policyHash?: string | null;
+    restoreWorkspaceId: string | null;
+  },
+): Promise<CodexCapacityWakeTarget[]> {
+  const wakeTargets: CodexCapacityWakeTarget[] = [];
+  await setRlsContext(tx, { accountId: input.accountId, workspaceId: null });
+  const workspaceRows = await tx.execute<{ workspace_id: string }>(sql`
+    select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid)
+    order by workspace_id
+  `);
+  for (const { workspace_id: workspaceId } of workspaceRows) {
+    await setRlsContext(tx, { accountId: input.accountId, workspaceId });
+    await tx.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
+    );
+    const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, workspaceId);
+    if (source.effectiveSource !== "organization") continue;
+    wakeTargets.push(
+      ...(await wakeCodexCapacityWaitersInWorkspaceInTransaction(tx, {
+        workspaceId,
+        reason: input.reason,
+        ...(input.policyHash !== undefined ? { policyHash: input.policyHash } : {}),
+      })),
+    );
+  }
+  await setRlsContext(tx, {
+    accountId: input.accountId,
+    workspaceId: input.restoreWorkspaceId,
+  });
+  return wakeTargets;
+}
+
+async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
+  tx: TDatabase,
+  input: CodexCapacityMutationInput,
+  mutate: (tx: TDatabase) => Promise<{ result: T; changed: boolean }>,
+): Promise<CodexCapacityMutationResult<T>> {
+  await lockWorkspaceCodexSubscriptionSource(tx, input.workspaceId);
+  const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
+  const mutation = await mutate(tx);
+  if (!mutation.changed) {
+    return { result: mutation.result, wakeTargets: [] };
+  }
+  const sourceAfter = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
+  const wakeTargets =
+    rotation?.source === "organization" && sourceAfter.effectiveSource === "organization"
+      ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
+          accountId: rotation.accountId,
+          reason: input.reason,
+          ...(input.policyHash !== undefined ? { policyHash: input.policyHash } : {}),
+          restoreWorkspaceId: input.workspaceId,
+        })
+      : await wakeCodexCapacityWaitersInWorkspaceInTransaction(tx, input);
   return {
     result: mutation.result,
     wakeTargets,
@@ -23846,6 +24872,7 @@ export async function reconcileCodexCapacityWait<
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           activeCredentialId: rotation.activeCredentialId,
+          source: rotation.source,
           excludeTurnId: waiter.blockedTurnId,
         });
         const policyScope = policy?.resolvePolicyScope?.(blockedTurn.metadata ?? {}) ?? null;
@@ -25346,6 +26373,8 @@ export async function quarantineCodexCredentialForLease(
         if (!leaseRows[0]) {
           return false;
         }
+        const pool = await effectiveCodexCredentialPoolCondition(tx, input.workspaceId);
+        if (!pool.condition) return false;
         const updated = await tx
           .update(schema.codexSubscriptionCredentials)
           .set(
@@ -25360,8 +26389,8 @@ export async function quarantineCodexCredentialForLease(
           .where(
             and(
               eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId),
               eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+              pool.condition,
             ),
           )
           .returning({ id: schema.codexSubscriptionCredentials.id });
@@ -25380,13 +26409,25 @@ export async function listCodexAccountStatuses(
   workspaceId: string,
 ): Promise<CodexAccountStatus[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [settingsRow] = await scopedDb
-      .select({
-        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-      })
-      .from(schema.codexRotationSettings)
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .limit(1);
+    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+    if (!pool.condition || pool.source.effectiveSource === "disabled") return [];
+    const accountSource: "workspace" | "organization" = pool.source.effectiveSource;
+    const [settingsRow] =
+      pool.source.effectiveSource === "organization"
+        ? await scopedDb
+            .select({
+              activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
+            })
+            .from(schema.organizationCodexRotationSettings)
+            .where(eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId))
+            .limit(1)
+        : await scopedDb
+            .select({
+              activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+            })
+            .from(schema.codexRotationSettings)
+            .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
+            .limit(1);
     const activeId = settingsRow?.activeCredentialId ?? null;
     const rows = await scopedDb
       .select({
@@ -25416,13 +26457,14 @@ export async function listCodexAccountStatuses(
         exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
       })
       .from(schema.codexSubscriptionCredentials)
-      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
+      .where(pool.condition)
       .orderBy(
         asc(schema.codexSubscriptionCredentials.createdAt),
         asc(schema.codexSubscriptionCredentials.id),
       );
     return rows.map((row) => ({
       ...row,
+      source: accountSource,
       expiresAt: codexMetadataDate(row.expiresAt),
       lastRefreshAt: codexMetadataDate(row.lastRefreshAt),
       allocatorUpdatedAt: codexMetadataDate(row.allocatorUpdatedAt),
@@ -26373,6 +27415,8 @@ export async function recordCodexAccountUsageWithWakeTargets(
     db,
     { workspaceId, reason: "codex_usage_refreshed" },
     async (tx) => {
+      const pool = await effectiveCodexCredentialPoolCondition(tx, workspaceId);
+      if (!pool.condition) return { result: false, changed: false };
       const [previous] = await tx
         .select({
           primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
@@ -26381,12 +27425,7 @@ export async function recordCodexAccountUsageWithWakeTargets(
           secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
         })
         .from(schema.codexSubscriptionCredentials)
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.id, credentialId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-          ),
-        )
+        .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
         .for("update");
       if (!previous) {
         return { result: false, changed: false };
@@ -26413,12 +27452,7 @@ export async function recordCodexAccountUsageWithWakeTargets(
           // metadata and must NOT race the (id, version) refresh CAS in
           // recordCodexTokenRefresh / setCodexCredentialStatus.
         })
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.id, credentialId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-          ),
-        )
+        .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
         .returning({ id: schema.codexSubscriptionCredentials.id });
       const rowUpdated = updated.length > 0;
       const timestampChanged = (before: Date | null, after: Date | null): boolean =>
@@ -26525,16 +27559,30 @@ export async function getCodexRotationSettings(
   workspaceId: string,
 ): Promise<CodexRotationSettings | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-        rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-        leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
-        rotationStrategy: schema.codexRotationSettings.rotationStrategy,
-      })
-      .from(schema.codexRotationSettings)
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .limit(1);
+    const source = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId);
+    if (source.effectiveSource === "disabled") return null;
+    const [row] =
+      source.effectiveSource === "organization"
+        ? await scopedDb
+            .select({
+              activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
+              rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
+              leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
+              rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
+            })
+            .from(schema.organizationCodexRotationSettings)
+            .where(eq(schema.organizationCodexRotationSettings.accountId, source.accountId))
+            .limit(1)
+        : await scopedDb
+            .select({
+              activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+              rotationEnabled: schema.codexRotationSettings.rotationEnabled,
+              leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
+              rotationStrategy: schema.codexRotationSettings.rotationStrategy,
+            })
+            .from(schema.codexRotationSettings)
+            .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
+            .limit(1);
     return row ?? null;
   });
 }
@@ -26666,15 +27714,12 @@ export async function setCodexCredentialExhaustedWithWakeTargets(
       reason: until === null ? "codex_cooldown_cleared" : "codex_cooldown_changed",
     },
     async (tx) => {
+      const pool = await effectiveCodexCredentialPoolCondition(tx, workspaceId);
+      if (!pool.condition) return { result: false, changed: false };
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
         .set({ exhaustedUntil: until })
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.id, credentialId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-          ),
-        )
+        .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
         .returning({ id: schema.codexSubscriptionCredentials.id });
       const changed = updated.length > 0;
       return { result: changed, changed };
@@ -26874,15 +27919,12 @@ export async function setSessionCodexPinInTransaction(
   options: SetSessionCodexPinOptions = {},
 ): Promise<boolean> {
   if (pinnedCredentialId !== null) {
+    const pool = await effectiveCodexCredentialPoolCondition(db, workspaceId);
+    if (!pool.condition) return false;
     const [cred] = await db
       .select({ id: schema.codexSubscriptionCredentials.id })
       .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, pinnedCredentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
+      .where(and(eq(schema.codexSubscriptionCredentials.id, pinnedCredentialId), pool.condition))
       .limit(1);
     if (!cred) {
       return false;
@@ -44450,11 +45492,12 @@ export class SandboxWorkspaceMutationFencedError extends Error {
   }
 }
 
-/** A process-scoped mutation named a durable retained process that has already
- * reached a terminal state. This remains a fence—the provider must not be
- * called again—but carries the existing terminal result so model-facing shell
- * tools can report completion/loss instead of presenting a retryable platform
- * failure for a handle that can never become active again. */
+/** An operation named a durable retained process that has already reached a
+ * terminal state. This remains a fence—the provider must not be called again
+ * and contradictory proof must not overwrite durable truth—but carries the
+ * existing terminal result so routing can reconcile a concurrent settlement
+ * or report completion/loss instead of presenting a retryable platform failure
+ * for a handle that can never become active again. */
 export class SandboxRetainedProcessTerminalError extends SandboxWorkspaceMutationFencedError {
   readonly name = "SandboxRetainedProcessTerminalError";
 
@@ -46927,7 +47970,8 @@ export async function countExpiredDrainingSandboxLeases(
 
 /** Settle an exact retained process only after exit or definitive loss proof.
  * The process row, parent admission, non-TTL holder, and lease count transition
- * commit atomically. Duplicate identical proof is idempotent; conflicting proof
+ * commit atomically. A duplicate terminal state + exit code is idempotent and
+ * preserves the first durable evidence reason; contradictory physical truth
  * fails closed. */
 export async function settleRetainedProcess(
   db: Database,
@@ -46989,15 +48033,8 @@ export async function settleRetainedProcess(
           );
         }
         if (process.state !== "active") {
-          if (
-            process.state !== input.outcome ||
-            process.exitCode !== exitCode ||
-            process.settlementReason !== reason
-          ) {
-            throw new SandboxWorkspaceMutationFencedError(
-              "process_fenced",
-              "Retained process already carries different terminal proof",
-            );
+          if (process.state !== input.outcome || process.exitCode !== exitCode) {
+            throw new SandboxRetainedProcessTerminalError(process.state, process.exitCode);
           }
           await tx
             .update(schema.sandboxPtySessions)
@@ -47022,9 +48059,7 @@ export async function settleRetainedProcess(
         const durableProof = retainedProcessReconciliationProof(mapRetainedProcess(process));
         if (
           durableProof &&
-          (durableProof.outcome !== input.outcome ||
-            durableProof.exitCode !== exitCode ||
-            durableProof.reason !== reason)
+          (durableProof.outcome !== input.outcome || durableProof.exitCode !== exitCode)
         ) {
           throw new SandboxWorkspaceMutationFencedError(
             "process_fenced",
@@ -47102,7 +48137,11 @@ export async function settleRetainedProcess(
           .set({
             state: input.outcome,
             exitCode,
-            settlementReason: reason,
+            // A checkpointed provider proof is the first durable evidence for
+            // this physical terminal state. A later owner/reaper observation
+            // may classify the same state + exit code differently, but it must
+            // not overwrite that already-durable evidence provenance.
+            settlementReason: durableProof?.reason ?? reason,
             settledAt: new Date(),
             reconcileClaimId: null,
             reconcileClaimedAt: null,

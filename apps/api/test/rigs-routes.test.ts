@@ -7,6 +7,7 @@ import {
   beginRigVersionVerificationAttempt,
   completeRigVersionVerification,
   createDb,
+  createRigVersion,
   createSession,
   createVariableSet,
   getRigChange,
@@ -114,6 +115,19 @@ async function auditActions(workspaceId: string, targetId: string): Promise<stri
     where workspace_id = ${workspaceId} and target_type = 'rig' and target_id = ${targetId}
     order by occurred_at asc`;
   return rows.map((r) => r.action);
+}
+
+async function rigVersionState(versionId: string): Promise<{
+  active: boolean;
+  verification: Record<string, unknown>;
+}> {
+  const [row] = await shared!.admin<
+    Array<{ active: boolean; verification: Record<string, unknown> }>
+  >`
+    select active, verification from rig_versions where id = ${versionId}
+  `;
+  if (!row) throw new Error(`Rig version not found: ${versionId}`);
+  return row;
 }
 
 function surfaceReceipt(versionId: string, sandboxGroupId = versionId) {
@@ -477,6 +491,145 @@ describe("rig route permission matrix", () => {
       new Set([`rig-verification-version-${version!.id}-attempt-${attemptId}`]),
     );
     expect(calls.every((call) => call.attemptId === attemptId)).toBe(true);
+  });
+
+  test("exact-version dispatch outage returns committed pending truth and reuses one attempt", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; versionId: string; attemptId: string }> = [];
+    let dispatcherAvailable = true;
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: {
+          workflowId: string;
+          versionId: string;
+          attemptId: string;
+        }) => {
+          calls.push(input);
+          if (!dispatcherAvailable) throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "exact-version-dispatch-outage" }),
+    });
+    const rig = await created.json();
+    const initialVersion = await activateInitialVersion(ws.workspaceId, rig.id);
+    const candidate = await createRigVersion(client.db, ws.workspaceId, rig.id, {
+      setupScript: "echo candidate",
+    });
+    dispatcherAvailable = false;
+    const endpoint = `${base}/${rig.id}/versions/${candidate.id}/verify`;
+
+    const first = await http.request(endpoint, { method: "POST", headers: manage });
+    expect(first.status).toBe(503);
+    expect(await first.json()).toMatchObject({
+      error: {
+        code: "upstream_unavailable",
+        retryable: true,
+        outcomeUnknown: true,
+        details: {
+          code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+          versionId: candidate.id,
+          verificationStatus: "pending",
+        },
+      },
+    });
+    const stateAfterFirst = await rigVersionState(candidate.id);
+    expect(stateAfterFirst).toMatchObject({
+      active: false,
+      verification: { status: "pending" },
+    });
+
+    const second = await http.request(endpoint, { method: "POST", headers: manage });
+    expect(second.status).toBe(503);
+    expect(await second.json()).toMatchObject({
+      error: {
+        details: { versionId: candidate.id, verificationStatus: "pending" },
+      },
+    });
+    expect(await rigVersionState(candidate.id)).toEqual(stateAfterFirst);
+    const failedDispatches = calls.slice(-2);
+    expect(failedDispatches).toHaveLength(2);
+    expect(failedDispatches[1]).toEqual(failedDispatches[0]);
+    expect(failedDispatches[0]?.workflowId).toBe(
+      `rig-verification-version-${candidate.id}-attempt-${failedDispatches[0]?.attemptId}`,
+    );
+    const current = await http.request(`${base}/${rig.id}`, { headers: manage });
+    expect((await current.json()).activeVersion.id).toBe(initialVersion.id);
+  });
+
+  test("active-version dispatch outage returns committed pending truth and reuses one attempt", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; versionId: string; attemptId: string }> = [];
+    let dispatcherAvailable = true;
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: {
+          workflowId: string;
+          versionId: string;
+          attemptId: string;
+        }) => {
+          calls.push(input);
+          if (!dispatcherAvailable) throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const use = { authorization: await bearer(ws, "user:u", ["rigs:use"]) };
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "active-version-dispatch-outage" }),
+    });
+    const rig = await created.json();
+    const activeVersion = await activateInitialVersion(ws.workspaceId, rig.id);
+    dispatcherAvailable = false;
+    const endpoint = `${base}/${rig.id}/verify`;
+
+    const first = await http.request(endpoint, { method: "POST", headers: use });
+    expect(first.status).toBe(503);
+    expect(await first.json()).toMatchObject({
+      error: {
+        code: "upstream_unavailable",
+        retryable: true,
+        outcomeUnknown: true,
+        details: {
+          code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+          versionId: activeVersion.id,
+          verificationStatus: "pending",
+        },
+      },
+    });
+    const stateAfterFirst = await rigVersionState(activeVersion.id);
+    expect(stateAfterFirst).toMatchObject({
+      active: true,
+      verification: { status: "pending" },
+    });
+
+    const second = await http.request(endpoint, { method: "POST", headers: use });
+    expect(second.status).toBe(503);
+    expect(await rigVersionState(activeVersion.id)).toEqual(stateAfterFirst);
+    const failedDispatches = calls.slice(-2);
+    expect(failedDispatches).toHaveLength(2);
+    expect(failedDispatches[1]).toEqual(failedDispatches[0]);
+    expect(failedDispatches[0]?.workflowId).toBe(
+      `rig-verification-version-${activeVersion.id}-attempt-${failedDispatches[0]?.attemptId}`,
+    );
   });
 
   test("exact version verification is manager-only and use-only denial has zero side effects", async () => {

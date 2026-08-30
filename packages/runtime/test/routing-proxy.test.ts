@@ -1159,6 +1159,129 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(proxy.hasRetainedProcess(75)).toBe(false);
   });
 
+  test("a concurrent matching durable terminal settlement unpins the original route", async () => {
+    let writes = 0;
+    let settlementAttempts = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 78\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        writes += 1;
+        return "write_stdin failed: session not found: 78";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      settleProcess: async () => {
+        settlementAttempts += 1;
+        throw Object.assign(new Error("retained process already settled by the lease reaper"), {
+          name: "SandboxRetainedProcessTerminalError",
+          code: "process_fenced",
+          state: "lost",
+          exitCode: null,
+        });
+      },
+    });
+
+    await proxy.execCommand({ cmd: "start" });
+    expect(await proxy.writeStdinForProcessControl({ sessionId: 78, chars: "" })).toBe(
+      "write_stdin failed: session not found: 78",
+    );
+    expect(writes).toBe(1);
+    expect(settlementAttempts).toBe(1);
+    expect(proxy.hasRetainedProcess(78)).toBe(false);
+  });
+
+  test("a contradictory durable terminal settlement remains outcome-unknown and pinned", async () => {
+    let writes = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 79\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        writes += 1;
+        return "write_stdin failed: session not found: 79";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      settleProcess: async () => {
+        throw Object.assign(new Error("retained process already exited elsewhere"), {
+          name: "SandboxRetainedProcessTerminalError",
+          code: "process_fenced",
+          state: "exited",
+          exitCode: 0,
+        });
+      },
+    });
+
+    await proxy.execCommand({ cmd: "start" });
+    await expect(
+      proxy.writeStdinForProcessControl({ sessionId: 79, chars: "" }),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(writes).toBe(1);
+    expect(proxy.hasRetainedProcess(79)).toBe(true);
+  });
+
+  test("a terminal admission race returns durable truth without another provider call", async () => {
+    for (const terminal of [
+      {
+        sessionId: 80,
+        state: "exited",
+        exitCode: 17,
+        expected: "Process exited with code 17\n\nOutput:\n",
+      },
+      {
+        sessionId: 81,
+        state: "lost",
+        exitCode: null,
+        expected: "write_stdin failed: session not found: 81",
+      },
+    ] as const) {
+      let writes = 0;
+      const backend: RoutableBackendSession = {
+        async execCommand() {
+          return `Process running with session ID ${terminal.sessionId}\n\nOutput:\nstarted`;
+        },
+        async writeStdin() {
+          writes += 1;
+          return "Process exited with code 0\n\nOutput:\nwrong";
+        },
+      };
+      const proxy = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+        beforeMutation: async () => "parent",
+        afterMutation: async () => undefined,
+        beforeProcessMutation: async () => {
+          throw Object.assign(new Error("retained process is already terminal"), {
+            name: "SandboxRetainedProcessTerminalError",
+            code: "process_fenced",
+            state: terminal.state,
+            exitCode: terminal.exitCode,
+          });
+        },
+      });
+
+      await proxy.execCommand({ cmd: "start" });
+      expect(
+        await proxy.writeStdinForProcessMutation({
+          sessionId: terminal.sessionId,
+          chars: "status",
+        }),
+      ).toBe(terminal.expected);
+      expect(writes).toBe(0);
+      expect(proxy.hasRetainedProcess(terminal.sessionId)).toBe(false);
+    }
+  });
+
   test("ambiguous process promotion retries the same UUID and exact route before control proceeds", async () => {
     const ptr = mutablePointer();
     let promotions = 0;

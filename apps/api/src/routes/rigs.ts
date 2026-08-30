@@ -69,6 +69,21 @@ async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string)
   });
 }
 
+function rigVersionDispatchDeferredError(versionId: string): ApiHttpError {
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message:
+      "The Rig verification attempt is committed and pending, but OpenGeni could not confirm workflow dispatch. Retry this verification request; it will reuse the same pending attempt.",
+    retryable: true,
+    outcomeUnknown: true,
+    details: {
+      code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+      versionId,
+      verificationStatus: "pending",
+    },
+  });
+}
+
 export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, workflowClient } = deps;
 
@@ -143,14 +158,30 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     workspaceId: string,
     rigId: string,
     versionId: string,
-  ): Promise<Awaited<ReturnType<typeof beginRigVersionVerificationAttempt>>> {
+  ): Promise<{
+    attempt: Awaited<ReturnType<typeof beginRigVersionVerificationAttempt>>;
+    started: boolean;
+  }> {
     const attempt = await beginRigVersionVerificationAttempt(
       db,
       { workspaceId, rigId, versionId },
       { allowAlreadyPending: true },
     );
-    await dispatchVersionVerification(workspaceId, versionId, attempt.attemptId);
-    return attempt;
+    try {
+      await dispatchVersionVerification(workspaceId, versionId, attempt.attemptId);
+      return { attempt, started: true };
+    } catch (error) {
+      // The pending attempt committed before Temporal dispatch. Keep the exact
+      // deterministic attempt reusable and report committed truth at callers.
+      deps.observability?.warn("rig version verification dispatch failed", {
+        workspaceId,
+        rigId,
+        versionId,
+        attemptId: attempt.attemptId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { attempt, started: false };
+    }
   }
 
   async function dispatchVersionVerification(
@@ -172,8 +203,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     versionId: string,
   ): Promise<boolean> {
     try {
-      await startVersionVerification(workspaceId, rigId, versionId);
-      return true;
+      return (await startVersionVerification(workspaceId, rigId, versionId)).started;
     } catch (error) {
       // Creation already committed, but the version remains inactive. Preserve
       // the deterministic retry target without mistaking dispatch for proof.
@@ -287,7 +317,10 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!versions.some((version) => version.id === versionId)) {
       throw new HTTPException(404, { message: "rig version not found" });
     }
-    await startVersionVerification(rig.workspaceId, rig.id, versionId);
+    const verification = await startVersionVerification(rig.workspaceId, rig.id, versionId);
+    if (!verification.started) {
+      throw rigVersionDispatchDeferredError(versionId);
+    }
     return c.json({ ok: true, versionId }, 202);
   });
 
@@ -421,7 +454,14 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!rig.activeVersion) {
       return c.json({ error: "rig has no active version" }, 422);
     }
-    await startVersionVerification(rig.workspaceId, rig.id, rig.activeVersion.id);
+    const verification = await startVersionVerification(
+      rig.workspaceId,
+      rig.id,
+      rig.activeVersion.id,
+    );
+    if (!verification.started) {
+      throw rigVersionDispatchDeferredError(rig.activeVersion.id);
+    }
     return c.json({ ok: true, versionId: rig.activeVersion.id }, 202);
   });
 }

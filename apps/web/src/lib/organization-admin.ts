@@ -7,6 +7,7 @@ import type {
 export const ORGANIZATION_ADMIN_SECTIONS = [
   "overview",
   "knowledge",
+  "models",
   "people",
   "recovery",
   "retention",

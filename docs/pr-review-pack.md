@@ -123,13 +123,14 @@ Each repository binding stores one optional exact product model. The model
 catalog is the source of truth for both the serving provider and billing rail;
 there is no second mutable `source` field that could disagree with the model.
 The setup UI currently exposes the two unattended-review billing rails with
-complete admission authority: OpenGeni credits and the workspace Codex
-subscription pool.
+complete admission authority: OpenGeni credits and the workspace's effective
+Codex subscription pool.
 
 Selecting a `codex/...` model freezes that exact model into the trigger revision
 and accepted automation run. Dispatch rechecks that the workspace still has an
 active Codex subscription, classifies the turn as externally billed, and then
-uses the ordinary workspace-local Codex allocator and capacity-wait lifecycle.
+uses the effective workspace or inherited organization Codex allocator and
+capacity-wait lifecycle.
 It consumes no OpenGeni credits. OpenGeni does not freeze a concrete credential
 row into the trigger: a workspace with multiple connected Codex accounts keeps
 the allocator's normal rotation, lease, cooldown, and failover behavior.

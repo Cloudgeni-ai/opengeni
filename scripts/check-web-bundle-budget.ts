@@ -373,6 +373,11 @@ const budgets = {
   // 637,787 gzip bytes across 33 files. Preserve a full KiB of raw and gzip
   // headroom around that exact Linux/x64 Bun 1.4 measurement; every initial,
   // per-file, lazy-chunk, and CSS cap remains fixed.
+  // Organization Codex inheritance adds the shared-workspace source selector
+  // and organization Models navigation while provider management stays in the
+  // existing Codex/settings chunks. Linux/x64 Bun 1.4 measures 2,271,792 raw
+  // bytes across the same 33 files. Advance only the raw whole-KiB envelope;
+  // gzip, file count, initial, per-file, lazy, and CSS caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
