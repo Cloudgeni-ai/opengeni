@@ -1292,6 +1292,11 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "rigs:use",
   "artifacts:read",
   "artifacts:publish",
+  "apps:read",
+  "apps:write",
+  "apps:publish",
+  "apps:run",
+  "apps:delete",
 ];
 
 /**

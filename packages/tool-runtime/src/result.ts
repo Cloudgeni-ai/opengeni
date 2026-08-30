@@ -113,7 +113,6 @@ export function inspectCanonicalToolResult(
     errorFallbackMessage?: string;
   }>,
 ): CanonicalToolResultInspection {
-  if (!options.expectsStructured) return { kind: "result", result };
   if (result.isError) {
     return {
       kind: "error",
@@ -121,6 +120,7 @@ export function inspectCanonicalToolResult(
       error: canonicalToolResultError(result, options.errorFallbackMessage),
     };
   }
+  if (!options.expectsStructured) return { kind: "result", result };
   if (!result.structuredContent) return { kind: "missing_structured", result };
   return { kind: "structured", value: result.structuredContent };
 }

@@ -148,6 +148,15 @@ describe("managed personal workspace access", () => {
       permissions: managedPersonalWorkspacePermissions,
       principalKind: "human_session",
     });
+    expect(access.workspaceGrants[1]?.permissions).toEqual(
+      expect.arrayContaining([
+        "apps:read",
+        "apps:write",
+        "apps:publish",
+        "apps:run",
+        "apps:delete",
+      ]),
+    );
 
     const listResponse = await app.request("http://x/v1/workspaces", {
       headers: { cookie: "session=present" },

@@ -146,6 +146,46 @@ describe("Apps current-human canonical runtime", () => {
     ]);
   });
 
+  test("treats MCP isError as failure when the tool declares no output schema", async () => {
+    const { outputSchema: _outputSchema, ...tool } = descriptor("knowledge", "get");
+    const result = await callAppRuntimeTool({
+      authority,
+      policy: policy([tool.identity]),
+      request: {
+        operationId,
+        identity: tool.identity,
+        input: { query: "missing" },
+        catalogDigest: digest,
+      },
+      provider: {
+        resolve: async () => ({
+          catalogDigest: digest,
+          bindings: [
+            {
+              descriptor: tool,
+              invoke: () => ({
+                content: [{ type: "text", text: "not found" }],
+                isError: true,
+              }),
+            },
+          ],
+        }),
+      },
+    });
+
+    expect(result).toEqual({
+      operationId,
+      status: "failed",
+      output: null,
+      error: {
+        code: "tool_error",
+        message: "The App tool failed",
+        retryable: false,
+      },
+      replayed: false,
+    });
+  });
+
   test("cannot substitute a display or programmatic name for authority identity", async () => {
     const tool = descriptor("status", "read", {
       modelName: "friendly_status",

@@ -217,10 +217,11 @@ grant to the authenticated managed human's `AccessContext.workspaceGrants`.
 The grant is an access projection rather than a `workspace_memberships` row and
 does not carry `workspace:admin`, `members:manage`, or `api_keys:manage`, so it
 cannot delegate access to another principal. The personal workspace is therefore
-included in authenticated workspace lists and ordinary runtime resource paths
-only for its owning managed human. Organization/account admins, API keys,
-delegated bearers, services, and other members receive no ambient personal-
-workspace access. The legacy Better Auth workspace remains
+included in authenticated workspace lists and ordinary runtime resource paths,
+including the full governed Apps authoring, publication, execution, and deletion
+lifecycle, only for its owning managed human. Organization/account admins, API
+keys, delegated bearers, services, and other members receive no ambient
+personal-workspace access. The legacy Better Auth workspace remains
 `defaultWorkspaceId`, and persisted legacy grants remain first in the returned
 grant order.
 

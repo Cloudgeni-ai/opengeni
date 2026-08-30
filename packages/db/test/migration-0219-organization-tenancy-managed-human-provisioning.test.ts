@@ -64,6 +64,11 @@ const expectedManagedPersonalWorkspacePermissions: Permission[] = [
   "rigs:use",
   "artifacts:read",
   "artifacts:publish",
+  "apps:read",
+  "apps:write",
+  "apps:publish",
+  "apps:run",
+  "apps:delete",
 ];
 
 let shared: SharedTestDatabase | null = null;
@@ -142,6 +147,15 @@ describe("migration 0219 managed-human organization provisioning", () => {
     expect(managedPersonalWorkspacePermissions).not.toContain("members:manage");
     expect(managedPersonalWorkspacePermissions).not.toContain("api_keys:manage");
     expect(managedPersonalWorkspacePermissions).not.toContain("rigs:manage");
+    expect(managedPersonalWorkspacePermissions).toEqual(
+      expect.arrayContaining([
+        "apps:read",
+        "apps:write",
+        "apps:publish",
+        "apps:run",
+        "apps:delete",
+      ]),
+    );
   });
 
   test("pins the rolling lifecycle capability, posture contract, and exact role grant", async () => {

@@ -44,6 +44,15 @@ describe("canonical tool result and invocation mechanics", () => {
       retryable: true,
     });
     expect(inspectCanonicalToolResult(result, { expectsStructured: true }).kind).toBe("error");
+    expect(inspectCanonicalToolResult(result, { expectsStructured: false })).toEqual({
+      kind: "error",
+      result,
+      error: {
+        code: "not_ready",
+        message: "Not ready",
+        retryable: true,
+      },
+    });
   });
 
   test("enforces argument, result, timeout, and external abort bounds", async () => {
