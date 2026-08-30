@@ -65,6 +65,17 @@ describe("browser controller image build contract", () => {
       const dockerfile = await readFile(resolve(root, imagePath), "utf8");
 
       expect(buildsBrowserControllerOnTargetPlatform(dockerfile)).toBe(true);
+      expect(dockerfile).toContain('"$runtime/node_modules/@opengeni/tool-runtime"');
+      expect(dockerfile).toContain(
+        'packages/tool-runtime/package.json "$runtime/node_modules/@opengeni/tool-runtime/package.json"',
+      );
+      expect(dockerfile).toContain(
+        'cp -a packages/tool-runtime/src "$runtime/node_modules/@opengeni/tool-runtime/src"',
+      );
+      expect(dockerfile).toContain(
+        'cp -aL packages/tool-runtime/node_modules/ajv "$runtime/node_modules/ajv"',
+      );
+      expect(dockerfile).not.toContain("packages/codemode/node_modules/ajv");
 
       const crossCompiled = dockerfile.replace(
         "FROM oven/bun:${BUN_VERSION} AS browserd-build",

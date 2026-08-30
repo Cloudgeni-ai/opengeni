@@ -127,19 +127,23 @@ RUN set -eux; \
     runtime=/out/codemode-runtime; \
     install -d -m 0755 "$runtime/node_modules/@opengeni/codemode" \
                         "$runtime/node_modules/@opengeni/contracts" \
+                        "$runtime/node_modules/@opengeni/tool-runtime" \
                         "$runtime/node_modules/@noble"; \
     install -m 0644 packages/codemode/package.json "$runtime/node_modules/@opengeni/codemode/package.json"; \
     cp -a packages/codemode/src "$runtime/node_modules/@opengeni/codemode/src"; \
     install -m 0644 packages/contracts/package.json "$runtime/node_modules/@opengeni/contracts/package.json"; \
     cp -a packages/contracts/src "$runtime/node_modules/@opengeni/contracts/src"; \
-    cp -aL packages/codemode/node_modules/ajv "$runtime/node_modules/ajv"; \
-    ajv_modules="$(dirname "$(readlink -f packages/codemode/node_modules/ajv)")"; \
+    install -m 0644 packages/tool-runtime/package.json "$runtime/node_modules/@opengeni/tool-runtime/package.json"; \
+    cp -a packages/tool-runtime/src "$runtime/node_modules/@opengeni/tool-runtime/src"; \
+    cp -aL packages/tool-runtime/node_modules/ajv "$runtime/node_modules/ajv"; \
+    ajv_modules="$(dirname "$(readlink -f packages/tool-runtime/node_modules/ajv)")"; \
     for dependency in fast-deep-equal fast-uri json-schema-traverse require-from-string; do \
       cp -aL "$ajv_modules/$dependency" "$runtime/node_modules/$dependency"; \
     done; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
-    test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"
+    test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
+    test -f "$runtime/node_modules/@opengeni/tool-runtime/src/index.ts"
 
 RUN cd packages/ogtool && bun run build
 
