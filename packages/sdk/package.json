@@ -82,6 +82,10 @@
       "types": "./src/interaction.ts",
       "default": "./src/interaction.ts"
     },
+    "./session": {
+      "types": "./src/session.ts",
+      "default": "./src/session.ts"
+    },
     "./codex-realtime-controller": {
       "types": "./src/codex-realtime-controller.ts",
       "default": "./src/codex-realtime-controller.ts"

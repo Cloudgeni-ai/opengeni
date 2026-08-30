@@ -32,12 +32,14 @@ describe("TurnSummary settle fold", () => {
     expect(r.container.textContent).toContain("the rows");
     const trigger = r.container.querySelector("button");
     expect(trigger?.getAttribute("data-state")).toBe("open");
+    expect(trigger?.textContent).toContain("Hide turn steps");
     // The chip eases in with its own entrance; the root does not re-animate
     // the already-visible body.
     expect(trigger?.className).toContain("animate-og-settle-chip");
 
     await flush(BEAT_AND_MARGIN_MS);
     expect(trigger?.getAttribute("data-state")).toBe("closed");
+    expect(trigger?.textContent).toContain("Show turn steps");
     await r.unmount();
   });
 

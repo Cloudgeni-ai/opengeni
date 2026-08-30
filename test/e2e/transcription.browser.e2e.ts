@@ -266,6 +266,7 @@ describe("native composer voice-input browser acceptance", () => {
     ).toBe("1");
 
     await page.reload({ waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Pause automatic retry" }).click();
     await page.getByRole("button", { name: "Retry voice input" }).waitFor();
     expect(
       await page.evaluate(() => document.documentElement.dataset.transcriptionMicRequests),

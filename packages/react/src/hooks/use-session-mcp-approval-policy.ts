@@ -4,31 +4,22 @@ import type {
   SessionMcpServerMetadata,
   UpdateSessionMcpApprovalPolicyResponse,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  createSessionMcpApprovalPolicyStore,
+  isSessionMcpApprovalPolicyEvent as isSdkSessionMcpApprovalPolicyEvent,
+} from "@opengeni/sdk/session";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import {
   useEmbeddedSessionMcpApprovalPolicy,
   type EmbeddedSessionMcpApprovalPolicyClientOverride,
 } from "../session-context";
-import {
-  useDebouncedCallback,
-  useMutationRunner,
-  usePolledValue,
-  useSessionEventTrigger,
-  type SessionEventFeedOptions,
-} from "./internal";
+import { useOwnedExternalStore, type SessionEventFeedOptions } from "./internal";
 
 export function isSessionMcpApprovalPolicyEvent(
   event: Pick<SessionEvent, "type" | "payload">,
   serverId?: string,
 ): boolean {
-  if (event.type !== "session.mcp.approval_policy.updated") {
-    return false;
-  }
-  if (serverId === undefined) {
-    return true;
-  }
-  const payload = event.payload as { serverId?: unknown } | null;
-  return payload?.serverId === serverId;
+  return isSdkSessionMcpApprovalPolicyEvent(event, serverId);
 }
 
 export type UseSessionMcpApprovalPolicyOptions = EmbeddedSessionMcpApprovalPolicyClientOverride &
@@ -50,10 +41,7 @@ export type UseSessionMcpApprovalPolicyResult = {
   clearError: () => void;
 };
 
-/**
- * Read and update one existing session MCP server's approval policy. Updates
- * become effective for the next claimed attempt; current work is unchanged.
- */
+/** React compatibility adapter over the framework-neutral MCP policy controller. */
 export function useSessionMcpApprovalPolicy(
   sessionId: string | null | undefined,
   serverId: string | null | undefined,
@@ -61,101 +49,37 @@ export function useSessionMcpApprovalPolicy(
 ): UseSessionMcpApprovalPolicyResult {
   const { client, workspaceId } = useEmbeddedSessionMcpApprovalPolicy(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId && serverId);
-  const [override, setOverride] = useState<SessionMcpServerMetadata | null>(null);
-  const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${serverId ?? ""}`;
-  const authoritativeGeneration = useRef(0);
-  const mutationIdentity = useMemo(() => ({ client, targetKey }), [client, targetKey]);
-  const { run, mutating, mutationError, clearMutationError } = useMutationRunner(mutationIdentity);
+  const sharedFeed = options.events !== undefined;
+  const latestEvents = useRef(options.events);
+  latestEvents.current = options.events;
+  const store = useMemo(
+    () =>
+      createSessionMcpApprovalPolicyStore({
+        client,
+        workspaceId,
+        sessionId,
+        serverId,
+        enabled,
+        ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
+        ...(sharedFeed ? { events: latestEvents.current ?? [] } : {}),
+      }),
+    [client, enabled, options.pollIntervalMs, serverId, sessionId, sharedFeed, workspaceId],
+  );
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  useOwnedExternalStore(store);
 
-  useLayoutEffect(() => {
-    authoritativeGeneration.current += 1;
-    setOverride(null);
-  }, [client, targetKey]);
-
-  type PolicyRead = {
-    targetKey: string;
-    generation: number;
-    server: SessionMcpServerMetadata | null;
-  };
-  const load = useCallback(async (): Promise<PolicyRead> => {
-    const generation = authoritativeGeneration.current;
-    if (!sessionId || !serverId) {
-      return { targetKey, generation, server: null };
-    }
-    const session = await client.getSession(workspaceId, sessionId);
-    return {
-      targetKey,
-      generation,
-      server: session.mcpServers.find((server) => server.id === serverId) ?? null,
-    };
-  }, [client, serverId, sessionId, targetKey, workspaceId]);
-  const {
-    data,
-    loading,
-    error: loadError,
-    refresh,
-  } = usePolledValue(load, {
-    enabled,
-    pollIntervalMs: options.pollIntervalMs,
-  });
   useEffect(() => {
-    if (data?.targetKey === targetKey && data.generation === authoritativeGeneration.current) {
-      setOverride(null);
-    }
-  }, [data, targetKey]);
+    if (options.events !== undefined) store.applyEvents(options.events);
+  }, [options.events, store]);
 
-  const scheduleRefresh = useDebouncedCallback(() => void refresh());
-  const matchesPolicyEvent = useCallback(
-    (event: Pick<SessionEvent, "type" | "payload">) =>
-      isSessionMcpApprovalPolicyEvent(event, serverId ?? undefined),
-    [serverId],
-  );
-  useSessionEventTrigger(
-    client,
-    workspaceId,
-    sessionId,
-    matchesPolicyEvent,
-    scheduleRefresh,
-    {
-      enabled,
-      ...(options.events !== undefined ? { events: options.events } : {}),
-    },
-    async () => await refresh(),
-  );
-
-  const update = useCallback(
-    async (
-      policy: SessionMcpApprovalPolicy,
-    ): Promise<UpdateSessionMcpApprovalPolicyResponse | null> => {
-      if (!sessionId || !serverId) {
-        return null;
-      }
-      const response = await run(() =>
-        client.updateSessionMcpApprovalPolicy(workspaceId, sessionId, serverId, {
-          requireApproval: policy,
-        }),
-      );
-      if (response) {
-        authoritativeGeneration.current += 1;
-        setOverride(response.server);
-        void refresh();
-      }
-      return response;
-    },
-    [client, refresh, run, serverId, sessionId, workspaceId],
-  );
-
-  const server = override ?? data?.server ?? null;
   return {
-    server,
-    policy: server?.requireApproval ?? null,
-    loading,
-    error: mutationError ?? loadError,
-    refresh: async () => {
-      await refresh();
-    },
-    update,
-    updating: mutating,
-    clearError: clearMutationError,
+    server: snapshot.server,
+    policy: snapshot.policy,
+    loading: snapshot.loading,
+    error: snapshot.error,
+    refresh: store.refresh,
+    update: store.update,
+    updating: snapshot.updating,
+    clearError: store.clearError,
   };
 }

@@ -8,11 +8,13 @@
  *   (a) a publishable package's published dependency maps point at an ignored or
  *       private workspace package.
  *   (b) a publishable package is missing npm-public package metadata or a build.
- *   (c) @opengeni/sdk / @opengeni/react stop honoring the client-clean closure:
- *       the SDK depends only on the canonical contracts package, React depends
- *       only on SDK, and its browser-safe artifact engine is an optional peer
- *       for the isolated artifact subpaths.
- *   (d) the BUILT sdk/react dist bundles reference any server/embed package.
+ *   (c) the framework-neutral client family stops honoring its clean closure:
+ *       UI is a dependency-free leaf, SDK depends only on the canonical
+ *       contracts package, React and Svelte depend only on SDK + UI, and
+ *       React's browser-safe artifact engine is an optional peer for the
+ *       isolated artifact subpaths.
+ *   (d) the BUILT sdk/ui/react/svelte dist bundles reference any server/embed
+ *       package or either framework package references the other.
  *   (e) the BUILT runtime leaves OpenAI Agents or Zod externally resolved,
  *       allowing an embedding host to change their runtime schema identity.
  *   (f) the runtime's third-party notices omit a package present in its built
@@ -333,20 +335,49 @@ if (
   );
 }
 
-// (b) React's only @opengeni runtime dependency is the client SDK. The artifact
-// engine stays an optional peer so ordinary React/session consumers do not
-// install its format codecs or native rasterizer.
+// (b) UI is the framework-neutral visual leaf. React and Svelte may depend on
+// SDK + UI, but must never depend on one another. The artifact engine stays an
+// optional React peer so ordinary React/session consumers do not install its
+// format codecs or native rasterizer.
+const uiPkg = readPkg("packages/ui");
+const uiRuntimeDeps = Object.keys(uiPkg.dependencies ?? {});
+if (uiRuntimeDeps.length > 0) {
+  failures.push(
+    `@opengeni/ui must remain a dependency-free runtime leaf, found: ${uiRuntimeDeps.join(", ")}.`,
+  );
+}
+
 const reactPkg = readPkg("packages/react");
 const reactOpengeniDeps = opengeniRuntimeDeps(reactPkg);
-const allowedReactOpengeniDeps = new Set(["@opengeni/sdk"]);
+const allowedReactOpengeniDeps = new Set(["@opengeni/sdk", "@opengeni/ui"]);
 const reactForbidden = reactOpengeniDeps.filter((name) => !allowedReactOpengeniDeps.has(name));
 if (reactForbidden.length > 0) {
   failures.push(
-    `@opengeni/react may only depend on @opengeni/sdk among @opengeni/* packages, found: ${reactForbidden.join(", ")}.`,
+    `@opengeni/react may only depend on @opengeni/sdk and @opengeni/ui among @opengeni/* packages, found: ${reactForbidden.join(", ")}.`,
   );
 }
-if (!reactOpengeniDeps.includes("@opengeni/sdk")) {
-  failures.push(`@opengeni/react must keep @opengeni/sdk as a runtime dependency.`);
+for (const required of ["@opengeni/sdk", "@opengeni/ui"] as const) {
+  if (reactPkg.dependencies?.[required] !== "workspace:*") {
+    failures.push(`@opengeni/react must keep ${required}="workspace:*" as a runtime dependency.`);
+  }
+}
+
+const sveltePkg = readPkg("packages/svelte");
+const svelteOpengeniDeps = opengeniRuntimeDeps(sveltePkg);
+const allowedSvelteOpengeniDeps = new Set(["@opengeni/sdk", "@opengeni/ui"]);
+const svelteForbidden = svelteOpengeniDeps.filter((name) => !allowedSvelteOpengeniDeps.has(name));
+if (svelteForbidden.length > 0) {
+  failures.push(
+    `@opengeni/svelte may only depend on @opengeni/sdk and @opengeni/ui among @opengeni/* packages, found: ${svelteForbidden.join(", ")}.`,
+  );
+}
+for (const required of ["@opengeni/sdk", "@opengeni/ui"] as const) {
+  if (sveltePkg.dependencies?.[required] !== "workspace:*") {
+    failures.push(`@opengeni/svelte must keep ${required}="workspace:*" as a runtime dependency.`);
+  }
+}
+if (sveltePkg.peerDependencies?.svelte !== ">=5.46.4 <6") {
+  failures.push(`@opengeni/svelte must expose its supported Svelte 5 line as a compatible peer.`);
 }
 const reactPeerDependencies = reactPkg.peerDependencies ?? {};
 if (reactPeerDependencies["@opengeni/artifact-tool"] !== ">=0.1.0 <0.4.0") {
@@ -365,32 +396,53 @@ if (reactPeerMetadata?.["@opengeni/artifact-tool"]?.optional !== true) {
 // well as bundlers. A bare string export ships runtime CSS but leaves tsc
 // unable to type a side-effect import unless every consumer adds its own
 // wildcard declaration.
-const reactExports = (reactPkg as PackageJson & { exports?: Record<string, unknown> }).exports;
-for (const subpath of ["./styles.css", "./compiled.css", "./responsive.css", "./tokens.css"]) {
-  const entry = reactExports?.[subpath];
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-    failures.push(`@opengeni/react ${subpath} must provide typed conditional exports.`);
-    continue;
-  }
-  const conditions = entry as { types?: unknown; style?: unknown; default?: unknown };
-  for (const condition of ["types", "style", "default"] as const) {
-    const target = conditions[condition];
-    if (typeof target !== "string" || !target.startsWith("./")) {
-      failures.push(`@opengeni/react ${subpath} is missing a local ${condition} export target.`);
+function assertCssExports(
+  packageName: string,
+  packageDir: string,
+  pkg: PackageJson,
+  subpaths: readonly string[],
+): void {
+  const exports = (pkg as PackageJson & { exports?: Record<string, unknown> }).exports;
+  for (const subpath of subpaths) {
+    const entry = exports?.[subpath];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      failures.push(`${packageName} ${subpath} must provide typed conditional exports.`);
       continue;
     }
-    if (!existsSync(join(repoRoot, "packages/react", target))) {
-      failures.push(`@opengeni/react ${subpath} ${condition} target does not exist: ${target}.`);
+    const conditions = entry as { types?: unknown; style?: unknown; default?: unknown };
+    for (const condition of ["types", "style", "default"] as const) {
+      const target = conditions[condition];
+      if (typeof target !== "string" || !target.startsWith("./")) {
+        failures.push(`${packageName} ${subpath} is missing a local ${condition} export target.`);
+        continue;
+      }
+      if (!existsSync(join(repoRoot, packageDir, target))) {
+        failures.push(`${packageName} ${subpath} ${condition} target does not exist: ${target}.`);
+      }
     }
   }
 }
 
+assertCssExports("@opengeni/react", "packages/react", reactPkg, [
+  "./styles.css",
+  "./compiled.css",
+  "./responsive.css",
+  "./tokens.css",
+]);
+assertCssExports("@opengeni/ui", "packages/ui", uiPkg, [
+  "./compiled.css",
+  "./components.css",
+  "./responsive.css",
+  "./tokens.css",
+]);
+assertCssExports("@opengeni/svelte", "packages/svelte", sveltePkg, ["./compiled.css"]);
+
 // (d) Built dist bundles must not reference any server/embed package.
 //
-// The sdk/react tsup configs externalize all @opengeni/* (see their
-// tsup.config.ts), so a leaked `import "@opengeni/<server>"` survives in dist as
-// a literal specifier rather than being inlined — which is exactly what this
-// grep relies on. The trailing `(?:/|["'\`]|$)` ensures we match the full
+// The client package builds externalize workspace packages, so a leaked
+// `import "@opengeni/<server>"` survives in dist as a literal specifier rather
+// than being inlined — exactly what this grep relies on. The trailing
+// `(?:/|["'\`]|$)` ensures we match the full
 // package boundary (e.g. `@opengeni/db` but not a hypothetical
 // `@opengeni/dbutils`); the capture group reports just the clean package name.
 const serverInternalPattern = new RegExp(
@@ -557,7 +609,7 @@ for (const pkg of publishable) {
   }
 }
 
-for (const pkgDir of ["packages/sdk", "packages/react"]) {
+for (const pkgDir of ["packages/sdk", "packages/ui", "packages/react", "packages/svelte"]) {
   const distDir = join(repoRoot, pkgDir, "dist");
   if (!existsSync(distDir)) continue;
   for (const path of builtContractFiles(distDir)) {
@@ -569,6 +621,32 @@ for (const pkgDir of ["packages/sdk", "packages/react"]) {
         `${path.slice(repoRoot.length + 1)} references a server/embed package (${leaked}). ` +
           `A server import leaked into a published client bundle.`,
       );
+    }
+  }
+}
+
+for (const frameworkBoundary of [
+  {
+    packageName: "@opengeni/react",
+    packageDir: "packages/react",
+    forbiddenPackage: "@opengeni/svelte",
+  },
+  {
+    packageName: "@opengeni/svelte",
+    packageDir: "packages/svelte",
+    forbiddenPackage: "@opengeni/react",
+  },
+] as const) {
+  for (const surfaceDir of ["src", "dist"] as const) {
+    const dir = join(repoRoot, frameworkBoundary.packageDir, surfaceDir);
+    if (!existsSync(dir)) continue;
+    const files = surfaceDir === "src" ? shippedSourceFiles(dir) : builtContractFiles(dir);
+    for (const path of files) {
+      if (readFileSync(path, "utf8").includes(frameworkBoundary.forbiddenPackage)) {
+        failures.push(
+          `${path.slice(repoRoot.length + 1)} crosses the framework boundary: ${frameworkBoundary.packageName} must not reference ${frameworkBoundary.forbiddenPackage}.`,
+        );
+      }
     }
   }
 }

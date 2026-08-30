@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Prove the built SDK + artifact engine + React package artifacts from an
- * external consumer.
+ * Prove the built SDK + UI + React + Svelte package artifacts from external
+ * consumers.
  *
  * The workspace itself resolves package source directly, so ordinary unit/type
  * checks cannot catch a broken published exports map, missing CSS declaration,
@@ -9,10 +9,10 @@
  * This gate stages release-shaped tarballs, installs them twice (the second time
  * from the frozen Bun lock), typechecks with stable TypeScript 7, builds the root and session
  * subpaths through Vite, verifies the packed runtime skill-library subpath, and
- * server-renders populated embedded host surfaces without a DOM. A second
- * consumer installs only the session subpath's required peers. A third imports
- * only the public SDK/React realtime subpaths, renders both batteries-included
- * composer controls without a provider, and bundles them as an external host.
+ * server-renders populated embedded host surfaces without a DOM. A native
+ * Svelte consumer typechecks focused subpaths, builds a hydration bundle, and
+ * server-renders through Vite SSR. Additional consumers retain the isolated
+ * artifact, React session, and realtime closure proofs.
  */
 import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -161,6 +161,7 @@ try {
   const minimalSpreadsheetRoot = join(tempRoot, "minimal-spreadsheet-artifact-consumer");
   const minimalSessionRoot = join(tempRoot, "minimal-session-consumer");
   const minimalRealtimeRoot = join(tempRoot, "minimal-realtime-consumer");
+  const minimalSvelteRoot = join(tempRoot, "minimal-svelte-consumer");
   await Promise.all([
     mkdir(stagingRoot, { recursive: true }),
     mkdir(tarballRoot, { recursive: true }),
@@ -168,6 +169,7 @@ try {
     mkdir(minimalSpreadsheetRoot, { recursive: true }),
     mkdir(minimalSessionRoot, { recursive: true }),
     mkdir(minimalRealtimeRoot, { recursive: true }),
+    mkdir(minimalSvelteRoot, { recursive: true }),
   ]);
 
   const versions = await workspaceVersions();
@@ -354,6 +356,53 @@ try {
       throw new Error(`react tarball is missing ${artifact}`);
     }
   }
+  const ui = await stageTarball("packages/ui", stagingRoot, tarballRoot, versions);
+  const uiTarballContents = await run(["tar", "-tzf", ui.tarball], consumerRoot, true);
+  for (const artifact of [
+    "package/LICENSE",
+    "package/dist/index.js",
+    "package/dist/index.d.ts",
+    "package/styles/compiled.css",
+    "package/styles/compiled.d.ts",
+    "package/styles/components.css",
+    "package/styles/responsive.css",
+    "package/styles/tokens.css",
+  ]) {
+    if (!uiTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`ui tarball is missing ${artifact}`);
+    }
+  }
+  const sveltePackage = await stageTarball("packages/svelte", stagingRoot, tarballRoot, versions);
+  const svelteTarballContents = await run(
+    ["tar", "-tzf", sveltePackage.tarball],
+    consumerRoot,
+    true,
+  );
+  for (const artifact of [
+    "package/LICENSE",
+    "package/dist/index.js",
+    "package/dist/index.d.ts",
+    "package/dist/session.js",
+    "package/dist/session.d.ts",
+    "package/dist/session-ui.js",
+    "package/dist/session-ui.d.ts",
+    "package/dist/composer.js",
+    "package/dist/composer.d.ts",
+    "package/dist/components/MessageTimeline.svelte",
+    "package/dist/components/MessageTimeline.svelte.d.ts",
+    "package/styles/compiled.css",
+    "package/styles/compiled.d.ts",
+  ]) {
+    if (!svelteTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`svelte tarball is missing ${artifact}`);
+    }
+  }
+  if (
+    !Array.isArray(sveltePackage.manifest.sideEffects) ||
+    !sveltePackage.manifest.sideEffects.includes("**/*.css")
+  ) {
+    throw new Error("svelte tarball does not preserve the CSS side-effect allowlist");
+  }
   const runtime = await stageTarball("packages/runtime", stagingRoot, tarballRoot, versions);
   const runtimeLocalDependencies = await Promise.all(
     [
@@ -459,11 +508,16 @@ try {
   const reactSource = JSON.parse(
     await readFile(join(repoRoot, "packages/react/package.json"), "utf8"),
   ) as PackageManifest;
+  const svelteSource = JSON.parse(
+    await readFile(join(repoRoot, "packages/svelte/package.json"), "utf8"),
+  ) as PackageManifest;
 
   const sdkFile = `file:${sdk.tarball}`;
   const codemodeFile = `file:${codemode.tarball}`;
   const artifactToolFile = `file:${artifactTool.tarball}`;
   const contractsFile = `file:${contracts.tarball}`;
+  const uiFile = `file:${ui.tarball}`;
+  const svelteFile = `file:${sveltePackage.tarball}`;
   const consumerManifest = {
     name: "opengeni-clean-consumer-proof",
     version: "0.0.0",
@@ -489,6 +543,7 @@ try {
       "@opengeni/react": `file:${react.tarball}`,
       "@opengeni/sdk": sdkFile,
       "@opengeni/runtime": `file:${runtime.tarball}`,
+      "@opengeni/ui": uiFile,
     },
     devDependencies: {
       "@types/node": "^24.10.1",
@@ -501,6 +556,7 @@ try {
     overrides: {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/ui": uiFile,
       ...runtimeLocalDependencyFiles,
     },
   };
@@ -896,6 +952,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/react": `file:${react.tarball}`,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/ui": uiFile,
       react: reactSource.peerDependencies?.react,
       "react-dom": reactSource.peerDependencies?.["react-dom"],
     },
@@ -910,6 +967,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/ui": uiFile,
     },
   };
   await Promise.all([
@@ -972,6 +1030,7 @@ try {
     dependencies: {
       "@opengeni/react": `file:${react.tarball}`,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/ui": uiFile,
       react: reactSource.peerDependencies?.react,
       "react-dom": reactSource.peerDependencies?.["react-dom"],
     },
@@ -985,6 +1044,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/ui": uiFile,
     },
   };
   await Promise.all([
@@ -1035,6 +1095,7 @@ try {
     dependencies: {
       "@opengeni/react": `file:${react.tarball}`,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/ui": uiFile,
       react: reactSource.peerDependencies?.react,
       "react-dom": reactSource.peerDependencies?.["react-dom"],
     },
@@ -1048,6 +1109,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/ui": uiFile,
     },
   };
   await Promise.all([
@@ -1138,6 +1200,129 @@ try {
         'if ((markup.match(/aria-label="Start voice with Codex Live"/g) ?? []).length !== 2) throw new Error("SSR output lost public realtime composer controls");',
         'if (!markup.includes("Choose voice model and options")) throw new Error("SSR output lost realtime model picker ARIA copy");',
         "console.log(`REALTIME_SUBPATH_SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);",
+        "",
+      ].join("\n"),
+    ),
+    writeFile(
+      join(minimalSvelteRoot, "package.json"),
+      `${JSON.stringify(
+        {
+          name: "opengeni-minimal-svelte-consumer",
+          version: "0.0.0",
+          private: true,
+          type: "module",
+          scripts: {
+            typecheck: "svelte-check --tsconfig ./tsconfig.json",
+            build: "vite build --logLevel warn",
+            "build:ssr": "vite build --config vite.ssr.config.ts --logLevel warn",
+            ssr: "bun ssr-dist/ssr-entry.js",
+          },
+          dependencies: {
+            "@opengeni/contracts": contractsFile,
+            "@opengeni/sdk": sdkFile,
+            "@opengeni/svelte": svelteFile,
+            "@opengeni/ui": uiFile,
+            svelte: svelteSource.devDependencies?.svelte,
+          },
+          devDependencies: {
+            "@sveltejs/vite-plugin-svelte":
+              svelteSource.devDependencies?.["@sveltejs/vite-plugin-svelte"],
+            "@types/node": "^24.10.1",
+            "svelte-check": svelteSource.devDependencies?.["svelte-check"],
+            typescript: svelteSource.devDependencies?.typescript,
+            vite: svelteSource.devDependencies?.vite,
+          },
+          overrides: {
+            "@opengeni/contracts": contractsFile,
+            "@opengeni/sdk": sdkFile,
+            "@opengeni/ui": uiFile,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    ),
+    writeFile(
+      join(minimalSvelteRoot, "tsconfig.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            strict: true,
+            target: "ESNext",
+            lib: ["ESNext", "DOM", "DOM.Iterable"],
+            module: "ESNext",
+            moduleResolution: "Bundler",
+            skipLibCheck: false,
+            allowJs: true,
+            checkJs: true,
+            isolatedModules: true,
+          },
+          include: ["*.ts", "*.svelte"],
+        },
+        null,
+        2,
+      )}\n`,
+    ),
+    writeFile(
+      join(minimalSvelteRoot, "vite.config.ts"),
+      'import { svelte } from "@sveltejs/vite-plugin-svelte";\nimport { defineConfig } from "vite";\nexport default defineConfig({ plugins: [svelte()] });\n',
+    ),
+    writeFile(
+      join(minimalSvelteRoot, "vite.ssr.config.ts"),
+      'import { svelte } from "@sveltejs/vite-plugin-svelte";\nimport { defineConfig } from "vite";\nexport default defineConfig({ plugins: [svelte()], ssr: { noExternal: ["@opengeni/svelte", "@opengeni/ui"] }, build: { ssr: "ssr-entry.ts", outDir: "ssr-dist", emptyOutDir: true } });\n',
+    ),
+    writeFile(
+      join(minimalSvelteRoot, "index.html"),
+      '<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenGeni Svelte consumer proof</title></head><body><div id="app"><main class="og-root"><p>Hydration target</p></main></div><script type="module" src="/main.ts"></script></body></html>\n',
+    ),
+    writeFile(
+      join(minimalSvelteRoot, "main.ts"),
+      'import { hydrate } from "svelte";\nimport App from "./App.svelte";\nconst target = document.getElementById("app");\nif (!target) throw new Error("missing #app");\nhydrate(App, { target });\n',
+    ),
+    writeFile(
+      join(minimalSvelteRoot, "surface.ts"),
+      [
+        'import type { SessionSurfaceControllers } from "@opengeni/svelte/session";',
+        'import { createSessionEvents, readableFromController } from "@opengeni/svelte/session";',
+        'import type { TimelineRendererRegistry } from "@opengeni/svelte/session-ui";',
+        'import type { ModelPickerOption, ToolPolicyOption } from "@opengeni/svelte/composer";',
+        "export const packedSvelteSurface = [createSessionEvents, readableFromController];",
+        "export type PackedSvelteTypes = [SessionSurfaceControllers, TimelineRendererRegistry, ModelPickerOption, ToolPolicyOption];",
+        "",
+      ].join("\n"),
+    ),
+    writeFile(
+      join(minimalSvelteRoot, "App.svelte"),
+      [
+        '<script lang="ts">',
+        '  import { HumanInputForm, SessionStatus } from "@opengeni/svelte/session-ui";',
+        '  import { ModelPicker, ToolPolicyPicker } from "@opengeni/svelte/composer";',
+        '  import "@opengeni/svelte/compiled.css";',
+        '  import type { SessionHumanInputRequest } from "@opengeni/sdk";',
+        '  let model = $state("gpt-5");',
+        '  let selectedTools = $state<string[]>(["search"]);',
+        '  const request: SessionHumanInputRequest = { id: "packed-input", workspaceId: "workspace-proof", sessionId: "session-proof", turnId: "turn-proof", turnGeneration: 1, creationAttemptId: "attempt-proof", toolCallId: "tool-proof", status: "pending", questions: [{ id: "direction", kind: "text", prompt: "What should change?", options: [], required: true, allowOther: false }], allowSkip: true, response: null, respondedBy: null, respondedAt: null, expiresAt: null, createdAt: "2026-08-29T12:00:00.000Z", updatedAt: "2026-08-29T12:00:00.000Z" };',
+        "</script>",
+        '<main class="og-root" data-og-theme="dark">',
+        "  <h1>Packed native Svelte surface</h1>",
+        '  <SessionStatus status="working" />',
+        '  <ModelPicker value={model} options={[{ id: "gpt-5", label: "GPT-5" }, { id: "host-model", label: "Host model" }]} onChange={(value) => (model = value)} />',
+        '  <ToolPolicyPicker tools={[{ id: "search", label: "Search", state: "enabled" }, { id: "deploy", label: "Deploy", state: "approval-required" }]} selected={selectedTools} onChange={(value) => (selectedTools = value)} />',
+        "  <HumanInputForm {request} autoFocus={false} onSubmit={async () => undefined} />",
+        "</main>",
+        "",
+      ].join("\n"),
+    ),
+    writeFile(
+      join(minimalSvelteRoot, "ssr-entry.ts"),
+      [
+        'import { render } from "svelte/server";',
+        'import App from "./App.svelte";',
+        "const { body, head } = render(App);",
+        'for (const expected of ["Packed native Svelte surface", "Working", "GPT-5", "Search", "approval required", "What should change?"]) { if (!body.includes(expected)) throw new Error(`Svelte SSR output lost populated surface: ${expected}`); }',
+        'if (typeof head !== "string") throw new Error("Svelte SSR head was not rendered");',
+        'if (typeof window !== "undefined") throw new Error("Svelte SSR touched the browser window global");',
+        "console.log(`SVELTE_SSR_OK bytes=${new TextEncoder().encode(body).byteLength}`);",
         "",
       ].join("\n"),
     ),
@@ -1239,6 +1424,17 @@ try {
   await run(["bun", "run", "typecheck"], minimalRealtimeRoot);
   await run(["bun", "run", "build"], minimalRealtimeRoot);
   await run(["bun", "run", "ssr"], minimalRealtimeRoot);
+  process.stdout.write("[publish-consumer] installing minimal native Svelte consumer\n");
+  await run(["bun", "install"], minimalSvelteRoot);
+  await rm(join(minimalSvelteRoot, "node_modules"), { recursive: true, force: true });
+  await run(["bun", "install", "--frozen-lockfile"], minimalSvelteRoot);
+  if (existsSync(join(minimalSvelteRoot, "node_modules", "react"))) {
+    throw new Error("Native Svelte consumer unexpectedly installed React");
+  }
+  await run(["bun", "run", "typecheck"], minimalSvelteRoot);
+  await run(["bun", "run", "build"], minimalSvelteRoot);
+  await run(["bun", "run", "build:ssr"], minimalSvelteRoot);
+  await run(["bun", "run", "ssr"], minimalSvelteRoot);
 
   const sessionBundle = await readFile(
     join(consumerRoot, "session-dist", "session-consumer.js"),
@@ -1321,7 +1517,7 @@ try {
 
   passed = true;
   process.stdout.write(
-    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${artifactTool.manifest.name}@${artifactTool.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${codemode.manifest.name}@${codemode.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, compiler-free scoped browser CSS, CSS-free session and realtime-only bundles, SSR, packed interaction/Codemode, and packed artifacts are clean.\n`,
+    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${ui.manifest.name}@${ui.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${sveltePackage.manifest.name}@${sveltePackage.manifest.version} + ${artifactTool.manifest.name}@${artifactTool.manifest.version} + ${codemode.manifest.name}@${codemode.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, compiler-free scoped browser CSS, native Svelte hydration/SSR, CSS-free session and realtime-only bundles, packed interaction/Codemode, and packed artifacts are clean.\n`,
   );
 } finally {
   if (passed && !keepArtifacts) {

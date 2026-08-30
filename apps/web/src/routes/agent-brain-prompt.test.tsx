@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { LatencyMode, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
+import * as RouterPackage from "@tanstack/react-router";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -236,6 +237,7 @@ mock.module("@/context", () => ({
   useAppContext: () => appContext,
 }));
 mock.module("@tanstack/react-router", () => ({
+  ...RouterPackage,
   useNavigate: () => navigate,
 }));
 

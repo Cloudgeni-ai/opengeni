@@ -14,6 +14,10 @@ async function applyFile(sql: postgres.Sql, file: string): Promise<void> {
   await sql.unsafe(await readFile(join(migrationsDir, file), "utf8"));
 }
 
+async function applyContinuabilityProjectionRepair(sql: postgres.Sql): Promise<void> {
+  await applyFile(sql, "0381_continuability_projection_performance.sql");
+}
+
 async function withPreMegaDatabase(
   label: string,
   callback: (sql: postgres.Sql) => Promise<void>,
@@ -265,6 +269,7 @@ describe("0063 session control mega migration", () => {
         )`;
 
       await applyFile(sql, "0063_session_control_mega_foundation.sql");
+      await applyContinuabilityProjectionRepair(sql);
 
       const [parent] = await sql<
         Array<{ status: string; direct: string; override_revision: string | null }>
@@ -431,6 +436,7 @@ describe("0063 session control mega migration", () => {
     await withPreMegaDatabase("continuability-scale", async (sql) => {
       const scope = await seedAccountWorkspace(sql, "continuability-scale");
       await applyFile(sql, "0063_session_control_mega_foundation.sql");
+      await applyContinuabilityProjectionRepair(sql);
 
       await sql`
         insert into sessions (

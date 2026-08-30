@@ -1,0 +1,85 @@
+{
+  "name": "@opengeni/svelte",
+  "version": "3.2.1",
+  "description": "Native Svelte stores and semantic session UI for OpenGeni.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/svelte"
+  },
+  "files": [
+    "dist",
+    "src",
+    "styles",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "svelte": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "svelte": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./session": {
+      "types": "./src/session.ts",
+      "svelte": "./src/session.ts",
+      "default": "./src/session.ts"
+    },
+    "./session-ui": {
+      "types": "./src/session-ui.ts",
+      "svelte": "./src/session-ui.ts",
+      "default": "./src/session-ui.ts"
+    },
+    "./composer": {
+      "types": "./src/composer.ts",
+      "svelte": "./src/composer.ts",
+      "default": "./src/composer.ts"
+    },
+    "./compiled.css": {
+      "types": "./styles/compiled.d.ts",
+      "style": "./styles/compiled.css",
+      "default": "./styles/compiled.css"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "svelte-package -i src -o dist",
+    "typecheck": "svelte-check --tsgo --tsconfig ./tsconfig.json",
+    "test": "bun test test",
+    "demo": "vite dev demo --port 3200",
+    "demo:build": "vite build demo",
+    "demo:build:deployed": "OPENGENI_SVELTE_DEMO_BASE=/svelte-demo/ OPENGENI_SVELTE_DEMO_OUT_DIR=../../../apps/web/dist/svelte-demo vite build demo",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "dependencies": {
+    "@opengeni/sdk": "workspace:*",
+    "@opengeni/ui": "workspace:*"
+  },
+  "devDependencies": {
+    "@sveltejs/package": "2.5.8",
+    "@sveltejs/vite-plugin-svelte": "7.3.0",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "svelte": "5.57.0",
+    "svelte-check": "4.7.6",
+    "typescript": "5.9.3",
+    "vite": "8.1.4"
+  },
+  "peerDependencies": {
+    "svelte": ">=5.46.4 <6"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

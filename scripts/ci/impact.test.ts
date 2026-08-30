@@ -94,6 +94,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      "test/e2e/framework-ui-parity.browser.e2e.ts",
+      "test/e2e/framework-ui-soak.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -103,6 +105,7 @@ describe("fail-closed change impact", () => {
       SESSION_RAIL_ROW_METADATA_E2E,
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
+      "test/e2e/svelte-demo.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
     expect(sdk.browserAcceptanceLanes).toEqual([
@@ -113,11 +116,43 @@ describe("fail-closed change impact", () => {
       "workbench",
     ]);
     expect(sdk.artifactRuntimeRequired).toBe(false);
-    expect(sdk.buildPackages).toEqual(expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]));
+    expect(sdk.buildPackages).toEqual(
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
+    );
 
     const react = createImpactPlan(["packages/react/src/index.ts"]);
     expect(react.buildPackages).toEqual(
-      expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]),
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
+    );
+
+    const ui = createImpactPlan(["packages/ui/src/index.ts"]);
+    expect(ui.buildPackages).toEqual(
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
+    );
+
+    const svelte = createImpactPlan(["packages/svelte/src/index.ts"]);
+    expect(svelte.buildPackages).toEqual(
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
     );
   });
 
@@ -319,6 +354,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      "test/e2e/framework-ui-parity.browser.e2e.ts",
+      "test/e2e/framework-ui-soak.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -328,6 +365,7 @@ describe("fail-closed change impact", () => {
       SESSION_RAIL_ROW_METADATA_E2E,
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
+      "test/e2e/svelte-demo.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
@@ -375,7 +413,12 @@ describe("fail-closed change impact", () => {
       expect.arrayContaining(["scripts/ci", "scripts/operator", "scripts/release"]),
     );
     expect(plan.buildPackages).toEqual(
-      expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]),
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
     );
   });
 

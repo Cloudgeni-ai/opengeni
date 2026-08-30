@@ -10,7 +10,7 @@
       "@opengeni/artifact-kernel-wasm-spreadsheet"
     ]
   ],
-  "linked": [["@opengeni/sdk", "@opengeni/react"]],
+  "linked": [["@opengeni/sdk", "@opengeni/ui", "@opengeni/react", "@opengeni/svelte"]],
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",

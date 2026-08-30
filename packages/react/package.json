@@ -121,6 +121,7 @@
     "@fontsource-variable/noto-sans-arabic": "5.2.10",
     "@fontsource-variable/noto-sans-jp": "5.2.10",
     "@opengeni/sdk": "workspace:*",
+    "@opengeni/ui": "workspace:*",
     "clsx": "^2.1.1",
     "dequal": "2.0.3",
     "lucide-react": "^1.8.0",

@@ -3,7 +3,8 @@
 > Most customer products do **not** need this integration shape. When OpenGeni
 > remains a standalone service and the product presents an OpenGeni-backed agent
 > in its own UI, use `@opengeni/sdk` through a tenant-scoped server proxy and add
-> only the `@opengeni/react` surfaces the product wants. See the package READMEs
+> only the `@opengeni/react` or native `@opengeni/svelte` surfaces the product
+> wants. See the package READMEs
 > and the `opengeni-client` skill. This guide is for the rarer case where the
 > host mounts OpenGeni's router or calls its core domain packages in-process.
 
@@ -14,28 +15,32 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 ## Consumption Shapes
 
 **Host-rendered product UI.** A host that keeps its own visual shell can consume
-`@opengeni/react/session`. The subpath exposes the session event, composer,
-queue and control hooks plus pure timeline projection, without importing the
-styled workbench graph. Pass a proxy implementing the subpath's narrow
-`SessionClientLike` plus host-safe workspace/session aliases through each
-hook's `{ client, workspaceId }` override when workspace-global provider
-behavior is not appropriate. The proxy does not need billing, rigs, files,
+`@opengeni/react/session` or `@opengeni/svelte/session`. Both expose the same
+framework-neutral session controllers and projections without importing the
+styled workbench graph. Pass a proxy implementing the relevant narrow
+structural client plus host-safe workspace/session aliases when provider
+context is not appropriate. The proxy does not need billing, rigs, files,
 terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
-**OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
-can import `@opengeni/react/compiled.css` once. That package-owned artifact is
-already compiled from the component source with Tailwind v4, contains no global
-Preflight or `--tw-*` property registrations, and scopes rules to the `.og-root`
-roots applied by the components. The host therefore needs no Tailwind compiler
-or source scan. Tailwind runtime variables are initialized only within those
-roots; independent defaults inherit without replacing host `--og-*` values,
-while scoped effective values keep derived tokens live. The additive
+**OpenGeni-rendered product UI.** A host that mounts styled session surfaces can
+use `@opengeni/react/session-ui` or native `@opengeni/svelte/session-ui` and
+import the matching `compiled.css` once. Both framework packages consume the
+same `@opengeni/ui` anatomy and tokens; the React stylesheet also retains the
+existing optional React-only surface closure. The package-owned artifact is
+precompiled, contains no global Preflight or `--tw-*` property registrations,
+and scopes rules to `.og-root`. The host therefore needs no Tailwind compiler
+or source scan. Runtime variables are initialized only within those roots;
+independent defaults inherit without replacing host `--og-*` values, while
+scoped effective values keep derived tokens live. The additive
 `@opengeni/react/styles.css` bridge remains available when a Tailwind v4 host
 intentionally wants to compile the package utilities itself. Import one styling
 path, not both. Theme, density, and brand overrides remain runtime `--og-*`
 tokens; portalled surfaces copy the effective tokens from their trigger onto
 their own standalone `.og-root`.
+
+The full cross-framework package, controller-lifecycle, CSS, and demo contract
+is documented in [`framework-ui.md`](framework-ui.md).
 
 **V1: mount the router.** Import `createApp(deps)` from `@opengeni/api-router/app` (`apps/api/src/app.ts`) and mount the returned Hono app under the host's route prefix. The dependency bag is `AppDependencies` from `@opengeni/core` (`packages/core/src/dependencies.ts`): `settings`, `db`, `bus`, and `workflowClient` are required; `documentIndexer`, `documentServices`, `observability`, `managedAuth`, `sessionAuthorization`, `sandboxClient`, and `resumeBoxById` are optional host bindings. The routes remain `/v1/...` inside the mounted app. If the mount prefix makes worker loopback wrong, set `OPENGENI_MCP_INTERNAL_URL` / `settings.opengeniMcpInternalUrl`. `OPENGENI_MCP_URL` remains the sandbox/external route used by Codemode and remote placements; `firstPartyMcpInternalBaseUrl` and `firstPartyMcpBaseUrl` in `packages/config/src/index.ts` own the split.
 

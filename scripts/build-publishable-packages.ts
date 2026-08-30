@@ -36,7 +36,12 @@ const packages = topologicallySortedPackages(publishableWorkspacePackages());
 const BUILD_CACHE_VERSION = 3;
 const buildCacheRoot = join(repoRoot, ".opengeni", "build-cache", "packages");
 const workspacePackagesByName = workspacePackageByName();
-const INPUT_EXCLUDED_DIRECTORY_NAMES = new Set(["dist", "node_modules", ".opengeni"]);
+const INPUT_EXCLUDED_DIRECTORY_NAMES = new Set([
+  "dist",
+  "node_modules",
+  ".opengeni",
+  ".svelte-kit",
+]);
 const INPUT_EXCLUDED_FILE_PATTERNS = [/^tsup\.config\.bundled_[^.]+\.mjs$/u];
 const LOCK_INITIALIZATION_GRACE_MS = 250;
 const LOCK_DRAIN_TIMEOUT_MS = 2_000;

@@ -37,7 +37,9 @@ COPY packages/react/package.json packages/react/package.json
 COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
+COPY packages/svelte/package.json packages/svelte/package.json
 COPY packages/testing/package.json packages/testing/package.json
+COPY packages/ui/package.json packages/ui/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 

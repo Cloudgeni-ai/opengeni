@@ -57,6 +57,49 @@ const operatorClient = new OpenGeniDocumentAuthorityClient({
 });
 ```
 
+## Framework-neutral session runtime (`@opengeni/sdk/session`)
+
+The focused session subpath contains the reusable browser-side state machines
+behind the React and Svelte packages. It is framework-free and SSR-import-safe:
+
+```ts
+import {
+  createSessionEventStore,
+  createSessionResourceStore,
+  createTurnQueueStore,
+} from "@opengeni/sdk/session";
+
+const events = createSessionEventStore({ client, workspaceId, sessionId });
+const unsubscribe = events.subscribe(() => {
+  const snapshot = events.getSnapshot();
+  console.log(snapshot.connectionState, snapshot.lastSequence);
+});
+
+await events.start();
+// Later, after the final owner releases the controller:
+unsubscribe();
+events.destroy();
+```
+
+Session controllers cover bounded event/history replay, session detail,
+durable composer drafts, attachments, queue, control, goals, structured human
+input, MCP approval policy, and lineage. They expose synchronous snapshots and
+explicit lifecycle; adapters own framework rendering and DOM behavior. Event
+history is compact-cursor aware and browser-bounded, queue/control reads are
+monotonic, and final teardown releases reads, streams, timers, visibility
+listeners, and retained object URLs.
+
+Use `acquireSessionController(...)` when several consumers share one complete
+authority/options key. Release only the acquired ownership handle; independently
+constructed controllers remain owned by their creator. Deterministic hosts and
+tests may inject `SessionRuntimeEnvironment` for time, IDs, visibility, draft
+storage, and object URLs.
+
+Pure timeline, parser, approval, human-input, older-history, status, and tool
+display projections are exported from the same subpath. See
+[`docs/framework-ui.md`](../../docs/framework-ui.md) for the package graph,
+framework responsibilities, and CSS boundary.
+
 ## Related-work discovery
 
 `listAgentTopology` returns a bounded hierarchy page plus provider-neutral

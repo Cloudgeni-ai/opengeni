@@ -699,17 +699,25 @@ async function fixtureWorker(
 }
 
 async function requiredServices(): Promise<RequiredServices> {
-  const databaseUrl = process.env.OPENGENI_TEST_DATABASE_URL;
-  const natsUrl = process.env.OPENGENI_TEST_NATS_URL;
-  const temporalHost = process.env.OPENGENI_TEST_TEMPORAL_HOST;
+  const databaseUrl =
+    process.env.OPENGENI_STEER_CANCELLATION_TEST_DATABASE_URL ??
+    process.env.OPENGENI_TEST_DATABASE_URL;
+  const natsUrl =
+    process.env.OPENGENI_STEER_CANCELLATION_TEST_NATS_URL ?? process.env.OPENGENI_TEST_NATS_URL;
+  const temporalHost =
+    process.env.OPENGENI_STEER_CANCELLATION_TEST_TEMPORAL_HOST ??
+    process.env.OPENGENI_TEST_TEMPORAL_HOST;
   const configured = [databaseUrl, natsUrl, temporalHost].filter(Boolean).length;
   if (configured !== 0 && configured !== 3) {
     throw new Error(
-      "cancellation-settlement lane fixture requires OPENGENI_TEST_DATABASE_URL, OPENGENI_TEST_NATS_URL, and OPENGENI_TEST_TEMPORAL_HOST together",
+      "cancellation-settlement lane fixture requires its database, NATS, and Temporal endpoints together",
     );
   }
   if (databaseUrl && natsUrl && temporalHost) {
-    const migrationUrl = process.env.OPENGENI_TEST_DATABASE_ADMIN_URL ?? databaseUrl;
+    const migrationUrl =
+      process.env.OPENGENI_STEER_CANCELLATION_TEST_DATABASE_ADMIN_URL ??
+      process.env.OPENGENI_TEST_DATABASE_ADMIN_URL ??
+      databaseUrl;
     return {
       databaseUrl,
       natsUrl,

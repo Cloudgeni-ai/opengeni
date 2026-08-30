@@ -181,6 +181,7 @@ describe("session control surface architecture", () => {
     const route = await source("routes/session.tsx");
     const appContext = await source("context.tsx");
     const lineageHook = await source("../../../packages/react/src/hooks/use-session-lineage.ts");
+    const lineageStore = await source("../../../packages/sdk/src/session/lineage.ts");
     expect(list).toContain("applySessionChannelProjection(pinProjected, projected)");
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
     expect(list).toContain("const promise = readSessionChannelMovePoint(");
@@ -192,8 +193,12 @@ describe("session control surface architecture", () => {
     expect(list).toContain("lineageChannelProjectionOwner");
     expect(list).toContain("beginRead: context.sessionChannelProjectionAuthority.beginRead");
     expect(list).toContain("activeLineage.readGeneration");
-    expect(lineageHook).toContain("getSessionLineage(workspaceId, sessionId, {");
-    expect(lineageHook).toContain("onRequestStart: (sharedReadGeneration) => {");
+    expect(lineageHook).toContain("createSessionLineageStore({");
+    expect(lineageHook).toContain("beginRead: options.beginRead");
+    expect(lineageStore).toContain(
+      "options.client.getSessionLineage(options.workspaceId, sessionId, {",
+    );
+    expect(lineageStore).toContain("onRequestStart: (sharedReadGeneration) => {");
     expect(appContext).toContain(
       "createOpenGeniClient(sessionChannelProjectionAuthority.beginRead)",
     );

@@ -4,6 +4,8 @@ const MANIFEST_STORE = "recordings";
 const CHUNK_STORE = "chunks";
 const CHUNKS_BY_RECORDING = "by-recording";
 
+export { createVoiceRecordingManifest } from "./voice-recording-model";
+
 export type VoiceRecordingCaptureState = "capturing" | "stopped" | "discarded";
 export type VoiceRecordingUploadState = "pending" | "syncing" | "retrying" | "complete";
 export type VoiceRecordingTranscriptionState = "pending" | "transcribing" | "retrying" | "complete";
@@ -142,37 +144,6 @@ export class VoiceRecordingOwnedError extends Error {
     super(`Voice recording ${recordingId} is active in another browser tab.`);
     this.name = "VoiceRecordingOwnedError";
   }
-}
-
-export function createVoiceRecordingManifest(input: {
-  recordingId: string;
-  workspaceId: string;
-  mimeType: string;
-  createdAt: string;
-  ownerId?: string | null | undefined;
-}): VoiceRecordingManifest {
-  return {
-    version: 1,
-    recordingId: input.recordingId,
-    workspaceId: input.workspaceId,
-    createdAt: input.createdAt,
-    updatedAt: input.createdAt,
-    mimeType: input.mimeType,
-    codec: codecForMimeType(input.mimeType),
-    captureState: "capturing",
-    uploadState: "pending",
-    transcriptionState: "pending",
-    finalizationState: "pending",
-    recoveryMode: "automatic",
-    handoffMode: "append",
-    ownerId: input.ownerId ?? null,
-    ownerHeartbeatAt: input.ownerId ? input.createdAt : null,
-    transcriptText: null,
-    nextChunkNumber: 0,
-    chunkCount: 0,
-    totalBytes: 0,
-    totalDurationMilliseconds: 0,
-  };
 }
 
 export async function prepareVoiceRecordingChunk(

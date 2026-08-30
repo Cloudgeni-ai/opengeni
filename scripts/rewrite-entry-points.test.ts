@@ -19,6 +19,11 @@ describe("release entry-point rewriting", () => {
           import: "./src/dual.ts",
           default: "./src/dual.ts",
         },
+        "./svelte": {
+          types: "./src/svelte.ts",
+          svelte: "./src/svelte.ts",
+          default: "./src/svelte.ts",
+        },
         "./compiled.css": {
           types: "./styles/compiled.d.ts",
           style: "./styles/compiled.css",
@@ -35,6 +40,11 @@ describe("release entry-point rewriting", () => {
         types: "./dist/dual.d.ts",
         import: "./dist/dual.js",
         default: "./dist/dual.js",
+      },
+      "./svelte": {
+        types: "./dist/svelte.d.ts",
+        svelte: "./dist/svelte.js",
+        import: "./dist/svelte.js",
       },
       "./compiled.css": source.exports["./compiled.css"],
     });

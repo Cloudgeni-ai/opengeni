@@ -1,377 +1,120 @@
+import {
+  createFileAttachmentStore,
+  type FileAttachment as SessionFileAttachment,
+} from "@opengeni/sdk/session";
 import type { FileAsset, FileResourceRef } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import {
   useEmbeddedFileAttachments,
   type EmbeddedFileAttachmentClientOverride,
 } from "../session-context";
+import { useOwnedExternalStore } from "./internal";
 
 export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride & {
-  /**
-   * Only files matching this predicate are accepted by {@link
-   * UseFileAttachmentsResult.addFromPaste} (the clipboard path). Defaults to
-   * `image/*` — the console's historical paste filter. {@link
-   * UseFileAttachmentsResult.addFiles} (the explicit picker / drop path)
-   * bypasses it.
-   */
+  /** Clipboard-only admission policy. Explicit picker/drop additions bypass it. */
   pasteFilter?: ((file: File) => boolean) | undefined;
 };
 
-export type FileAttachment = {
-  id: string;
-  name: string;
-  contentType: string;
-  sizeBytes: number;
-  status: "uploading" | "ready" | "failed";
-  /** The SDK `FileAsset` once the upload finishes. */
-  file?: FileAsset | undefined;
-  /** Object-URL for an inline preview; minted for `image/*` files only. */
-  previewUrl?: string | undefined;
-  error?: string | undefined;
-};
+export type FileAttachment = SessionFileAttachment;
 
 export type UseFileAttachmentsResult = {
   attachments: FileAttachment[];
-  /**
-   * `FileResourceRef[]` for every attachment that finished uploading — feed
-   * straight into `useComposer`'s `sendExtras.resources`.
-   */
   readyResources: FileResourceRef[];
-  /** True while any attachment is still uploading (drives progress UI). */
   uploading: boolean;
-  /**
-   * True while any attachment still needs an explicit outcome: wait for an
-   * upload, retry a failure, or remove it. This is the loss-prevention send
-   * gate; failed cards must never be silently omitted from a message.
-   */
   hasUnresolved: boolean;
-  /** Explicit picker / drop path — uploads every file, no filter. */
   addFiles: (files: Iterable<File>) => void;
-  /** Clipboard path — applies `pasteFilter` (default `image/*`) then uploads. */
   addFromPaste: (event: { clipboardData: DataTransfer | null }) => void;
-  /** Restore already-ready server assets without recreating browser-local bytes. */
   restoreReadyFiles: (files: Iterable<FileAsset>) => void;
-  /**
-   * Re-run the upload for a `failed` attachment, in place (same id, same
-   * source file). No-op for an id that isn't a known failed upload.
-   */
   retry: (id: string) => void;
-  /**
-   * Keep an attachment's object-URL alive for a consumer that outlives its
-   * queue entry (for example, an open route-level lightbox). The returned
-   * release is idempotent; pending revocation finishes after the last holder
-   * releases. Returns `undefined` when the attachment has no local preview.
-   */
   retainPreview: (id: string) => (() => void) | undefined;
-  /** Remove one attachment; revokes its object-URL after retained users finish. */
   remove: (id: string) => void;
-  /**
-   * Remove only finalized files whose durable ids were accepted by a send.
-   * Attachments added while that request was in flight remain queued for the
-   * next message.
-   */
   removeReadyFiles: (fileIds: Iterable<string>) => void;
-  /** Remove all attachments and revoke every unretained object-URL. */
   clear: () => void;
 };
 
 const isImage = (file: File): boolean => file.type.startsWith("image/");
 
-/**
- * Upload-and-track state for files attached to the next message. Owns the
- * full client-side upload layer: a per-file `uploading | ready | failed`
- * status machine driven by the SDK's `client.uploadFile`, object-URL image
- * previews with create/revoke lifecycle, the `image/*` clipboard paste filter,
- * and a `FileResourceRef[]` projection that drops straight into a message's
- * `resources`. Workspace-scoped, so it resolves both client and workspace from
- * the {@link OpenGeniProvider} (or a per-call `{ client, workspaceId }`).
- */
+/** React adapter over the framework-neutral attachment controller. */
 export function useFileAttachments(
   options: UseFileAttachmentsOptions = {},
 ): UseFileAttachmentsResult {
   const { client, workspaceId } = useEmbeddedFileAttachments(options);
   const pasteFilter = options.pasteFilter ?? isImage;
-  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
-  // Keep the source File per attachment id so a failed upload can be retried
-  // in place. Cleared on remove/clear so it never outlives its attachment.
-  const sources = useRef<Map<string, File>>(new Map());
-  // Object URLs must be owned synchronously: React may discard an attachment
-  // state update when its component unmounts in the same batch that minted the
-  // preview. The registry remains available to cleanup even before a render.
-  const previewUrls = useRef<Map<string, string>>(new Map());
-  const previewRetainers = useRef<Map<string, number>>(new Map());
-  const pendingPreviewRevocations = useRef<Set<string>>(new Set());
-  const revokePreview = useCallback((id: string) => {
-    const previewUrl = previewUrls.current.get(id);
-    if (!previewUrl) return;
-    if ((previewRetainers.current.get(id) ?? 0) > 0) {
-      pendingPreviewRevocations.current.add(id);
-      return;
-    }
-    previewUrls.current.delete(id);
-    pendingPreviewRevocations.current.delete(id);
-    URL.revokeObjectURL(previewUrl);
-  }, []);
-  const revokeAllPreviews = useCallback(() => {
-    for (const id of previewUrls.current.keys()) revokePreview(id);
-  }, [revokePreview]);
-  const retainPreview = useCallback(
-    (id: string): (() => void) | undefined => {
-      if (!previewUrls.current.has(id)) return undefined;
-      previewRetainers.current.set(id, (previewRetainers.current.get(id) ?? 0) + 1);
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        const remaining = (previewRetainers.current.get(id) ?? 1) - 1;
-        if (remaining > 0) {
-          previewRetainers.current.set(id, remaining);
-          return;
-        }
-        previewRetainers.current.delete(id);
-        if (pendingPreviewRevocations.current.has(id)) revokePreview(id);
-      };
-    },
-    [revokePreview],
-  );
-  // Ready-file reconciliation uses functional state updaters, which React may
-  // evaluate during a concurrent render that later suspends or is abandoned.
-  // Diff only committed attachment sets here so URL revocation cannot run from
-  // render-phase code while the previously committed DOM still uses a preview.
-  const committedAttachmentIds = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const currentIds = new Set(attachments.map((attachment) => attachment.id));
-    for (const id of committedAttachmentIds.current) {
-      if (!currentIds.has(id)) revokePreview(id);
-    }
-    committedAttachmentIds.current = currentIds;
-  }, [attachments, revokePreview]);
-  // Upload promises are not cancellable at this layer. Fence their settlements
-  // when the hook changes client/workspace or unmounts so an old tenant/session
-  // cannot mutate the next attachment queue (or an already-unmounted component).
-  const scopeGeneration = useRef(0);
-  const previousScope = useRef({ client, workspaceId });
-
-  useEffect(() => {
-    const previous = previousScope.current;
-    if (previous.client === client && previous.workspaceId === workspaceId) return;
-    previousScope.current = { client, workspaceId };
-    scopeGeneration.current += 1;
-    sources.current.clear();
-    revokeAllPreviews();
-    setAttachments([]);
-  }, [client, revokeAllPreviews, workspaceId]);
-
-  useEffect(
-    () => () => {
-      scopeGeneration.current += 1;
-      sources.current.clear();
-      revokeAllPreviews();
-    },
-    [revokeAllPreviews],
-  );
-
-  // Run (or re-run) the upload for one already-tracked attachment id. Sets it
-  // back to `uploading`, then resolves to `ready` (with the asset) or `failed`
-  // (with the error message).
-  const startUpload = useCallback(
-    (id: string, file: File) => {
-      const generation = scopeGeneration.current;
-      void client
-        .uploadFile(workspaceId, {
-          filename: file.name || "file",
-          contentType: file.type || "application/octet-stream",
-          data: file,
-        })
-        .then((asset) => {
-          if (scopeGeneration.current !== generation) return;
-          // Retry bytes are useful only until durable finalization succeeds.
-          // Drop the source File immediately; restored/ready attachments must
-          // never retain browser-local byte authority.
-          sources.current.delete(id);
-          setAttachments((current) =>
-            current.map((attachment) =>
-              attachment.id === id
-                ? {
-                    ...attachment,
-                    status: "ready",
-                    file: asset,
-                    name: asset.filename,
-                    contentType: asset.contentType,
-                    sizeBytes: asset.sizeBytes,
-                    error: undefined,
-                  }
-                : attachment,
-            ),
-          );
-        })
-        .catch((error: unknown) => {
-          if (scopeGeneration.current !== generation) return;
-          setAttachments((current) =>
-            current.map((attachment) =>
-              attachment.id === id
-                ? {
-                    ...attachment,
-                    status: "failed",
-                    error: error instanceof Error ? error.message : String(error),
-                  }
-                : attachment,
-            ),
-          );
-        });
-    },
+  const store = useMemo(
+    () => createFileAttachmentStore({ client, workspaceId }),
     [client, workspaceId],
   );
-
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  const releaseCommittedPreviews = useCommittedPreviewLeases(store, snapshot.attachments);
+  const retireResources = useCallback(() => {
+    releaseCommittedPreviews();
+    store.clear();
+  }, [releaseCommittedPreviews, store]);
+  useOwnedExternalStore(store, retireResources);
   const addFiles = useCallback(
     (files: Iterable<File>) => {
-      for (const file of files) {
-        const id = crypto.randomUUID();
-        sources.current.set(id, file);
-        const previewUrl = isImage(file) ? URL.createObjectURL(file) : undefined;
-        if (previewUrl) previewUrls.current.set(id, previewUrl);
-        setAttachments((current) => [
-          ...current,
-          {
-            id,
-            name: file.name || "image",
-            contentType: file.type || "application/octet-stream",
-            sizeBytes: file.size,
-            status: "uploading",
-            ...(previewUrl ? { previewUrl } : {}),
-          },
-        ]);
-        startUpload(id, file);
-      }
+      store.addFiles(files);
     },
-    [startUpload],
+    [store],
   );
-
-  const retry = useCallback(
-    (id: string) => {
-      const file = sources.current.get(id);
-      if (!file) {
-        return;
-      }
-      setAttachments((current) =>
-        current.map((attachment) =>
-          attachment.id === id
-            ? { ...attachment, status: "uploading", error: undefined }
-            : attachment,
-        ),
-      );
-      startUpload(id, file);
-    },
-    [startUpload],
-  );
-
   const addFromPaste = useCallback(
     (event: { clipboardData: DataTransfer | null }) => {
-      const clipboardFiles = event.clipboardData?.files;
-      if (!clipboardFiles) {
-        return;
-      }
-      const files = [...clipboardFiles].filter(pasteFilter);
-      if (files.length > 0) {
-        addFiles(files);
-      }
+      const files = event.clipboardData?.files;
+      if (!files) return;
+      const accepted = [...files].filter(pasteFilter);
+      if (accepted.length > 0) store.addFiles(accepted);
     },
-    [addFiles, pasteFilter],
+    [pasteFilter, store],
   );
-
-  const restoreReadyFiles = useCallback(
-    (files: Iterable<FileAsset>) => {
-      const incoming = new Map<string, FileAsset>();
-      for (const file of files) {
-        if (file.status === "ready" && file.workspaceId === workspaceId) {
-          incoming.set(file.id, file);
-        }
-      }
-      setAttachments((current) => {
-        const unresolved = current.filter((attachment) => attachment.status !== "ready");
-        const existingReady = new Map(
-          current.flatMap((attachment) =>
-            attachment.status === "ready" && attachment.file
-              ? ([[attachment.file.id, attachment]] as const)
-              : [],
-          ),
-        );
-        const restored = [...incoming.values()].map((file): FileAttachment => {
-          const existing = existingReady.get(file.id);
-          return existing
-            ? {
-                ...existing,
-                name: file.filename,
-                contentType: file.contentType,
-                sizeBytes: file.sizeBytes,
-                status: "ready",
-                file,
-                error: undefined,
-              }
-            : {
-                id: `restored:${file.id}`,
-                name: file.filename,
-                contentType: file.contentType,
-                sizeBytes: file.sizeBytes,
-                status: "ready",
-                file,
-                // No source File and no object URL: server metadata is the
-                // only authority restored across page/device boundaries.
-              };
-        });
-        // A server restoration is authoritative for finalized assets, but an
-        // upload that has not finalized still belongs to the local actor. Keep
-        // those unresolved entries while replacing the ready set exactly.
-        return [...unresolved, ...restored];
-      });
-    },
-    [workspaceId],
-  );
-
-  const remove = useCallback(
-    (id: string) => {
-      sources.current.delete(id);
-      revokePreview(id);
-      setAttachments((current) => current.filter((attachment) => attachment.id !== id));
-    },
-    [revokePreview],
-  );
-
-  const removeReadyFiles = useCallback((fileIds: Iterable<string>) => {
-    const accepted = new Set(fileIds);
-    if (accepted.size === 0) return;
-    setAttachments((current) =>
-      current.filter((attachment) => {
-        return !(
-          attachment.status === "ready" &&
-          attachment.file !== undefined &&
-          accepted.has(attachment.file.id)
-        );
-      }),
-    );
-  }, []);
-
-  const clear = useCallback(() => {
-    sources.current.clear();
-    revokeAllPreviews();
-    setAttachments([]);
-  }, [revokeAllPreviews]);
 
   return {
-    attachments,
-    readyResources: attachments.flatMap((attachment): FileResourceRef[] =>
-      attachment.status === "ready" && attachment.file
-        ? [{ kind: "file", fileId: attachment.file.id }]
-        : [],
-    ),
-    uploading: attachments.some((attachment) => attachment.status === "uploading"),
-    hasUnresolved: attachments.some((attachment) => attachment.status !== "ready"),
+    attachments: [...snapshot.attachments],
+    readyResources: [...snapshot.readyResources],
+    uploading: snapshot.uploading,
+    hasUnresolved: snapshot.hasUnresolved,
     addFiles,
     addFromPaste,
-    restoreReadyFiles,
-    retry,
-    retainPreview,
-    remove,
-    removeReadyFiles,
-    clear,
+    restoreReadyFiles: store.restoreReadyFiles,
+    retry: store.retry,
+    retainPreview: store.retainPreview,
+    remove: store.remove,
+    removeReadyFiles: store.removeReadyFiles,
+    clear: store.clear,
   };
+}
+
+function useCommittedPreviewLeases(
+  store: {
+    retainPreview(id: string): (() => void) | undefined;
+  },
+  attachments: readonly FileAttachment[],
+): () => void {
+  const leasesByStore = useRef(new Map<object, Map<string, () => void>>());
+  useEffect(() => {
+    let leases = leasesByStore.current.get(store);
+    if (!leases) {
+      leases = new Map();
+      leasesByStore.current.set(store, leases);
+    }
+    const committed = new Set(
+      attachments.flatMap((attachment) => (attachment.previewUrl ? [attachment.id] : [])),
+    );
+    for (const id of committed) {
+      if (leases.has(id)) continue;
+      const release = store.retainPreview(id);
+      if (release) leases.set(id, release);
+    }
+    for (const [id, release] of [...leases]) {
+      if (committed.has(id)) continue;
+      leases.delete(id);
+      release();
+    }
+  }, [attachments, store]);
+
+  return useCallback(() => {
+    const leases = leasesByStore.current.get(store);
+    if (!leases) return;
+    leasesByStore.current.delete(store);
+    for (const release of leases.values()) release();
+  }, [store]);
 }

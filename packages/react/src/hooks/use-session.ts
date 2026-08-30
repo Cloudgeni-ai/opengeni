@@ -1,12 +1,8 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createSessionResourceStore, isTitleEvent as isSdkTitleEvent } from "@opengeni/sdk/session";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
-import {
-  useMutationRunner,
-  usePolledValue,
-  useSessionEventTrigger,
-  type SessionEventFeedOptions,
-} from "./internal";
+import { useOwnedExternalStore, type SessionEventFeedOptions } from "./internal";
 
 export type UseSessionOptions = EmbeddedSessionReadClientOverride &
   SessionEventFeedOptions & {
@@ -35,10 +31,10 @@ export type UseSessionResult = {
 
 /** Event types that change the session title (auto + cross-client renames). */
 export function isTitleEvent(event: Pick<SessionEvent, "type">): boolean {
-  return event.type === "session.title_set";
+  return isSdkTitleEvent(event);
 }
 
-/** Fetch one session (with optional polling), live-patching its title on `session.title_set`. */
+/** React compatibility adapter over the framework-neutral session resource controller. */
 export function useSession(
   sessionId: string | null | undefined,
   options: UseSessionOptions = {},
@@ -46,113 +42,54 @@ export function useSession(
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionRead(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
-  const [override, setOverride] = useState<Session | null>(null);
-  const nextReadRevision = useRef(0);
-  const nextReadGeneration = useRef(0);
-  const beginRead = options.beginRead;
-  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
-  const load = useCallback(
-    async (signal?: AbortSignal) => {
-      if (!sessionId) {
-        return null;
-      }
-      let readGeneration = 0;
-      const fetched = await client.getSession(workspaceId, sessionId, {
-        fresh: true,
-        signal,
-        onRequestStart: () => {
-          readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
-        },
-      });
-      // A fresh server read supersedes any optimistic/event-driven override.
-      setOverride(null);
-      return {
-        session: fetched,
-        revision: ++nextReadRevision.current,
-        readGeneration,
-      };
-    },
-    [beginRead, client, workspaceId, sessionId],
+  const sharedFeed = options.events !== undefined;
+  const latestEvents = useRef(options.events);
+  latestEvents.current = options.events;
+  const store = useMemo(
+    () =>
+      createSessionResourceStore({
+        client,
+        workspaceId,
+        sessionId,
+        enabled,
+        ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
+        ...(options.beginRead === undefined ? {} : { beginRead: options.beginRead }),
+        ...(sharedFeed ? { events: latestEvents.current ?? [] } : {}),
+      }),
+    [
+      client,
+      enabled,
+      options.beginRead,
+      options.pollIntervalMs,
+      sessionId,
+      sharedFeed,
+      workspaceId,
+    ],
   );
-  const { data, loading, error, refresh } = usePolledValue(load, {
-    pollIntervalMs: options.pollIntervalMs,
-    enabled,
-  });
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  useOwnedExternalStore(store);
+
   useEffect(() => {
-    if (enabled && workspaceControlEvent) void refresh();
-  }, [enabled, refresh, workspaceControlEvent]);
+    if (options.events !== undefined) store.applyEvents(options.events);
+  }, [options.events, store]);
+  useEffect(() => {
+    if (enabled && workspaceControlEvent) void store.refresh();
+  }, [enabled, store, workspaceControlEvent]);
   useEffect(() => {
     if (!sessionId || !enabled) return;
-    return registerSessionReconciler(sessionId, "session", refresh);
-  }, [enabled, refresh, registerSessionReconciler, sessionId]);
-
-  const base = data?.session ?? null;
-  const readRevision = data?.revision ?? 0;
-  const readGeneration = data?.readGeneration ?? 0;
-  // The override only ever carries title/titleSource patches; it is reset on
-  // every fresh load so it can never go stale against the server snapshot.
-  const session = useMemo(
-    () =>
-      base && override && override.id === base.id
-        ? { ...base, title: override.title, titleSource: override.titleSource }
-        : base,
-    [base, override],
-  );
-
-  // Live-patch the title on auto (agent) + cross-client (user/agent) renames so
-  // the UI reflects the new title without polling or a full re-fetch.
-  const onTitleEvent = useCallback(
-    (event: SessionEvent) => {
-      // The fetched session row is the authoritative title projection through
-      // lastSequence. Shared feeds may replay that historical tail after the
-      // fetch; applying it would undo a row-only migration quarantine. Only an
-      // event committed after this snapshot may live-patch the title.
-      if (!base || event.sequence <= base.lastSequence) {
-        return;
-      }
-      const payload = (event.payload ?? {}) as { title?: unknown; source?: unknown };
-      const title = payload.title;
-      if (typeof title !== "string") {
-        return;
-      }
-      const source: "user" | "agent" | null =
-        payload.source === "user" || payload.source === "agent" ? payload.source : null;
-      setOverride((current): Session | null => {
-        const next = current ?? base;
-        return { ...next, title, titleSource: source };
-      });
-    },
-    [base],
-  );
-  useSessionEventTrigger(client, workspaceId, sessionId, isTitleEvent, onTitleEvent, {
-    enabled,
-    ...(options.events !== undefined ? { events: options.events } : {}),
-  });
-
-  const updateTitle = useCallback(
-    async (title: string): Promise<Session | null> => {
-      if (!sessionId) {
-        return null;
-      }
-      const result = await run(() => client.updateSession(workspaceId, sessionId, { title }));
-      if (result) {
-        setOverride(result);
-      }
-      return result;
-    },
-    [client, workspaceId, sessionId, run],
-  );
+    return registerSessionReconciler(sessionId, "session", store.refresh);
+  }, [enabled, registerSessionReconciler, sessionId, store]);
 
   return {
-    session,
-    loading,
-    error,
-    readRevision,
-    readGeneration,
-    refresh,
-    updateTitle,
-    updating: mutating,
-    mutationError,
-    clearMutationError,
+    session: snapshot.value,
+    loading: snapshot.loading,
+    error: snapshot.error,
+    readRevision: snapshot.readRevision,
+    readGeneration: snapshot.readGeneration,
+    refresh: store.refresh,
+    updateTitle: store.updateTitle,
+    updating: snapshot.updating,
+    mutationError: snapshot.mutationError,
+    clearMutationError: store.clearMutationError,
   };
 }

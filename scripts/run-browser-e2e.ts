@@ -17,6 +17,7 @@ const testFiles =
         "./test/e2e/personal-workspace-accessibility.browser.e2e.ts",
         "./test/e2e/codex-overview.e2e.ts",
         "./test/e2e/code-editor.browser.e2e.ts",
+        "./test/e2e/framework-ui-parity.browser.e2e.ts",
         "./test/e2e/queue-surface.browser.e2e.ts",
         "./test/e2e/react-compiled-css.browser.e2e.ts",
         "./test/e2e/react-demo-mobile.browser.e2e.ts",
@@ -24,6 +25,7 @@ const testFiles =
         "./test/e2e/session-header.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
         "./test/e2e/session-rail-row-metadata.browser.e2e.ts",
+        "./test/e2e/svelte-demo.browser.e2e.ts",
         "./test/e2e/timeline-scroll.browser.e2e.ts",
         "./test/e2e/timeline-tip-follow.browser.e2e.ts",
         "./test/e2e/user-message-disclosure.browser.e2e.ts",
@@ -32,13 +34,16 @@ const testFiles =
       ];
 
 for (const testFile of testFiles) {
-  const engineIds = testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts")
-    ? (["chromium", "firefox", "webkit"] as const)
-    : ([undefined] as const);
+  const crossEngine = testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts")
+    ? { key: "OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE", ids: ["chromium", "firefox", "webkit"] }
+    : testFile.endsWith("framework-ui-parity.browser.e2e.ts")
+      ? { key: "OPENGENI_FRAMEWORK_UI_BROWSER_ENGINE", ids: ["chromium", "firefox", "webkit"] }
+      : null;
+  const engineIds = crossEngine?.ids ?? [undefined];
   for (const engineId of engineIds) {
     // Keep native browser engines in separate Bun processes so one engine's teardown cannot
     // influence another engine's performance or liveness result.
-    const environment = engineId ? { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId } : {};
+    const environment = engineId && crossEngine ? { [crossEngine.key]: engineId } : {};
     const status = runTestFile(testFile, environment);
     if (status !== 0) process.exit(status);
   }

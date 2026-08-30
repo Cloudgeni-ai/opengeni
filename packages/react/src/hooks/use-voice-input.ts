@@ -1,18 +1,12 @@
 import { OpenGeniApiError, type ClientVoiceInputConfig, type OpenGeniClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  IndexedDbVoiceRecordingStore,
-  VoiceRecordingOwnedError,
-  VoiceRecordingStorageUnavailableError,
-  createVoiceRecordingManifest,
-  type VoiceRecordingChunk,
-  type VoiceRecordingManifest,
-  type VoiceRecordingStore,
+import { createVoiceRecordingManifest } from "../voice-recording-model";
+import type {
+  VoiceRecordingChunk,
+  VoiceRecordingManifest,
+  VoiceRecordingStore,
 } from "../voice-recording-store";
-import {
-  acquireDefaultVoiceRecordingOwnerLease,
-  type VoiceRecordingOwnerLease,
-} from "../voice-recording-owner";
+import type { VoiceRecordingOwnerLease } from "../voice-recording-owner";
 import { appendFinalTranscript } from "./use-transcription";
 
 export type VoiceInputStatus =
@@ -92,6 +86,8 @@ const TRANSCRIPTION_RECORDING_RECOVERY_RETRY_AFTER_MILLISECONDS = 5_000;
 const MIME_PREFERENCES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
 const createDefaultVoiceRecordingId = () => crypto.randomUUID();
 const currentDate = () => new Date();
+const isVoiceRecordingError = (reason: unknown, name: string): boolean =>
+  reason instanceof Error && reason.name === name;
 
 export function transcriptionRecoveryMutationDelayMilliseconds(
   retryAfterMilliseconds: number | undefined,
@@ -186,6 +182,7 @@ export function useVoiceInput({
         ownerIdRef.current = injectedOwnerId;
         return injectedOwnerId;
       }
+      const { acquireDefaultVoiceRecordingOwnerLease } = await import("../voice-recording-owner");
       const lease = await acquireDefaultVoiceRecordingOwnerLease();
       ownerLeaseRef.current = lease;
       ownerIdRef.current = lease.ownerId;
@@ -222,9 +219,11 @@ export function useVoiceInput({
   const ensureStore = useCallback(async (): Promise<VoiceRecordingStore> => {
     if (storeRef.current) return storeRef.current;
     if (!storePromiseRef.current) {
-      storePromiseRef.current = Promise.resolve().then(() => {
+      storePromiseRef.current = Promise.resolve().then(async () => {
         const factory = createRecordingStoreRef.current;
-        const store = factory?.() ?? new IndexedDbVoiceRecordingStore();
+        const store = factory
+          ? factory()
+          : new (await import("../voice-recording-store")).IndexedDbVoiceRecordingStore();
         ownsStoreRef.current = factory === undefined;
         storeRef.current = store;
         setStorageAvailable(true);
@@ -235,7 +234,9 @@ export function useVoiceInput({
       return await storePromiseRef.current;
     } catch (reason) {
       storePromiseRef.current = null;
-      if (reason instanceof VoiceRecordingStorageUnavailableError) setStorageAvailable(false);
+      if (isVoiceRecordingError(reason, "VoiceRecordingStorageUnavailableError")) {
+        setStorageAvailable(false);
+      }
       throw reason;
     }
   }, []);
@@ -361,7 +362,7 @@ export function useVoiceInput({
           setError(null);
           return;
         } catch (reason) {
-          if (reason instanceof VoiceRecordingOwnedError) continue;
+          if (isVoiceRecordingError(reason, "VoiceRecordingOwnedError")) continue;
           throw reason;
         }
       }
@@ -636,7 +637,7 @@ export function useVoiceInput({
     } catch (reason) {
       setStatus("error");
       setError(
-        reason instanceof VoiceRecordingStorageUnavailableError
+        isVoiceRecordingError(reason, "VoiceRecordingStorageUnavailableError")
           ? "storage_unavailable"
           : errorCode(reason),
       );
@@ -875,7 +876,7 @@ export function useVoiceInput({
       }
       setStatus("error");
       setError(
-        reason instanceof VoiceRecordingStorageUnavailableError
+        isVoiceRecordingError(reason, "VoiceRecordingStorageUnavailableError")
           ? "storage_unavailable"
           : errorCode(reason),
       );
@@ -1129,7 +1130,9 @@ export function useVoiceInput({
     }
     if (!manifestRef.current) {
       void loadNextRecoverable(generation).catch((reason: unknown) => {
-        if (reason instanceof VoiceRecordingStorageUnavailableError) setStorageAvailable(false);
+        if (isVoiceRecordingError(reason, "VoiceRecordingStorageUnavailableError")) {
+          setStorageAvailable(false);
+        }
       });
     }
   }, [

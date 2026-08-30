@@ -6,8 +6,10 @@ import selectorParser, { type Selector } from "postcss-selector-parser";
 
 import {
   assertScoped,
+  assertUiCompatibilityCssEqual,
   buildCompiledCss,
   buildEffectiveTokensCss,
+  syncUiCompatibilityCss,
 } from "../scripts/build-compiled-css";
 
 const packageRoot = join(import.meta.dir, "..");
@@ -132,6 +134,7 @@ describe("compiled CSS contract", () => {
   });
 
   test("is deterministic, directive-free, scoped, and bounded", async () => {
+    await expect(syncUiCompatibilityCss(true)).resolves.toBeUndefined();
     expect(await buildCompiledCss()).toBe(compiled);
     expect(await buildEffectiveTokensCss()).toBe(effectiveTokens);
     expect(() => assertScoped(compiled)).not.toThrow();
@@ -161,6 +164,13 @@ describe("compiled CSS contract", () => {
     expect([...foundDirectives]).toEqual([]);
     expect(Buffer.byteLength(compiled)).toBeGreaterThan(120_000);
     expect(Buffer.byteLength(compiled)).toBeLessThan(256_000);
+  });
+
+  test("compatibility-copy sensitivity rejects one planted byte of drift", () => {
+    expect(() => assertUiCompatibilityCssEqual("tokens.css", tokens, tokens)).not.toThrow();
+    expect(() =>
+      assertUiCompatibilityCssEqual("tokens.css", tokens, `${tokens}/* planted drift */`),
+    ).toThrow("styles/tokens.css diverged from @opengeni/ui");
   });
 
   test("contains representative utilities for roots and descendants", () => {

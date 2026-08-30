@@ -296,6 +296,37 @@ export type SessionEventFeedOptions = {
   enabled?: boolean | undefined;
 };
 
+type OwnedExternalStore = {
+  start(): void | Promise<void>;
+  destroy(): void;
+};
+
+/**
+ * Own one framework-neutral store across React StrictMode effect replay.
+ * Destruction waits one microtask so the replay setup can supersede its first
+ * cleanup, while a real target change still retires the old store.
+ */
+export function useOwnedExternalStore(
+  store: OwnedExternalStore,
+  beforeDestroy?: (() => void) | undefined,
+): void {
+  const active = useRef(new Map<OwnedExternalStore, symbol>());
+  useEffect(() => {
+    const activeStores = active.current;
+    const marker = Symbol("owned-external-store");
+    activeStores.set(store, marker);
+    void store.start();
+    return () => {
+      beforeDestroy?.();
+      queueMicrotask(() => {
+        if (activeStores.get(store) !== marker) return;
+        activeStores.delete(store);
+        store.destroy();
+      });
+    };
+  }, [beforeDestroy, store]);
+}
+
 /**
  * Invoke `onEvent` for every session event matching `match` — the live-update
  * primitive behind `useTurnQueue` and `useGoal`. Either watches a shared

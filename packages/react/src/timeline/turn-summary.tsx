@@ -430,6 +430,7 @@ export function TurnSummary({
               liveShell && "text-og-fg-subtle",
             )}
           >
+            <span className="sr-only">{open ? "Hide turn steps" : "Show turn steps"}</span>
             {/* Disclosure grammar matches the rows: chevron leads (far left), then any
             exceptional or active state, then the facets — one expand affordance
             side everywhere. */}

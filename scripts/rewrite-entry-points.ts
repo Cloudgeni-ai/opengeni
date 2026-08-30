@@ -46,7 +46,7 @@ import { join } from "node:path";
 import { publishableWorkspacePackages, repoRoot, type PackageJson } from "./publishable-workspaces";
 
 export type ExportsEntry =
-  | { types?: string; style?: string; import?: string; default?: string }
+  | { types?: string; style?: string; svelte?: string; import?: string; default?: string }
   | string;
 
 export function srcToDist(value: string, kind: "runtime" | "types"): string {
@@ -81,6 +81,9 @@ function entryToDist(entry: ExportsEntry): ExportsEntry {
   if (entry.import?.startsWith("./src/")) {
     next.import = srcToDist(entry.import, "runtime");
   }
+  if (entry.svelte?.startsWith("./src/")) {
+    next.svelte = srcToDist(entry.svelte, "runtime");
+  }
   if (entry.default?.startsWith("./src/")) {
     const runtime = srcToDist(entry.default, "runtime");
     if (entry.import === undefined) {
@@ -109,6 +112,9 @@ function entryToSrc(entry: ExportsEntry): ExportsEntry {
     } else {
       next.import = runtime;
     }
+  }
+  if (entry.svelte?.startsWith("./dist/")) {
+    next.svelte = distToSrc(entry.svelte);
   }
   if (entry.default?.startsWith("./dist/")) {
     next.default = distToSrc(entry.default);

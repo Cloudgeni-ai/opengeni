@@ -452,4 +452,41 @@ describe("durable voice recording browser storage", () => {
     }, ownerModuleSource);
     expect(reloadedOwner).toBe(opener.ownerId);
   }, 30_000);
+
+  test("releases owner locks on unload but retains them for BFCache suspension", async () => {
+    const result = await page.evaluate(
+      async ({ source }) => {
+        const moduleUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+        const owner = (await import(
+          moduleUrl
+        )) as typeof import("../../packages/react/src/voice-recording-owner");
+        URL.revokeObjectURL(moduleUrl);
+
+        const first = await owner.acquireDefaultVoiceRecordingOwnerLease();
+        const lockName = `opengeni.voice-recording-owner:${first.ownerId}`;
+        const heldBefore = (await navigator.locks.query()).held?.some(
+          (lock) => lock.name === lockName,
+        );
+        window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+        await Promise.resolve();
+        const heldAfterPersisted = (await navigator.locks.query()).held?.some(
+          (lock) => lock.name === lockName,
+        );
+        window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const heldAfterUnload = (await navigator.locks.query()).held?.some(
+          (lock) => lock.name === lockName,
+        );
+        first.release();
+        return { heldBefore, heldAfterPersisted, heldAfterUnload };
+      },
+      { source: ownerModuleSource },
+    );
+
+    expect(result).toEqual({
+      heldBefore: true,
+      heldAfterPersisted: true,
+      heldAfterUnload: false,
+    });
+  }, 30_000);
 });

@@ -51,9 +51,16 @@ mock.module("@opengeni/core", () => ({
     grant: AccessGrant,
     candidateWorkspaceId: string,
     input: unknown,
+    canonicalManagedHumanSession?: Parameters<typeof realCore.saveActorNewSessionDraft>[4],
   ) => {
     if (deps.db !== fakeDb || candidateWorkspaceId !== workspaceId) {
-      return await realCoreFns.saveActorNewSessionDraft(deps, grant, candidateWorkspaceId, input);
+      return await realCoreFns.saveActorNewSessionDraft(
+        deps,
+        grant,
+        candidateWorkspaceId,
+        input,
+        canonicalManagedHumanSession,
+      );
     }
     const parsed = SaveNewSessionDraftRequest.parse(input);
     lastSaveGrant = grant;

@@ -1,7 +1,8 @@
+import { createSessionControlStore } from "@opengeni/sdk/session";
 import type { SessionControlResponse, SessionEvent } from "@opengeni/sdk";
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
-import { useMutationRunner } from "./internal";
+import { useOwnedExternalStore } from "./internal";
 
 export type UseSessionControlOptions = EmbeddedSessionClientOverride;
 
@@ -19,123 +20,26 @@ export type UseSessionControlResult = {
   clearError: () => void;
 };
 
-/**
- * Session pause/resume and approval decisions. Pair with
- * `useSessionEvents` (for `session.requiresAction` payloads carrying the
- * `approvalId`) to render an approval bar.
- */
+/** React adapter over the framework-neutral session-control controller. */
 export function useSessionControl(
   sessionId: string | null | undefined,
   options: UseSessionControlOptions = {},
 ): UseSessionControlResult {
   const { client, workspaceId } = useEmbeddedSession(options);
-  const approvalTargetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
-  const pendingApproval = useRef<{
-    targetKey: string;
-    decisionKey: string;
-    clientEventId: string;
-  } | null>(null);
-  useLayoutEffect(() => {
-    if (pendingApproval.current?.targetKey !== approvalTargetKey) {
-      pendingApproval.current = null;
-    }
-  }, [approvalTargetKey]);
-  const {
-    run: runControl,
-    mutating: controlling,
-    mutationError: controlError,
-    clearMutationError: clearControlError,
-  } = useMutationRunner(approvalTargetKey);
-  const {
-    run: runApproval,
-    mutating: responding,
-    mutationError: approvalError,
-    clearMutationError: clearApprovalError,
-  } = useMutationRunner(approvalTargetKey);
-
-  const pause = useCallback(
-    async (reason?: string): Promise<SessionControlResponse | null> => {
-      if (!sessionId) {
-        return null;
-      }
-      return await runControl(() =>
-        client.pauseSession(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
-      );
-    },
-    [client, workspaceId, sessionId, runControl],
+  const store = useMemo(
+    () => createSessionControlStore({ client, workspaceId, sessionId }),
+    [client, sessionId, workspaceId],
   );
-
-  const resume = useCallback(
-    async (reason?: string): Promise<SessionControlResponse | null> => {
-      if (!sessionId) return null;
-      return await runControl(() =>
-        client.resumeSession(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
-      );
-    },
-    [client, workspaceId, sessionId, runControl],
-  );
-
-  const decide = useCallback(
-    async (
-      approvalId: string,
-      decision: "approve" | "reject",
-      message?: string,
-    ): Promise<SessionEvent | null> => {
-      if (!sessionId) {
-        return null;
-      }
-      const decisionKey = JSON.stringify([approvalId, decision, message ?? null]);
-      if (pendingApproval.current?.decisionKey !== decisionKey) {
-        pendingApproval.current = {
-          targetKey: approvalTargetKey,
-          decisionKey,
-          clientEventId: crypto.randomUUID(),
-        };
-      }
-      const clientEventId = pendingApproval.current.clientEventId;
-      const accepted = await runApproval(() =>
-        client.sendApprovalDecision(workspaceId, sessionId, {
-          approvalId,
-          decision,
-          ...(message !== undefined ? { message } : {}),
-          clientEventId,
-        }),
-      );
-      if (
-        accepted !== null &&
-        pendingApproval.current?.targetKey === approvalTargetKey &&
-        pendingApproval.current.clientEventId === clientEventId
-      ) {
-        pendingApproval.current = null;
-      }
-      return accepted;
-    },
-    [approvalTargetKey, client, workspaceId, sessionId, runApproval],
-  );
-
-  const approve = useCallback(
-    async (approvalId: string, message?: string) => await decide(approvalId, "approve", message),
-    [decide],
-  );
-  const reject = useCallback(
-    async (approvalId: string, message?: string) => await decide(approvalId, "reject", message),
-    [decide],
-  );
-
-  const error = approvalError ?? controlError;
-  const clearError = useCallback(() => {
-    clearControlError();
-    clearApprovalError();
-  }, [clearControlError, clearApprovalError]);
-
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  useOwnedExternalStore(store);
   return {
-    pause,
-    resume,
-    controlling,
-    approve,
-    reject,
-    responding,
-    error,
-    clearError,
+    pause: store.pause,
+    resume: store.resume,
+    controlling: snapshot.controlling,
+    approve: store.approve,
+    reject: store.reject,
+    responding: snapshot.responding,
+    error: snapshot.error,
+    clearError: store.clearError,
   };
 }
