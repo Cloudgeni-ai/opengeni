@@ -40,6 +40,20 @@ describe("migration 0379 session event raw lane activation", () => {
     expect(source).toContain("DEFERRABLE INITIALLY DEFERRED");
     expect(source).toContain("session event compatibility projection is ahead of its cursor");
     expect(source.match(/SET search_path = pg_catalog, %I, pg_temp/gu)).toHaveLength(4);
+    for (const functionName of [
+      "prevent_session_event_projection_regression",
+      "assert_session_event_projection_not_ahead",
+    ]) {
+      const start = source.indexOf(`CREATE FUNCTION ${functionName}()`);
+      const end = source.indexOf(`$${functionName}$;`, start);
+      const functionSource = source.slice(start, end);
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(end).toBeGreaterThan(start);
+      expect(functionSource).toContain("SECURITY DEFINER");
+      expect(functionSource).toContain("open_session_tenancy_fenced_access");
+      expect(functionSource).toContain("close_session_tenancy_fenced_access");
+      expect(functionSource).toContain("EXCEPTION WHEN OTHERS");
+    }
     for (const eventType of SESSION_EVENT_RAW_DELTA_TYPES) {
       expect(source.match(new RegExp(`'${eventType.replaceAll(".", "\\.")}'`, "gu"))).toHaveLength(
         2,

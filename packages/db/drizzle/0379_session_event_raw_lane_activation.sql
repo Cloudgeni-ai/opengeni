@@ -220,14 +220,20 @@ $normalize_legacy_session_event_sequence_from_cursor$;
 CREATE FUNCTION prevent_session_event_projection_regression()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $prevent_session_event_projection_regression$
 DECLARE
+  fenced_access_capability_id uuid;
   current_sequence integer;
 BEGIN
   IF NEW.last_sequence IS NOT DISTINCT FROM OLD.last_sequence THEN
     RETURN NEW;
   END IF;
+  fenced_access_capability_id :=
+    opengeni_private.open_session_tenancy_fenced_access(
+      session_tenancy_fence_target_schema()
+    );
   SELECT cursor.last_sequence
   INTO current_sequence
   FROM session_event_cursors cursor
@@ -245,24 +251,43 @@ BEGIN
   -- validated AFTER INSERT trigger advances the compatibility projection once
   -- the event exists. No direct/manual update may lead or regress authority.
   NEW.last_sequence := current_sequence;
+  PERFORM opengeni_private.close_session_tenancy_fenced_access(
+    fenced_access_capability_id
+  );
   RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  IF fenced_access_capability_id IS NOT NULL THEN
+    PERFORM opengeni_private.close_session_tenancy_fenced_access(
+      fenced_access_capability_id
+    );
+  END IF;
+  RAISE;
 END
 $prevent_session_event_projection_regression$;
 
 CREATE FUNCTION assert_session_event_projection_not_ahead()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $assert_session_event_projection_not_ahead$
 DECLARE
+  fenced_access_capability_id uuid;
   current_sequence integer;
 BEGIN
+  fenced_access_capability_id :=
+    opengeni_private.open_session_tenancy_fenced_access(
+      session_tenancy_fence_target_schema()
+    );
   IF NOT EXISTS (
     SELECT 1 FROM sessions session
     WHERE session.account_id = NEW.account_id
       AND session.workspace_id = NEW.workspace_id
       AND session.id = NEW.id
   ) THEN
+    PERFORM opengeni_private.close_session_tenancy_fenced_access(
+      fenced_access_capability_id
+    );
     RETURN NULL;
   END IF;
   SELECT cursor.last_sequence
@@ -282,7 +307,17 @@ BEGIN
         current_sequence
       );
   END IF;
+  PERFORM opengeni_private.close_session_tenancy_fenced_access(
+    fenced_access_capability_id
+  );
   RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  IF fenced_access_capability_id IS NOT NULL THEN
+    PERFORM opengeni_private.close_session_tenancy_fenced_access(
+      fenced_access_capability_id
+    );
+  END IF;
+  RAISE;
 END
 $assert_session_event_projection_not_ahead$;
 
