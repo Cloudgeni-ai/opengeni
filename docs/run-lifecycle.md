@@ -458,7 +458,7 @@ delay. The exact Modal `TaskExecStart` `ClientError` for DNS resolution of a
 ten `UNAVAILABLE` retries: DNS failed before the command transport connected, so
 OpenGeni resumes the same accepted turn through the connectivity backoff.
 Generic `TaskExecStart` `UNAVAILABLE`, mixed failure batches, message-only
-lookalikes, contradictory HTTP client statuses, and the exact
+lookalikes, any attached HTTP status metadata, and the exact
 `FAILED_PRECONDITION: Modal Sandbox is shutting down` condition remain
 non-retryable because pre-command safety is not proven. Required first-party
 connect/tools-list also treats a rolling API

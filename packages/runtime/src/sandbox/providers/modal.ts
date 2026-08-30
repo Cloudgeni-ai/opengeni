@@ -220,10 +220,7 @@ function hasContradictoryModalHttpStatus(record: Record<string, unknown>): boole
       Reflect.get(response, "httpStatusCode"),
     );
   }
-  return values.some((value) => {
-    const status = modalHttpStatus(value);
-    return status !== null && status < 500;
-  });
+  return values.some((value) => modalHttpStatus(value) !== null);
 }
 
 function isModalTaskExecStartDnsResolutionLeaf(record: Record<string, unknown>): boolean {
@@ -240,7 +237,8 @@ function isModalTaskExecStartDnsResolutionLeaf(record: Record<string, unknown>):
  * Modal exhausted its own retries before failing to resolve the exact command
  * router DNS name, so TaskExecStart never connected and replay is safe. Keep
  * this fail-closed across Agents SDK wrappers: every reachable structural leaf
- * must be that exact ClientError, and any incomplete or mixed graph is rejected.
+ * must be that exact ClientError with no HTTP status metadata, and any incomplete
+ * or mixed graph is rejected.
  */
 export function isModalTaskExecStartDnsResolutionError(error: unknown): boolean {
   const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];

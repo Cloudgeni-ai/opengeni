@@ -4970,6 +4970,7 @@ describe("transient provider error classifier", () => {
     );
     const wrapped = new ToolCallError("Failed to run function tools", clientError);
 
+    expect(isTransientProviderError(wrapped)).toBe(false);
     expect(agentRunFailurePayload(wrapped)).toEqual({
       error:
         "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
@@ -4982,6 +4983,45 @@ describe("transient provider error classifier", () => {
         attemptNumber: 1,
       }),
     ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+  });
+
+  test("keeps status-tagged, mixed-sibling, and shutdown Modal failures terminal", () => {
+    const path = "/modal.task_command_router.TaskCommandRouter/TaskExecStart";
+    const details =
+      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443";
+    const clientError = (overrides: Record<string, unknown> = {}) =>
+      Object.assign(new Error(`${path} UNAVAILABLE: ${details}`), {
+        name: "ClientError",
+        path,
+        code: 14,
+        details,
+        ...overrides,
+      });
+    const statusTagged = new ToolCallError(
+      "Failed to run function tools",
+      clientError({ status: 503 }),
+    );
+    const mixed = new AggregateError(
+      [
+        new ToolCallError("DNS tool failed", clientError()),
+        new Error("another tool may have started"),
+      ],
+      "parallel tools failed",
+    );
+    const shutdownDetails = "Modal Sandbox is shutting down";
+    const shutdown = new ToolCallError(
+      "Failed to run function tools",
+      clientError({
+        code: 9,
+        details: shutdownDetails,
+        message: `${path} FAILED_PRECONDITION: ${shutdownDetails}`,
+      }),
+    );
+
+    for (const terminal of [statusTagged, mixed, shutdown]) {
+      expect(isTransientProviderError(terminal)).toBe(false);
+      expect(agentRunFailurePayload(terminal)).toEqual({ error: terminal.message });
+    }
   });
 
   test("classifies node/undici network fault codes as transient", () => {

@@ -151,9 +151,6 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     expect(
       isModalTaskExecStartDnsResolutionError(modalTaskExecStartDnsError({ code: "UNAVAILABLE" })),
     ).toBe(true);
-    expect(
-      isModalTaskExecStartDnsResolutionError(modalTaskExecStartDnsError({ status: 503 })),
-    ).toBe(true);
   });
 
   test("traverses ToolCallError.error, cause, and all AggregateError leaves", () => {
@@ -178,7 +175,7 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
     expect(isModalTaskExecStartDnsResolutionError(aggregate)).toBe(true);
   });
 
-  test("rejects every near match and contradictory HTTP client status", () => {
+  test("rejects every near match and any HTTP status metadata", () => {
     for (const nearMatch of [
       modalTaskExecStartDnsError({ name: "Error" }),
       modalTaskExecStartDnsError({ path: "/other.TaskCommandRouter/TaskExecStart" }),
@@ -203,6 +200,7 @@ describe("OpenGeni Modal 0.9 snapshot policy", () => {
       }),
       modalTaskExecStartDnsError({ details: `${MODAL_TASK_EXEC_START_DNS_DETAILS}.` }),
       modalTaskExecStartDnsError({ status: 400 }),
+      modalTaskExecStartDnsError({ status: 503 }),
       modalTaskExecStartDnsError({ statusCode: "404" }),
       modalTaskExecStartDnsError({ response: { status: 422 } }),
     ]) {
