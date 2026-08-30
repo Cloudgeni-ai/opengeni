@@ -157,6 +157,8 @@ import { registerCompanyBrainRoutes } from "./routes/company-brain";
 import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
+import { registerAppRoutes } from "./routes/apps";
+import { createDatabaseAppsApplication } from "./apps-application";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
@@ -244,6 +246,18 @@ export function createAppComposition(deps: AppDependencies): {
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
+  const appsApplication =
+    deps.apps ??
+    (deps.settings.appsEnabled
+      ? createDatabaseAppsApplication({
+          db: deps.db,
+          storage: objectStorage,
+          settings: deps.settings,
+          ...(deps.appRuntimeToolProvider
+            ? { runtimeToolProvider: deps.appRuntimeToolProvider }
+            : {}),
+        })
+      : undefined);
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
   const getDocumentServices = () => {
     documentServices ??= createDocumentServices(deps.settings);
@@ -365,6 +379,7 @@ export function createAppComposition(deps: AppDependencies): {
     managedAuthSessionAdapter,
     managedEmailTransport,
     objectStorage,
+    ...(appsApplication ? { apps: appsApplication } : {}),
     documentIndexer,
     getDocumentServices,
     transcription,
@@ -390,6 +405,11 @@ export function createAppComposition(deps: AppDependencies): {
       "Content-Type",
       "Range",
       "X-OpenGeni-Access-Key",
+      "X-OpenGeni-App-Csrf",
+      "X-OpenGeni-App-Authority-Generation",
+      "X-OpenGeni-App-Launch-Nonce",
+      "X-OpenGeni-App-Launch-Id",
+      "X-OpenGeni-App-Release-Id",
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Correlation-Id",
@@ -436,6 +456,13 @@ export function createAppComposition(deps: AppDependencies): {
     // request ceiling. The exact closed broker routes apply their own method,
     // content-type, authority, and idle-deadline checks.
     if (isPersonalGitHubGitBrokerRequest(c.req.method, new URL(c.req.url).pathname)) {
+      await next();
+      return;
+    }
+    if (
+      c.req.method === "POST" &&
+      new URL(c.req.url).pathname === "/internal/apps/resolve-launch"
+    ) {
       await next();
       return;
     }
@@ -974,6 +1001,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceStateRoutes(app, routeDeps);
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
+  registerAppRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerPersonalGitHubRoutes(app, routeDeps);

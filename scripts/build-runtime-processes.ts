@@ -4,7 +4,7 @@ import { cp, mkdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-type ProcessTarget = "api" | "worker" | "artifact-materializer" | "artifact-outbox";
+type ProcessTarget = "api" | "worker" | "app-host" | "artifact-materializer" | "artifact-outbox";
 
 export const RUNTIME_SKILL_ASSET_DIRECTORY_NAMES = [
   "curated_skill_library",
@@ -16,11 +16,12 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const requested = process.argv.slice(2);
 const targets: ProcessTarget[] =
   requested.length === 0
-    ? ["api", "worker", "artifact-materializer", "artifact-outbox"]
+    ? ["api", "worker", "app-host", "artifact-materializer", "artifact-outbox"]
     : requested.map((target) => {
         if (
           target !== "api" &&
           target !== "worker" &&
+          target !== "app-host" &&
           target !== "artifact-materializer" &&
           target !== "artifact-outbox"
         ) {
@@ -110,6 +111,17 @@ async function buildWorker(): Promise<void> {
   await copyRuntimeSkillAssets(repositoryRoot, outdir);
 }
 
+async function buildAppHost(): Promise<void> {
+  const outdir = join(repositoryRoot, "apps/app-host/dist/process");
+  await rm(outdir, { recursive: true, force: true });
+  await checkedBuild({
+    ...sharedBuild,
+    splitting: false,
+    entrypoints: [join(repositoryRoot, "apps/app-host/src/process.ts")],
+    outdir,
+  });
+}
+
 async function buildArtifactSidecar(
   target: "artifact-materializer" | "artifact-outbox",
 ): Promise<void> {
@@ -134,6 +146,7 @@ if (import.meta.main) {
   for (const target of targets) {
     if (target === "api") await buildApi();
     else if (target === "worker") await buildWorker();
+    else if (target === "app-host") await buildAppHost();
     else await buildArtifactSidecar(target);
     process.stdout.write(`[runtime-process] built ${target}\n`);
   }

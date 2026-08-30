@@ -24,6 +24,8 @@ import type {
   EditableArtifactDurableExportService,
   EditableArtifactOfficeImportPort,
 } from "./editable-artifacts";
+import type { AppsApplicationPort } from "./application/apps";
+import type { AppRuntimeToolProvider } from "./application/app-runtime";
 
 export type SessionWorkflowClient = {
   triggerAutomationRun?: (input: {
@@ -130,6 +132,13 @@ export type ManagedEmailTransport = {
 export type AppDependencies = {
   settings: Settings;
   db: Database;
+  /**
+   * Current-human Apps control plane. This seam is intentionally independent
+   * of Code Mode attempt ownership and worker-local attempt dispatch.
+   */
+  apps?: AppsApplicationPort;
+  /** Current-human, server-side canonical App tool resolver/invoker. */
+  appRuntimeToolProvider?: AppRuntimeToolProvider;
   /**
    * Host-composed editable artifact engine. Standalone startup binds the same
    * native kernel/DB/object-store implementation; embedded hosts may inject an

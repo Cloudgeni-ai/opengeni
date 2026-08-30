@@ -197,6 +197,9 @@ describe("release schema contract", () => {
     const scopedRigHealthAuditTimestamp = completeSourceContract.migrations.some(
       (migration) => migration.path === "0378_scoped_rig_health_audit_timestamp.sql",
     );
+    const governedAppsPersistence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0379_governed_apps_persistence.sql",
+    );
     const automaticSessionTitleMigrationPaths = new Set([
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
@@ -224,6 +227,7 @@ describe("release schema contract", () => {
       "0376_organization_workspace_inventory.sql",
       "0377_scoped_rig_health_projection.sql",
       "0378_scoped_rig_health_audit_timestamp.sql",
+      "0379_governed_apps_persistence.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -257,10 +261,13 @@ describe("release schema contract", () => {
         (sessionRecoveryObservability ? 1 : 0) +
         (organizationWorkspaceInventory ? 1 : 0) +
         (scopedRigHealthProjection ? 1 : 0) +
-        (scopedRigHealthAuditTimestamp ? 1 : 0),
-      latestMigration: scopedRigHealthAuditTimestamp
-        ? "0378_scoped_rig_health_audit_timestamp.sql"
-        : scopedRigHealthProjection
+        (scopedRigHealthAuditTimestamp ? 1 : 0) +
+        (governedAppsPersistence ? 1 : 0),
+      latestMigration: governedAppsPersistence
+        ? "0379_governed_apps_persistence.sql"
+        : scopedRigHealthAuditTimestamp
+          ? "0378_scoped_rig_health_audit_timestamp.sql"
+          : scopedRigHealthProjection
           ? "0377_scoped_rig_health_projection.sql"
           : organizationWorkspaceInventory
             ? "0376_organization_workspace_inventory.sql"
@@ -431,6 +438,7 @@ describe("release schema contract", () => {
       "0376_organization_workspace_inventory.sql",
       "0377_scoped_rig_health_projection.sql",
       "0378_scoped_rig_health_audit_timestamp.sql",
+      "0379_governed_apps_persistence.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -551,6 +559,9 @@ describe("release schema contract", () => {
     const scopedRigHealthAuditTimestamp = completeSourceContract.migrations.some(
       (migration) => migration.path === "0378_scoped_rig_health_audit_timestamp.sql",
     );
+    const governedAppsPersistence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0379_governed_apps_persistence.sql",
+    );
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
@@ -584,10 +595,13 @@ describe("release schema contract", () => {
         (sessionRecoveryObservability ? 1 : 0) +
         (organizationWorkspaceInventory ? 1 : 0) +
         (scopedRigHealthProjection ? 1 : 0) +
-        (scopedRigHealthAuditTimestamp ? 1 : 0),
-      latestMigration: scopedRigHealthAuditTimestamp
-        ? "0378_scoped_rig_health_audit_timestamp.sql"
-        : scopedRigHealthProjection
+        (scopedRigHealthAuditTimestamp ? 1 : 0) +
+        (governedAppsPersistence ? 1 : 0),
+      latestMigration: governedAppsPersistence
+        ? "0379_governed_apps_persistence.sql"
+        : scopedRigHealthAuditTimestamp
+          ? "0378_scoped_rig_health_audit_timestamp.sql"
+          : scopedRigHealthProjection
           ? "0377_scoped_rig_health_projection.sql"
           : organizationWorkspaceInventory
             ? "0376_organization_workspace_inventory.sql"

@@ -142,7 +142,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 USER bun
 ENV TESSDATA_PREFIX=/opt/opengeni/tessdata
-RUN bun scripts/build-runtime-processes.ts api
+RUN bun scripts/build-runtime-processes.ts api app-host
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by
 # the CI step scripts/bake-agent.sh BEFORE this build, and arrive in the image via
@@ -153,7 +153,7 @@ RUN bun scripts/build-runtime-processes.ts api
 # agent/install/baked/ holds only its placeholder and /agent/* 302-redirects to the
 # GitHub Release (the public archive + install.sh fallback). No Dockerfile change is
 # needed to switch between the two: it is purely whether the baked files are present.
-EXPOSE 8000
+EXPOSE 8000 8080
 CMD ["bun", "apps/api/dist/process/index.js"]
 
 # Dedicated durable live-hint outbox dispatcher. It has no native artifact

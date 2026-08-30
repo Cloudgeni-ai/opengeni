@@ -16,6 +16,7 @@
     "@opengeni/artifact-kernel-wasm-document": "workspace:*",
     "@opengeni/artifact-kernel-wasm-presentation": "workspace:*",
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",
+    "@opengeni/app-sdk": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/react": "workspace:*",
     "@opengeni/sdk": "workspace:*",

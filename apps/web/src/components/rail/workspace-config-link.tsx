@@ -3,6 +3,7 @@
 import { Link } from "@tanstack/react-router";
 import {
   BoxIcon,
+  BoxesIcon,
   BrainCircuitIcon,
   CalendarClockIcon,
   FileSearchIcon,
@@ -32,6 +33,7 @@ const WORKSPACE_CONFIG_ICONS = {
   map: MapIcon,
   plug: PlugIcon,
   "calendar-clock": CalendarClockIcon,
+  boxes: BoxesIcon,
   "panels-top-left": PanelsTopLeftIcon,
   settings: SettingsIcon,
 } as const satisfies Record<WorkspaceConfigIcon, LucideIcon>;

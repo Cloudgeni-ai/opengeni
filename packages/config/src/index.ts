@@ -327,6 +327,10 @@ const SettingsSchema = z.object({
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
   webBaseUrl: z.string().url().optional(),
+  appsEnabled: EnvBoolean.default(false),
+  appOriginTemplate: z.string().min(1).max(2_048).optional(),
+  /** Shared secret for the narrow app-host frozen-object resolver callout. */
+  appHostResolverKey: z.string().min(32).max(4_096).optional(),
   // Base URL for the bring-your-own-compute agent release assets the get.<domain>
   // install routes redirect to. Defaults to this repo's GitHub Releases. The route
   // appends `/download/agent-v<ver>/<asset>`.
@@ -2318,6 +2322,9 @@ export function getSettings(): Settings {
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
+    appsEnabled: optional("OPENGENI_APPS_ENABLED"),
+    appOriginTemplate: optional("OPENGENI_APP_ORIGIN_TEMPLATE"),
+    appHostResolverKey: optional("OPENGENI_APP_HOST_RESOLVER_KEY"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),

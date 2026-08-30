@@ -29,6 +29,22 @@ spec:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: worker-control
 {{- end }}
+{{- if and .Values.appHost.enabled .Values.appHost.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "opengeni.fullname" . }}-app-host
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app-host
+spec:
+  minAvailable: {{ .Values.appHost.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: app-host
+{{- end }}
 {{- if and .Values.worker.enabled .Values.worker.turns.podDisruptionBudget.enabled }}
 ---
 apiVersion: policy/v1

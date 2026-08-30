@@ -1,0 +1,44 @@
+{
+  "name": "@opengeni/app-sdk",
+  "version": "0.1.0",
+  "description": "Typed MessageChannel bridge for sandboxed OpenGeni Apps.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/app-sdk"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

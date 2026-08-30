@@ -21,6 +21,7 @@ export default defineConfig({
     "src/memory-slack.ts",
     "src/automations.ts",
     "src/pr-review.ts",
+    "src/apps.ts",
     "src/organization-private-session-settings.ts",
     "src/organization-user-setup.ts",
     "src/realtime.ts",

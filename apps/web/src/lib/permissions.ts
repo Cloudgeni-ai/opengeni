@@ -39,6 +39,11 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "rigs:manage": "Rigs",
   "artifacts:read": "Artifacts",
   "artifacts:publish": "Artifacts",
+  "apps:read": "Apps",
+  "apps:write": "Apps",
+  "apps:publish": "Apps",
+  "apps:run": "Apps",
+  "apps:delete": "Apps",
   "enrollments:read": "Machines",
   "enrollments:manage": "Machines",
   "workspace:admin": "Admin & account",
@@ -65,6 +70,7 @@ const permissionGroupOrder = [
   "Goals",
   "Rigs",
   "Artifacts",
+  "Apps",
   "Admin & account",
 ];
 

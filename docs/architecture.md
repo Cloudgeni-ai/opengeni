@@ -731,6 +731,7 @@ metadata.
 | Path | Package | Owns |
 | --- | --- | --- |
 | `apps/api` | `@opengeni/api-router` | Hono HTTP composition, middleware, routes, MCP transport, SSE, and API-side control adapters over core |
+| `apps/app-host` | standalone process | Dedicated-origin immutable Apps byte serving through a narrow launch resolver and conditional object-storage ranges |
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension and its control-plane protocol; a leaf client, not session authority |
@@ -1089,6 +1090,12 @@ Cloud Terraform roots and stack wrappers compose external infrastructure.
 Bundled Postgres, Temporal, NATS, and object-storage templates are development,
 CI, conformance, or explicitly documented single-machine fixtures—not a claim
 that those topologies are appropriate production defaults.
+
+Published Apps use a separate, storage-only origin process rather than the API
+or web workload. It resolves one tokenized launch path to exact frozen object
+identities and streams version-pinned ranges without database or user-session
+authority. The canonical hosting and operator boundary is
+[`apps.md`](apps.md).
 
 Deployment procedures, provider-specific requirements, activation boundaries,
 and recovery runbooks belong in [`deployment.md`](deployment.md). Advanced host

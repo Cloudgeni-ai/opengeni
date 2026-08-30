@@ -1,4 +1,5 @@
 import type { AttemptToolResult } from "@opengeni/contracts";
+import { canonicalToolResultError, inspectCanonicalToolResult } from "@opengeni/tool-runtime";
 import type { CodemodeCallOptions, CodemodeClient } from "./index";
 import { environmentCodemodeClient, type CodemodeClientProvider } from "./environment";
 
@@ -7,7 +8,7 @@ export class CodemodeToolExecutionError extends Error {
   readonly retryable: boolean;
 
   constructor(readonly result: AttemptToolResult) {
-    const error = toolError(result);
+    const error = canonicalToolResultError(result, "Codemode tool failed");
     super(error.message);
     this.name = "CodemodeToolExecutionError";
     this.code = error.code;
@@ -28,25 +29,16 @@ export async function callStructured<T>(
   options: CodemodeCallOptions,
 ): Promise<T> {
   const result = await (await client()).callPath(path, args, options);
-  if (result.isError) throw new CodemodeToolExecutionError(result);
-  if (!result.structuredContent) {
+  const inspection = inspectCanonicalToolResult(result, {
+    expectsStructured: true,
+    errorFallbackMessage: "Codemode tool failed",
+  });
+  if (inspection.kind === "error") throw new CodemodeToolExecutionError(inspection.result);
+  if (inspection.kind === "missing_structured") {
     throw new Error(`Codemode tool ${path.join(".")} returned no structured content`);
   }
-  return result.structuredContent as T;
-}
-
-function toolError(result: AttemptToolResult): {
-  code: string;
-  message: string;
-  retryable: boolean;
-} {
-  const structured = result.structuredContent as
-    | { error?: { code?: unknown; message?: unknown; retryable?: unknown } }
-    | undefined;
-  const error = structured?.error;
-  return {
-    code: typeof error?.code === "string" ? error.code : "tool_error",
-    message: typeof error?.message === "string" ? error.message : "Codemode tool failed",
-    retryable: error?.retryable === true,
-  };
+  if (inspection.kind !== "structured") {
+    throw new Error(`Codemode tool ${path.join(".")} returned no structured content`);
+  }
+  return inspection.value as T;
 }

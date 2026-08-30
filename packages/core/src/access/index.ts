@@ -243,6 +243,48 @@ export function requireAccountAdminAuthorizationStamp(
   });
 }
 
+/**
+ * Prove that an authorization was minted by this process from the exact
+ * canonical managed-cookie human that owns the workspace grant. A structurally
+ * similar object is not sufficient.
+ */
+export function requireCanonicalManagedHumanAuthorization(
+  authorization: AccessGrantAuthorization,
+): AccessGrantAuthorization {
+  const { grant } = authorization;
+  if (
+    !resolvedAccessGrantAuthorizations.has(authorization) ||
+    !authorization.contextIntegrity ||
+    !authorization.canonicalManagedHumanSession ||
+    authorization.authenticatedSubjectId !== grant.subjectId ||
+    grant.principalKind !== "human_session" ||
+    grant.serviceInitiator ||
+    grant.serviceInitiatorContext ||
+    grant.metadata?.delegated === true ||
+    grant.subjectId.startsWith("api_key:")
+  ) {
+    throw new HTTPException(403, {
+      message: "the currently logged-in managed human is required",
+    });
+  }
+  return authorization;
+}
+
+/** Establish that a structurally typed authorization came from this resolver. */
+export function requireResolvedAccessGrantAuthorization(
+  authorization: AccessGrantAuthorization,
+): AccessGrantAuthorization {
+  const { grant } = authorization;
+  if (
+    !resolvedAccessGrantAuthorizations.has(authorization) ||
+    !authorization.contextIntegrity ||
+    authorization.authenticatedSubjectId !== grant.subjectId
+  ) {
+    throw new HTTPException(403, { message: "resolved caller authority is required" });
+  }
+  return authorization;
+}
+
 export async function requireAccessGrantAuthorization(
   c: Context,
   deps: AccessDeps,
@@ -399,7 +441,7 @@ export function hasLiteralPermission(permissions: Permission[], permission: Perm
   return permissions.includes(permission);
 }
 
-export function hasPermission(permissions: Permission[], permission: Permission): boolean {
+export function hasPermission(permissions: readonly Permission[], permission: Permission): boolean {
   if (!Array.isArray(permissions)) return false;
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
