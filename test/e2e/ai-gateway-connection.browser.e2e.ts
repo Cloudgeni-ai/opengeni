@@ -97,21 +97,33 @@ describe("AI Gateway custom model settings in Chromium", () => {
   }, 60_000);
 
   test("stays readable and bounded at a narrow mobile viewport", async () => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await openFixture(page, baseUrl);
-    await page.locator("summary").click();
-    await page.getByText("Models from your Gateway", { exact: true }).waitFor();
+    const mobileContext = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    const mobilePage = await mobileContext.newPage();
+    try {
+      await openFixture(mobilePage, baseUrl);
+      await mobilePage.locator("summary").click();
+      await mobilePage.getByText("Models from your Gateway", { exact: true }).waitFor();
 
-    const slug = page.getByLabel("Vercel AI Gateway model slug");
-    const add = page.getByRole("button", { name: "Add model" });
-    const key = page.getByLabel("Vercel AI Gateway key");
-    expect(await slug.inputValue()).toBe("");
-    expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("12px");
-    expect((await add.boundingBox())?.width).toBeGreaterThan(100);
-    expect((await key.boundingBox())?.width).toBeGreaterThan(300);
+      const slug = mobilePage.getByLabel("Vercel AI Gateway model slug");
+      const add = mobilePage.getByRole("button", { name: "Add model" });
+      const key = mobilePage.getByLabel("Vercel AI Gateway key");
+      const remove = mobilePage.getByRole("button", { name: "Remove deepseek/deepseek-v3.2" });
+      expect(await slug.inputValue()).toBe("");
+      expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
+      expect((await add.boundingBox())?.width).toBeGreaterThan(100);
+      expect((await key.boundingBox())?.width).toBeGreaterThan(300);
+      expect((await remove.boundingBox())?.width).toBeGreaterThanOrEqual(44);
+      expect((await remove.boundingBox())?.height).toBeGreaterThanOrEqual(44);
 
-    await assertAccessibleAndBounded(page);
-    await page.screenshot({ path: `${evidenceDir}narrow-390x844.png`, fullPage: true });
+      await assertAccessibleAndBounded(mobilePage);
+      await mobilePage.screenshot({ path: `${evidenceDir}narrow-390x844.png`, fullPage: true });
+    } finally {
+      await mobileContext.close();
+    }
   }, 60_000);
 });
 
