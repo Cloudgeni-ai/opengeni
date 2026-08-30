@@ -901,8 +901,12 @@ services. Browser and computer control use attempt-scoped managed
 `ComputerSession` tools from `@opengeni/interaction` and `@opengeni/browserd`,
 with the selected sandbox or machine providing placement. Agents do not receive
 the retired model-bound shared-desktop capability; human viewer control remains
-a separate consented surface. The browser extension is an attachment client,
-not an authorization service.
+a separate consented surface. Computer screenshot bytes and their bounded frame
+metadata remain one evidence unit: the placement runtime verifies their digest
+and controller/session/target binding, the API repeats that validation against
+its durable `ComputerSession` binding before forwarding the exact bytes, and the
+SDK retains its independent verification. The browser extension is an attachment
+client, not an authorization service.
 
 New capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes

@@ -16,6 +16,7 @@ import {
   interactionOperationMetricObserver,
   type Observability,
 } from "@opengeni/observability";
+import type { ComputerFrameEvidenceMismatchReason } from "@opengeni/runtime/sandbox";
 
 type InteractionActionReceipt = BrowserActionReceipt | ComputerActionReceipt;
 type InteractionLifecycleMutation =
@@ -30,6 +31,14 @@ const STALE_INTERACTION_ERROR_CODES = new Set([
   "document_stale",
   "frame_stale",
   "attempt_stale",
+]);
+
+const COMPUTER_FRAME_EVIDENCE_MISMATCH_REASONS = new Set<ComputerFrameEvidenceMismatchReason>([
+  "frame_session_mismatch",
+  "frame_target_mismatch",
+  "frame_controller_mismatch",
+  "frame_media_mismatch",
+  "frame_digest_mismatch",
 ]);
 
 export function observeBrowserActionResult(
@@ -60,6 +69,27 @@ export function observeComputerActionResult(
     outcome: actionReceiptOutcome(receipt),
     durationMs: elapsedMs(startedAtMs),
   });
+}
+
+export function observeComputerFrameEvidenceMismatch(
+  observability: Observability | null | undefined,
+  reason: ComputerFrameEvidenceMismatchReason,
+): void {
+  if (!observability || !COMPUTER_FRAME_EVIDENCE_MISMATCH_REASONS.has(reason)) return;
+  try {
+    observability.incrementCounter({
+      name: "opengeni_computer_frame_evidence_mismatches_total",
+      help: "Computer frame evidence rejected at the controller-to-API boundary by bounded reason.",
+      labels: { reason },
+    });
+  } catch {
+    // Observability cannot alter the fail-closed frame boundary.
+  }
+  try {
+    observability.warn("Computer frame evidence mismatch", { reason });
+  } catch {
+    // Observability cannot alter the fail-closed frame boundary.
+  }
 }
 
 export function observeLifecycleResult(

@@ -68,6 +68,7 @@ import {
   BrowserControlServerUnsupportedError,
   BrowserControlTransportError,
   BrowserControlUnsupportedError,
+  ComputerFrameEvidenceMismatchError,
   buildSelfhostedBackendSession,
   buildStreamUrl,
   exposedPortEndpointFromUrl,
@@ -75,8 +76,11 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   provisionBrowserControlClient,
+  validateComputerControlFrameEvidence,
   renewSandboxProviderExpiration,
   type BrowserControlPlacementSession,
+  type ComputerControlFrame,
+  type ExpectedComputerFrameEvidence,
 } from "@opengeni/runtime/sandbox";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -101,7 +105,11 @@ import {
   createInteractionFrameProxyAttachment,
   placementUsesInteractionFrameProxy,
 } from "../interaction-frame-proxy";
-import { observeComputerActionResult, observeLifecycleResult } from "../interaction-metrics";
+import {
+  observeComputerActionResult,
+  observeComputerFrameEvidenceMismatch,
+  observeLifecycleResult,
+} from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 
 type ComputerPlacement = {
@@ -112,6 +120,57 @@ type ComputerPlacement = {
 };
 
 const MODEL_COMPUTER_FRAME_MAX_BYTES = 256 * 1024;
+
+type ComputerFrameCaptureClient = {
+  capture(
+    targetId: string,
+    options: {
+      format?: "jpeg" | "png";
+      quality?: number;
+      maxWidth?: number;
+      maxHeight?: number;
+    },
+  ): Promise<ComputerControlFrame>;
+};
+
+export function validateComputerFrameForApi(
+  frame: Pick<ComputerControlFrame, "data" | "mediaType" | "metadataHeader">,
+  expected: ExpectedComputerFrameEvidence,
+): ComputerControlFrame {
+  return validateComputerControlFrameEvidence(frame, expected);
+}
+
+export async function captureModelComputerFrame(
+  sessionClient: ComputerFrameCaptureClient,
+  expected: ExpectedComputerFrameEvidence,
+): Promise<ComputerControlFrame> {
+  let captured = validateComputerFrameForApi(
+    await sessionClient.capture(expected.targetId, {
+      format: "jpeg",
+      quality: 55,
+      maxWidth: 1_024,
+      maxHeight: 768,
+    }),
+    expected,
+  );
+  if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
+    captured = validateComputerFrameForApi(
+      await sessionClient.capture(expected.targetId, {
+        format: "jpeg",
+        quality: 30,
+        maxWidth: 640,
+        maxHeight: 480,
+      }),
+      expected,
+    );
+  }
+  if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
+    throw new BrowserControlProtocolError(
+      "computer screenshot could not honor the model image byte bound",
+    );
+  }
+  return captured;
+}
 
 /** Public ComputerSession resource surface. Physical app/window authority stays
  * in the same placement controller used by BrowserSession; this route owns only
@@ -406,27 +465,19 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         computerSessionId,
         "session.read",
         "computer.read",
-        async ({ sessionClient }) => {
-          let captured = await sessionClient.capture(targetId, {
-            format: "jpeg",
-            quality: 55,
-            maxWidth: 1_024,
-            maxHeight: 768,
-          });
-          if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
-            captured = await sessionClient.capture(targetId, {
-              format: "jpeg",
-              quality: 30,
-              maxWidth: 640,
-              maxHeight: 480,
+        async ({ sessionClient, binding }) => {
+          try {
+            return await captureModelComputerFrame(sessionClient, {
+              computerSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              targetId,
             });
+          } catch (error) {
+            if (error instanceof ComputerFrameEvidenceMismatchError) {
+              observeComputerFrameEvidenceMismatch(deps.observability, error.reason);
+            }
+            throw error;
           }
-          if (captured.data.byteLength > MODEL_COMPUTER_FRAME_MAX_BYTES) {
-            throw new BrowserControlProtocolError(
-              "computer screenshot could not honor the model image byte bound",
-            );
-          }
-          return captured;
         },
       );
       return new Response(frame.data.slice().buffer, {
