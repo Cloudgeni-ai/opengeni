@@ -40,6 +40,7 @@ import {
 } from "@tanstack/react-router";
 import type { OpenGeniAppsControlTransport } from "@opengeni/sdk/apps";
 import { AppsControlProvider } from "@/components/apps/apps-control-context";
+import { createOpenGeniAppsHttpTransport } from "@/lib/apps-control-transport";
 import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
@@ -511,6 +512,7 @@ const routeTree = rootRoute.addChildren([
 // caught only by the root Outlet, briefly replacing the rail along with the
 // canvas. The leaf boundary keeps the persistent workspace chrome mounted.
 const router = createRouter({ routeTree, ...ROUTER_PENDING_OPTIONS });
+const defaultAppsControlTransport = createOpenGeniAppsHttpTransport();
 
 declare module "@tanstack/react-router" {
   interface Register {
@@ -519,7 +521,7 @@ declare module "@tanstack/react-router" {
 }
 
 export function App({
-  appsControlTransport,
+  appsControlTransport = defaultAppsControlTransport,
 }: {
   appsControlTransport?: OpenGeniAppsControlTransport;
 } = {}) {
