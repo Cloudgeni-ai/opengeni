@@ -941,9 +941,11 @@ The provider-neutral coordination contract creates a child only for concrete,
 bounded, independently useful work with a defined integration point. Parent
 work must stay disjoint from the delegated scope. A parent joining a child uses
 `session_wait` with `waitFor: "completion"` before committing or publishing
-dependent work: `goal.completed` is a durable goal fact, not proof that the
-child has emitted `agent.message.completed` or settled its turn. The ordinary
-`waitFor: "change"` mode remains available for progress monitoring.
+dependent work. `goal.completed` is a durable goal fact, not proof that the
+child has emitted its final result. Completed commentary messages, maintenance
+turns, and continuation segment settlements are also ignored until an ordinary
+result-bearing turn settles. The ordinary `waitFor: "change"` mode remains
+available for progress monitoring.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and

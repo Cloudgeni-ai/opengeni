@@ -56,5 +56,6 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "A `goal.completed` event records goal state but is not a terminal child result",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("continuation segment settlements");
   });
 });

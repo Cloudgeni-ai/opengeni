@@ -244,6 +244,7 @@ import {
   SESSION_WAIT_EVENTS_PER_TARGET,
   SESSION_WAIT_MAX_SECONDS,
   SESSION_WAIT_MAX_TARGETS,
+  sessionWaitCompletionEventMatches,
   waitForSessionChanges,
 } from "./session-wait";
 import {
@@ -4707,7 +4708,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session). waitFor=change is the backward-compatible default and returns on turn lifecycle, agent.message.completed, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, and goal facts and returns only for terminal turn settlement or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
+        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session). waitFor=change is the backward-compatible default and returns on turn lifecycle, agent.message.completed, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
         inputSchema: {
           targets: z4
             .array(
@@ -4728,7 +4729,7 @@ function registerWorkspaceOrchestrationTools(
             .enum(["change", "completion"])
             .optional()
             .describe(
-              "change (default) returns on relevant activity; completion ignores messages and goal/progress events until terminal turn settlement or a blocker.",
+              "change (default) returns on relevant activity; completion ignores messages, goal/progress, maintenance, and continuation segments until a result-bearing final turn or blocker.",
             ),
           maxWaitSeconds: z4.number().int().min(1).max(SESSION_WAIT_MAX_SECONDS).optional(),
         },
@@ -4764,6 +4765,8 @@ function registerWorkspaceOrchestrationTools(
             ownSessionId,
             maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
             targetEventTypes,
+            targetEventMatches:
+              waitFor === "completion" ? sessionWaitCompletionEventMatches : undefined,
             signal,
             source: {
               reauthorizeTargets: async (sessionIds) => {

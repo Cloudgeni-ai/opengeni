@@ -86,7 +86,8 @@ export const SESSION_WAIT_EVENT_TYPES = [
  * Goal facts are deliberately absent: an agent can complete its durable goal
  * before it emits the final assistant message and settles the turn. Completed
  * agent messages are also absent because commentary messages use the same
- * event type; `turn.completed` carries the authoritative final output.
+ * event type; an ordinary result-bearing `turn.completed` carries the
+ * authoritative final output.
  */
 export const SESSION_WAIT_COMPLETION_EVENT_TYPES = [
   "turn.completed",
@@ -102,6 +103,29 @@ export const SESSION_WAIT_COMPLETION_EVENT_TYPES = [
   "rig.setup.failed",
   "goal.paused",
 ] as const satisfies readonly SessionEventType[];
+
+const SESSION_WAIT_COMPLETION_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
+  SESSION_WAIT_COMPLETION_EVENT_TYPES,
+);
+
+/**
+ * A completed turn is result-bearing only when it carries the ordinary final
+ * output. Segment-limit and maintenance turns settle one execution segment
+ * while the session still has work to do, so they must not release a parent.
+ */
+export function sessionWaitCompletionEventMatches(event: SessionEvent): boolean {
+  if (!SESSION_WAIT_COMPLETION_EVENT_TYPE_SET.has(event.type)) return false;
+  if (event.type !== "turn.completed") return true;
+  if (event.payload === null || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+    return false;
+  }
+  const payload = event.payload as Record<string, unknown>;
+  return (
+    Object.prototype.hasOwnProperty.call(payload, "output") &&
+    !Object.prototype.hasOwnProperty.call(payload, "segmentLimit") &&
+    !Object.prototype.hasOwnProperty.call(payload, "maintenance")
+  );
+}
 
 /** The self-session event that announces a newly pending machine input. */
 export const SESSION_WAIT_OWN_PENDING_EVENT_TYPE =
@@ -210,6 +234,8 @@ export type SessionWaitInput = {
   maxWaitMs: number;
   /** Target events that end the wait. Defaults to the ordinary activity set. */
   targetEventTypes?: readonly SessionEventType[] | undefined;
+  /** Optional payload-aware refinement applied after the event-type filter. */
+  targetEventMatches?: ((event: SessionEvent) => boolean) | undefined;
   source: SessionWaitSource;
   signal?: AbortSignal | undefined;
   now?: (() => number) | undefined;
@@ -231,6 +257,8 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
   const targetEventTypeSet: ReadonlySet<string> = new Set(
     input.targetEventTypes ?? SESSION_WAIT_EVENT_TYPES,
   );
+  const targetEventMatches = (event: SessionEvent): boolean =>
+    targetEventTypeSet.has(event.type) && (input.targetEventMatches?.(event) ?? true);
 
   // One subscription per distinct session; a session may be both a target and
   // the caller's own session, in which case either condition wakes the wait.
@@ -255,7 +283,7 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
     const after = targetAfter.get(sessionId);
     for (const event of events) {
       if (event.sessionId !== sessionId) continue;
-      if (after !== undefined && event.sequence > after && targetEventTypeSet.has(event.type)) {
+      if (after !== undefined && event.sequence > after && targetEventMatches(event)) {
         return true;
       }
       if (sessionId === ownSessionId && event.type === SESSION_WAIT_OWN_PENDING_EVENT_TYPE) {
@@ -295,7 +323,7 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
     const changed: SessionWaitTargetResult[] = [];
     for (const { target, read } of targetReads) {
       const events = read.events.filter(
-        (event) => event.sequence > target.afterSequence && targetEventTypeSet.has(event.type),
+        (event) => event.sequence > target.afterSequence && targetEventMatches(event),
       );
       if (events.length === 0) continue;
       changed.push({
