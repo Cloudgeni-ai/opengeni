@@ -1828,7 +1828,11 @@ fleet is unsupported even while every process still uses `code`:
    For the bundled Helm chart, perform the drain as a migrations-disabled Helm
    revision using the same new chart, exact `sha256:` API/worker/web/migrations
    image digests, and values that the final upgrade will use. Mutable tags and
-   registry cache state are not acceptable evidence across this drain boundary:
+   registry cache state are not acceptable evidence across this drain boundary.
+   The generated `local-kubernetes` plan is the sole tag-based exception: before
+   draining, it builds all three images, derives one content identity from their
+   Docker image IDs, loads those exact tags into kind, and persists the tag for
+   both the drain and final Helm revisions.
 
    The generated deployment plan emits this drain only when both of these
    operator acknowledgements are present:
@@ -1866,8 +1870,9 @@ fleet is unsupported even while every process still uses `code`:
 
    Verify the application Deployments are absent and the configured database
    login has zero sessions. Then run the ordinary upgrade with those disable
-   overrides removed; its pre-upgrade Job applies 0383 before Helm recreates the
-   application. If the second upgrade fails, remain drained and fix forward.
+   overrides removed; its pre-upgrade Job applies pending migrations through
+   0383 before Helm recreates the application. If the second upgrade fails,
+   remain drained and fix forward.
 
 3. Apply `0383_model_catalog_and_gateway_custom_models.sql`, provision roles,
    and assert runtime posture using the catalog-aware release artifacts. The

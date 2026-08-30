@@ -624,6 +624,71 @@ describe("AiGatewayConnectionCard custom models", () => {
       });
       expect(input.disabled).toBe(false);
       expect(input.value).toBe("");
+      expect(document.activeElement).toBe(input);
+      expect(input.className).toContain("text-base");
+      expect(input.className).toContain("sm:text-xs");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("preserves the slug and restores input focus when an add fails", async () => {
+    createWorkspaceGatewayCustomModel.mockImplementation(async () => {
+      throw new Error("fixture create failed");
+    });
+    const { container, root } = await renderCard();
+
+    try {
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway model slug"]',
+      )!;
+      await setInputValue(input, "anthropic/claude-sonnet-4.6");
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+
+      expect(input.disabled).toBe(false);
+      expect(input.value).toBe("anthropic/claude-sonnet-4.6");
+      expect(document.activeElement).toBe(input);
+      expect(toastError).toHaveBeenCalledWith("Couldn't add Gateway model", expect.any(Object));
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("restores removal focus to the next stable model action", async () => {
+    const first = customModel("anthropic/claude-sonnet-4.6");
+    const second = customModel("xai/grok-4.1-fast");
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
+      models: deleteWorkspaceGatewayCustomModel.mock.calls.length > 0 ? [second] : [first, second],
+    }));
+    const { container, root } = await renderCard();
+
+    try {
+      const removeFirst = container.querySelector<HTMLButtonElement>(
+        `button[aria-label="Remove ${first.upstreamModelId}"]`,
+      )!;
+      expect(removeFirst.className).toContain("pointer-coarse:size-11");
+      await act(async () => {
+        removeFirst.click();
+        await flush();
+      });
+      const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Remove model",
+      )!;
+      await act(async () => {
+        confirm.click();
+        await flush();
+      });
+
+      expect(document.activeElement).toBe(
+        container.querySelector(`button[aria-label="Remove ${second.upstreamModelId}"]`),
+      );
     } finally {
       await act(async () => root.unmount());
       container.remove();

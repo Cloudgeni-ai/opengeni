@@ -73,6 +73,15 @@ describe("AI Gateway custom model settings in Chromium", () => {
       .getByText("Use the exact printable slug with no spaces or |.", { exact: true })
       .waitFor();
 
+    await slug.fill("fixture/fail-add");
+    await add.click();
+    await expectReceipt(page, {
+      action: "create-model-error",
+      upstreamModelId: "fixture/fail-add",
+    });
+    await waitForAriaLabelFocus(page, "Vercel AI Gateway model slug");
+    expect(await slug.inputValue()).toBe("fixture/fail-add");
+
     await slug.fill("xai/grok-4.1-fast");
     expect(await add.isEnabled()).toBe(true);
     await add.click();

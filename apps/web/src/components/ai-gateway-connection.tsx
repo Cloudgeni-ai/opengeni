@@ -234,6 +234,7 @@ export function AiGatewayConnectionCardWithClient(
   async function addCustomModel() {
     if (modelBusy || !modelSlugValid || modelSlugExists) return;
     const submittedSlug = modelSlug;
+    restoreModelInputFocusRef.current = true;
     setModelBusy(true);
     try {
       await client.createWorkspaceGatewayCustomModel(props.workspaceId, {

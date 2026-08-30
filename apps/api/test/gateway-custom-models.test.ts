@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
@@ -28,6 +30,7 @@ import {
   resolveWorkspaceMcpRouteDeps,
   type AppDependencies,
 } from "../src/app";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
 const SECRET = "gateway-custom-models-test-secret-at-least-32-bytes";
@@ -142,6 +145,24 @@ async function request(
   });
 }
 
+async function callMcpTool(
+  deps: ApiRouteDeps,
+  accessGrant: NonNullable<typeof grant>,
+  name: string,
+  arguments_: Record<string, unknown>,
+): Promise<unknown> {
+  const server = buildOpenGeniMcpServer(deps, accessGrant);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const mcpClient = new Client({ name: "gateway-custom-models-test", version: "1" });
+  await server.connect(serverTransport);
+  await mcpClient.connect(clientTransport);
+  try {
+    return await mcpClient.callTool({ name, arguments: arguments_ });
+  } finally {
+    await Promise.all([mcpClient.close(), server.close()]);
+  }
+}
+
 describe("workspace Gateway custom model API", () => {
   test("requires workspace admin and rejects invalid or curated-collision inputs", async () => {
     if (!app || !grant) return;
@@ -244,6 +265,30 @@ describe("workspace Gateway custom model API", () => {
       latencyMode: "standard",
       sandboxBackend: "none",
     });
+    const scheduledTask = await createScheduledTask(client!.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      name: "Continue the accepted Gateway model",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `gateway-custom-model-${crypto.randomUUID()}`,
+      runMode: "existing_session",
+      targetSessionId: inheritedSession.id,
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Continue with the session's already accepted model",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const mcpTrigger = await callMcpTool(mcpDeps, grant, "scheduled_tasks_trigger", {
+      id: scheduledTask.id,
+      triggerId: crypto.randomUUID(),
+    });
+    expect(mcpTrigger).not.toMatchObject({ isError: true });
     const inheritedChild = await createSessionForRequest(
       publicRouteDeps!,
       {

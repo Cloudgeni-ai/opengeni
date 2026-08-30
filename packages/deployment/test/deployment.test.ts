@@ -471,6 +471,84 @@ describe("deployment contract", () => {
     ).toThrow("unsupported OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER");
   });
 
+  test("pins every non-managed Kubernetes image before a maintenance drain", () => {
+    for (const profile of ["single-node-kubernetes", "kubernetes-external"] as const) {
+      expect(() =>
+        stackPlanFor(deploymentProfiles[profile], "none", {
+          OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
+          OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
+        }),
+      ).toThrow("OPENGENI_API_IMAGE_DIGEST must be an exact sha256 digest");
+
+      const plan = stackPlanFor(deploymentProfiles[profile], "none", {
+        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
+        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
+        ...maintenanceImageDigests,
+      });
+      const helmCommands = plan.deployCommands.filter(
+        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
+      );
+      expect(helmCommands).toHaveLength(2);
+      for (const command of helmCommands) {
+        expect(command).toContain(
+          `--set-string api.image.digest=${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}`,
+        );
+        expect(command).toContain(
+          `--set-string worker.image.digest=${maintenanceImageDigests.OPENGENI_WORKER_IMAGE_DIGEST}`,
+        );
+        expect(command).toContain(
+          `--set-string web.image.digest=${maintenanceImageDigests.OPENGENI_WEB_IMAGE_DIGEST}`,
+        );
+        expect(command).toContain(
+          `--set-string migrations.image.digest=${maintenanceImageDigests.OPENGENI_MIGRATIONS_IMAGE_DIGEST}`,
+        );
+      }
+    }
+
+    expect(() =>
+      stackPlanFor(deploymentProfiles["kubernetes-external"], "none", {
+        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
+        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
+        ...testImageDigests,
+      }),
+    ).toThrow("OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST");
+  });
+
+  test("binds a local Kubernetes maintenance drain and final upgrade to one built image set", () => {
+    const plan = stackPlanFor(deploymentProfiles["local-kubernetes"], "none", {
+      OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
+      OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
+    });
+    const commands = plan.deployCommands.join("\n");
+    const helmCommands = plan.deployCommands.filter(
+      (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
+    );
+
+    expect(commands).toContain("opengeni-api:local-k8s-maintenance-candidate");
+    expect(commands).toContain("docker image inspect --format '{{.Id}}'");
+    expect(commands).toContain("git hash-object --stdin");
+    expect(commands).toContain("maintenance-image-tag.env");
+    expect(commands).toContain(
+      'kind load docker-image "opengeni-api:$OPENGENI_LOCAL_K8S_IMAGE_TAG"',
+    );
+    expect(helmCommands).toHaveLength(2);
+    for (const command of helmCommands) {
+      expect(command).toContain(". .agent/generated/local-kubernetes/maintenance-image-tag.env");
+      for (const component of ["api", "worker", "web", "migrations"]) {
+        expect(command).toContain(
+          `--set-string ${component}.image.tag="$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
+        );
+      }
+    }
+    expect(helmCommands[0]).not.toContain("if ! helm status");
+    expect(commands.indexOf("kind load docker-image")).toBeLessThan(
+      commands.indexOf("--set api.enabled=false"),
+    );
+    expect(commands.indexOf("wait --for=delete pod")).toBeLessThan(
+      commands.lastIndexOf("helm upgrade"),
+    );
+  });
+
   test("plans pinned private OpenSandbox only when a Kubernetes deployment selects it", () => {
     const contract = withSandboxBackend("opensandbox");
     const plan = stackPlanFor(contract);

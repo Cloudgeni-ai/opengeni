@@ -1790,6 +1790,50 @@ const HELM_APPLICATION_DRAIN_ARGS = [
 
 export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0383_model_catalog_and_gateway_custom_models";
 
+const MAINTENANCE_IMAGE_DIGEST_ENV = {
+  api: "OPENGENI_API_IMAGE_DIGEST",
+  worker: "OPENGENI_WORKER_IMAGE_DIGEST",
+  web: "OPENGENI_WEB_IMAGE_DIGEST",
+  migrations: "OPENGENI_MIGRATIONS_IMAGE_DIGEST",
+} as const;
+
+function maintenanceImageDigestHelmArgs(
+  contract: DeploymentContract,
+  terraformRoot: string | null,
+  env: Record<string, string | undefined>,
+): string {
+  if (!requestedMaintenanceCutover(env)) return "";
+  // Managed plans resolve registry digests after publishing the exact images
+  // and inject them through helm-values.generated.yaml.
+  if (terraformRoot) return "";
+  if (contract.runtime.platform !== "kubernetes") {
+    throw new Error(
+      `${MODEL_CATALOG_MAINTENANCE_CUTOVER} requires a non-local Kubernetes deployment with immutable image artifacts`,
+    );
+  }
+  // Local Kubernetes derives one content identity from the freshly built
+  // Docker image IDs and binds both Helm revisions to that persisted tag.
+  if (contract.runtime.cloud === "local") return "";
+  const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
+  const digests = Object.fromEntries(
+    Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV).map(([component, name]) => {
+      const digest = env[name]?.trim() ?? "";
+      if (!exactSha256Digest.test(digest)) {
+        throw new Error(`${name} must be an exact sha256 digest for a maintenance cutover`);
+      }
+      return [component, digest];
+    }),
+  ) as Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string>;
+  if (digests.migrations !== digests.api) {
+    throw new Error(
+      "OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST because migrations run from the API image",
+    );
+  }
+  return Object.entries(digests)
+    .map(([component, digest]) => ` --set-string ${component}.image.digest=${digest}`)
+    .join("");
+}
+
 function requestedMaintenanceCutover(
   env: Record<string, string | undefined>,
 ): typeof MODEL_CATALOG_MAINTENANCE_CUTOVER | null {
@@ -1879,6 +1923,7 @@ function deployCommands(
     ];
   }
   if (contract.profile === "local-kubernetes") {
+    const maintenanceCutover = requestedMaintenanceCutover(env) !== null;
     const opensandbox = platformDependencies.find((dependency) => dependency.id === "opensandbox");
     const sandboxSecretArgs = opensandbox
       ? ' --from-literal=OPENGENI_OPENSANDBOX_API_KEY="$OPENGENI_OPENSANDBOX_API_KEY" --from-literal=OPENGENI_OPENSANDBOX_IMAGE="$OPENGENI_OPENSANDBOX_IMAGE"'
@@ -1889,14 +1934,37 @@ function deployCommands(
     const namespace = contract.runtime.namespace ?? "opengeni-local";
     const release = contract.runtime.releaseName;
     const values = helmValuesFile ?? "deploy/helm/opengeni/values.local-kubernetes.example.yaml";
+    const maintenanceImageEnvFile = ".agent/generated/local-kubernetes/maintenance-image-tag.env";
+    const maintenanceImageEnvPrefix = maintenanceCutover
+      ? `set -a && . ${maintenanceImageEnvFile} && set +a && `
+      : "";
+    const localImageTag = maintenanceCutover ? "$OPENGENI_LOCAL_K8S_IMAGE_TAG" : "local-k8s";
+    const maintenanceImageTagHelmArgs = maintenanceCutover
+      ? ["api", "worker", "web", "migrations"]
+          .map(
+            (component) => ` --set-string ${component}.image.tag="$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
+          )
+          .join("")
+      : "";
     const drainUpgradeCommand =
-      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} ` +
-      `${HELM_APPLICATION_DRAIN_ARGS} --wait --timeout 10m`;
+      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} ` +
+      `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageTagHelmArgs} --wait --timeout 10m`;
+    const localImageCommands = maintenanceCutover
+      ? [
+          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s-maintenance-candidate .",
+          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s-maintenance-candidate .",
+          "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-$(git rev-parse HEAD)} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s-maintenance-candidate .",
+          `mkdir -p .agent/generated/local-kubernetes && OPENGENI_LOCAL_K8S_IMAGE_TAG="maintenance-$(printf '%s\\n' "$(docker image inspect --format '{{.Id}}' opengeni-api:local-k8s-maintenance-candidate)" "$(docker image inspect --format '{{.Id}}' opengeni-worker:local-k8s-maintenance-candidate)" "$(docker image inspect --format '{{.Id}}' opengeni-web:local-k8s-maintenance-candidate)" | git hash-object --stdin)" && printf 'OPENGENI_LOCAL_K8S_IMAGE_TAG=%s\\n' "$OPENGENI_LOCAL_K8S_IMAGE_TAG" > ${maintenanceImageEnvFile} && docker tag opengeni-api:local-k8s-maintenance-candidate "opengeni-api:$OPENGENI_LOCAL_K8S_IMAGE_TAG" && docker tag opengeni-worker:local-k8s-maintenance-candidate "opengeni-worker:$OPENGENI_LOCAL_K8S_IMAGE_TAG" && docker tag opengeni-web:local-k8s-maintenance-candidate "opengeni-web:$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
+          `${maintenanceImageEnvPrefix}kind load docker-image "opengeni-api:${localImageTag}" "opengeni-worker:${localImageTag}" "opengeni-web:${localImageTag}" --name \${KIND_CLUSTER_NAME:-opengeni-local}`,
+        ]
+      : [
+          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
+          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
+          "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
+          "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
+        ];
     return [
-      "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
-      "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
-      "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
-      "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
+      ...localImageCommands,
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl -n ${namespace} create secret generic opengeni-runtime-local-k8s --from-literal=OPENGENI_ACCESS_KEY="$OPENGENI_ACCESS_KEY" --from-literal=OPENGENI_DATABASE_URL="postgres://opengeni_app:opengeni_app@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_MIGRATIONS_DATABASE_URL="postgres://opengeni:opengeni@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_APP_DATABASE_USER=opengeni_app --from-literal=OPENGENI_APP_DATABASE_PASSWORD=opengeni_app${sandboxSecretArgs} --dry-run=client -o yaml | kubectl apply -f -`,
       ...platformDependencies.flatMap((dependency) => dependency.installCommands),
@@ -1907,7 +1975,7 @@ function deployCommands(
         drainUpgradeCommand,
         env,
       }),
-      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} --wait --timeout 15m`,
+      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageTagHelmArgs} --wait --timeout 15m`,
     ];
   }
   const commands: string[] = [

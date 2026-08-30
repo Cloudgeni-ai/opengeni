@@ -58,6 +58,10 @@ function Fixture() {
       listConnections: async () => [connectedGateway()],
       listWorkspaceGatewayCustomModels: async () => ({ models: [...customModelsRef.current] }),
       createWorkspaceGatewayCustomModel: async (_workspaceId, request) => {
+        if (request.upstreamModelId === "fixture/fail-add") {
+          setReceipt({ action: "create-model-error", upstreamModelId: request.upstreamModelId });
+          throw new Error("Fixture rejected this Gateway model");
+        }
         const model = customModel(crypto.randomUUID(), request.upstreamModelId);
         customModelsRef.current = [...customModelsRef.current, model];
         setReceipt({ action: "create-model", upstreamModelId: request.upstreamModelId });
