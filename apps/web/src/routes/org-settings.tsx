@@ -19,6 +19,7 @@ import {
   OrganizationPrivateSessionsSection,
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
+import { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { Button } from "@/components/ui/button";
@@ -595,6 +596,13 @@ export function OrgSettingsRoute({
             actorRole={actorRole}
             managedSession={context.clientConfig.auth.mode === "managedSession"}
             onAuthorityChanged={context.revalidatePrincipalAccess}
+          />
+        ) : null}
+
+        {section === "models" ? (
+          <OrganizationCodexSubscriptions
+            key={`${identityKey}:organization-codex`}
+            organizationId={accountId}
           />
         ) : null}
 

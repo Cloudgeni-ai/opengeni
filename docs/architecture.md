@@ -725,6 +725,8 @@ grant capacity.
 Managed billing is an API concern over the shared usage and entitlement
 boundaries. Provider subscription pools such as Codex or SuperGrok add their
 own credential and capacity authority without changing the logical-turn model.
+Codex may resolve to a workspace pool or an organization pool inherited by a
+shared workspace; the resolved pool remains one complete allocator boundary.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),

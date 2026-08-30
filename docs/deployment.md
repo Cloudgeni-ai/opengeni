@@ -204,7 +204,8 @@ kubectl -n opengeni create secret generic opengeni-migrations \
 ```
 
 This bootstrap does not require a model-provider API key. A workspace admin can
-connect a ChatGPT/Codex subscription from workspace settings after the
+connect a ChatGPT/Codex subscription from workspace settings, or connect it once
+from Organization settings → Models for inheritance by shared workspaces, after the
 application starts. If the deployment instead uses API-billed models, add the
 selected provider's credential to `opengeni-runtime` separately. Keep the
 generated directory as a private recovery artifact or move the values into a
