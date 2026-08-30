@@ -42,6 +42,15 @@ export function createAutomationActivities(
   const assertModelPolicy = options.assertModelPolicy ?? assertWorkspaceModelPolicyAllows;
   const recordUsage = options.recordUsage ?? recordWorkspaceUsage;
   return {
+    settleAutomationRunFailure: async (input: DispatchAutomationRunInput): Promise<void> => {
+      const service = await services();
+      await settle(service.db, {
+        workspaceId: input.workspaceId,
+        runId: input.runId,
+        status: "failed",
+        errorCode: "dispatch_failed",
+      });
+    },
     dispatchAutomationRun: async (
       input: DispatchAutomationRunInput,
     ): Promise<DispatchAutomationRunResult> => {

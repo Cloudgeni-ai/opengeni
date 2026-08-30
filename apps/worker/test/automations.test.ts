@@ -3,6 +3,7 @@ import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { AutomationAuthorityRevokedError, type AutomationRunExecution } from "@opengeni/db";
 import { createAutomationActivities } from "../src/activities/automations";
 import type { ActivityServices } from "../src/activities/types";
+import { runAutomationRunWorkflow } from "../src/workflows/automations";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -279,6 +280,21 @@ describe("automation dispatch activity", () => {
     expect(settle).not.toHaveBeenCalled();
   });
 
+  test("terminally settles a run after the bounded dispatch retry window exhausts", async () => {
+    const settle = mock(async () => undefined);
+    const activity = createAutomationActivities(services(), { settle });
+
+    await expect(
+      activity.settleAutomationRunFailure({ accountId, workspaceId, runId }),
+    ).resolves.toBeUndefined();
+    expect(settle).toHaveBeenCalledWith(expect.anything(), {
+      workspaceId,
+      runId,
+      status: "failed",
+      errorCode: "dispatch_failed",
+    });
+  });
+
   test("replays a durably failed run without reclaiming it", async () => {
     const settle = mock(async () => undefined);
     const activity = createAutomationActivities(services(), {
@@ -295,5 +311,24 @@ describe("automation dispatch activity", () => {
       reason: "dispatch_failed",
     });
     expect(settle).not.toHaveBeenCalled();
+  });
+});
+
+describe("automation run workflow", () => {
+  test("invokes durable failure settlement after dispatch retries exhaust", async () => {
+    const dispatchAutomationRun = mock(async () => {
+      throw new Error("dispatch retries exhausted");
+    });
+    const settleAutomationRunFailure = mock(async () => undefined);
+    const input = { accountId, workspaceId, runId };
+
+    await expect(
+      runAutomationRunWorkflow(input, {
+        dispatchAutomationRun,
+        settleAutomationRunFailure,
+      }),
+    ).resolves.toBeUndefined();
+    expect(dispatchAutomationRun).toHaveBeenCalledWith(input);
+    expect(settleAutomationRunFailure).toHaveBeenCalledWith(input);
   });
 });

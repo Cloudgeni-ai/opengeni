@@ -1006,6 +1006,50 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
+  test("treats a refreshed-absent model as removed after both delete responses are lost", async () => {
+    const model = customModel("xai/grok-4.1-fast");
+    let reads = 0;
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => {
+      reads += 1;
+      return { models: reads === 1 ? [model] : [] };
+    });
+    deleteWorkspaceGatewayCustomModel.mockImplementation(async () => {
+      throw new Error("response lost after delete commit");
+    });
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderCard(true, onConnectionChange);
+
+    try {
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(`button[aria-label="Remove ${model.upstreamModelId}"]`)!
+          .click();
+        await flush();
+      });
+      const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Remove model",
+      )!;
+      await act(async () => {
+        confirm.click();
+        await flush();
+      });
+
+      expect(deleteWorkspaceGatewayCustomModel).toHaveBeenCalledTimes(2);
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(2);
+      expect(container.textContent).not.toContain(model.upstreamModelId);
+      expect(container.textContent).toContain("No custom model slugs yet");
+      expect(onConnectionChange).toHaveBeenCalledTimes(1);
+      expect(toastSuccess).toHaveBeenCalledWith("Gateway model removed");
+      expect(toastError).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(
+        container.querySelector('input[aria-label="Vercel AI Gateway model slug"]'),
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("does not present a failed custom-model read as empty and offers an in-page retry", async () => {
     const recovered = customModel("recovered/provider-model");
     let reads = 0;

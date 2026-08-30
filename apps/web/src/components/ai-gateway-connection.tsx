@@ -107,24 +107,26 @@ export function AiGatewayConnectionCardWithClient(
     /^[!-{}-~]+$/.test(modelSlug);
   const modelSlugExists = customModels.some((model) => model.upstreamModelId === modelSlug);
 
-  const refreshCustomModels = useCallback(async (): Promise<boolean> => {
+  const refreshCustomModels = useCallback(async (): Promise<
+    WorkspaceGatewayCustomModel[] | null
+  > => {
     const requestGeneration = ++customModelsRequestGenerationRef.current;
     try {
       const result = await client.listWorkspaceGatewayCustomModels(props.workspaceId);
       if (!activeRef.current || requestGeneration !== customModelsRequestGenerationRef.current) {
-        return false;
+        return null;
       }
       setCustomModels(result.models);
       setCustomModelsError(null);
       setCustomModelsLoaded(true);
-      return true;
+      return result.models;
     } catch (caught) {
       if (!activeRef.current || requestGeneration !== customModelsRequestGenerationRef.current) {
-        return false;
+        return null;
       }
       setCustomModelsError(caught instanceof Error ? caught.message : String(caught));
       setCustomModelsLoaded(true);
-      return false;
+      return null;
     }
   }, [client, props.workspaceId]);
 
@@ -366,6 +368,17 @@ export function AiGatewayConnectionCardWithClient(
       pendingModelDeleteOperationsRef.current.get(model.id) ?? crypto.randomUUID();
     pendingModelDeleteOperationsRef.current.set(model.id, operationId);
     customModelsRequestGenerationRef.current += 1;
+    const confirmRemoved = () => {
+      pendingModelDeleteOperationsRef.current.delete(model.id);
+      setCustomModels((current) => current.filter((candidate) => candidate.id !== model.id));
+      setCustomModelsError(null);
+      setCustomModelsLoaded(true);
+      removeFocusTargetRef.current = focusModelId
+        ? (removeButtonRefs.current.get(focusModelId) ?? modelInputRef.current)
+        : modelInputRef.current;
+      props.onConnectionChange?.();
+      toast.success("Gateway model removed");
+    };
     try {
       const remove = () =>
         client.deleteWorkspaceGatewayCustomModel(props.workspaceId, model.id, {
@@ -378,20 +391,16 @@ export function AiGatewayConnectionCardWithClient(
         await remove();
       }
       if (!activeRef.current) return true;
-      pendingModelDeleteOperationsRef.current.delete(model.id);
-      setCustomModels((current) => current.filter((candidate) => candidate.id !== model.id));
-      setCustomModelsError(null);
-      setCustomModelsLoaded(true);
-      removeFocusTargetRef.current = focusModelId
-        ? (removeButtonRefs.current.get(focusModelId) ?? modelInputRef.current)
-        : modelInputRef.current;
-      props.onConnectionChange?.();
-      toast.success("Gateway model removed");
+      confirmRemoved();
       return true;
     } catch (caught) {
       if (!activeRef.current) return false;
-      await refreshCustomModels();
+      const reconciled = await refreshCustomModels();
       if (!activeRef.current) return false;
+      if (reconciled !== null && !reconciled.some((candidate) => candidate.id === model.id)) {
+        confirmRemoved();
+        return true;
+      }
       toast.error("Couldn't confirm Gateway model removal", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
