@@ -684,6 +684,9 @@ BEGIN
   REVOKE ALL ON FUNCTION opengeni_private.codex_organization_admin_visible(uuid) FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.codex_organization_live_lease_count(uuid,uuid,uuid)
     FROM PUBLIC;
+  REVOKE ALL ON FUNCTION opengeni_private.enforce_codex_lease_source() FROM PUBLIC;
+  REVOKE ALL ON FUNCTION opengeni_private.enforce_codex_credential_workspace() FROM PUBLIC;
+  REVOKE ALL ON FUNCTION opengeni_private.clear_workspace_codex_session_affinity() FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.enforce_organization_codex_runtime_update() FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.prevent_organization_codex_disconnect_with_live_leases()
     FROM PUBLIC;
