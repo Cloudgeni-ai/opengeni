@@ -1,5 +1,6 @@
 ---
 "@opengeni/db": patch
+"@opengeni/core": patch
 "@opengeni/runtime": patch
 ---
 
