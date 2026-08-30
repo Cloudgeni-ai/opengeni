@@ -47,6 +47,8 @@ export type ResolvedAppObject = Readonly<{
   path: string;
   /** Exact immutable key selected from the frozen release manifest. */
   objectKey: string;
+  /** Provider generation/etag frozen when the release bytes were verified. */
+  versionToken: string;
 }>;
 
 export type AppLaunchResolution = Readonly<{
@@ -67,23 +69,22 @@ export type AppLaunchResolution = Readonly<{
  * adapter or a narrow internal HTTP callout may implement it.
  */
 export interface AppLaunchResolver {
-  resolve(input: Readonly<{
-    host: string;
-    /** Lowercase `sha256:<hex>`; the raw launch token never crosses this seam. */
-    launchTokenDigest: string;
-    /** Already-normalized release-relative path, or null for the release entry. */
-    requestedPath: string | null;
-  }>): Promise<AppLaunchResolution | null>;
+  resolve(
+    input: Readonly<{
+      host: string;
+      /** Lowercase `sha256:<hex>`; the raw launch token never crosses this seam. */
+      launchTokenDigest: string;
+      /** Already-normalized release-relative path, or null for the release entry. */
+      requestedPath: string | null;
+    }>,
+  ): Promise<AppLaunchResolution | null>;
 }
 
 export type AppHost = Readonly<{
   fetch(request: Request): Promise<Response>;
 }>;
 
-export type AppHostFetch = (
-  input: string | URL | Request,
-  init?: RequestInit,
-) => Promise<Response>;
+export type AppHostFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export type AppHostOptions = Readonly<{
   resolver: AppLaunchResolver;
@@ -151,7 +152,12 @@ export function createAppHost(options: AppHostOptions): AppHost {
       return errorResponse("not_found", 404, securityHeaders);
     }
 
-    let selected: { key: string; head: ImmutableRawObjectHead; path: string } | null;
+    let selected: {
+      key: string;
+      head: ImmutableRawObjectHead;
+      path: string;
+      versionToken: string;
+    } | null;
     try {
       selected = await selectObject(options, resolution, launch.path, request);
     } catch {
@@ -193,7 +199,7 @@ export function createAppHost(options: AppHostOptions): AppHost {
         key: selected.key,
         start,
         endInclusive,
-        expectedVersionToken: selected.head.versionToken,
+        expectedVersionToken: selected.versionToken,
         signal: request.signal,
       });
     } catch {
@@ -205,12 +211,14 @@ export function createAppHost(options: AppHostOptions): AppHost {
   return Object.freeze({ fetch });
 }
 
-export function createHttpAppLaunchResolver(options: Readonly<{
-  url: string;
-  sharedKey: string;
-  timeoutMs?: number;
-  fetchImpl?: AppHostFetch;
-}>): AppLaunchResolver {
+export function createHttpAppLaunchResolver(
+  options: Readonly<{
+    url: string;
+    sharedKey: string;
+    timeoutMs?: number;
+    fetchImpl?: AppHostFetch;
+  }>,
+): AppLaunchResolver {
   const url = resolverUrl(options.url);
   if (
     typeof options.sharedKey !== "string" ||
@@ -290,9 +298,7 @@ export function normalizeAppHost(value: string): string | null {
   if (
     labels.some(
       (label) =>
-        label.length < 1 ||
-        label.length > 63 ||
-        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
+        label.length < 1 || label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label),
     )
   ) {
     return null;
@@ -347,7 +353,12 @@ async function selectObject(
   resolution: AppLaunchResolution,
   requestedPath: string | null,
   request: Request,
-): Promise<{ key: string; head: ImmutableRawObjectHead; path: string } | null> {
+): Promise<{
+  key: string;
+  head: ImmutableRawObjectHead;
+  path: string;
+  versionToken: string;
+} | null> {
   let selectedObject = requestedPath === null ? resolution.entryObject : resolution.requestedObject;
   if (
     !selectedObject &&
@@ -362,7 +373,14 @@ async function selectObject(
     key: selectedObject.objectKey,
     signal: request.signal,
   });
-  return head ? { key: selectedObject.objectKey, head, path: selectedObject.path } : null;
+  return head && head.versionToken === selectedObject.versionToken
+    ? {
+        key: selectedObject.objectKey,
+        head,
+        path: selectedObject.path,
+        versionToken: selectedObject.versionToken,
+      }
+    : null;
 }
 
 function acceptsSpaFallback(request: Request): boolean {
@@ -372,7 +390,9 @@ function acceptsSpaFallback(request: Request): boolean {
     .some((value) => value.trim().toLowerCase().startsWith("text/html"));
 }
 
-function parseLaunchPath(pathname: string):
+function parseLaunchPath(
+  pathname: string,
+):
   | { token: string; path: string | null; redirectTo?: undefined }
   | { token: string; path: null; redirectTo: string }
   | null {
@@ -448,7 +468,12 @@ function validResolvedObject(value: ResolvedAppObject): boolean {
     value.objectKey.length >= 1 &&
     value.objectKey.length <= 2_048 &&
     value.objectKey.trim() === value.objectKey &&
-    !/[\u0000-\u001f\u007f]/u.test(value.objectKey)
+    !/[\u0000-\u001f\u007f]/u.test(value.objectKey) &&
+    typeof value.versionToken === "string" &&
+    value.versionToken.length >= 1 &&
+    value.versionToken.length <= 2_048 &&
+    value.versionToken.trim() === value.versionToken &&
+    !/[\u0000-\u001f\u007f]/u.test(value.versionToken)
   );
 }
 
@@ -610,8 +635,18 @@ function parseResolution(
 function parseResolvedObject(value: unknown): ResolvedAppObject | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const object = value as Record<string, unknown>;
-  if (typeof object.path !== "string" || typeof object.objectKey !== "string") return null;
-  const resolved = { path: object.path, objectKey: object.objectKey };
+  if (
+    typeof object.path !== "string" ||
+    typeof object.objectKey !== "string" ||
+    typeof object.versionToken !== "string"
+  ) {
+    return null;
+  }
+  const resolved = {
+    path: object.path,
+    objectKey: object.objectKey,
+    versionToken: object.versionToken,
+  };
   return validResolvedObject(resolved) ? Object.freeze(resolved) : null;
 }
 

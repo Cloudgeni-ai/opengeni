@@ -29,6 +29,7 @@ const frozenObjectKey = (path: keyof typeof FILE_IDS, sha256 = CONTENT_SHA256) =
 const ENTRY_OBJECT = Object.freeze({
   path: "index.html",
   objectKey: frozenObjectKey("index.html"),
+  versionToken: "version:index.html",
 });
 const RESOLUTION: AppLaunchResolution = Object.freeze({
   appId: APP_ID,
@@ -45,7 +46,7 @@ const RESOLUTION: AppLaunchResolution = Object.freeze({
 describe("dedicated Apps byte host", () => {
   test("normalizes Host, hashes the launch token, and streams immutable bytes", async () => {
     const fixture = appHostFixture({
-      "index.html": new TextEncoder().encode("<script src=\"assets/app.js\"></script>"),
+      "index.html": new TextEncoder().encode('<script src="assets/app.js"></script>'),
     });
     const response = await fixture.host.fetch(
       request(`https://${APP_HOST.toUpperCase()}:443/.opengeni/launch/${TOKEN}/index.html`),
@@ -73,6 +74,25 @@ describe("dedicated Apps byte host", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.has("set-cookie")).toBe(false);
     expect(response.headers.has("access-control-allow-credentials")).toBe(false);
+  });
+
+  test("refuses bytes when a frozen object key now resolves to another provider version", async () => {
+    const fixture = appHostFixture({
+      "index.html": new TextEncoder().encode("original"),
+    });
+    fixture.setObject(
+      frozenObjectKey("index.html"),
+      new TextEncoder().encode("replacement"),
+      "version:index.html:replacement",
+    );
+
+    const response = await fixture.host.fetch(
+      request(`https://${APP_HOST}/.opengeni/launch/${TOKEN}/index.html`),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("replacement");
+    expect(fixture.ranges).toEqual([]);
   });
 
   test("supports HEAD, exact single ranges, and unsatisfiable-range responses", async () => {
@@ -110,80 +130,76 @@ describe("dedicated Apps byte host", () => {
 
     fixture.keys.length = 0;
     const asset = await fixture.host.fetch(
-      request(
-        `https://${APP_HOST}/.opengeni/launch/${TOKEN}/assets/missing.js`,
-        { headers: { accept: "*/*" } },
-      ),
+      request(`https://${APP_HOST}/.opengeni/launch/${TOKEN}/assets/missing.js`, {
+        headers: { accept: "*/*" },
+      }),
     );
     expect(asset.status).toBe(404);
     expect(fixture.keys).toEqual([]);
   });
 
-  test(
-    "rejects ambient credentials, malformed paths, invalid hosts, and expired grants",
-    async () => {
-      const fixture = appHostFixture({ "index.html": new TextEncoder().encode("ok") });
-      const url = `https://${APP_HOST}/.opengeni/launch/${TOKEN}/index.html`;
-      for (const headers of [{ cookie: "session=secret" }, { authorization: "Bearer secret" }]) {
-        const denied = await fixture.host.fetch(request(url, { headers }));
-        expect(denied.status).toBe(400);
-      }
-      expect(fixture.resolverInputs).toEqual([]);
+  test("rejects ambient credentials, malformed paths, invalid hosts, and expired grants", async () => {
+    const fixture = appHostFixture({ "index.html": new TextEncoder().encode("ok") });
+    const url = `https://${APP_HOST}/.opengeni/launch/${TOKEN}/index.html`;
+    for (const headers of [{ cookie: "session=secret" }, { authorization: "Bearer secret" }]) {
+      const denied = await fixture.host.fetch(request(url, { headers }));
+      expect(denied.status).toBe(400);
+    }
+    expect(fixture.resolverInputs).toEqual([]);
 
-      for (const path of ["../secret", "assets%2Fsecret", "assets//app.js", "assets/%5Csecret"]) {
-        const denied = await fixture.host.fetch(
-          request(`https://${APP_HOST}/.opengeni/launch/${TOKEN}/${path}`),
-        );
-        expect(denied.status).toBe(404);
-      }
-      expect(fixture.resolverInputs).toEqual([]);
-
-      const badHost = await fixture.host.fetch(
-        request(`https://${APP_HOST}/.opengeni/launch/${TOKEN}/index.html`, {
-          headers: { host: "victim.example.test, attacker.example.test" },
-        }),
+    for (const path of ["../secret", "assets%2Fsecret", "assets//app.js", "assets/%5Csecret"]) {
+      const denied = await fixture.host.fetch(
+        request(`https://${APP_HOST}/.opengeni/launch/${TOKEN}/${path}`),
       );
-      expect(badHost.status).toBe(404);
-      expect(fixture.resolverInputs).toEqual([]);
+      expect(denied.status).toBe(404);
+    }
+    expect(fixture.resolverInputs).toEqual([]);
 
-      const productOrigin = await fixture.host.fetch(
-        request(url, { headers: { host: "console.example.test" } }),
-      );
-      expect(productOrigin.status).toBe(404);
-      expect(fixture.resolverInputs).toEqual([]);
+    const badHost = await fixture.host.fetch(
+      request(`https://${APP_HOST}/.opengeni/launch/${TOKEN}/index.html`, {
+        headers: { host: "victim.example.test, attacker.example.test" },
+      }),
+    );
+    expect(badHost.status).toBe(404);
+    expect(fixture.resolverInputs).toEqual([]);
 
-      const nonAppOrigin = await fixture.host.fetch(
-        request(url, { headers: { host: "web.example.test" } }),
-      );
-      expect(nonAppOrigin.status).toBe(404);
-      expect(fixture.resolverInputs).toEqual([]);
+    const productOrigin = await fixture.host.fetch(
+      request(url, { headers: { host: "console.example.test" } }),
+    );
+    expect(productOrigin.status).toBe(404);
+    expect(fixture.resolverInputs).toEqual([]);
 
-      const expired = appHostFixture(
-        { "index.html": new TextEncoder().encode("old") },
-        { resolution: { ...RESOLUTION, expiresAt: new Date("2026-08-29T17:59:59.999Z") } },
-      );
-      const expiredResponse = await expired.host.fetch(request(url));
-      expect(expiredResponse.status).toBe(404);
-      expect(expired.keys).toEqual([]);
+    const nonAppOrigin = await fixture.host.fetch(
+      request(url, { headers: { host: "web.example.test" } }),
+    );
+    expect(nonAppOrigin.status).toBe(404);
+    expect(fixture.resolverInputs).toEqual([]);
 
-      const wrongApp = appHostFixture(
-        { "index.html": new TextEncoder().encode("wrong") },
-        { resolution: { ...RESOLUTION, appId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } },
-      );
-      expect(await wrongApp.host.fetch(request(url))).toMatchObject({ status: 404 });
-      expect(wrongApp.keys).toEqual([]);
+    const expired = appHostFixture(
+      { "index.html": new TextEncoder().encode("old") },
+      { resolution: { ...RESOLUTION, expiresAt: new Date("2026-08-29T17:59:59.999Z") } },
+    );
+    const expiredResponse = await expired.host.fetch(request(url));
+    expect(expiredResponse.status).toBe(404);
+    expect(expired.keys).toEqual([]);
 
-      const stagingKey =
-        `workspaces/${WORKSPACE_ID}/apps/${APP_ID}/builds/${BUILD_ID}/staging/` +
-        FILE_IDS["index.html"];
-      const stagingResolution = appHostFixture(
-        { "index.html": new TextEncoder().encode("unfrozen") },
-        { objectKeysByPath: { "index.html": stagingKey } },
-      );
-      expect(await stagingResolution.host.fetch(request(url))).toMatchObject({ status: 404 });
-      expect(stagingResolution.keys).toEqual([]);
-    },
-  );
+    const wrongApp = appHostFixture(
+      { "index.html": new TextEncoder().encode("wrong") },
+      { resolution: { ...RESOLUTION, appId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } },
+    );
+    expect(await wrongApp.host.fetch(request(url))).toMatchObject({ status: 404 });
+    expect(wrongApp.keys).toEqual([]);
+
+    const stagingKey =
+      `workspaces/${WORKSPACE_ID}/apps/${APP_ID}/builds/${BUILD_ID}/staging/` +
+      FILE_IDS["index.html"];
+    const stagingResolution = appHostFixture(
+      { "index.html": new TextEncoder().encode("unfrozen") },
+      { objectKeysByPath: { "index.html": stagingKey } },
+    );
+    expect(await stagingResolution.host.fetch(request(url))).toMatchObject({ status: 404 });
+    expect(stagingResolution.keys).toEqual([]);
+  });
 
   test("serves only frozen bytes after the signed staging PUT is replayed", async () => {
     const original = new TextEncoder().encode("export const value = 'verified';");
@@ -232,46 +248,41 @@ describe("dedicated Apps byte host", () => {
 });
 
 describe("Apps launch resolver callout", () => {
-  test(
-    "sends only canonical Host plus the token digest with omitted ambient credentials",
-    async () => {
-      const calls: Array<{ url: string; init: RequestInit; body: unknown }> = [];
-      const resolver = createHttpAppLaunchResolver({
-        url: "http://opengeni-api:8000/internal/apps/resolve-launch",
-        sharedKey: "r".repeat(64),
-        async fetchImpl(url, init) {
-          calls.push({
-            url: String(url),
-            init: init!,
-            body: JSON.parse(String(init?.body)),
-          });
-          return Response.json({
-            ...RESOLUTION,
-            expiresAt: RESOLUTION.expiresAt.toISOString(),
-          });
-        },
-      });
-      const result = await resolver.resolve({
-        host: APP_HOST,
-        launchTokenDigest: launchTokenDigest(TOKEN),
-        requestedPath: "index.html",
-      });
-      expect(result).toEqual(RESOLUTION);
-      expect(calls).toHaveLength(1);
-      expect(calls[0]!.body).toEqual({
-        host: APP_HOST,
-        launchTokenDigest: launchTokenDigest(TOKEN),
-        requestedPath: "index.html",
-      });
-      expect(JSON.stringify(calls[0]!.body)).not.toContain(TOKEN);
-      expect(calls[0]!.init.credentials).toBe("omit");
-      expect(new Headers(calls[0]!.init.headers).get(APP_HOST_RESOLVER_HEADER)).toBe(
-        "r".repeat(64),
-      );
-      expect(new Headers(calls[0]!.init.headers).has("cookie")).toBe(false);
-      expect(new Headers(calls[0]!.init.headers).has("authorization")).toBe(false);
-    },
-  );
+  test("sends only canonical Host plus the token digest with omitted ambient credentials", async () => {
+    const calls: Array<{ url: string; init: RequestInit; body: unknown }> = [];
+    const resolver = createHttpAppLaunchResolver({
+      url: "http://opengeni-api:8000/internal/apps/resolve-launch",
+      sharedKey: "r".repeat(64),
+      async fetchImpl(url, init) {
+        calls.push({
+          url: String(url),
+          init: init!,
+          body: JSON.parse(String(init?.body)),
+        });
+        return Response.json({
+          ...RESOLUTION,
+          expiresAt: RESOLUTION.expiresAt.toISOString(),
+        });
+      },
+    });
+    const result = await resolver.resolve({
+      host: APP_HOST,
+      launchTokenDigest: launchTokenDigest(TOKEN),
+      requestedPath: "index.html",
+    });
+    expect(result).toEqual(RESOLUTION);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toEqual({
+      host: APP_HOST,
+      launchTokenDigest: launchTokenDigest(TOKEN),
+      requestedPath: "index.html",
+    });
+    expect(JSON.stringify(calls[0]!.body)).not.toContain(TOKEN);
+    expect(calls[0]!.init.credentials).toBe("omit");
+    expect(new Headers(calls[0]!.init.headers).get(APP_HOST_RESOLVER_HEADER)).toBe("r".repeat(64));
+    expect(new Headers(calls[0]!.init.headers).has("cookie")).toBe(false);
+    expect(new Headers(calls[0]!.init.headers).has("authorization")).toBe(false);
+  });
 
   test("fails closed on denial, malformed output, and oversized output", async () => {
     const denied = createHttpAppLaunchResolver({
@@ -341,8 +352,7 @@ describe("Apps Host normalization", () => {
   test("loads only dedicated process configuration and rejects malformed values", () => {
     expect(
       appHostProcessConfiguration({
-        OPENGENI_APP_HOST_RESOLVER_URL:
-          "http://opengeni-api:8000/internal/apps/resolve-launch",
+        OPENGENI_APP_HOST_RESOLVER_URL: "http://opengeni-api:8000/internal/apps/resolve-launch",
         OPENGENI_APP_HOST_RESOLVER_KEY: "r".repeat(64),
         OPENGENI_APP_HOST_FRAME_ANCESTORS:
           "https://console.example.test,https://admin.example.test",
@@ -357,8 +367,7 @@ describe("Apps Host normalization", () => {
     });
     expect(() =>
       appHostProcessConfiguration({
-        OPENGENI_APP_HOST_RESOLVER_URL:
-          "http://opengeni-api:8000/internal/apps/resolve-launch",
+        OPENGENI_APP_HOST_RESOLVER_URL: "http://opengeni-api:8000/internal/apps/resolve-launch",
         OPENGENI_APP_HOST_RESOLVER_KEY: "r".repeat(64),
         OPENGENI_APP_HOST_PORT: "0",
       }),
@@ -448,13 +457,21 @@ function appHostFixture(
         const entryObject = {
           path: base.entryObject.path,
           objectKey: objectKeyForPath(base.entryObject.path),
+          versionToken: base.entryObject.versionToken,
         };
         const requestedObject =
           input.requestedPath !== null &&
           (Object.hasOwn(files, input.requestedPath) ||
             input.requestedPath === base.entryObject.path ||
             options.storageFailure)
-            ? { path: input.requestedPath, objectKey: objectKeyForPath(input.requestedPath) }
+            ? {
+                path: input.requestedPath,
+                objectKey: objectKeyForPath(input.requestedPath),
+                versionToken:
+                  input.requestedPath === base.entryObject.path
+                    ? base.entryObject.versionToken
+                    : `version:${input.requestedPath}`,
+              }
             : null;
         return Object.freeze({ ...base, requestedObject, entryObject });
       },

@@ -582,10 +582,14 @@ CREATE TABLE opengeni_private.app_host_route_files (
   launch_id uuid NOT NULL,
   path text NOT NULL,
   object_key text NOT NULL,
+  version_token text NOT NULL,
   CONSTRAINT app_host_route_files_pk PRIMARY KEY (launch_id, path),
   CONSTRAINT app_host_route_files_launch_fk FOREIGN KEY (launch_id)
     REFERENCES opengeni_private.app_host_routes(launch_id) ON DELETE CASCADE,
-  CONSTRAINT app_host_route_files_object_chk CHECK (length(object_key) BETWEEN 1 AND 2048)
+  CONSTRAINT app_host_route_files_object_chk CHECK (
+    length(object_key) BETWEEN 1 AND 2048
+    AND length(version_token) BETWEEN 1 AND 2048
+  )
 );
 REVOKE ALL ON TABLE opengeni_private.app_host_route_files FROM PUBLIC;
 
@@ -1410,8 +1414,11 @@ BEGIN
     COALESCE(preview_row.spa_fallback, publication_row.spa_fallback),
     launch_row.expires_at
   );
-  INSERT INTO opengeni_private.app_host_route_files (launch_id, path, object_key)
-  SELECT launch_row.id, build_file.path, build_file.frozen_object_key
+  INSERT INTO opengeni_private.app_host_route_files (
+    launch_id, path, object_key, version_token
+  )
+  SELECT launch_row.id, build_file.path, build_file.frozen_object_key,
+    build_file.frozen_version_token
   FROM app_build_files build_file
   WHERE build_file.workspace_id = workspace_id_value
     AND build_file.app_id = app_id_value AND build_file.build_id = build_row.id
@@ -1730,15 +1737,18 @@ RETURNS TABLE (
   spa_fallback boolean,
   requested_path text,
   requested_object_key text,
+  requested_version_token text,
   entry_path text,
-  entry_object_key text
+  entry_object_key text,
+  entry_version_token text
 )
 LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = opengeni_private, pg_catalog
 AS $body$
   SELECT route.app_id, route.release_id, route.launch_id, route.preview_id,
     route.publication_id, route.expires_at, route.spa_fallback,
-    requested.path, requested.object_key, route.entry_path, entry_file.object_key
+    requested.path, requested.object_key, requested.version_token,
+    route.entry_path, entry_file.object_key, entry_file.version_token
   FROM app_host_routes route
   JOIN app_host_route_files entry_file
     ON entry_file.launch_id = route.launch_id AND entry_file.path = route.entry_path

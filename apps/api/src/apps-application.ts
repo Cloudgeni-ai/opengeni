@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import type {
   AppRuntimeToolCallResponse,
@@ -49,12 +49,13 @@ import {
   updateWorkspaceApp,
   type Database,
 } from "@opengeni/db";
-import type { ObjectStorage } from "@opengeni/storage";
+import { createImmutableRawObjectReader, type ObjectStorage } from "@opengeni/storage";
 import { HTTPException } from "hono/http-exception";
 
 const SOURCE_CONTENT_TYPE = "application/x-tar";
 const DEFAULT_PREVIEW_TTL_SECONDS = 60 * 60;
 const DEFAULT_LAUNCH_TTL_SECONDS = 15 * 60;
+const APP_SOURCE_DOWNLOAD_TTL_SECONDS = 5 * 60;
 
 export function createDatabaseAppsApplication(input: {
   db: Database;
@@ -72,9 +73,7 @@ export function createDatabaseAppsApplication(input: {
   const application: AppsApplicationPort = {
     async resolveHostLaunch(request) {
       const resolution = await resolveAppHostLaunch(input.db, request);
-      return resolution
-        ? { ...resolution, expiresAt: resolution.expiresAt.toISOString() }
-        : null;
+      return resolution ? { ...resolution, expiresAt: resolution.expiresAt.toISOString() } : null;
     },
 
     async list(request) {
@@ -142,11 +141,7 @@ export function createDatabaseAppsApplication(input: {
 
     async beginSourceUpload({ authority, appId, request }) {
       const objectStore = storage();
-      const sourceRevisionId = stableUuid(
-        "source",
-        authority.workspaceId,
-        request.idempotencyKey,
-      );
+      const sourceRevisionId = stableUuid("source", authority.workspaceId, request.idempotencyKey);
       const stagingObjectKey = appSourceStagingObjectKey({
         workspaceId: authority.workspaceId,
         appId,
@@ -243,8 +238,8 @@ export function createDatabaseAppsApplication(input: {
       return await detail(input.db, authority, appId);
     },
 
-    async getSourceDownload({ authority, appId, sourceRevisionId }) {
-      const objectStore = storage();
+    async getSourceDownload({ authority, appId, sourceRevisionId, downloadUrl }) {
+      storage();
       const source = await appPersistence(() =>
         getAppSourceStorageRef(input.db, {
           accountId: authority.accountId,
@@ -256,11 +251,79 @@ export function createDatabaseAppsApplication(input: {
       if (source.sourceRevision.status !== "ready" || !source.frozenVersionToken) {
         throw new HTTPException(409, { message: "App source revision is not ready" });
       }
-      const signed = await objectStore.createGetUrl({ key: source.frozenObjectKey });
+      const expiresAt = new Date(Date.now() + APP_SOURCE_DOWNLOAD_TTL_SECONDS * 1_000);
+      const expiresAtSeconds = Math.floor(expiresAt.getTime() / 1_000);
+      const signature = createAppSourceDownloadSignature(input.settings, {
+        authority,
+        appId,
+        sourceRevisionId,
+        expiresAtSeconds,
+      });
+      const url = new URL(downloadUrl);
+      url.searchParams.set("expires", String(expiresAtSeconds));
+      url.searchParams.set("signature", signature);
       return {
         sourceRevision: source.sourceRevision,
-        url: signed.url,
-        expiresAt: signed.expiresAt.toISOString(),
+        url: url.toString(),
+        expiresAt: expiresAt.toISOString(),
+      };
+    },
+
+    async openSourceDownload(
+      { authority, appId, sourceRevisionId, expiresAtSeconds, signature },
+      options,
+    ) {
+      const nowSeconds = Math.floor(Date.now() / 1_000);
+      if (
+        !Number.isSafeInteger(expiresAtSeconds) ||
+        expiresAtSeconds < nowSeconds ||
+        expiresAtSeconds > nowSeconds + APP_SOURCE_DOWNLOAD_TTL_SECONDS
+      ) {
+        throw new HTTPException(404, { message: "App source download not found" });
+      }
+      const expected = createAppSourceDownloadSignature(input.settings, {
+        authority,
+        appId,
+        sourceRevisionId,
+        expiresAtSeconds,
+      });
+      if (!equalDigest(signature, expected)) {
+        throw new HTTPException(404, { message: "App source download not found" });
+      }
+      const objectStore = storage();
+      const source = await appPersistence(() =>
+        getAppSourceStorageRef(input.db, {
+          accountId: authority.accountId,
+          workspaceId: authority.workspaceId,
+          appId,
+          sourceRevisionId,
+        }),
+      );
+      if (source.sourceRevision.status !== "ready" || !source.frozenVersionToken) {
+        throw new HTTPException(404, { message: "App source download not found" });
+      }
+      const reader = createImmutableRawObjectReader(objectStore);
+      const head = await reader.head({
+        key: source.frozenObjectKey,
+        ...(options?.signal ? { signal: options.signal } : {}),
+      });
+      if (
+        !head ||
+        head.versionToken !== source.frozenVersionToken ||
+        head.byteSize !== source.sourceRevision.sizeBytes
+      ) {
+        throw new HTTPException(404, { message: "App source download not found" });
+      }
+      return {
+        byteSize: head.byteSize,
+        contentType: SOURCE_CONTENT_TYPE,
+        body: reader.streamRange({
+          key: source.frozenObjectKey,
+          start: 0,
+          endInclusive: head.byteSize - 1,
+          expectedVersionToken: source.frozenVersionToken,
+          ...(options?.signal ? { signal: options.signal } : {}),
+        }),
       };
     },
 
@@ -368,7 +431,8 @@ export function createDatabaseAppsApplication(input: {
             ),
           })),
         ),
-        nextCursor: offset + page.length < plan.files.length ? encodeOffset(offset + page.length) : null,
+        nextCursor:
+          offset + page.length < plan.files.length ? encodeOffset(offset + page.length) : null,
       };
     },
 
@@ -847,4 +911,38 @@ function toolCallResponse(
     error: call.error,
     replayed,
   };
+}
+
+export function createAppSourceDownloadSignature(
+  settings: Settings,
+  input: Readonly<{
+    authority: { accountId: string; workspaceId: string; subjectId: string };
+    appId: string;
+    sourceRevisionId: string;
+    expiresAtSeconds: number;
+  }>,
+): string {
+  const secret = settings.appHostResolverKey;
+  if (!secret) {
+    throw new HTTPException(503, { message: "Apps download signing is not configured" });
+  }
+  return createHmac("sha256", secret)
+    .update(
+      [
+        "opengeni-app-source-download-v1",
+        input.authority.accountId,
+        input.authority.workspaceId,
+        input.authority.subjectId,
+        input.appId,
+        input.sourceRevisionId,
+        String(input.expiresAtSeconds),
+      ].join("\0"),
+      "utf8",
+    )
+    .digest("hex");
+}
+
+function equalDigest(actual: string, expected: string): boolean {
+  if (!/^[0-9a-f]{64}$/u.test(actual)) return false;
+  return timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expected, "hex"));
 }

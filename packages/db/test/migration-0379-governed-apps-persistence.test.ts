@@ -171,9 +171,10 @@ describe("migration 0379 governed Apps persistence", () => {
     expect(source).toContain("AND route.nonce_sha256 = p_launch_token_digest");
     expect(source).toContain("LEFT JOIN app_host_route_files requested");
     expect(source).toContain("JOIN app_host_route_files entry_file");
-    expect(source).toContain(
-      "requested.path, requested.object_key, route.entry_path, entry_file.object_key",
-    );
+    expect(source).toContain("requested.version_token");
+    expect(source).toContain("entry_file.version_token");
+    expect(source).toContain("requested.path, requested.object_key, requested.version_token,");
+    expect(source).toContain("route.entry_path, entry_file.object_key, entry_file.version_token");
     expect(source).toContain(
       "ON entry_file.launch_id = route.launch_id AND entry_file.path = route.entry_path",
     );

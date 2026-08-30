@@ -96,8 +96,8 @@ export type AppHostLaunchResolution = {
   publicationId: string | null;
   expiresAt: Date;
   spaFallback: boolean;
-  requestedObject: { path: string; objectKey: string } | null;
-  entryObject: { path: string; objectKey: string };
+  requestedObject: { path: string; objectKey: string; versionToken: string } | null;
+  entryObject: { path: string; objectKey: string; versionToken: string };
 };
 
 export type AppReleaseToolPolicy = {
@@ -484,15 +484,17 @@ async function runLifecycle(
   },
 ): Promise<LifecycleResult> {
   try {
-    return await withSessionRlsActorContext({ subjectId: command.actorSubjectId }, async () =>
-      await withRlsContext(db, command, async (scopedDb) => {
-        const [row] = await rawRows<{ result: LifecycleResult }>(
-          scopedDb,
-          lifecycleCommandQuery(command.action, JSON.stringify(command)),
-        );
-        if (!row) throw new Error("App lifecycle command returned no result");
-        return row.result;
-      }),
+    return await withSessionRlsActorContext(
+      { subjectId: command.actorSubjectId },
+      async () =>
+        await withRlsContext(db, command, async (scopedDb) => {
+          const [row] = await rawRows<{ result: LifecycleResult }>(
+            scopedDb,
+            lifecycleCommandQuery(command.action, JSON.stringify(command)),
+          );
+          if (!row) throw new Error("App lifecycle command returned no result");
+          return row.result;
+        }),
     );
   } catch (error) {
     return translatePersistenceError(error);
@@ -554,68 +556,71 @@ export async function getWorkspaceApp(
   input: { accountId: string; workspaceId: string; appId: string },
 ): Promise<WorkspaceAppDetailResponse> {
   return await withRlsContext(db, input, async (scopedDb) => {
-    const [appRows, sourceRows, buildRows, releaseRows, previewRows, policyRows] = await Promise.all([
-      scopedDb
-        .select()
-        .from(schema.apps)
-        .where(and(eq(schema.apps.workspaceId, input.workspaceId), eq(schema.apps.id, input.appId)))
-        .limit(1),
-      scopedDb
-        .select()
-        .from(schema.appSourceRevisions)
-        .where(
-          and(
-            eq(schema.appSourceRevisions.workspaceId, input.workspaceId),
-            eq(schema.appSourceRevisions.appId, input.appId),
-          ),
-        )
-        .orderBy(desc(schema.appSourceRevisions.revision))
-        .limit(101),
-      scopedDb
-        .select()
-        .from(schema.appBuilds)
-        .where(
-          and(
-            eq(schema.appBuilds.workspaceId, input.workspaceId),
-            eq(schema.appBuilds.appId, input.appId),
-          ),
-        )
-        .orderBy(desc(schema.appBuilds.revision))
-        .limit(101),
-      scopedDb
-        .select()
-        .from(schema.appReleases)
-        .where(
-          and(
-            eq(schema.appReleases.workspaceId, input.workspaceId),
-            eq(schema.appReleases.appId, input.appId),
-          ),
-        )
-        .orderBy(desc(schema.appReleases.revision))
-        .limit(101),
-      scopedDb
-        .select()
-        .from(schema.appPreviews)
-        .where(
-          and(
-            eq(schema.appPreviews.workspaceId, input.workspaceId),
-            eq(schema.appPreviews.appId, input.appId),
-          ),
-        )
-        .orderBy(desc(schema.appPreviews.createdAt))
-        .limit(101),
-      scopedDb
-        .select()
-        .from(schema.appToolPolicyRevisions)
-        .where(
-          and(
-            eq(schema.appToolPolicyRevisions.workspaceId, input.workspaceId),
-            eq(schema.appToolPolicyRevisions.appId, input.appId),
-          ),
-        )
-        .orderBy(desc(schema.appToolPolicyRevisions.revision))
-        .limit(101),
-    ]);
+    const [appRows, sourceRows, buildRows, releaseRows, previewRows, policyRows] =
+      await Promise.all([
+        scopedDb
+          .select()
+          .from(schema.apps)
+          .where(
+            and(eq(schema.apps.workspaceId, input.workspaceId), eq(schema.apps.id, input.appId)),
+          )
+          .limit(1),
+        scopedDb
+          .select()
+          .from(schema.appSourceRevisions)
+          .where(
+            and(
+              eq(schema.appSourceRevisions.workspaceId, input.workspaceId),
+              eq(schema.appSourceRevisions.appId, input.appId),
+            ),
+          )
+          .orderBy(desc(schema.appSourceRevisions.revision))
+          .limit(101),
+        scopedDb
+          .select()
+          .from(schema.appBuilds)
+          .where(
+            and(
+              eq(schema.appBuilds.workspaceId, input.workspaceId),
+              eq(schema.appBuilds.appId, input.appId),
+            ),
+          )
+          .orderBy(desc(schema.appBuilds.revision))
+          .limit(101),
+        scopedDb
+          .select()
+          .from(schema.appReleases)
+          .where(
+            and(
+              eq(schema.appReleases.workspaceId, input.workspaceId),
+              eq(schema.appReleases.appId, input.appId),
+            ),
+          )
+          .orderBy(desc(schema.appReleases.revision))
+          .limit(101),
+        scopedDb
+          .select()
+          .from(schema.appPreviews)
+          .where(
+            and(
+              eq(schema.appPreviews.workspaceId, input.workspaceId),
+              eq(schema.appPreviews.appId, input.appId),
+            ),
+          )
+          .orderBy(desc(schema.appPreviews.createdAt))
+          .limit(101),
+        scopedDb
+          .select()
+          .from(schema.appToolPolicyRevisions)
+          .where(
+            and(
+              eq(schema.appToolPolicyRevisions.workspaceId, input.workspaceId),
+              eq(schema.appToolPolicyRevisions.appId, input.appId),
+            ),
+          )
+          .orderBy(desc(schema.appToolPolicyRevisions.revision))
+          .limit(101),
+      ]);
     const app = appRows[0];
     if (!app) throw new AppPersistenceNotFoundError("App not found");
     return {
@@ -1073,15 +1078,17 @@ export async function claimArchivedAppGc(
     ...input,
     leaseToken: stableUuid("app-gc-lease", input.workspaceId, input.idempotencyKey),
   };
-  return await withSessionRlsActorContext({ subjectId: input.actorSubjectId }, async () =>
-    await withRlsContext(db, input, async (scopedDb) => {
-      const [row] = await rawRows<{ result: { claim: RawRow; replayed: boolean } }>(
-        scopedDb,
-        sql`select claim_archived_app_gc_command(${JSON.stringify(command)}::jsonb) as result`,
-      );
-      if (!row) throw new Error("App GC claim returned no result");
-      return { claim: mapGcClaim(row.result.claim), replayed: row.result.replayed };
-    }),
+  return await withSessionRlsActorContext(
+    { subjectId: input.actorSubjectId },
+    async () =>
+      await withRlsContext(db, input, async (scopedDb) => {
+        const [row] = await rawRows<{ result: { claim: RawRow; replayed: boolean } }>(
+          scopedDb,
+          sql`select claim_archived_app_gc_command(${JSON.stringify(command)}::jsonb) as result`,
+        );
+        if (!row) throw new Error("App GC claim returned no result");
+        return { claim: mapGcClaim(row.result.claim), replayed: row.result.replayed };
+      }),
   );
 }
 
@@ -1098,15 +1105,17 @@ export async function settleArchivedAppGc(
     errorCode?: string;
   },
 ): Promise<{ claim: AppGcClaim; replayed: boolean }> {
-  return await withSessionRlsActorContext({ subjectId: input.actorSubjectId }, async () =>
-    await withRlsContext(db, input, async (scopedDb) => {
-      const [row] = await rawRows<{ result: { claim: RawRow; replayed: boolean } }>(
-        scopedDb,
-        sql`select settle_archived_app_gc_command(${JSON.stringify(input)}::jsonb) as result`,
-      );
-      if (!row) throw new Error("App GC settlement returned no result");
-      return { claim: mapGcClaim(row.result.claim), replayed: row.result.replayed };
-    }),
+  return await withSessionRlsActorContext(
+    { subjectId: input.actorSubjectId },
+    async () =>
+      await withRlsContext(db, input, async (scopedDb) => {
+        const [row] = await rawRows<{ result: { claim: RawRow; replayed: boolean } }>(
+          scopedDb,
+          sql`select settle_archived_app_gc_command(${JSON.stringify(input)}::jsonb) as result`,
+        );
+        if (!row) throw new Error("App GC settlement returned no result");
+        return { claim: mapGcClaim(row.result.claim), replayed: row.result.replayed };
+      }),
   );
 }
 
@@ -1130,21 +1139,23 @@ export async function createAppLaunch(
   const nonceSha256 = `sha256:${createHash("sha256").update(nonce, "utf8").digest("hex")}`;
   const expiresAt = new Date(Date.now() + input.ttlSeconds * 1000);
   try {
-    return await withSessionRlsActorContext({ subjectId: input.actorSubjectId }, async () =>
-      await withRlsContext(db, input, async (scopedDb) => {
-      const command = {
-        ...input,
-        launchId,
-        nonceSha256,
-        expiresAt: expiresAt.toISOString(),
-      };
-      const [row] = await rawRows<{ result: { replayed: boolean; launch: RawRow } }>(
-        scopedDb,
-        sql`select app_launch_command(${JSON.stringify(command)}::jsonb) as result`,
-      );
-      if (!row) throw new Error("App launch command returned no result");
-      return { launch: mapLaunch(row.result.launch), nonce, replayed: row.result.replayed };
-      }),
+    return await withSessionRlsActorContext(
+      { subjectId: input.actorSubjectId },
+      async () =>
+        await withRlsContext(db, input, async (scopedDb) => {
+          const command = {
+            ...input,
+            launchId,
+            nonceSha256,
+            expiresAt: expiresAt.toISOString(),
+          };
+          const [row] = await rawRows<{ result: { replayed: boolean; launch: RawRow } }>(
+            scopedDb,
+            sql`select app_launch_command(${JSON.stringify(command)}::jsonb) as result`,
+          );
+          if (!row) throw new Error("App launch command returned no result");
+          return { launch: mapLaunch(row.result.launch), nonce, replayed: row.result.replayed };
+        }),
     );
   } catch (error) {
     return translatePersistenceError(error);
@@ -1171,16 +1182,18 @@ export async function beginAppToolCall(
   },
 ): Promise<{ toolCall: AppToolCall; replayed: boolean }> {
   try {
-    return await withSessionRlsActorContext({ subjectId: input.actorSubjectId }, async () =>
-      await withRlsContext(db, input, async (scopedDb) => {
-      const command = { action: "begin", ...input };
-      const [row] = await rawRows<{ result: { replayed: boolean; toolCall: RawRow } }>(
-        scopedDb,
-        sql`select app_tool_call_command(${JSON.stringify(command)}::jsonb) as result`,
-      );
-      if (!row) throw new Error("App tool-call command returned no result");
-      return { toolCall: mapToolCall(row.result.toolCall), replayed: row.result.replayed };
-      }),
+    return await withSessionRlsActorContext(
+      { subjectId: input.actorSubjectId },
+      async () =>
+        await withRlsContext(db, input, async (scopedDb) => {
+          const command = { action: "begin", ...input };
+          const [row] = await rawRows<{ result: { replayed: boolean; toolCall: RawRow } }>(
+            scopedDb,
+            sql`select app_tool_call_command(${JSON.stringify(command)}::jsonb) as result`,
+          );
+          if (!row) throw new Error("App tool-call command returned no result");
+          return { toolCall: mapToolCall(row.result.toolCall), replayed: row.result.replayed };
+        }),
     );
   } catch (error) {
     return translatePersistenceError(error);
@@ -1252,16 +1265,18 @@ export async function settleAppToolCall(
   },
 ): Promise<{ toolCall: AppToolCall; replayed: boolean }> {
   try {
-    return await withSessionRlsActorContext({ subjectId: input.actorSubjectId }, async () =>
-      await withRlsContext(db, input, async (scopedDb) => {
-      const command = { action: "settle", ...input };
-      const [row] = await rawRows<{ result: { replayed: boolean; toolCall: RawRow } }>(
-        scopedDb,
-        sql`select app_tool_call_command(${JSON.stringify(command)}::jsonb) as result`,
-      );
-      if (!row) throw new Error("App tool-call settlement returned no result");
-      return { toolCall: mapToolCall(row.result.toolCall), replayed: row.result.replayed };
-      }),
+    return await withSessionRlsActorContext(
+      { subjectId: input.actorSubjectId },
+      async () =>
+        await withRlsContext(db, input, async (scopedDb) => {
+          const command = { action: "settle", ...input };
+          const [row] = await rawRows<{ result: { replayed: boolean; toolCall: RawRow } }>(
+            scopedDb,
+            sql`select app_tool_call_command(${JSON.stringify(command)}::jsonb) as result`,
+          );
+          if (!row) throw new Error("App tool-call settlement returned no result");
+          return { toolCall: mapToolCall(row.result.toolCall), replayed: row.result.replayed };
+        }),
     );
   } catch (error) {
     return translatePersistenceError(error);
@@ -1286,8 +1301,10 @@ export async function resolveAppHostLaunch(
     spa_fallback: boolean;
     requested_path: string | null;
     requested_object_key: string | null;
+    requested_version_token: string | null;
     entry_path: string;
     entry_object_key: string;
+    entry_version_token: string;
   }>(
     db,
     sql`select * from opengeni_private.resolve_app_host_launch(
@@ -1304,10 +1321,18 @@ export async function resolveAppHostLaunch(
         expiresAt: new Date(row.expires_at),
         spaFallback: row.spa_fallback,
         requestedObject:
-          row.requested_path && row.requested_object_key
-            ? { path: row.requested_path, objectKey: row.requested_object_key }
+          row.requested_path && row.requested_object_key && row.requested_version_token
+            ? {
+                path: row.requested_path,
+                objectKey: row.requested_object_key,
+                versionToken: row.requested_version_token,
+              }
             : null,
-        entryObject: { path: row.entry_path, objectKey: row.entry_object_key },
+        entryObject: {
+          path: row.entry_path,
+          objectKey: row.entry_object_key,
+          versionToken: row.entry_version_token,
+        },
       }
     : null;
 }

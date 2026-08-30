@@ -32,10 +32,7 @@ import type {
 } from "@opengeni/contracts/apps";
 import type { Permission } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
-import {
-  requireResolvedAccessGrantAuthorization,
-  type AccessGrantAuthorization,
-} from "../access";
+import { requireResolvedAccessGrantAuthorization, type AccessGrantAuthorization } from "../access";
 import { getManagedAuthRequestActorAdmissionStamp } from "../managed-session";
 
 /**
@@ -74,6 +71,14 @@ export type AppHostResolvedObject = Readonly<{
   path: string;
   /** Exact digest-addressed frozen object key. Staging keys are forbidden. */
   objectKey: string;
+  /** Exact provider generation/etag captured when the frozen object was verified. */
+  versionToken: string;
+}>;
+
+export type AppSourceDownloadContent = Readonly<{
+  byteSize: number;
+  contentType: string;
+  body: ReadableStream<Uint8Array>;
 }>;
 
 export type AppHostLaunchResolution = Readonly<{
@@ -129,7 +134,10 @@ export interface AppsApplicationPort {
     }>,
     options?: AppApplicationCallOptions,
   ): Promise<WorkspaceAppMutationResponse>;
-  get(input: AppResourceInput, options?: AppApplicationCallOptions): Promise<WorkspaceAppDetailResponse>;
+  get(
+    input: AppResourceInput,
+    options?: AppApplicationCallOptions,
+  ): Promise<WorkspaceAppDetailResponse>;
   update(
     input: AppResourceInput & Readonly<{ request: UpdateWorkspaceAppRequest }>,
     options?: AppApplicationCallOptions,
@@ -151,9 +159,18 @@ export interface AppsApplicationPort {
     options?: AppApplicationCallOptions,
   ): Promise<WorkspaceAppDetailResponse>;
   getSourceDownload(
-    input: AppResourceInput & Readonly<{ sourceRevisionId: string }>,
+    input: AppResourceInput & Readonly<{ sourceRevisionId: string; downloadUrl: string }>,
     options?: AppApplicationCallOptions,
   ): Promise<AppSourceDownloadResponse>;
+  openSourceDownload(
+    input: AppResourceInput &
+      Readonly<{
+        sourceRevisionId: string;
+        expiresAtSeconds: number;
+        signature: string;
+      }>,
+    options?: AppApplicationCallOptions,
+  ): Promise<AppSourceDownloadContent>;
   prepareBuild(
     input: AppResourceInput & Readonly<{ request: PrepareAppBuildRequest }>,
     options?: AppApplicationCallOptions,

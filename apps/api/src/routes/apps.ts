@@ -67,11 +67,19 @@ const AppHostResolveResponse = z
     expiresAt: z.string().datetime({ offset: true }),
     spaFallback: z.boolean(),
     requestedObject: z
-      .object({ path: z.string().min(1).max(1_024), objectKey: z.string().min(1).max(1_024) })
+      .object({
+        path: z.string().min(1).max(1_024),
+        objectKey: z.string().min(1).max(2_048),
+        versionToken: z.string().min(1).max(2_048),
+      })
       .strict()
       .nullable(),
     entryObject: z
-      .object({ path: z.string().min(1).max(1_024), objectKey: z.string().min(1).max(1_024) })
+      .object({
+        path: z.string().min(1).max(1_024),
+        objectKey: z.string().min(1).max(2_048),
+        versionToken: z.string().min(1).max(2_048),
+      })
       .strict(),
   })
   .strict();
@@ -218,7 +226,10 @@ export function registerAppRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/csrf`, async (context) => {
     await currentHumanAuthority(context, deps, "apps:read", false);
-    return context.json({ token: mintAppCsrf(context, deps), expiresInSeconds: APP_CSRF_TTL_SECONDS });
+    return context.json({
+      token: mintAppCsrf(context, deps),
+      expiresInSeconds: APP_CSRF_TTL_SECONDS,
+    });
   });
 
   app.get(base, async (context) => {
@@ -229,7 +240,9 @@ export function registerAppRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     if (!query.success) throw new HTTPException(422, { message: "Invalid Apps list query" });
     return context.json(
-      WorkspaceAppListResponse.parse(await apps(deps).list({ authority: actor, query: query.data }, signal(context))),
+      WorkspaceAppListResponse.parse(
+        await apps(deps).list({ authority: actor, query: query.data }, signal(context)),
+      ),
     );
   });
 
@@ -314,6 +327,10 @@ export function registerAppRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get(`${base}/:appId/source-revisions/:sourceRevisionId/download`, async (context) => {
     const actor = await controlAuthority(context, deps, "apps:read", false);
+    const downloadUrl = new URL(context.req.url);
+    downloadUrl.pathname = `${downloadUrl.pathname}/content`;
+    downloadUrl.search = "";
+    downloadUrl.hash = "";
     return context.json(
       AppSourceDownloadResponse.parse(
         await apps(deps).getSourceDownload(
@@ -321,12 +338,43 @@ export function registerAppRoutes(app: Hono, deps: ApiRouteDeps): void {
             authority: actor,
             appId: id(context, "appId"),
             sourceRevisionId: id(context, "sourceRevisionId"),
+            downloadUrl: downloadUrl.toString(),
           },
           signal(context),
         ),
       ),
     );
   });
+
+  app.on(
+    ["GET", "HEAD"],
+    `${base}/:appId/source-revisions/:sourceRevisionId/download/content`,
+    async (context) => {
+      const actor = await controlAuthority(context, deps, "apps:read", false);
+      const expiresAtSeconds = Number(context.req.query("expires"));
+      const signature = context.req.query("signature") ?? "";
+      const source = await apps(deps).openSourceDownload(
+        {
+          authority: actor,
+          appId: id(context, "appId"),
+          sourceRevisionId: id(context, "sourceRevisionId"),
+          expiresAtSeconds,
+          signature,
+        },
+        signal(context),
+      );
+      return new Response(context.req.method === "HEAD" ? null : source.body, {
+        status: 200,
+        headers: {
+          "cache-control": "private, no-store, max-age=0, no-transform",
+          "content-disposition": 'attachment; filename="opengeni-app-source.tar"',
+          "content-length": String(source.byteSize),
+          "content-type": source.contentType,
+          "x-content-type-options": "nosniff",
+        },
+      });
+    },
+  );
 
   app.post(`${base}/:appId/builds`, async (context) => {
     const actor = await controlAuthority(context, deps, "apps:write", true);
