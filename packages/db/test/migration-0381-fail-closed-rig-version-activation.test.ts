@@ -14,20 +14,26 @@ describe("migration 0381 fail-closed Rig activation", () => {
     expect(source).not.toMatch(/UPDATE\s+rig_versions[\s\S]*status["']?\s*:\s*["']passed/iu);
   });
 
-  test("requires a drained maintenance cutover before the writer protocol changes", () => {
-    expect(source.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
+  test("scoped creation accepts an explicit inactive pending initial version", () => {
     expect(source).toContain("p_initial_version -> 'verification'");
     expect(source).toContain("(p_initial_version ->> 'active')::boolean");
-    expect(source).toContain("coalesce((p_initial_version ->> 'active')::boolean, true)");
-    expect(source).toContain("opengeni.migration_application_roles");
-    expect(source).toContain("rig_version_writer_drain_before_lock");
-    expect(source).toContain("rig_version_writer_drain_after_lock");
-    expect(source).toContain("LOCK TABLE rigs IN ACCESS EXCLUSIVE MODE");
-    expect(source).toContain("LOCK TABLE rig_versions IN ACCESS EXCLUSIVE MODE");
-    expect(source).toContain("LOCK TABLE rig_changes IN ACCESS EXCLUSIVE MODE");
-    expect(source).toContain(
-      "requires all configured OpenGeni application database sessions to be stopped",
-    );
+    expect(source).toContain("coalesce((p_initial_version ->> 'active')::boolean, false)");
+  });
+
+  test("fences active inserts and inactive-to-active transitions at the database boundary", () => {
+    expect(source).toContain("rig_versions_active_verification_trigger");
+    expect(source).toContain("TG_OP = 'INSERT' OR OLD.active IS DISTINCT FROM true");
+    expect(source).toContain("rig_versions_active_verification_check");
+    expect(source).toContain("binding' ->> 'sandboxGroupId'");
+    expect(source).toContain("binding' ->> 'rigVersionId'");
+    expect(source).toContain("receipt' ->> 'version' IS DISTINCT FROM '2'");
+  });
+
+  test("removes and fences obsolete provider-image proof across the maintenance cutover", () => {
+    expect(source).toContain("THEN image.value - 'coldBootValidation'");
+    expect(source).toContain("rig_versions_provider_image_proof_trigger");
+    expect(source).toContain("rig_versions_provider_image_proof_version_check");
+    expect(source).toContain("coldBootValidation' ->> 'version' = '1'");
   });
 
   test("retains the scoped creation security boundary", () => {

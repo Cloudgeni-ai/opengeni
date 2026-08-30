@@ -173,6 +173,7 @@ import type {
   WorkDiscoveryProjection,
 } from "@opengeni/contracts";
 import {
+  RIG_PLATFORM_SURFACE_VALIDATION_VERSION,
   RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptSchema,
   type RigPlatformSurfaceValidationReceipt,
 } from "@opengeni/contracts/rig-platform-surface-validation";
@@ -242,6 +243,7 @@ import {
   resolveWorkspaceMemoryPromptMode,
   RigChange as RigChangeContract,
   RigProviderImage as RigProviderImageContract,
+  RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION,
   SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
   renderSessionSystemUpdateBatch,
@@ -17747,8 +17749,9 @@ async function loadRigHealthByActiveVersion(
 }
 
 // Creates the rig row AND its version 1 in one transaction: a failure leaves
-// nothing behind. API callers use the inactive verification-pending option;
-// lower-level compatibility callers retain active-by-default behavior.
+// nothing behind. Every newly-authored version is inactive until an exact
+// verification receipt activates it; the database trigger enforces that rule
+// for stale and direct writers after the maintenance cutover.
 export async function createRig(
   db: Database,
   input: {
@@ -17787,7 +17790,7 @@ export async function createRig(
               changelog: content.changelog ?? null,
               createdBy: content.createdBy ?? input.createdBy ?? null,
               verification: input.initialVerification ?? { status: "unverified" },
-              active: input.activateInitialVersion ?? true,
+              active: input.activateInitialVersion ?? false,
             })}::jsonb, ${input.allowOrganization === true}
           ) as value`,
         );
@@ -17830,7 +17833,7 @@ export async function createRig(
           providerImages: {},
           verification: input.initialVerification ?? { status: "unverified" },
           createdBy: content.createdBy ?? input.createdBy ?? null,
-          active: input.activateInitialVersion ?? true,
+          active: input.activateInitialVersion ?? false,
         })
         .returning();
       if (!versionRow) {
@@ -18904,29 +18907,9 @@ export async function createRigVersionForChangePromotion(
   input: RigVersionContentInput & {
     expectedActiveVersionId: string;
     providerImages?: RigProviderImages;
-    verification?: RigVersionVerificationState;
   },
 ): Promise<{ version: RigVersion; change: RigChange }> {
   assertRigUsesPlatformImage(input);
-  const promotedVerification = input.verification;
-  if (promotedVerification?.status !== "passed") {
-    throw new Error("Rig change promotion requires its exact passing platform-surface receipt");
-  }
-  const promotedReceipt = RigPlatformSurfaceValidationReceiptSchema.safeParse(
-    promotedVerification.receipt,
-  );
-  const promotedSource = promotedVerification.source;
-  if (
-    !promotedReceipt.success ||
-    promotedSource?.kind !== "change" ||
-    promotedSource.changeId !== changeId ||
-    promotedSource.baseVersionId !== input.expectedActiveVersionId ||
-    promotedVerification.expectedActiveVersionId !== input.expectedActiveVersionId ||
-    promotedReceipt.data.binding.sandboxGroupId !== changeId ||
-    promotedReceipt.data.binding.rigVersionId !== input.expectedActiveVersionId
-  ) {
-    throw new Error("Rig change promotion requires its exact passing platform-surface receipt");
-  }
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [rig] = await scopedDb
       .select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
@@ -18955,26 +18938,27 @@ export async function createRigVersionForChangePromotion(
     if (currentChange.status === "merged" || currentChange.status === "rejected") {
       throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
     }
+    const changeVerification = mapRigChange(currentChange).verification;
+    const validationReceipt =
+      changeVerification?.passed === true
+        ? RigPlatformSurfaceValidationReceiptSchema.safeParse(
+            changeVerification.platformSurfaceValidation,
+          )
+        : null;
+    if (
+      !validationReceipt?.success ||
+      validationReceipt.data.version !== RIG_PLATFORM_SURFACE_VALIDATION_VERSION ||
+      validationReceipt.data.binding.sandboxGroupId !== changeId ||
+      validationReceipt.data.binding.rigVersionId !== changeId
+    ) {
+      throw new RigVersionVerificationRequiredError(changeId);
+    }
     if (currentChange.baseVersionId !== input.expectedActiveVersionId) {
       throw new RigActiveVersionChangedError(
         rigId,
         input.expectedActiveVersionId,
         currentChange.baseVersionId,
       );
-    }
-    const changeVerification = fromPostgresLosslessJson(
-      currentChange.verification,
-      currentChange.verificationCodecVersion,
-    ) as Record<string, unknown> | null;
-    const changeReceipt = RigPlatformSurfaceValidationReceiptSchema.safeParse(
-      changeVerification?.platformSurfaceValidation,
-    );
-    if (
-      changeVerification?.passed !== true ||
-      !changeReceipt.success ||
-      stableJson(changeReceipt.data) !== stableJson(promotedReceipt.data)
-    ) {
-      throw new Error("Rig change promotion receipt no longer matches the verified change");
     }
     const [active] = await scopedDb
       .select({ id: schema.rigVersions.id })
@@ -19007,6 +18991,7 @@ export async function createRigVersionForChangePromotion(
       scopedDb,
       workspaceId,
       input.providerImages ?? {},
+      { targetKind: "change", targetId: changeId },
     );
     await scopedDb
       .update(schema.rigVersions)
@@ -19021,6 +19006,7 @@ export async function createRigVersionForChangePromotion(
     const [versionRow] = await scopedDb
       .insert(schema.rigVersions)
       .values({
+        id: changeId,
         accountId: rig.accountId,
         workspaceId,
         rigId,
@@ -19032,7 +19018,13 @@ export async function createRigVersionForChangePromotion(
         defaultVariableSetIds: input.defaultVariableSetIds ?? [],
         changelog: input.changelog ?? null,
         providerImages,
-        verification: promotedVerification,
+        verification: {
+          status: "passed",
+          attemptId: changeId,
+          expectedActiveVersionId: input.expectedActiveVersionId,
+          verifiedAt: validationReceipt.data.checkedAt,
+          receipt: validationReceipt.data,
+        },
         createdBy: input.createdBy ?? null,
         active: true,
       })
@@ -19063,65 +19055,6 @@ export async function createRigVersionForChangePromotion(
       change: mapRigChange(changeRow),
     };
   });
-}
-
-async function rigVersionHasExactPassingReceipt(
-  scopedDb: Database,
-  input: {
-    workspaceId: string;
-    rigId: string;
-    versionId: string;
-    verification: RigVersionVerificationState;
-  },
-): Promise<boolean> {
-  if (input.verification.status !== "passed") return false;
-  const receipt = RigPlatformSurfaceValidationReceiptSchema.safeParse(input.verification.receipt);
-  if (!receipt.success) return false;
-  if (
-    receipt.data.binding.sandboxGroupId === input.versionId &&
-    receipt.data.binding.rigVersionId === input.versionId &&
-    (input.verification.source === undefined ||
-      (input.verification.source.kind === "version" &&
-        input.verification.source.versionId === input.versionId))
-  ) {
-    return true;
-  }
-  const source = input.verification.source;
-  if (
-    source?.kind !== "change" ||
-    input.verification.expectedActiveVersionId !== source.baseVersionId ||
-    receipt.data.binding.sandboxGroupId !== source.changeId ||
-    receipt.data.binding.rigVersionId !== source.baseVersionId
-  ) {
-    return false;
-  }
-  const [change] = await scopedDb
-    .select()
-    .from(schema.rigChanges)
-    .where(
-      and(
-        eq(schema.rigChanges.workspaceId, input.workspaceId),
-        eq(schema.rigChanges.rigId, input.rigId),
-        eq(schema.rigChanges.id, source.changeId),
-        eq(schema.rigChanges.baseVersionId, source.baseVersionId),
-        eq(schema.rigChanges.resultVersionId, input.versionId),
-        eq(schema.rigChanges.status, "merged"),
-      ),
-    )
-    .limit(1);
-  if (!change) return false;
-  const changeVerification = fromPostgresLosslessJson(
-    change.verification,
-    change.verificationCodecVersion,
-  ) as Record<string, unknown> | null;
-  const changeReceipt = RigPlatformSurfaceValidationReceiptSchema.safeParse(
-    changeVerification?.platformSurfaceValidation,
-  );
-  return (
-    changeVerification?.passed === true &&
-    changeReceipt.success &&
-    stableJson(changeReceipt.data) === stableJson(receipt.data)
-  );
 }
 
 export async function listRigVersions(
@@ -19362,11 +19295,25 @@ async function retainRigProviderImageArtifacts(
   db: Database,
   workspaceId: string,
   images: RigProviderImages,
+  expectedProvenance?: { targetKind: "change" | "version"; targetId: string },
 ): Promise<RigProviderImages> {
   const retained: RigProviderImages = {};
   for (const [backend, image] of Object.entries(images) as Array<
     [SandboxBackend, RigProviderImage]
   >) {
+    if (
+      expectedProvenance &&
+      (image.provenance.targetKind !== expectedProvenance.targetKind ||
+        image.provenance.targetId !== expectedProvenance.targetId)
+    ) {
+      continue;
+    }
+    if (
+      image.status === "ready" &&
+      image.coldBootValidation?.version !== RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION
+    ) {
+      continue;
+    }
     if (image.status !== "ready" || backend !== "modal") {
       retained[backend] = image;
       continue;
@@ -19451,7 +19398,10 @@ export async function claimRigVersionProviderImageBuild(
           const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
             [existing.backend]: existing,
           });
-          if (retained[existing.backend] && existing.coldBootValidation?.version === 2) {
+          if (
+            retained[existing.backend] &&
+            existing.coldBootValidation?.version === RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION
+          ) {
             return { status: "ready", image: existing };
           }
         }
@@ -19540,6 +19490,11 @@ export async function finalizeRigVersionProviderImageBuild(
       );
     }
     if (finalized.status === "ready") {
+      if (
+        finalized.coldBootValidation?.version !== RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION
+      ) {
+        return false;
+      }
       const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
         [finalized.backend]: finalized,
       });
@@ -19614,13 +19569,16 @@ export async function activateRigVersion(
       throw new Error(`Rig version not found: ${versionId}`);
     }
     if (options.requireVerification) {
+      const verification = target.verification;
+      const receipt =
+        verification.status === "passed"
+          ? RigPlatformSurfaceValidationReceiptSchema.safeParse(verification.receipt)
+          : null;
       if (
-        !(await rigVersionHasExactPassingReceipt(scopedDb, {
-          workspaceId,
-          rigId,
-          versionId,
-          verification: target.verification,
-        }))
+        !receipt?.success ||
+        receipt.data.version !== RIG_PLATFORM_SURFACE_VALIDATION_VERSION ||
+        receipt.data.binding.sandboxGroupId !== versionId ||
+        receipt.data.binding.rigVersionId !== versionId
       ) {
         throw new RigVersionVerificationRequiredError(versionId);
       }
@@ -19657,104 +19615,90 @@ export async function activateRigVersion(
   });
 }
 
+export type RigVersionVerificationAttempt = {
+  version: RigVersion;
+  attemptId: string;
+  expectedActiveVersionId: string | null;
+  requestedAt: string;
+};
+
+/**
+ * Atomically claim an opaque verification attempt for one exact version.
+ * Dispatch retries reuse a pending token; callers may omit that option to
+ * deliberately supersede a verifier whose completion must then be fenced.
+ */
 export async function beginRigVersionVerificationAttempt(
   db: Database,
   input: {
     workspaceId: string;
+    rigId: string;
     versionId: string;
-    requestedAt: string;
   },
-): Promise<{ version: RigVersion; attempt: number; alreadyPending: boolean }> {
+  options: {
+    requestedAt?: string;
+    attemptId?: string;
+    allowAlreadyPending?: boolean;
+  } = {},
+): Promise<RigVersionVerificationAttempt> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [identity] = await scopedDb
-      .select({ rigId: schema.rigVersions.rigId })
-      .from(schema.rigVersions)
-      .where(
-        and(
-          eq(schema.rigVersions.workspaceId, input.workspaceId),
-          eq(schema.rigVersions.id, input.versionId),
-        ),
-      )
-      .limit(1);
-    if (!identity) throw new Error(`Rig version not found: ${input.versionId}`);
     const [rig] = await scopedDb
       .select({ id: schema.rigs.id })
       .from(schema.rigs)
-      .where(
-        and(eq(schema.rigs.workspaceId, input.workspaceId), eq(schema.rigs.id, identity.rigId)),
-      )
+      .where(and(eq(schema.rigs.workspaceId, input.workspaceId), eq(schema.rigs.id, input.rigId)))
       .for("update")
       .limit(1);
-    if (!rig) throw new Error(`Rig not found: ${identity.rigId}`);
+    if (!rig) throw new Error(`Rig not found: ${input.rigId}`);
+
     const [target] = await scopedDb
       .select()
       .from(schema.rigVersions)
       .where(
         and(
           eq(schema.rigVersions.workspaceId, input.workspaceId),
-          eq(schema.rigVersions.rigId, identity.rigId),
+          eq(schema.rigVersions.rigId, input.rigId),
           eq(schema.rigVersions.id, input.versionId),
         ),
       )
       .for("update")
       .limit(1);
     if (!target) throw new Error(`Rig version not found: ${input.versionId}`);
+
     const state = target.verification;
-    if (state.status === "pending") {
-      const attempt =
-        typeof state.attempt === "number" &&
-        Number.isSafeInteger(state.attempt) &&
-        state.attempt > 0
-          ? state.attempt
-          : 1;
-      if (state.attempt !== attempt) {
-        const [normalized] = await scopedDb
-          .update(schema.rigVersions)
-          .set({ verification: { ...state, attempt } })
-          .where(
-            and(
-              eq(schema.rigVersions.workspaceId, input.workspaceId),
-              eq(schema.rigVersions.id, input.versionId),
-            ),
-          )
-          .returning();
-        if (!normalized) throw new Error(`Rig version not found: ${input.versionId}`);
-        return { version: mapRigVersion(normalized), attempt, alreadyPending: true };
-      }
-      return { version: mapRigVersion(target), attempt, alreadyPending: true };
+    if (
+      options.allowAlreadyPending &&
+      state.status === "pending" &&
+      typeof state.attemptId === "string"
+    ) {
+      return {
+        version: mapRigVersion(target),
+        attemptId: state.attemptId,
+        expectedActiveVersionId: state.expectedActiveVersionId,
+        requestedAt: state.requestedAt,
+      };
     }
-    const previousAttempt =
-      "attempt" in state &&
-      typeof state.attempt === "number" &&
-      Number.isSafeInteger(state.attempt) &&
-      state.attempt > 0
-        ? state.attempt
-        : 0;
+
     const [active] = await scopedDb
       .select({ id: schema.rigVersions.id })
       .from(schema.rigVersions)
       .where(
         and(
           eq(schema.rigVersions.workspaceId, input.workspaceId),
-          eq(schema.rigVersions.rigId, identity.rigId),
+          eq(schema.rigVersions.rigId, input.rigId),
           eq(schema.rigVersions.active, true),
         ),
       )
       .limit(1);
-    const expectedActiveVersionId = target.active
-      ? target.id
-      : "expectedActiveVersionId" in state
-        ? state.expectedActiveVersionId
-        : (active?.id ?? null);
-    const attempt = previousAttempt + 1;
+    const attemptId = options.attemptId ?? randomUUID();
+    const requestedAt = options.requestedAt ?? new Date().toISOString();
+    const expectedActiveVersionId = target.active ? target.id : (active?.id ?? null);
     const [row] = await scopedDb
       .update(schema.rigVersions)
       .set({
         verification: {
           status: "pending",
-          attempt,
+          attemptId,
           expectedActiveVersionId,
-          requestedAt: input.requestedAt,
+          requestedAt,
         },
       })
       .where(
@@ -19765,41 +19709,34 @@ export async function beginRigVersionVerificationAttempt(
       )
       .returning();
     if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
-    return { version: mapRigVersion(row), attempt, alreadyPending: false };
+    return { version: mapRigVersion(row), attemptId, expectedActiveVersionId, requestedAt };
   });
 }
 
-export type RigVersionVerificationAudit = {
-  subjectId: string;
-  metadata: Record<string, unknown>;
-};
-
-async function insertRigVerificationAuditEvent(
-  scopedDb: Database,
+export async function isCurrentRigVersionVerificationAttempt(
+  db: Database,
   input: {
-    accountId: string;
     workspaceId: string;
     rigId: string;
-    subjectId: string;
-    action: "rig.verification.passed" | "rig.verification.failed" | "rig.version.activated";
-    metadata: Record<string, unknown>;
+    versionId: string;
+    attemptId: string;
   },
-): Promise<void> {
-  await scopedDb.insert(schema.auditEvents).values(
-    withLosslessContentWriteVersion(
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-        action: input.action,
-        targetType: "rig",
-        targetId: input.rigId,
-        metadata: { rigId: input.rigId, ...input.metadata },
-      },
-      "metadata",
-      "metadataCodecVersion",
-    ),
-  );
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ verification: schema.rigVersions.verification })
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.rigId, input.rigId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .limit(1);
+    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+    return row.verification.status === "pending" && row.verification.attemptId === input.attemptId;
+  });
 }
 
 export async function failRigVersionVerification(
@@ -19808,16 +19745,14 @@ export async function failRigVersionVerification(
     workspaceId: string;
     rigId: string;
     versionId: string;
+    attemptId: string;
     error: string;
     verifiedAt?: string;
-    attempt?: number;
-    audit?: RigVersionVerificationAudit;
   },
-): Promise<boolean> {
+): Promise<{ applied: boolean; stale: boolean }> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
-        accountId: schema.rigVersions.accountId,
         verification: schema.rigVersions.verification,
         active: schema.rigVersions.active,
       })
@@ -19832,26 +19767,21 @@ export async function failRigVersionVerification(
       .for("update")
       .limit(1);
     if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
-    if (row.verification.status === "passed") return false;
-    if (
-      input.attempt !== undefined &&
-      (row.verification.status !== "pending" || row.verification.attempt !== input.attempt)
-    ) {
-      return false;
+    if (row.verification.status === "failed" && row.verification.attemptId === input.attemptId) {
+      return { applied: true, stale: false };
     }
-    const expectedActiveVersionId =
-      "expectedActiveVersionId" in row.verification
-        ? row.verification.expectedActiveVersionId
-        : null;
-    const verifiedAt = input.verifiedAt ?? new Date().toISOString();
+    if (row.verification.status !== "pending" || row.verification.attemptId !== input.attemptId) {
+      return { applied: false, stale: true };
+    }
+    const expectedActiveVersionId = row.verification.expectedActiveVersionId;
     await scopedDb
       .update(schema.rigVersions)
       .set({
         verification: {
           status: "failed",
-          ...(input.attempt !== undefined ? { attempt: input.attempt } : {}),
+          attemptId: input.attemptId,
           expectedActiveVersionId,
-          verifiedAt,
+          verifiedAt: input.verifiedAt ?? new Date().toISOString(),
           error: input.error.slice(0, 2_000),
         },
         active: row.active,
@@ -19862,17 +19792,7 @@ export async function failRigVersionVerification(
           eq(schema.rigVersions.id, input.versionId),
         ),
       );
-    if (input.audit) {
-      await insertRigVerificationAuditEvent(scopedDb, {
-        accountId: row.accountId,
-        workspaceId: input.workspaceId,
-        rigId: input.rigId,
-        subjectId: input.audit.subjectId,
-        action: "rig.verification.failed",
-        metadata: input.audit.metadata,
-      });
-    }
-    return true;
+    return { applied: true, stale: false };
   });
 }
 
@@ -19882,14 +19802,14 @@ export async function completeRigVersionVerification(
     workspaceId: string;
     rigId: string;
     versionId: string;
+    attemptId: string;
     receipt: RigPlatformSurfaceValidationReceipt;
     verifiedAt?: string;
-    attempt?: number;
-    audit?: RigVersionVerificationAudit;
   },
-): Promise<{ version: RigVersion; activated: boolean; stale: boolean; superseded: boolean }> {
+): Promise<{ version: RigVersion; applied: boolean; activated: boolean; stale: boolean }> {
   const receipt = RigPlatformSurfaceValidationReceiptSchema.parse(input.receipt);
   if (
+    receipt.version !== RIG_PLATFORM_SURFACE_VALIDATION_VERSION ||
     receipt.binding.sandboxGroupId !== input.versionId ||
     receipt.binding.rigVersionId !== input.versionId
   ) {
@@ -19897,7 +19817,7 @@ export async function completeRigVersionVerification(
   }
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [rig] = await scopedDb
-      .select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
+      .select({ id: schema.rigs.id })
       .from(schema.rigs)
       .where(and(eq(schema.rigs.workspaceId, input.workspaceId), eq(schema.rigs.id, input.rigId)))
       .for("update")
@@ -19917,29 +19837,18 @@ export async function completeRigVersionVerification(
       .limit(1);
     if (!target) throw new Error(`Rig version not found: ${input.versionId}`);
     const state = target.verification;
-    if (
-      input.attempt !== undefined &&
-      (state.status !== "pending" || state.attempt !== input.attempt)
-    ) {
+    if (state.status === "passed" && state.attemptId === input.attemptId) {
       return {
         version: mapRigVersion(target),
-        activated: false,
+        applied: true,
+        activated: target.active,
         stale: !target.active,
-        superseded: true,
       };
     }
-    if (
-      state.status !== "pending" &&
-      state.status !== "failed" &&
-      !(target.active && (state.status === "unverified" || state.status === "passed"))
-    ) {
-      throw new RigVersionVerificationStateError(input.versionId, state.status);
+    if (state.status !== "pending" || state.attemptId !== input.attemptId) {
+      return { version: mapRigVersion(target), applied: false, activated: false, stale: true };
     }
-    const expectedActiveVersionId = target.active
-      ? target.id
-      : "expectedActiveVersionId" in state
-        ? state.expectedActiveVersionId
-        : null;
+    const expectedActiveVersionId = state.expectedActiveVersionId;
     const [active] = await scopedDb
       .select({ id: schema.rigVersions.id })
       .from(schema.rigVersions)
@@ -19970,11 +19879,10 @@ export async function completeRigVersionVerification(
       .set({
         verification: {
           status: "passed",
-          ...(input.attempt !== undefined ? { attempt: input.attempt } : {}),
+          attemptId: input.attemptId,
           expectedActiveVersionId,
           verifiedAt: input.verifiedAt ?? new Date().toISOString(),
           receipt,
-          source: { kind: "version", versionId: input.versionId },
         },
         active: !stale,
       })
@@ -19990,31 +19898,7 @@ export async function completeRigVersionVerification(
       .update(schema.rigs)
       .set({ updatedAt: new Date() })
       .where(and(eq(schema.rigs.workspaceId, input.workspaceId), eq(schema.rigs.id, input.rigId)));
-    if (input.audit) {
-      await insertRigVerificationAuditEvent(scopedDb, {
-        accountId: rig.accountId,
-        workspaceId: input.workspaceId,
-        rigId: input.rigId,
-        subjectId: input.audit.subjectId,
-        action: "rig.verification.passed",
-        metadata: { ...input.audit.metadata, activated: !stale, stale },
-      });
-      if (!stale) {
-        await insertRigVerificationAuditEvent(scopedDb, {
-          accountId: rig.accountId,
-          workspaceId: input.workspaceId,
-          rigId: input.rigId,
-          subjectId: input.audit.subjectId,
-          action: "rig.version.activated",
-          metadata: {
-            versionId: input.versionId,
-            version: row.version,
-            verification: true,
-          },
-        });
-      }
-    }
-    return { version: mapRigVersion(row), activated: !stale, stale, superseded: false };
+    return { version: mapRigVersion(row), applied: true, activated: !stale, stale };
   });
 }
 

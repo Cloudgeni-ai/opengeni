@@ -89,6 +89,95 @@ $rig_version_writer_drain_after_lock$;
 ALTER TABLE rig_versions
   ADD COLUMN verification jsonb NOT NULL DEFAULT '{"status":"unverified"}'::jsonb;
 
+-- Version-1 provider-image proof predates exact Browser/Computer target
+-- binding. Remove only that optimization proof so the new runtime falls back
+-- to logical-image + setup until it publishes current proof.
+ALTER TABLE rig_versions NO FORCE ROW LEVEL SECURITY;
+UPDATE rig_versions
+SET provider_images = (
+  SELECT coalesce(
+    jsonb_object_agg(
+      image.key,
+      CASE
+        WHEN image.value -> 'coldBootValidation' ->> 'version' = '1'
+          THEN image.value - 'coldBootValidation'
+        ELSE image.value
+      END
+    ),
+    '{}'::jsonb
+  )
+  FROM jsonb_each(rig_versions.provider_images) AS image
+)
+WHERE EXISTS (
+  SELECT 1
+  FROM jsonb_each(rig_versions.provider_images) AS image
+  WHERE image.value -> 'coldBootValidation' ->> 'version' = '1'
+);
+ALTER TABLE rig_versions FORCE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION opengeni_private.reject_obsolete_rig_provider_image_proof()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.jsonb_each(NEW.provider_images) AS image
+    WHERE image.value -> 'coldBootValidation' ->> 'version' = '1'
+  ) THEN
+    RAISE EXCEPTION 'rig provider image cold-boot proof version 1 is obsolete'
+      USING ERRCODE = '23514',
+        CONSTRAINT = 'rig_versions_provider_image_proof_version_check';
+  END IF;
+  RETURN NEW;
+END
+$$;
+REVOKE ALL ON FUNCTION opengeni_private.reject_obsolete_rig_provider_image_proof()
+FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS rig_versions_provider_image_proof_trigger ON rig_versions;
+CREATE TRIGGER rig_versions_provider_image_proof_trigger
+BEFORE INSERT OR UPDATE OF provider_images ON rig_versions
+FOR EACH ROW
+EXECUTE FUNCTION opengeni_private.reject_obsolete_rig_provider_image_proof();
+
+-- This trigger keeps the maintenance cutover fail-closed. New application code
+-- writes inactive/pending rows, while a stale or direct writer that attempts an
+-- active unverified INSERT is rejected in the same transaction. Existing active
+-- rows are grandfathered and ordinary updates remain available after cutover.
+CREATE OR REPLACE FUNCTION opengeni_private.enforce_rig_version_activation_verification()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF NEW.active = true AND (TG_OP = 'INSERT' OR OLD.active IS DISTINCT FROM true) THEN
+    IF NEW.verification ->> 'status' IS DISTINCT FROM 'passed'
+      OR NEW.verification ->> 'attemptId' IS NULL
+      OR NEW.verification -> 'receipt' ->> 'version' IS DISTINCT FROM '2'
+      OR NEW.verification -> 'receipt' -> 'binding' ->> 'sandboxGroupId'
+        IS DISTINCT FROM NEW.id::text
+      OR NEW.verification -> 'receipt' -> 'binding' ->> 'rigVersionId'
+        IS DISTINCT FROM NEW.id::text
+    THEN
+      RAISE EXCEPTION 'rig version activation requires an exact passing platform-surface receipt'
+        USING ERRCODE = '23514',
+          CONSTRAINT = 'rig_versions_active_verification_check';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+REVOKE ALL ON FUNCTION opengeni_private.enforce_rig_version_activation_verification()
+FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS rig_versions_active_verification_trigger ON rig_versions;
+CREATE TRIGGER rig_versions_active_verification_trigger
+BEFORE INSERT OR UPDATE OF active ON rig_versions
+FOR EACH ROW
+EXECUTE FUNCTION opengeni_private.enforce_rig_version_activation_verification();
+
 CREATE OR REPLACE FUNCTION create_scoped_rig(
   p_account_id uuid,
   p_workspace_id uuid,
@@ -162,7 +251,7 @@ BEGIN
     p_initial_version ->> 'changelog', '{}'::jsonb,
     coalesce(p_initial_version -> 'verification', '{"status":"unverified"}'::jsonb),
     coalesce(p_initial_version ->> 'createdBy', p_created_by),
-    coalesce((p_initial_version ->> 'active')::boolean, true)
+    coalesce((p_initial_version ->> 'active')::boolean, false)
   );
   DELETE FROM opengeni_private.scoped_compute_capabilities
   WHERE backend_pid = pg_catalog.pg_backend_pid()

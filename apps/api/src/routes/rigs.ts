@@ -5,8 +5,8 @@ import {
   UpdateRigRequest,
 } from "@opengeni/contracts";
 import {
-  beginRigVersionVerificationAttempt,
   beginRigChangeVerificationAttempt,
+  beginRigVersionVerificationAttempt,
   listRigs,
   RigChangeTransitionError,
 } from "@opengeni/db";
@@ -139,23 +139,30 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   async function startVersionVerification(
     workspaceId: string,
+    rigId: string,
     versionId: string,
-    attempt: number,
-  ): Promise<void> {
+  ): Promise<Awaited<ReturnType<typeof beginRigVersionVerificationAttempt>>> {
+    const attempt = await beginRigVersionVerificationAttempt(
+      db,
+      { workspaceId, rigId, versionId },
+      { allowAlreadyPending: true },
+    );
     await workflowClient.startRigVerification({
       workspaceId,
       versionId,
-      versionAttempt: attempt,
-      workflowId: `rig-verification-version-${versionId}-attempt-${attempt}`,
+      attemptId: attempt.attemptId,
+      workflowId: `rig-verification-version-${versionId}-attempt-${attempt.attemptId}`,
     });
+    return attempt;
   }
 
   async function tryStartInitialVersionVerification(
     workspaceId: string,
+    rigId: string,
     versionId: string,
   ): Promise<boolean> {
     try {
-      await startVersionVerification(workspaceId, versionId, 1);
+      await startVersionVerification(workspaceId, rigId, versionId);
       return true;
     } catch (error) {
       // Creation already committed, but the version remains inactive. Preserve
@@ -194,7 +201,11 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     const [initialVersion] = await listRigVersionsForApi({ db }, workspaceId, rig.id);
     if (!initialVersion) throw new Error("initial rig version was not persisted");
-    const started = await tryStartInitialVersionVerification(workspaceId, initialVersion.id);
+    const started = await tryStartInitialVersionVerification(
+      workspaceId,
+      rig.id,
+      initialVersion.id,
+    );
     if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
     return c.json(rig, 201);
   });
@@ -253,7 +264,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
     const payload = await parseRigRequest(c, RigDefinitionEditPayload, "Rig version request");
     const version = await createRigVersionForApi({ db }, grant, rig, payload);
-    const started = await tryStartInitialVersionVerification(rig.workspaceId, version.id);
+    const started = await tryStartInitialVersionVerification(rig.workspaceId, rig.id, version.id);
     if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
     return c.json(version, 201);
   });
@@ -266,13 +277,8 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!versions.some((version) => version.id === versionId)) {
       throw new HTTPException(404, { message: "rig version not found" });
     }
-    const verification = await beginRigVersionVerificationAttempt(db, {
-      workspaceId: rig.workspaceId,
-      versionId,
-      requestedAt: new Date().toISOString(),
-    });
-    await startVersionVerification(rig.workspaceId, versionId, verification.attempt);
-    return c.json({ ok: true, versionId, attempt: verification.attempt }, 202);
+    await startVersionVerification(rig.workspaceId, rig.id, versionId);
+    return c.json({ ok: true, versionId }, 202);
   });
 
   // Rollback / promote-activate: flips which existing version is active.
@@ -352,15 +358,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!rig.activeVersion) {
       return c.json({ error: "rig has no active version" }, 422);
     }
-    const verification = await beginRigVersionVerificationAttempt(db, {
-      workspaceId: rig.workspaceId,
-      versionId: rig.activeVersion.id,
-      requestedAt: new Date().toISOString(),
-    });
-    await startVersionVerification(rig.workspaceId, rig.activeVersion.id, verification.attempt);
-    return c.json(
-      { ok: true, versionId: rig.activeVersion.id, attempt: verification.attempt },
-      202,
-    );
+    await startVersionVerification(rig.workspaceId, rig.id, rig.activeVersion.id);
+    return c.json({ ok: true, versionId: rig.activeVersion.id }, 202);
   });
 }

@@ -255,27 +255,27 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
-    startRigVerification: async ({
-      workspaceId,
-      changeId,
-      versionId,
-      versionAttempt,
-      workflowId,
-    }) => {
+    startRigVerification: async ({ workspaceId, changeId, versionId, attemptId, workflowId }) => {
       const targetId = changeId ?? versionId;
       if (!targetId) {
         throw new Error("rig verification requires changeId or versionId");
+      }
+      if (versionId && !attemptId) {
+        throw new Error("rig version verification requires an attemptId");
       }
       try {
         await temporal.workflow.start("rigVerificationWorkflow", {
           taskQueue: settings.temporalTaskQueue,
           workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
-          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          // A pending attempt may need the same deterministic workflow id
+          // restarted after a failed run. Running/successful duplicates remain
+          // rejected and are treated as idempotent dispatch acknowledgements.
+          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
           args: [
             {
               workspaceId,
               ...(changeId ? { changeId } : {}),
-              ...(versionId ? { versionId, versionAttempt } : {}),
+              ...(versionId ? { versionId, attemptId } : {}),
             },
           ],
         });

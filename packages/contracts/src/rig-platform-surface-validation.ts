@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const RIG_PLATFORM_SURFACE_VALIDATION_VERSION = 2 as const;
+
 export const RigPlatformSurfaceValidationBinding = z
   .object({
     leaseId: z.string().uuid(),
@@ -17,7 +19,9 @@ export type RigPlatformSurfaceValidationBinding = z.infer<
 
 export const RigPlatformSurfaceValidationReceipt = z
   .object({
-    version: z.literal(1),
+    // Version 1 remains readable for durable history, but activation and
+    // promotion boundaries require the current version 2 proof.
+    version: z.union([z.literal(1), z.literal(RIG_PLATFORM_SURFACE_VALIDATION_VERSION)]),
     checkedAt: z.string().datetime(),
     binding: RigPlatformSurfaceValidationBinding,
     terminal: z.discriminatedUnion("status", [

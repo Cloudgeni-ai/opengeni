@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   CapabilityPack,
+  RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION,
   type RigVersion,
   type Session,
   type SandboxBackend,
@@ -166,7 +167,7 @@ export function resolveRigProviderImageSelection(
       imageId: image.imageId,
     };
   }
-  if (image.coldBootValidation?.version !== 2) {
+  if (image.coldBootValidation?.version !== RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION) {
     return {
       settings,
       reason: "not_cold_boot_validated",

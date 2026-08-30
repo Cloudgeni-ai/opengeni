@@ -19,6 +19,7 @@ import {
   SessionGoalStatus,
   SessionStatus,
 } from "./session-topology-primitives";
+import { RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptSchema } from "./rig-platform-surface-validation";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -7914,6 +7915,10 @@ export type RigCheck = z.infer<typeof RigCheck>;
 export const RigProviderImageBuildStatus = z.enum(["building", "ready", "failed", "unsupported"]);
 export type RigProviderImageBuildStatus = z.infer<typeof RigProviderImageBuildStatus>;
 
+/** Current proof protocol for immutable provider images. Version 1 remains
+ * readable during rolling upgrades, but it is never eligible for reuse. */
+export const RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION = 2 as const;
+
 export const RigProviderImage = z
   .object({
     backend: SandboxBackend,
@@ -7932,12 +7937,15 @@ export const RigProviderImage = z
       .string()
       .regex(/^sha256:[0-9a-f]{64}$/u)
       .nullable(),
-    // Added after provider-image v1 shipped. Older proof versions remain
-    // readable for rolling compatibility, but runtime selection requires the
-    // current version so a stronger validation protocol always rebuilds.
+    // Added after provider-image v1 shipped. Absence is retained for rolling
+    // compatibility but means runtime must use logical-image + setup fallback
+    // until an explicit verification cold-boots this exact image.
     coldBootValidation: z
       .object({
-        version: z.union([z.literal(1), z.literal(2)]),
+        version: z.union([
+          z.literal(1),
+          z.literal(RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION),
+        ]),
         checkedAt: z.string().datetime(),
       })
       .optional(),
@@ -8096,30 +8104,33 @@ export type RigCheckResult = z.infer<typeof RigCheckResult>;
 
 // The verification record a rig-CI run writes onto a change (M4). Open-ended
 // (passthrough) so M4 can enrich it without a contracts break.
-export const RigChangeVerification = z
-  .object({
-    startedAt: z.string().optional(),
-    finishedAt: z.string().optional(),
-    log: z.string().optional(),
-    platformCheckResults: z.array(RigCheckResult).optional(),
-    checkResults: z.array(RigCheckResult).optional(),
-  })
-  .passthrough();
+export const RigChangeVerification = /* @__PURE__ */ (() =>
+  z
+    .object({
+      startedAt: z.string().optional(),
+      finishedAt: z.string().optional(),
+      log: z.string().optional(),
+      platformCheckResults: z.array(RigCheckResult).optional(),
+      checkResults: z.array(RigCheckResult).optional(),
+      platformSurfaceValidation: RigPlatformSurfaceValidationReceiptSchema.optional(),
+    })
+    .passthrough())();
 export type RigChangeVerification = z.infer<typeof RigChangeVerification>;
 
-export const RigChange = z.object({
-  id: z.string().uuid(),
-  rigId: z.string().uuid(),
-  baseVersionId: z.string().uuid().nullable(),
-  kind: RigChangeKind,
-  payload: z.record(z.string(), z.unknown()),
-  status: RigChangeStatus,
-  proposedBy: z.string().nullable(),
-  verification: RigChangeVerification.nullable(),
-  resultVersionId: z.string().uuid().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const RigChange = /* @__PURE__ */ (() =>
+  z.object({
+    id: z.string().uuid(),
+    rigId: z.string().uuid(),
+    baseVersionId: z.string().uuid().nullable(),
+    kind: RigChangeKind,
+    payload: z.record(z.string(), z.unknown()),
+    status: RigChangeStatus,
+    proposedBy: z.string().nullable(),
+    verification: RigChangeVerification.nullable(),
+    resultVersionId: z.string().uuid().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }))();
 export type RigChange = z.infer<typeof RigChange>;
 
 // Rig setup payloads are transferred to sandboxes in bounded chunks. Keep the

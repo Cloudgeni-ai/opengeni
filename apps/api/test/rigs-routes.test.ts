@@ -4,9 +4,9 @@ import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
+  beginRigVersionVerificationAttempt,
   completeRigVersionVerification,
   createDb,
-  createRigVersion,
   createSession,
   createVariableSet,
   getRigChange,
@@ -17,6 +17,7 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  createVerifiedTestRigVersion,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
@@ -116,7 +117,7 @@ async function auditActions(workspaceId: string, targetId: string): Promise<stri
 
 function surfaceReceipt(versionId: string, sandboxGroupId = versionId) {
   return {
-    version: 1 as const,
+    version: 2 as const,
     checkedAt: "2026-08-30T12:00:00.000Z",
     binding: {
       leaseId: "11111111-2222-4333-8444-555555555555",
@@ -148,10 +149,16 @@ function surfaceReceipt(versionId: string, sandboxGroupId = versionId) {
 async function activateInitialVersion(workspaceId: string, rigId: string) {
   const [version] = await listRigVersions(client.db, workspaceId, rigId);
   if (!version) throw new Error("initial version missing");
+  const attempt = await beginRigVersionVerificationAttempt(
+    client.db,
+    { workspaceId, rigId, versionId: version.id },
+    { allowAlreadyPending: true },
+  );
   const result = await completeRigVersionVerification(client.db, {
     workspaceId,
     rigId,
     versionId: version.id,
+    attemptId: attempt.attemptId,
     receipt: surfaceReceipt(version.id),
   });
   expect(result.activated).toBe(true);
@@ -339,6 +346,8 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "del" }),
     });
     const rig = await created.json();
+    const [initialVersion] = await listRigVersions(client.db, ws.workspaceId, rig.id);
+    expect(initialVersion).toBeDefined();
     await activateInitialVersion(ws.workspaceId, rig.id);
 
     const session = await createSession(client.db, {
@@ -381,7 +390,7 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "retry-verify" }),
     });
     const rig = await created.json();
-    const initialVersion = await activateInitialVersion(ws.workspaceId, rig.id);
+    await activateInitialVersion(ws.workspaceId, rig.id);
     const proposed = await http.request(`${base}/${rig.id}/changes`, {
       method: "POST",
       headers: use,
@@ -390,8 +399,10 @@ describe("rig route permission matrix", () => {
     expect(proposed.status).toBe(201);
     const change = await proposed.json();
     expect(calls).toHaveLength(2);
-    expect((calls[0] as { workflowId: string }).workflowId).toBe(
-      `rig-verification-version-${initialVersion.id}-attempt-1`,
+    const initialCall = calls[0] as { attemptId: string; workflowId: string };
+    expect(initialCall.attemptId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(initialCall.workflowId).toBe(
+      `rig-verification-version-${initialVersion!.id}-attempt-${initialCall.attemptId}`,
     );
     expect((calls[1] as { workflowId: string }).workflowId).toBe(
       `rig-verification-change-${change.id}-attempt-1`,
@@ -428,13 +439,13 @@ describe("rig route permission matrix", () => {
   test("repeated version verification requests reuse one in-flight attempt", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const calls: Array<{ workflowId: string; versionAttempt: number }> = [];
+    const calls: Array<{ workflowId: string; attemptId: string }> = [];
     const http = createApp({
       settings,
       db: client.db,
       bus: {} as never,
       workflowClient: {
-        startRigVerification: async (input: { workflowId: string; versionAttempt: number }) => {
+        startRigVerification: async (input: { workflowId: string; attemptId: string }) => {
           calls.push(input);
         },
       } as never,
@@ -456,13 +467,15 @@ describe("rig route permission matrix", () => {
     const second = await http.request(endpoint, { method: "POST", headers: manage });
     expect(first.status).toBe(202);
     expect(second.status).toBe(202);
-    expect((await first.json()).attempt).toBe(1);
-    expect((await second.json()).attempt).toBe(1);
+    expect((await first.json()).versionId).toBe(version!.id);
+    expect((await second.json()).versionId).toBe(version!.id);
     expect(calls).toHaveLength(3);
+    const attemptId = calls[0]!.attemptId;
+    expect(attemptId).toMatch(/^[0-9a-f-]{36}$/u);
     expect(new Set(calls.map((call) => call.workflowId))).toEqual(
-      new Set([`rig-verification-version-${version!.id}-attempt-1`]),
+      new Set([`rig-verification-version-${version!.id}-attempt-${attemptId}`]),
     );
-    expect(calls.every((call) => call.versionAttempt === 1)).toBe(true);
+    expect(calls.every((call) => call.attemptId === attemptId)).toBe(true);
   });
 
   test("a committed rig create survives an unavailable initial verification dispatcher", async () => {
@@ -560,7 +573,7 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "stale-promote", setupScript: "echo v1" }),
     });
     const rig = await created.json();
-    const initialVersion = await activateInitialVersion(ws.workspaceId, rig.id);
+    await activateInitialVersion(ws.workspaceId, rig.id);
     const proposed = await http.request(`${base}/${rig.id}/changes`, {
       method: "POST",
       headers: manage,
@@ -574,16 +587,12 @@ describe("rig route permission matrix", () => {
       status: "proposed",
       verification: {
         passed: true,
-        platformSurfaceValidation: surfaceReceipt(initialVersion.id, change.id),
+        platformSurfaceValidation: surfaceReceipt(change.id),
       },
     });
-    await createRigVersion(
-      client.db,
-      ws.workspaceId,
-      rig.id,
-      { setupScript: "echo independently-promoted" },
-      { activate: true },
-    );
+    await createVerifiedTestRigVersion(client.db, ws.workspaceId, rig.id, {
+      setupScript: "echo independently-promoted",
+    });
 
     const promoted = await http.request(`${base}/${rig.id}/changes/${change.id}/promote`, {
       method: "POST",
@@ -598,13 +607,17 @@ describe("rig route permission matrix", () => {
   test("manager-authored versions stay inactive when verification dispatch is deferred", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const calls: Array<{ versionId: string }> = [];
+    const calls: Array<{ versionId: string; attemptId: string; workflowId: string }> = [];
     const http = createApp({
       settings,
       db: client.db,
       bus: {} as never,
       workflowClient: {
-        startRigVerification: async (input: { versionId: string }) => {
+        startRigVerification: async (input: {
+          versionId: string;
+          attemptId: string;
+          workflowId: string;
+        }) => {
           calls.push(input);
           if (calls.length === 2) throw new Error("temporal unavailable");
         },
@@ -636,6 +649,16 @@ describe("rig route permission matrix", () => {
       headers: manage,
     });
     expect(activation.status).toBe(422);
+    const retried = await http.request(`${base}/${rig.id}/versions/${version.id}/verify`, {
+      method: "POST",
+      headers: manage,
+    });
+    expect(retried.status).toBe(202);
+    expect(calls[1]?.attemptId).toBe(calls[2]?.attemptId);
+    expect(calls[1]?.workflowId).toBe(calls[2]?.workflowId);
+    expect(calls[2]?.workflowId).toBe(
+      `rig-verification-version-${version.id}-attempt-${calls[2]?.attemptId}`,
+    );
   });
 
   test("workspace default rig setter is rigs:manage gated, validates rigId, and clears", async () => {

@@ -20,7 +20,6 @@ import {
   claimSessionWorkForAttempt,
   bindScheduledTaskRunSessionInTransaction,
   createDb,
-  createRig,
   createScheduledTask,
   createScheduledTaskRun,
   createSession,
@@ -45,6 +44,7 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  createVerifiedTestRig as createRig,
   MemoryEventBus,
   testSettings,
   type SharedTestDatabase,

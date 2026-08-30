@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/contracts";
-import { createDb, createRig, type DbClient } from "@opengeni/db";
+import { createDb, type DbClient } from "@opengeni/db";
 import {
   buildSandboxImage,
+  createVerifiedTestRig as createRig,
   freePort,
   startE2eWorkerTopology,
   startProcess,

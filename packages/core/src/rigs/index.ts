@@ -4,7 +4,11 @@
 // the raw RLS-scoped persistence lives in @opengeni/db. M4 adds verification /
 // auto-merge / promotion on top of the change substrate created here.
 
-import { RigChangePlatformSurfaceValidationTarget } from "@opengeni/contracts/rig-platform-surface-validation";
+import { randomUUID } from "node:crypto";
+import {
+  RIG_PLATFORM_SURFACE_VALIDATION_VERSION,
+  RigPlatformSurfaceValidationReceipt,
+} from "@opengeni/contracts/rig-platform-surface-validation";
 import type {
   AccessGrant,
   CreateRigRequest,
@@ -265,7 +269,7 @@ export async function createRigForApi(
     },
     initialVerification: {
       status: "pending",
-      attempt: 1,
+      attemptId: randomUUID(),
       expectedActiveVersionId: null,
       requestedAt: new Date().toISOString(),
     },
@@ -424,22 +428,24 @@ function requirePlatformSurfaceValidation(change: RigChange) {
       message: "rig change must pass verification before promote",
     });
   }
-  const parsed = RigChangePlatformSurfaceValidationTarget.safeParse(change);
+  const parsed = RigPlatformSurfaceValidationReceipt.safeParse(
+    change.verification.platformSurfaceValidation,
+  );
   if (!parsed.success) {
     throw new HTTPException(422, {
       message: "rig change has no exact passing platform-surface validation receipt",
     });
   }
-  const receipt = parsed.data.verification.platformSurfaceValidation;
   if (
-    receipt.binding.sandboxGroupId !== change.id ||
-    receipt.binding.rigVersionId !== change.baseVersionId
+    parsed.data.version !== RIG_PLATFORM_SURFACE_VALIDATION_VERSION ||
+    parsed.data.binding.sandboxGroupId !== change.id ||
+    parsed.data.binding.rigVersionId !== change.id
   ) {
     throw new HTTPException(422, {
       message: "rig change platform-surface receipt targets another verification sandbox",
     });
   }
-  return receipt;
+  return parsed.data;
 }
 
 async function promoteChangeWithActiveCas(
@@ -483,7 +489,7 @@ export async function promoteSetupAppendChange(
   if (!change.baseVersionId) {
     throw new HTTPException(422, { message: "rig change has no base version" });
   }
-  const platformSurfaceValidation = requirePlatformSurfaceValidation(change);
+  requirePlatformSurfaceValidation(change);
   const base = await getRigVersion(deps.db, rig.workspaceId, rig.id, change.baseVersionId);
   if (!base) {
     throw new HTTPException(404, { message: "base rig version not found" });
@@ -514,18 +520,11 @@ export async function promoteSetupAppendChange(
           ? payload.note
           : "Verified setup append",
       createdBy: change.proposedBy ?? rigActorForGrant(grant),
-      providerImages: rigProviderImagesFromVerification(change.verification, nextDefinition),
-      verification: {
-        status: "passed",
-        expectedActiveVersionId: change.baseVersionId,
-        verifiedAt: platformSurfaceValidation.checkedAt,
-        receipt: platformSurfaceValidation,
-        source: {
-          kind: "change",
-          changeId: change.id,
-          baseVersionId: change.baseVersionId,
-        },
-      },
+      providerImages: rigProviderImagesFromVerification(
+        change.verification,
+        nextDefinition,
+        change.id,
+      ),
     },
   );
   await recordRigAuditEvent(deps.db, {
@@ -567,7 +566,7 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
       message: `rig change is ${change.status}; cannot promote`,
     });
   }
-  const platformSurfaceValidation = requirePlatformSurfaceValidation(change);
+  requirePlatformSurfaceValidation(change);
   if (!change.baseVersionId) {
     throw new HTTPException(422, { message: "rig change has no base version" });
   }
@@ -607,18 +606,11 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
           ? payload.changelog
           : "Verified definition edit",
       createdBy: rigActorForGrant(grant),
-      providerImages: rigProviderImagesFromVerification(change.verification, nextDefinition),
-      verification: {
-        status: "passed",
-        expectedActiveVersionId: change.baseVersionId,
-        verifiedAt: platformSurfaceValidation.checkedAt,
-        receipt: platformSurfaceValidation,
-        source: {
-          kind: "change",
-          changeId: change.id,
-          baseVersionId: change.baseVersionId,
-        },
-      },
+      providerImages: rigProviderImagesFromVerification(
+        change.verification,
+        nextDefinition,
+        change.id,
+      ),
     },
   );
   await recordRigAuditEvent(deps.db, {
@@ -678,7 +670,7 @@ export async function createRigVersionForApi(
       activate: false,
       verification: {
         status: "pending",
-        attempt: 1,
+        attemptId: randomUUID(),
         expectedActiveVersionId: base.id,
         requestedAt: new Date().toISOString(),
       },

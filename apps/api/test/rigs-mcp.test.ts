@@ -3,7 +3,6 @@ import type { AccessGrant, Permission } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
-  createRig,
   createRigChange,
   createRigVersion,
   createSession,
@@ -13,6 +12,7 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  createVerifiedTestRig as createRig,
   MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
@@ -210,6 +210,36 @@ describe("rig MCP tools", () => {
     });
     expect(clamped.versions).toHaveLength(1);
     expect(clamped.changes).toHaveLength(0);
+  });
+
+  test("rig_verify dispatches an active version with one durable attempt identity", async () => {
+    if (!available) return;
+    const workflow = new FakeWorkflowClient();
+    const rig = await createRig(client.db, {
+      accountId,
+      workspaceId,
+      name: `mcp-verify-${crypto.randomUUID()}`,
+      createdBy: "user:mcp",
+      initialVersion: { setupScript: "true" },
+    });
+    const server = buildOpenGeniMcpServer(deps(workflow), grant(["rigs:use"]));
+    const receipt = await callMcpTool<{
+      facts: { verificationAttempt: string };
+      resource: { id: string; state: string };
+    }>(server, "rig_verify", { rigId: rig.id });
+    const attemptId = receipt.facts.verificationAttempt;
+    expect(receipt.resource).toMatchObject({
+      id: rig.activeVersion!.id,
+      state: "verification_started",
+    });
+    expect(workflow.rigVerifications).toEqual([
+      {
+        workspaceId,
+        versionId: rig.activeVersion!.id,
+        attemptId,
+        workflowId: `rig-verification-version-${rig.activeVersion!.id}-attempt-${attemptId}`,
+      },
+    ]);
   });
 
   test("rig_propose_change creates a setup_append change and triggers verification", async () => {

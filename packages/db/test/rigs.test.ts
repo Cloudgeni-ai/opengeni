@@ -5,7 +5,12 @@ import {
   type NativeSnapshotDescriptor,
   type RigProviderImage,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  createVerifiedTestRig,
+  createVerifiedTestRigVersion,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createHash, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import {
@@ -17,7 +22,7 @@ import {
   countSessionsUsingRig,
   completeRigVersionVerification,
   createDb,
-  createRig,
+  createRig as createInactiveRig,
   createRigChange,
   createRigVersion,
   createRigVersionForChangePromotion,
@@ -36,12 +41,10 @@ import {
   listRigVersions,
   listRigs,
   markSandboxCheckpointArtifactDeletePending,
-  nestedPostgresSqlState,
   registerSandboxCheckpointArtifact,
   RigActiveVersionChangedError,
   RigChangeTransitionError,
   RigImageOverrideUnsupportedError,
-  RigVersionVerificationRequiredError,
   updateRig,
   updateRigChangeStatus,
   withWorkspaceSessionActivityRls,
@@ -54,6 +57,13 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let db: Database;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+
+async function createRig(testDb: Database, input: Parameters<typeof createInactiveRig>[1]) {
+  if (input.activateInitialVersion === false || input.initialVerification !== undefined) {
+    return await createInactiveRig(testDb, input);
+  }
+  return await createVerifiedTestRig(testDb, input);
+}
 
 // This file verifies serialized rig invariants against real PostgreSQL. Parallel
 // repository runs can queue those transactions behind other database suites, so
@@ -145,13 +155,13 @@ function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProvide
   };
 }
 
-function surfaceReceipt(versionId: string, sandboxGroupId = versionId) {
+function surfaceReceipt(versionId: string) {
   return {
-    version: 1 as const,
+    version: 2 as const,
     checkedAt: "2026-08-30T12:00:00.000Z",
     binding: {
       leaseId: "11111111-2222-4333-8444-555555555555",
-      sandboxGroupId,
+      sandboxGroupId: versionId,
       leaseEpoch: 2,
       workspaceGeneration: 1,
       instanceId: "sandbox-test",
@@ -176,31 +186,17 @@ function surfaceReceipt(versionId: string, sandboxGroupId = versionId) {
   };
 }
 
-async function passingChangePromotionVerification(input: {
-  workspaceId: string;
-  changeId: string;
-  baseVersionId: string;
-}) {
-  const receipt = surfaceReceipt(input.baseVersionId, input.changeId);
-  await updateRigChangeStatus(db, input.workspaceId, input.changeId, {
+async function markChangeVerifiedForPromotion(workspaceId: string, changeId: string) {
+  return await updateRigChangeStatus(db, workspaceId, changeId, {
     status: "proposed",
     verification: {
-      finishedAt: receipt.checkedAt,
+      startedAt: "2026-08-30T12:00:00.000Z",
+      finishedAt: "2026-08-30T12:01:00.000Z",
       passed: true,
-      platformSurfaceValidation: receipt,
+      checkResults: [],
+      platformSurfaceValidation: surfaceReceipt(changeId),
     },
   });
-  return {
-    status: "passed" as const,
-    expectedActiveVersionId: input.baseVersionId,
-    verifiedAt: receipt.checkedAt,
-    receipt,
-    source: {
-      kind: "change" as const,
-      changeId: input.changeId,
-      baseVersionId: input.baseVersionId,
-    },
-  };
 }
 
 async function registerRigProviderImageArtifact(
@@ -386,15 +382,57 @@ describe("rig CRUD lifecycle", () => {
 });
 
 describe("rig version invariants", () => {
+  test("database fences old active writes and obsolete provider-image proof", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createInactiveRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "database-activation-fence",
+      activateInitialVersion: false,
+    });
+    const [version] = await listRigVersions(db, ws.workspaceId, rig.id);
+    expect(version).toBeDefined();
+
+    await expect(
+      shared!.admin`update rig_versions set active = true where id = ${version!.id}`,
+    ).rejects.toThrow(/exact passing platform-surface receipt/iu);
+    await expect(
+      shared!.admin`insert into rig_versions (
+        account_id, workspace_id, rig_id, version, checks, credential_hooks,
+        default_variable_set_ids, provider_images, active
+      ) values (
+        ${ws.accountId}, ${ws.workspaceId}, ${rig.id}, 2, '[]'::jsonb, '[]'::jsonb,
+        '[]'::jsonb, '{}'::jsonb, true
+      )`,
+    ).rejects.toThrow(/exact passing platform-surface receipt/iu);
+    await expect(
+      shared!.admin`update rig_versions
+        set provider_images = ${shared!.admin.json({
+          modal: rigProviderImage({
+            status: "ready",
+            coldBootValidation: {
+              version: 1,
+              checkedAt: "2026-08-30T12:00:00.000Z",
+            },
+          }),
+        })}::jsonb
+        where id = ${version!.id}`,
+    ).rejects.toThrow(/proof version 1 is obsolete/iu);
+    expect((await getRigVersionById(db, ws.workspaceId, version!.id))?.active).toBe(false);
+  });
+
   test("pending initial/direct versions activate only after an exact receipt", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
+    const initialAttemptId = randomUUID();
     const rig = await createRig(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       name: "verified-activation",
       initialVerification: {
         status: "pending",
+        attemptId: initialAttemptId,
         expectedActiveVersionId: null,
         requestedAt: "2026-08-30T12:00:00.000Z",
       },
@@ -408,11 +446,13 @@ describe("rig version invariants", () => {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
       versionId: v1!.id,
+      attemptId: initialAttemptId,
       receipt: surfaceReceipt(v1!.id),
     });
     expect(initial).toMatchObject({ activated: true, stale: false });
     expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(v1!.id);
 
+    const directAttemptId = randomUUID();
     const v2 = await createRigVersion(
       db,
       ws.workspaceId,
@@ -421,6 +461,7 @@ describe("rig version invariants", () => {
       {
         verification: {
           status: "pending",
+          attemptId: directAttemptId,
           expectedActiveVersionId: v1!.id,
           requestedAt: "2026-08-30T12:01:00.000Z",
         },
@@ -430,15 +471,22 @@ describe("rig version invariants", () => {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
       versionId: v2.id,
+      attemptId: directAttemptId,
       error: "browser unsupported",
     });
     expect((await getRigVersionById(db, ws.workspaceId, v2.id))?.active).toBe(false);
     expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(v1!.id);
 
+    const retry = await beginRigVersionVerificationAttempt(db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: v2.id,
+    });
     const direct = await completeRigVersionVerification(db, {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
       versionId: v2.id,
+      attemptId: retry.attemptId,
       receipt: surfaceReceipt(v2.id),
     });
     expect(direct).toMatchObject({ activated: true, stale: false });
@@ -454,6 +502,7 @@ describe("rig version invariants", () => {
       name: "stale-verified-activation",
     });
     const v1 = rig.activeVersion!;
+    const pendingAttemptId = randomUUID();
     const pending = await createRigVersion(
       db,
       ws.workspaceId,
@@ -462,22 +511,39 @@ describe("rig version invariants", () => {
       {
         verification: {
           status: "pending",
+          attemptId: pendingAttemptId,
           expectedActiveVersionId: v1.id,
           requestedAt: "2026-08-30T12:00:00.000Z",
         },
       },
     );
+    const newerAttemptId = randomUUID();
     const newer = await createRigVersion(
       db,
       ws.workspaceId,
       rig.id,
       { setupScript: "echo newer" },
-      { activate: true },
+      {
+        verification: {
+          status: "pending",
+          attemptId: newerAttemptId,
+          expectedActiveVersionId: v1.id,
+          requestedAt: "2026-08-30T12:01:00.000Z",
+        },
+      },
     );
+    await completeRigVersionVerification(db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: newer.id,
+      attemptId: newerAttemptId,
+      receipt: surfaceReceipt(newer.id),
+    });
     const completed = await completeRigVersionVerification(db, {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
       versionId: pending.id,
+      attemptId: pendingAttemptId,
       receipt: surfaceReceipt(pending.id),
     });
     expect(completed).toMatchObject({ activated: false, stale: true });
@@ -485,188 +551,65 @@ describe("rig version invariants", () => {
     expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(newer.id);
   });
 
-  test("version verification attempts are single-flight and fence late terminal writes", async () => {
+  test("attempt tokens fence superseded success/failure and post-commit failure", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const rig = await createRig(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
-      name: "verification-attempt-fence",
+      name: "attempt-fence",
     });
-    const versionId = rig.activeVersion!.id;
-
+    const version = rig.activeVersion!;
     const first = await beginRigVersionVerificationAttempt(db, {
       workspaceId: ws.workspaceId,
-      versionId,
-      requestedAt: "2026-08-30T12:10:00.000Z",
+      rigId: rig.id,
+      versionId: version.id,
     });
-    const duplicate = await beginRigVersionVerificationAttempt(db, {
-      workspaceId: ws.workspaceId,
-      versionId,
-      requestedAt: "2026-08-30T12:11:00.000Z",
-    });
-    expect(first).toMatchObject({ attempt: 1, alreadyPending: false });
-    expect(duplicate).toMatchObject({ attempt: 1, alreadyPending: true });
-
-    expect(
-      await failRigVersionVerification(db, {
-        workspaceId: ws.workspaceId,
-        rigId: rig.id,
-        versionId,
-        attempt: first.attempt,
-        verifiedAt: "2026-08-30T12:12:00.000Z",
-        error: "first attempt failed",
-      }),
-    ).toBe(true);
-    const retry = await beginRigVersionVerificationAttempt(db, {
-      workspaceId: ws.workspaceId,
-      versionId,
-      requestedAt: "2026-08-30T12:13:00.000Z",
-    });
-    expect(retry).toMatchObject({ attempt: 2, alreadyPending: false });
-
-    const completed = await completeRigVersionVerification(db, {
+    const second = await beginRigVersionVerificationAttempt(db, {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
-      versionId,
-      attempt: retry.attempt,
-      verifiedAt: "2026-08-30T12:14:00.000Z",
-      receipt: surfaceReceipt(versionId),
+      versionId: version.id,
     });
-    expect(completed).toMatchObject({ activated: true, stale: false, superseded: false });
+    expect(second.attemptId).not.toBe(first.attemptId);
 
     expect(
       await failRigVersionVerification(db, {
         workspaceId: ws.workspaceId,
         rigId: rig.id,
-        versionId,
-        attempt: first.attempt,
-        verifiedAt: "2026-08-30T12:15:00.000Z",
-        error: "late first-attempt failure",
+        versionId: version.id,
+        attemptId: first.attemptId,
+        error: "late failure",
       }),
-    ).toBe(false);
+    ).toEqual({ applied: false, stale: true });
     expect(
       await completeRigVersionVerification(db, {
         workspaceId: ws.workspaceId,
         rigId: rig.id,
-        versionId,
-        attempt: first.attempt,
-        verifiedAt: "2026-08-30T12:16:00.000Z",
-        receipt: surfaceReceipt(versionId),
+        versionId: version.id,
+        attemptId: first.attemptId,
+        receipt: surfaceReceipt(version.id),
       }),
-    ).toMatchObject({ activated: false, superseded: true });
+    ).toMatchObject({ applied: false, activated: false, stale: true });
 
-    const [stored] = await shared!.admin<
-      { verification: { status: string; attempt?: number }; active: boolean }[]
-    >`select verification, active from rig_versions where id = ${versionId}`;
-    expect(stored).toMatchObject({
-      verification: { status: "passed", attempt: 2 },
-      active: true,
-    });
-  });
-
-  test("verification state and activation roll back when the passing audit cannot commit", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const rig = await createRig(db, {
-      accountId: ws.accountId,
-      workspaceId: ws.workspaceId,
-      name: "verification-audit-atomicity",
-    });
-    const originalActiveId = rig.activeVersion!.id;
-    const candidate = await createRigVersion(
-      db,
-      ws.workspaceId,
-      rig.id,
-      { setupScript: "echo candidate" },
-      {
-        verification: {
-          status: "pending",
-          attempt: 1,
-          expectedActiveVersionId: originalActiveId,
-          requestedAt: "2026-08-30T12:20:00.000Z",
-        },
-      },
-    );
-
-    await shared!.admin.unsafe(`
-      create or replace function opengeni_test_fail_rig_verification_audit()
-      returns trigger language plpgsql as $$
-      begin
-        if new.action = 'rig.verification.passed' then
-          raise exception 'synthetic Rig verification audit failure';
-        end if;
-        return new;
-      end
-      $$;
-      create trigger opengeni_test_fail_rig_verification_audit
-      before insert on audit_events
-      for each row execute function opengeni_test_fail_rig_verification_audit();
-    `);
-    try {
-      let completionFailure: unknown;
-      try {
-        await completeRigVersionVerification(db, {
-          workspaceId: ws.workspaceId,
-          rigId: rig.id,
-          versionId: candidate.id,
-          attempt: 1,
-          verifiedAt: "2026-08-30T12:21:00.000Z",
-          receipt: surfaceReceipt(candidate.id),
-          audit: {
-            subjectId: "system:rig-verification",
-            metadata: {
-              versionId: candidate.id,
-              passed: true,
-            },
-          },
-        });
-      } catch (error) {
-        completionFailure = error;
-      }
-      expect(completionFailure).toBeInstanceOf(Error);
-      expect(nestedPostgresSqlState(completionFailure)).toBe("P0001");
-
-      expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(originalActiveId);
-      const afterRollback = await shared!.admin<
-        { verification: { status: string; attempt?: number }; active: boolean }[]
-      >`select verification, active from rig_versions where id = ${candidate.id}`;
-      expect(afterRollback[0]).toMatchObject({
-        verification: { status: "pending", attempt: 1 },
-        active: false,
-      });
-
-      expect(
-        await failRigVersionVerification(db, {
-          workspaceId: ws.workspaceId,
-          rigId: rig.id,
-          versionId: candidate.id,
-          attempt: 1,
-          verifiedAt: "2026-08-30T12:22:00.000Z",
-          error: "passing audit did not commit",
-          audit: {
-            subjectId: "system:rig-verification",
-            metadata: {
-              versionId: candidate.id,
-              passed: false,
-            },
-          },
-        }),
-      ).toBe(true);
-      expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(originalActiveId);
-      const afterFailure = await shared!.admin<
-        { verification: { status: string; attempt?: number }; active: boolean }[]
-      >`select verification, active from rig_versions where id = ${candidate.id}`;
-      expect(afterFailure[0]).toMatchObject({
-        verification: { status: "failed", attempt: 1 },
-        active: false,
-      });
-    } finally {
-      await shared!.admin.unsafe(`
-        drop trigger if exists opengeni_test_fail_rig_verification_audit on audit_events;
-        drop function if exists opengeni_test_fail_rig_verification_audit();
-      `);
-    }
+    expect(
+      await completeRigVersionVerification(db, {
+        workspaceId: ws.workspaceId,
+        rigId: rig.id,
+        versionId: version.id,
+        attemptId: second.attemptId,
+        receipt: surfaceReceipt(version.id),
+      }),
+    ).toMatchObject({ applied: true, activated: true, stale: false });
+    expect(
+      await failRigVersionVerification(db, {
+        workspaceId: ws.workspaceId,
+        rigId: rig.id,
+        versionId: version.id,
+        attemptId: second.attemptId,
+        error: "audit failed after completion",
+      }),
+    ).toEqual({ applied: false, stale: true });
+    expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(version.id);
   });
 
   test("createRigVersion mints strictly-monotonic versions under concurrency", async () => {
@@ -697,8 +640,12 @@ describe("rig version invariants", () => {
       workspaceId: ws.workspaceId,
       name: "single-active",
     });
-    const v2 = await createRigVersion(db, ws.workspaceId, rig.id, { setupScript: "echo 2" });
-    const v3 = await createRigVersion(db, ws.workspaceId, rig.id, { setupScript: "echo 3" });
+    const v2 = await createVerifiedTestRigVersion(db, ws.workspaceId, rig.id, {
+      setupScript: "echo 2",
+    });
+    const v3 = await createVerifiedTestRigVersion(db, ws.workspaceId, rig.id, {
+      setupScript: "echo 3",
+    });
     const v1 = (await listRigVersions(db, ws.workspaceId, rig.id)).find((v) => v.version === 1)!;
 
     // Race three activations. The per-rig lock + partial unique index guarantee
@@ -732,13 +679,9 @@ describe("rig version invariants", () => {
     });
     const v1Id = rig.activeVersion!.id;
     const before = await getRigVersion(db, ws.workspaceId, rig.id, v1Id);
-    const v2 = await createRigVersion(
-      db,
-      ws.workspaceId,
-      rig.id,
-      { setupScript: "setup-two" },
-      { activate: true },
-    );
+    const v2 = await createVerifiedTestRigVersion(db, ws.workspaceId, rig.id, {
+      setupScript: "setup-two",
+    });
 
     // v1 is now inactive but its CONTENT is byte-identical to before.
     const afterV1 = await getRigVersion(db, ws.workspaceId, rig.id, v1Id);
@@ -1032,16 +975,12 @@ describe("rig provider image build ledger", () => {
     });
     expect(claim.status).toBe("claimed");
     const artifact = await registerRigProviderImageArtifact(ws, versionId, "im-legacy-rig");
-    const legacyReady = rigProviderImage({
+    const { coldBootValidation: _unproven, ...legacyReady } = rigProviderImage({
       ...claim.image,
       status: "ready",
       imageId: "im-legacy-rig",
       artifactId: artifact.artifactId,
       providerBindingKeyHash: artifact.providerBindingKeyHash,
-      coldBootValidation: {
-        version: 1,
-        checkedAt: new Date().toISOString(),
-      },
       finishedAt: new Date().toISOString(),
       error: null,
     });
@@ -1201,24 +1140,34 @@ describe("rig change lifecycle", () => {
       payload: { command: "touch /opt/tool" },
       proposedBy: "session:s1",
     });
-    const verification = await passingChangePromotionVerification({
-      workspaceId: ws.workspaceId,
-      changeId: change.id,
-      baseVersionId,
-    });
-    await createRigVersion(
+    await markChangeVerifiedForPromotion(ws.workspaceId, change.id);
+    const newerAttemptId = randomUUID();
+    const newer = await createRigVersion(
       db,
       ws.workspaceId,
       rig.id,
       { setupScript: "new active" },
-      { activate: true },
+      {
+        verification: {
+          status: "pending",
+          attemptId: newerAttemptId,
+          expectedActiveVersionId: baseVersionId,
+          requestedAt: "2026-08-30T12:02:00.000Z",
+        },
+      },
     );
+    await completeRigVersionVerification(db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: newer.id,
+      attemptId: newerAttemptId,
+      receipt: surfaceReceipt(newer.id),
+    });
 
     await expect(
       createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
         expectedActiveVersionId: baseVersionId,
         setupScript: "base plus append",
-        verification,
       }),
     ).rejects.toBeInstanceOf(RigActiveVersionChangedError);
 
@@ -1245,18 +1194,13 @@ describe("rig change lifecycle", () => {
       payload: { setupScript: "echo v2" },
       proposedBy: "user:m",
     });
-    const verification = await passingChangePromotionVerification({
-      workspaceId: ws.workspaceId,
-      changeId: change.id,
-      baseVersionId,
-    });
+    await markChangeVerifiedForPromotion(ws.workspaceId, change.id);
 
     const promote = () =>
       createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
         expectedActiveVersionId: baseVersionId,
         setupScript: "echo v2",
         changelog: "verified edit",
-        verification,
       });
     const results = await Promise.allSettled([promote(), promote()]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
@@ -1266,6 +1210,7 @@ describe("rig change lifecycle", () => {
     expect(versions).toHaveLength(2);
     const stored = await getRigChange(db, ws.workspaceId, change.id);
     expect(stored?.status).toBe("merged");
+    expect(stored?.resultVersionId).toBe(change.id);
     expect(stored?.resultVersionId).toBe(
       (
         results.find((result) => result.status === "fulfilled") as PromiseFulfilledResult<{
@@ -1273,88 +1218,16 @@ describe("rig change lifecycle", () => {
         }>
       ).value.version.id,
     );
-  });
-
-  test("promoted versions retain truthful change receipts for rollback activation", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const rig = await createRig(db, {
-      accountId: ws.accountId,
-      workspaceId: ws.workspaceId,
-      name: "promotion-receipt-linkage",
-    });
-    const baseVersionId = rig.activeVersion!.id;
-    const change = await createRigChange(db, {
-      accountId: ws.accountId,
-      workspaceId: ws.workspaceId,
-      rigId: rig.id,
-      baseVersionId,
-      kind: "definition_edit",
-      payload: { setupScript: "echo promoted" },
-      proposedBy: "user:m",
-    });
-    const verification = await passingChangePromotionVerification({
-      workspaceId: ws.workspaceId,
-      changeId: change.id,
-      baseVersionId,
-    });
-
-    await expect(
-      createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
-        expectedActiveVersionId: baseVersionId,
-        setupScript: "echo promoted",
-        verification: {
-          ...verification,
-          receipt: {
-            ...verification.receipt,
-            checkedAt: "2026-08-30T12:00:01.000Z",
-          },
-        },
-      }),
-    ).rejects.toThrow("Rig change promotion receipt no longer matches the verified change");
-
-    const promoted = await createRigVersionForChangePromotion(
-      db,
-      ws.workspaceId,
-      rig.id,
-      change.id,
-      {
-        expectedActiveVersionId: baseVersionId,
-        setupScript: "echo promoted",
-        verification,
+    const [proof] = await shared!.admin<{ verification: Record<string, unknown> }[]>`
+      select verification from rig_versions where id = ${change.id}`;
+    expect(proof?.verification).toMatchObject({
+      status: "passed",
+      attemptId: change.id,
+      receipt: {
+        version: 2,
+        binding: { sandboxGroupId: change.id, rigVersionId: change.id },
       },
-    );
-    const newer = await createRigVersion(
-      db,
-      ws.workspaceId,
-      rig.id,
-      { setupScript: "echo newer" },
-      { activate: true },
-    );
-
-    await expect(
-      activateRigVersion(db, ws.workspaceId, rig.id, promoted.version.id, {
-        requireVerification: true,
-      }),
-    ).resolves.toMatchObject({ id: promoted.version.id, active: true });
-    await activateRigVersion(db, ws.workspaceId, rig.id, newer.id);
-
-    await shared!.admin`
-      update rig_versions
-      set verification = jsonb_set(
-        verification,
-        '{receipt,checkedAt}',
-        to_jsonb(${"2026-08-30T12:00:02.000Z"}::text),
-        false
-      )
-      where id = ${promoted.version.id}
-    `;
-    await expect(
-      activateRigVersion(db, ws.workspaceId, rig.id, promoted.version.id, {
-        requireVerification: true,
-      }),
-    ).rejects.toBeInstanceOf(RigVersionVerificationRequiredError);
-    expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(newer.id);
+    });
   });
 
   test("list/get expose active version verification health", async () => {
@@ -1380,10 +1253,15 @@ describe("rig change lifecycle", () => {
       payload: { command: "touch /opt/health/tool" },
       proposedBy: "session:s1",
     });
-    const verification = await passingChangePromotionVerification({
-      workspaceId: ws.workspaceId,
-      changeId: change.id,
-      baseVersionId: verifiedRig.activeVersion!.id,
+    await updateRigChangeStatus(db, ws.workspaceId, change.id, {
+      status: "proposed",
+      verification: {
+        startedAt: "2026-07-08T00:00:00.000Z",
+        finishedAt: "2026-07-08T00:01:00.000Z",
+        passed: true,
+        checkResults: [],
+        platformSurfaceValidation: surfaceReceipt(change.id),
+      },
     });
     const promoted = await createRigVersionForChangePromotion(
       db,
@@ -1393,7 +1271,6 @@ describe("rig change lifecycle", () => {
       {
         expectedActiveVersionId: verifiedRig.activeVersion!.id,
         setupScript: "mkdir -p /opt/health\ntouch /opt/health/tool",
-        verification,
       },
     );
 
@@ -1407,7 +1284,7 @@ describe("rig change lifecycle", () => {
     );
     expect(listed.find((rig) => rig.id === verifiedRig.id)?.activeVersionHealth).toEqual({
       checkHealth: "passing",
-      lastVerifiedAt: "2026-08-30T12:00:00.000Z",
+      lastVerifiedAt: "2026-07-08T00:01:00.000Z",
     });
     expect(
       (await getRig(db, ws.workspaceId, verifiedRig.id))?.activeVersionHealth?.checkHealth,

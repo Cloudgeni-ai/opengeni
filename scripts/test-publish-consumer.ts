@@ -895,7 +895,7 @@ try {
         'import { RigPlatformSurfaceValidationReceipt } from "@opengeni/contracts/rig-platform-surface-validation";',
         "",
         "const receipt = RigPlatformSurfaceValidationReceipt.parse({",
-        "  version: 1,",
+        "  version: 2,",
         '  checkedAt: "2026-08-30T12:00:00.000Z",',
         "  binding: {",
         '    leaseId: "11111111-2222-4333-8444-555555555555",',

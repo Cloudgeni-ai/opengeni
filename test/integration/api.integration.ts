@@ -10,6 +10,7 @@ import {
   bootstrapWorkspace,
   bindAuthorizedGitHubInstallationRepositories,
   bindGitHubInstallationRepositories,
+  beginRigVersionVerificationAttempt,
   buildConnectionTokenResolver,
   claimCodemodeOperation,
   claimSessionWorkForAttempt,
@@ -106,7 +107,7 @@ import { submitTestHumanPrompt } from "./helpers/session-control";
 
 function rigSurfaceReceipt(versionId: string) {
   return {
-    version: 1 as const,
+    version: 2 as const,
     checkedAt: "2026-08-30T12:00:00.000Z",
     binding: {
       leaseId: "11111111-2222-4333-8444-555555555555",
@@ -4230,10 +4231,16 @@ describe("API component integration", () => {
     const activateCreatedRig = async (rigId: string): Promise<void> => {
       const [version] = await listRigVersions(dbClient.db, workspaceId, rigId);
       expect(version).toBeDefined();
+      const attempt = await beginRigVersionVerificationAttempt(
+        dbClient.db,
+        { workspaceId, rigId, versionId: version!.id },
+        { allowAlreadyPending: true },
+      );
       const activation = await completeRigVersionVerification(dbClient.db, {
         workspaceId,
         rigId,
         versionId: version!.id,
+        attemptId: attempt.attemptId,
         receipt: rigSurfaceReceipt(version!.id),
       });
       expect(activation).toMatchObject({ activated: true, stale: false });

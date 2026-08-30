@@ -4,7 +4,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createDb,
-  createRig,
+  createRig as createInactiveRig,
   deleteWorkspace,
   listInstalledPortableSkills,
   type DbClient,
@@ -12,6 +12,7 @@ import {
 import { migrate } from "@opengeni/db/migrate";
 import {
   acquireSharedTestDatabase,
+  createVerifiedTestRig as createRig,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
@@ -394,7 +395,7 @@ describe("Pack routes", () => {
     });
     expect(registered.status).toBe(201);
 
-    const rig = await createRig(client.db, {
+    const rig = await createInactiveRig(client.db, {
       accountId,
       workspaceId,
       name: rigName,
@@ -402,6 +403,7 @@ describe("Pack routes", () => {
       initialVersion: { setupScript: "true" },
       initialVerification: {
         status: "pending",
+        attemptId: "11111111-2222-4333-8444-555555555555",
         expectedActiveVersionId: null,
         requestedAt: "2026-08-30T12:00:00.000Z",
       },

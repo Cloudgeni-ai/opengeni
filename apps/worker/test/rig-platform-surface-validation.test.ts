@@ -29,13 +29,19 @@ type FailureMode =
   | "browser_unsupported"
   | "browser_empty_targets"
   | "browser_generation_mismatch"
-  | "browser_target_mismatch"
+  | "browser_observed_target_mismatch"
   | "browser_cleanup"
   | "computer_unsupported"
   | "computer_empty_targets"
-  | "computer_target_mismatch"
   | "computer_empty_image"
   | "computer_invalid_image"
+  | "computer_observed_target_mismatch"
+  | "computer_observed_generation_mismatch"
+  | "computer_frame_target_mismatch"
+  | "computer_frame_generation_mismatch"
+  | "computer_action_target_mismatch"
+  | "computer_action_observation_mismatch"
+  | "computer_settled_target_mismatch"
   | "computer_cleanup"
   | "controller_cleanup"
   | "lease_epoch_mismatch"
@@ -70,9 +76,12 @@ function lease(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
   } as LeaseSnapshot;
 }
 
-function browserTarget(controllerGeneration: string, id = "page-1"): BrowserTarget {
+function browserTarget(
+  controllerGeneration: string,
+  overrides: Partial<BrowserTarget> = {},
+): BrowserTarget {
   return {
-    id,
+    id: "page-1",
     browserSessionId: BROWSER_SESSION_ID,
     controllerGeneration,
     targetGeneration: "target-1",
@@ -83,11 +92,15 @@ function browserTarget(controllerGeneration: string, id = "page-1"): BrowserTarg
     selected: true,
     attached: true,
     createdAt: CHECKED_AT,
+    ...overrides,
   };
 }
 
-function browserObservation(controllerGeneration: string, targetId = "page-1"): BrowserObservation {
-  const target = browserTarget(controllerGeneration, targetId);
+function browserObservation(
+  controllerGeneration: string,
+  targetOverrides: Partial<BrowserTarget> = {},
+): BrowserObservation {
+  const target = browserTarget(controllerGeneration, targetOverrides);
   return {
     protocolVersion: 1,
     observationId: "browser-observation-1",
@@ -109,9 +122,12 @@ function browserObservation(controllerGeneration: string, targetId = "page-1"): 
   };
 }
 
-function computerTarget(controllerGeneration: string, id = "screen-1"): ComputerTarget {
+function computerTarget(
+  controllerGeneration: string,
+  overrides: Partial<ComputerTarget> = {},
+): ComputerTarget {
   return {
-    id,
+    id: "screen-1",
     computerSessionId: COMPUTER_SESSION_ID,
     controllerGeneration,
     targetGeneration: "screen-generation-1",
@@ -121,18 +137,19 @@ function computerTarget(controllerGeneration: string, id = "screen-1"): Computer
     title: "Desktop",
     bounds: { x: 0, y: 0, width: 1280, height: 800 },
     focused: true,
+    ...overrides,
   };
 }
 
 function computerObservation(
   controllerGeneration: string,
-  targetId = "screen-1",
+  targetOverrides: Partial<ComputerTarget> = {},
 ): ComputerObservation {
   return {
     protocolVersion: 1,
     observationId: "computer-observation-1",
     computerSessionId: COMPUTER_SESSION_ID,
-    target: computerTarget(controllerGeneration, targetId),
+    target: computerTarget(controllerGeneration, targetOverrides),
     frameId: "computer-frame-1",
     semantic: null,
     screenshot: null,
@@ -142,7 +159,10 @@ function computerObservation(
   };
 }
 
-function completedComputerAction(controllerGeneration: string): ComputerActionReceipt {
+function completedComputerAction(
+  controllerGeneration: string,
+  overrides: Partial<ComputerActionReceipt> = {},
+): ComputerActionReceipt {
   return {
     protocolVersion: 1,
     operationId: OPERATION_ID,
@@ -154,6 +174,7 @@ function completedComputerAction(controllerGeneration: string): ComputerActionRe
     settledAt: CHECKED_AT,
     observation: null,
     error: null,
+    ...overrides,
   };
 }
 
@@ -172,6 +193,7 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
     OPERATION_ID,
   ];
   let generation = "";
+  let computerObservationCount = 0;
   const image = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   const imageSha = createHash("sha256").update(image).digest("hex");
 
@@ -209,7 +231,7 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
         events.push("browser:observe");
         return browserObservation(
           generation,
-          mode === "browser_target_mismatch" ? "page-other" : "page-1",
+          mode === "browser_observed_target_mismatch" ? { id: "page-other" } : {},
         );
       },
     }),
@@ -256,10 +278,17 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       },
       observe: async () => {
         events.push("computer:observe");
-        return computerObservation(
-          generation,
-          mode === "computer_target_mismatch" ? "screen-other" : "screen-1",
-        );
+        computerObservationCount += 1;
+        if (mode === "computer_observed_target_mismatch" && computerObservationCount === 1) {
+          return computerObservation(generation, { id: "screen-other" });
+        }
+        if (mode === "computer_observed_generation_mismatch" && computerObservationCount === 1) {
+          return computerObservation(generation, { targetGeneration: "screen-generation-other" });
+        }
+        if (mode === "computer_settled_target_mismatch" && computerObservationCount === 2) {
+          return computerObservation(generation, { id: "screen-other" });
+        }
+        return computerObservation(generation);
       },
       capture: async () => {
         events.push("computer:capture");
@@ -268,8 +297,11 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
           frameId: "computer-frame-1",
           computerSessionId: COMPUTER_SESSION_ID,
           controllerGeneration: generation,
-          targetId: "screen-1",
-          targetGeneration: "screen-generation-1",
+          targetId: mode === "computer_frame_target_mismatch" ? "screen-other" : "screen-1",
+          targetGeneration:
+            mode === "computer_frame_generation_mismatch"
+              ? "screen-generation-other"
+              : "screen-generation-1",
           sequence: 1,
           mediaType: "image/png",
           width: 1,
@@ -285,6 +317,14 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       },
       action: async () => {
         events.push("computer:action");
+        if (mode === "computer_action_target_mismatch") {
+          return completedComputerAction(generation, { targetId: "screen-other" });
+        }
+        if (mode === "computer_action_observation_mismatch") {
+          return completedComputerAction(generation, {
+            observation: computerObservation(generation, { id: "screen-other" }),
+          });
+        }
         return completedComputerAction(generation);
       },
     }),
@@ -390,6 +430,7 @@ describe("mandatory Rig platform surface validation", () => {
       "computer:observe",
       "computer:capture",
       "computer:action",
+      "computer:observe",
       "computer:end",
       "controller:down",
     ]);
@@ -414,13 +455,19 @@ describe("mandatory Rig platform surface validation", () => {
     ["browser_unsupported", "unsupported"],
     ["browser_empty_targets", "no real targets"],
     ["browser_generation_mismatch", "another session/controller binding"],
-    ["browser_target_mismatch", "another target binding"],
+    ["browser_observed_target_mismatch", "another requested target binding"],
     ["browser_cleanup", "browser cleanup failed"],
     ["computer_unsupported", "computer unsupported"],
     ["computer_empty_targets", "no real screen target"],
-    ["computer_target_mismatch", "another target binding"],
     ["computer_empty_image", "image is empty"],
     ["computer_invalid_image", "does not match its request"],
+    ["computer_observed_target_mismatch", "another requested target binding"],
+    ["computer_observed_generation_mismatch", "another requested target binding"],
+    ["computer_frame_target_mismatch", "does not match its request"],
+    ["computer_frame_generation_mismatch", "another target generation"],
+    ["computer_action_target_mismatch", "exact binding"],
+    ["computer_action_observation_mismatch", "another requested target binding"],
+    ["computer_settled_target_mismatch", "another requested target binding"],
     ["computer_cleanup", "computer cleanup failed"],
     ["controller_cleanup", "controller cleanup failed"],
     ["lease_epoch_mismatch", "binding changed"],

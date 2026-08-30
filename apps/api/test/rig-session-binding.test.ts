@@ -3,13 +3,13 @@ import postgres from "postgres";
 import {
   testSettings,
   acquireSharedTestDatabase,
+  createVerifiedTestRig as createRig,
+  createVerifiedTestRigVersion,
   MemoryEventBus,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
   createDb,
-  createRig,
-  createRigVersion,
   createSession,
   createVariableSet,
   getSession,
@@ -192,13 +192,7 @@ describe("M3 rig binding: freeze at create", () => {
     expect(s1.rigVersionId).toBe(v1);
 
     // Promote a new active version, then bind a NEW session: it gets v2.
-    const v2 = await createRigVersion(
-      db,
-      workspaceId,
-      rigId,
-      { changelog: "v2" },
-      { activate: true },
-    );
+    const v2 = await createVerifiedTestRigVersion(db, workspaceId, rigId, { changelog: "v2" });
     const s2 = await createSessionForRequest(
       deps(bus),
       grant(accountId, workspaceId),

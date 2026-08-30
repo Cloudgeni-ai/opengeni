@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION,
   RigProviderImage as RigProviderImageContract,
   stableJson,
   type RigChangeVerification,
@@ -42,9 +43,7 @@ export function rigProviderImageContentHash(input: {
 }): string {
   return sha256(
     stableJson({
-      // v3 requires the native Browser/Computer surface proof added to the
-      // independent cold boot. A v2 record must never compare equal.
-      version: 3,
+      version: 2,
       backend: input.backend,
       sourceImage: input.sourceImage,
       setupScript: input.definition.setupScript,
@@ -56,7 +55,7 @@ export function rigProviderImageContentHash(input: {
 }
 
 /** Modal's patched snapshot API accepts a caller-owned UUID idempotency key.
- * v3 denotes images proven by the current native-surface cold-boot protocol. */
+ * v3 denotes images proven under the current post-surface-validation protocol. */
 export function rigProviderImageBuildRequestId(input: {
   targetId: string;
   backend: SandboxBackend;
@@ -103,10 +102,17 @@ export function rigProviderImageMatchesDefinition(
 export function rigProviderImagesFromVerification(
   verification: RigChangeVerification | null,
   definition: RigProviderImageDefinition,
+  expectedTargetId: string,
 ): RigProviderImages {
   const parsed = RigProviderImageContract.safeParse(verification?.providerImage);
-  if (!parsed.success || parsed.data.status === "building") return {};
-  if (parsed.data.status === "ready" && parsed.data.coldBootValidation?.version !== 2) return {};
+  if (
+    !parsed.success ||
+    parsed.data.status !== "ready" ||
+    parsed.data.coldBootValidation?.version !== RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION ||
+    parsed.data.provenance.targetId !== expectedTargetId
+  ) {
+    return {};
+  }
   if (!rigProviderImageMatchesDefinition(parsed.data, definition)) return {};
   return { [parsed.data.backend]: parsed.data };
 }

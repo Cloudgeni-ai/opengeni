@@ -4290,16 +4290,20 @@ function registerRigTools(
         if (!rig.activeVersion) {
           throw new Error("rig has no active version");
         }
-        const verification = await beginRigVersionVerificationAttempt(deps.db, {
-          workspaceId: rig.workspaceId,
-          versionId: rig.activeVersion.id,
-          requestedAt: new Date().toISOString(),
-        });
+        const versionAttempt = await beginRigVersionVerificationAttempt(
+          deps.db,
+          {
+            workspaceId: rig.workspaceId,
+            rigId: rig.id,
+            versionId: rig.activeVersion.id,
+          },
+          { allowAlreadyPending: true },
+        );
         await deps.workflowClient.startRigVerification({
           workspaceId: rig.workspaceId,
           versionId: rig.activeVersion.id,
-          versionAttempt: verification.attempt,
-          workflowId: `rig-verification-version-${rig.activeVersion.id}-attempt-${verification.attempt}`,
+          attemptId: versionAttempt.attemptId,
+          workflowId: `rig-verification-version-${rig.activeVersion.id}-attempt-${versionAttempt.attemptId}`,
         });
         return json(
           mcpMutationReceipt({
@@ -4314,8 +4318,8 @@ function registerRigTools(
               state: "verification_started",
             },
             relatedResources: [{ type: "rig", id: rig.id }],
-            idempotency: { status: "applied" },
-            facts: { verificationAttempt: verification.attempt },
+            idempotency: { status: "not_supported" },
+            facts: { verificationAttempt: versionAttempt.attemptId },
             nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
           }),
         );

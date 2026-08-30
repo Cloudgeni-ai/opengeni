@@ -2,9 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   createDb,
   claimSessionWorkForAttempt,
-  createRig,
   createRigChange,
-  createRigVersion,
   createRigVersionForChangePromotion,
   createScheduledTask,
   createSession,
@@ -21,7 +19,10 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  createVerifiedTestRig as createRig,
+  createVerifiedTestRigVersion,
   MemoryEventBus,
+  testRigSurfaceReceipt,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
@@ -57,63 +58,6 @@ function alertMetadata(
         service: "worker-turn",
       },
       provider: input.provider ?? "alertmanager",
-    },
-  };
-}
-
-async function passingPromotionVerification(input: {
-  db: Parameters<typeof updateRigChangeStatus>[0];
-  workspaceId: string;
-  changeId: string;
-  baseVersionId: string;
-  checkedAt: string;
-}) {
-  const receipt = {
-    version: 1 as const,
-    checkedAt: input.checkedAt,
-    binding: {
-      leaseId: "11111111-2222-4333-8444-555555555555",
-      sandboxGroupId: input.changeId,
-      leaseEpoch: 2,
-      workspaceGeneration: 1,
-      instanceId: "sandbox-test",
-      backendId: "modal",
-      rigVersionId: input.baseVersionId,
-    },
-    terminal: {
-      status: "passed" as const,
-      cwd: "/workspace" as const,
-      uid: 0 as const,
-      bunVersion: "1.4.0" as const,
-      interactive: true as const,
-    },
-    browser: {
-      status: "passed" as const,
-      browserSessionId: "22222222-3333-4444-8555-666666666666",
-      controllerGeneration: "rig-test",
-      targetId: "page-1",
-      observedTargetGeneration: "page-generation-1",
-    },
-    computer: { status: "disabled" as const },
-  };
-  await updateRigChangeStatus(input.db, input.workspaceId, input.changeId, {
-    status: "proposed",
-    verification: {
-      finishedAt: input.checkedAt,
-      passed: true,
-      checkResults: [],
-      platformSurfaceValidation: receipt,
-    },
-  });
-  return {
-    status: "passed" as const,
-    expectedActiveVersionId: input.baseVersionId,
-    verifiedAt: input.checkedAt,
-    receipt,
-    source: {
-      kind: "change" as const,
-      changeId: input.changeId,
-      baseVersionId: input.baseVersionId,
     },
   };
 }
@@ -1200,12 +1144,15 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       kind: "definition_edit",
       payload: { credentialHooks: ["azure-monitor"] },
     });
-    const verification = await passingPromotionVerification({
-      db: client.db,
-      workspaceId: workspace.workspaceId,
-      changeId: change.id,
-      baseVersionId: rig.activeVersion!.id,
-      checkedAt: "2026-08-14T00:01:00.000Z",
+    await updateRigChangeStatus(client.db, workspace.workspaceId, change.id, {
+      status: "proposed",
+      verification: {
+        startedAt: "2026-08-14T00:00:00.000Z",
+        finishedAt: "2026-08-14T00:01:00.000Z",
+        passed: true,
+        checkResults: [],
+        platformSurfaceValidation: testRigSurfaceReceipt(change.id),
+      },
     });
     const promoted = await createRigVersionForChangePromotion(
       client.db,
@@ -1215,7 +1162,6 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       {
         expectedActiveVersionId: rig.activeVersion!.id,
         credentialHooks: ["azure-monitor"],
-        verification,
       },
     );
     const responder = await createSession(client.db, {
@@ -1230,13 +1176,9 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       rigId: rig.id,
       rigVersionId: promoted.version.id,
     });
-    await createRigVersion(
-      client.db,
-      workspace.workspaceId,
-      rig.id,
-      { credentialHooks: ["azure-monitor"] },
-      { activate: true },
-    );
+    await createVerifiedTestRigVersion(client.db, workspace.workspaceId, rig.id, {
+      credentialHooks: ["azure-monitor"],
+    });
     const task = await taskFixture(workspace, alertMetadata(), {
       runMode: "existing_session",
       responderSessionId: responder.id,
@@ -1323,12 +1265,15 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       kind: "definition_edit",
       payload: { credentialHooks: ["azure-monitor"] },
     });
-    const verification = await passingPromotionVerification({
-      db: client.db,
-      workspaceId: personalWorkspace!.id,
-      changeId: change.id,
-      baseVersionId: rig.activeVersion!.id,
-      checkedAt: "2026-08-16T20:01:00.000Z",
+    await updateRigChangeStatus(client.db, personalWorkspace!.id, change.id, {
+      status: "proposed",
+      verification: {
+        startedAt: "2026-08-16T20:00:00.000Z",
+        finishedAt: "2026-08-16T20:01:00.000Z",
+        passed: true,
+        checkResults: [],
+        platformSurfaceValidation: testRigSurfaceReceipt(change.id),
+      },
     });
     const frozen = await createRigVersionForChangePromotion(
       client.db,
@@ -1338,7 +1283,6 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       {
         expectedActiveVersionId: rig.activeVersion!.id,
         credentialHooks: ["azure-monitor"],
-        verification,
       },
     );
     const responder = await createSession(client.db, {
@@ -1353,13 +1297,9 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       rigId: rig.id,
       rigVersionId: frozen.version.id,
     });
-    await createRigVersion(
-      client.db,
-      personalWorkspace!.id,
-      rig.id,
-      { credentialHooks: ["azure-monitor"] },
-      { activate: true },
-    );
+    await createVerifiedTestRigVersion(client.db, personalWorkspace!.id, rig.id, {
+      credentialHooks: ["azure-monitor"],
+    });
     const task = await taskFixture(workspace, alertMetadata(), {
       runMode: "existing_session",
       responderSessionId: responder.id,

@@ -25,7 +25,7 @@ export async function rigVerificationWorkflow(input: RigVerificationWorkflowInpu
     await rigVerificationActivities.verifyRigVersion({
       workspaceId: input.workspaceId,
       versionId: input.versionId,
-      ...(input.versionAttempt === undefined ? {} : { versionAttempt: input.versionAttempt }),
+      attemptId: input.attemptId,
     });
   }
 }

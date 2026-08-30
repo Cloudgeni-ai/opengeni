@@ -300,6 +300,27 @@ describe("build-once rig provider image runtime", () => {
     expect(selected.reason).toBe("not_cold_boot_validated");
     expect(selected.settings.modalImageId).toBeUndefined();
     expect(selected.imageId).toBeNull();
+
+    const obsoleteProof = {
+      ...base,
+      providerImages: {
+        modal: {
+          ...readyImage(settings, base),
+          coldBootValidation: {
+            version: 1 as const,
+            checkedAt: "2026-08-10T00:00:00.500Z",
+          },
+        },
+      },
+    };
+    expect(
+      resolveRigProviderImageSelection(
+        settings,
+        obsoleteProof,
+        "modal",
+        obsoleteProof.providerImages.modal.providerBindingKeyHash,
+      ).reason,
+    ).toBe("not_cold_boot_validated");
   });
 
   test("a v1 cold-boot record is not selected without the current native-surface proof", () => {

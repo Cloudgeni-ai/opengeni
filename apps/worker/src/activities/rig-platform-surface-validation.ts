@@ -8,6 +8,7 @@ import {
   type ComputerTarget,
 } from "@opengeni/contracts";
 import {
+  RIG_PLATFORM_SURFACE_VALIDATION_VERSION,
   RigPlatformSurfaceValidationReceipt,
   type RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptValue,
 } from "@opengeni/contracts/rig-platform-surface-validation";
@@ -167,14 +168,19 @@ function assertBrowserTargetBinding(target: BrowserTarget, session: PlacementBro
 function assertBrowserObservationBinding(
   observation: BrowserObservation,
   session: PlacementBrowserSession,
-  expectedTargetId: string,
+  expectedTargetId?: string,
+  expectedTargetGeneration?: string,
 ): void {
   if (observation.browserSessionId !== session.browserSessionId) {
     throw validationError("browser observation returned another session binding");
   }
   assertBrowserTargetBinding(observation.target, session);
-  if (observation.target.id !== expectedTargetId) {
-    throw validationError("browser observation returned another target binding");
+  if (
+    (expectedTargetId !== undefined && observation.target.id !== expectedTargetId) ||
+    (expectedTargetGeneration !== undefined &&
+      observation.target.targetGeneration !== expectedTargetGeneration)
+  ) {
+    throw validationError("browser observation returned another requested target binding");
   }
 }
 
@@ -202,14 +208,19 @@ function assertComputerTargetBinding(
 function assertComputerObservationBinding(
   observation: ComputerObservation,
   session: PlacementComputerSession,
-  expectedTargetId: string,
+  expectedTargetId?: string,
+  expectedTargetGeneration?: string,
 ): void {
   if (observation.computerSessionId !== session.computerSessionId) {
     throw validationError("computer observation returned another session binding");
   }
   assertComputerTargetBinding(observation.target, session);
-  if (observation.target.id !== expectedTargetId) {
-    throw validationError("computer observation returned another target binding");
+  if (
+    (expectedTargetId !== undefined && observation.target.id !== expectedTargetId) ||
+    (expectedTargetGeneration !== undefined &&
+      observation.target.targetGeneration !== expectedTargetGeneration)
+  ) {
+    throw validationError("computer observation returned another requested target binding");
   }
 }
 
@@ -379,7 +390,7 @@ async function validateBrowser(
     ) {
       throw validationError("browser creation returned another session/controller binding");
     }
-    assertBrowserObservationBinding(session.observation, session, session.observation.target.id);
+    assertBrowserObservationBinding(session.observation, session);
     assertDeterministicBrowserTarget(session.observation.target);
     const client: BrowserSessionClient = controller.sessionClient({
       reference: session,
@@ -393,7 +404,7 @@ async function validateBrowser(
     initialTargets.forEach((target) => assertBrowserTargetBinding(target, session!));
     const opened = await client.openTarget(`${SURFACE_TARGET_URL}%23opened`);
     await assertExactBinding(input, dependencies);
-    assertBrowserObservationBinding(opened, session, opened.target.id);
+    assertBrowserObservationBinding(opened, session);
     assertDeterministicBrowserTarget(opened.target);
     const targets = await client.listTargets();
     await assertExactBinding(input, dependencies);
@@ -403,7 +414,12 @@ async function validateBrowser(
     targets.forEach((target) => assertBrowserTargetBinding(target, session!));
     const observed = await client.observe(opened.target.id);
     await assertExactBinding(input, dependencies);
-    assertBrowserObservationBinding(observed, session, opened.target.id);
+    assertBrowserObservationBinding(
+      observed,
+      session,
+      opened.target.id,
+      opened.target.targetGeneration,
+    );
     assertDeterministicBrowserTarget(observed.target);
     return {
       status: "passed",
@@ -434,6 +450,14 @@ function assertCompletedAction(
     receipt.state !== "completed"
   ) {
     throw validationError("computer benign action did not complete on the exact binding");
+  }
+  if (receipt.observation) {
+    assertComputerObservationBinding(
+      receipt.observation,
+      session,
+      target.id,
+      target.targetGeneration,
+    );
   }
 }
 
@@ -477,7 +501,7 @@ async function validateComputer(
     if (!target) throw validationError("computer returned no real screen target");
     const observation = await client.observe(target.id);
     await assertExactBinding(input, dependencies);
-    assertComputerObservationBinding(observation, session, target.id);
+    assertComputerObservationBinding(observation, session, target.id, target.targetGeneration);
     if (
       !observation.frameId ||
       !target.bounds ||
@@ -519,6 +543,14 @@ async function validateComputer(
     });
     await assertExactBinding(input, dependencies);
     assertCompletedAction(receipt, session, target, operationId);
+    const settledObservation = await client.observe(target.id);
+    await assertExactBinding(input, dependencies);
+    assertComputerObservationBinding(
+      settledObservation,
+      session,
+      target.id,
+      target.targetGeneration,
+    );
     return { ...evidence, actionOperationId: operationId };
   } catch (error) {
     primary = error;
@@ -559,7 +591,7 @@ export async function runRigPlatformSurfaceValidation(
     const computer = await validateComputer(input, dependencies, controller, generation);
     await assertExactBinding(input, dependencies);
     receipt = RigPlatformSurfaceValidationReceipt.parse({
-      version: 1,
+      version: RIG_PLATFORM_SURFACE_VALIDATION_VERSION,
       checkedAt: dependencies.checkedAt(),
       binding: {
         leaseId: input.ownership.leaseId,

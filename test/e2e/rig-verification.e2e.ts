@@ -4,7 +4,6 @@ import {
   beginRigVersionVerificationAttempt,
   bootstrapWorkspace,
   createDb,
-  createRig,
   createRigChange,
   dbSql,
   getRig,
@@ -21,6 +20,7 @@ import {
 } from "@opengeni/runtime";
 import {
   buildSandboxImage,
+  createVerifiedTestRig as createRig,
   startTestServices,
   testSettings,
   type TestServices,
@@ -98,9 +98,10 @@ describe("real Docker rig verification e2e", () => {
     expect(verified.status).toBe("merged");
     expect(verified.verification?.passed).toBe(true);
     expect(verified.verification?.platformSurfaceValidation).toMatchObject({
-      version: 1,
+      version: 2,
       binding: {
-        rigVersionId: rig.activeVersion!.id,
+        sandboxGroupId: change.id,
+        rigVersionId: change.id,
       },
       terminal: {
         status: "passed",
@@ -196,13 +197,13 @@ describe("real Docker rig verification e2e", () => {
 
     const attempt = await beginRigVersionVerificationAttempt(db.db, {
       workspaceId,
+      rigId: rig.id,
       versionId: rig.activeVersion!.id,
-      requestedAt: new Date().toISOString(),
     });
     await verifier().verifyRigVersion({
       workspaceId,
       versionId: rig.activeVersion!.id,
-      versionAttempt: attempt.attempt,
+      attemptId: attempt.attemptId,
     });
     const [audit] = await db.db.transaction(async (tx) => {
       await setRlsContext(tx as never, { accountId, workspaceId });

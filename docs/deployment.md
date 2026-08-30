@@ -296,6 +296,17 @@ out of API and worker pods. Its default command serializes `db:migrate`,
 `helm upgrade` before workload replacement begins. Operators running without
 Helm must preserve the same order explicitly.
 
+Migration `0381_fail_closed_rig_version_activation.sql` is the drained,
+maintenance-only Rig writer-protocol cutover described below. Its trigger keeps
+the boundary fail-closed after activation by rejecting an active insert or new
+activation without exact current proof, while the replaced scoped-create
+function defaults omitted activation to inactive. It also removes obsolete
+version-1 Rig provider-image cold-boot proof and rejects any stale finalizer that
+tries to restore it. Existing active versions and unrelated updates remain
+available after the cutover. Never restart a pre-0381 workload; remain in
+maintenance and fix forward instead of reversing the ledger, dropping either
+trigger, restoring the old active default, or fabricating verification JSON.
+
 After a successful install or upgrade, the default-on `catalogImport` hook Job
 imports the committed reviewed integrations snapshot. It receives the runtime
 Secret for object-storage configuration but overrides `OPENGENI_DATABASE_URL`

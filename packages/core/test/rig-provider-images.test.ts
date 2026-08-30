@@ -108,12 +108,18 @@ describe("rig provider image identity", () => {
   test("promotion copies only a finalized build matching the exact promoted definition", () => {
     const image = readyImage();
     const verification = { providerImage: image } as RigChangeVerification;
-    expect(rigProviderImagesFromVerification(verification, version)).toEqual({ modal: image });
+    expect(rigProviderImagesFromVerification(verification, version, version.id)).toEqual({
+      modal: image,
+    });
     expect(
-      rigProviderImagesFromVerification(verification, {
-        ...version,
-        setupScript: `${version.setupScript}\necho planted-stale-image`,
-      }),
+      rigProviderImagesFromVerification(
+        verification,
+        {
+          ...version,
+          setupScript: `${version.setupScript}\necho planted-stale-image`,
+        },
+        version.id,
+      ),
     ).toEqual({});
     expect(
       rigProviderImagesFromVerification(
@@ -126,7 +132,26 @@ describe("rig provider image identity", () => {
           },
         } as RigChangeVerification,
         version,
+        version.id,
       ),
     ).toEqual({});
+    expect(
+      rigProviderImagesFromVerification(
+        {
+          providerImage: {
+            ...image,
+            coldBootValidation: {
+              version: 1,
+              checkedAt: "2026-08-10T00:00:00.500Z",
+            },
+          },
+        } as RigChangeVerification,
+        version,
+        version.id,
+      ),
+    ).toEqual({});
+    expect(rigProviderImagesFromVerification(verification, version, crypto.randomUUID())).toEqual(
+      {},
+    );
   });
 });
