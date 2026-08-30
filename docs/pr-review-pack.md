@@ -22,7 +22,10 @@ Azure DevOps pull requests through one normalized event contract.
 3. For an advanced provider registration, configure the provider webhook with
    the OpenGeni API origin plus the returned opaque path,
    `/v1/webhooks/automations/:endpointId`.
-4. Enable only the repositories the bot may review. Provider repository,
+4. Enable only the repositories the bot may review, then choose the review
+   model for each repository under **Review execution**. The selector is grouped
+   by billing source. Choosing a Codex model uses the workspace's connected
+   Codex subscription instead of OpenGeni credits. Provider repository,
    installation, and project identifiers are authority, not display metadata.
 
 Registration and secret rotation require workspace administration and
@@ -113,6 +116,30 @@ See Microsoft's
 
 GitLab and Azure DevOps credential rotation is explicit through registration
 update. Expired credentials fail closed before sandbox injection.
+
+## Model and billing source
+
+Each repository binding stores one optional exact product model. The model
+catalog is the source of truth for both the serving provider and billing rail;
+there is no second mutable `source` field that could disagree with the model.
+The setup UI currently exposes the two unattended-review billing rails with
+complete admission authority: OpenGeni credits and the workspace Codex
+subscription pool.
+
+Selecting a `codex/...` model freezes that exact model into the trigger revision
+and accepted automation run. Dispatch rechecks that the workspace still has an
+active Codex subscription, classifies the turn as externally billed, and then
+uses the ordinary workspace-local Codex allocator and capacity-wait lifecycle.
+It consumes no OpenGeni credits. OpenGeni does not freeze a concrete credential
+row into the trigger: a workspace with multiple connected Codex accounts keeps
+the allocator's normal rotation, lease, cooldown, and failover behavior.
+
+Leaving the repository on **Deployment default** preserves the existing
+deployment model behavior. Changing the selection creates a new immutable
+trigger revision for future events; a run already accepted against an older
+revision retains its original model. If the selected external subscription is
+later disconnected or becomes unavailable, new dispatch fails closed instead
+of silently falling back to OpenGeni credits.
 
 ## Generic automation composition
 

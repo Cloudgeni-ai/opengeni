@@ -370,22 +370,23 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         });
         expect(rows.wake?.deliveredRevision).toBeLessThan(rows.wake?.wakeRevision ?? 0);
 
-        // Persistent reconciliation must keep the workflow open past the old
-        // five-second close boundary. The exact activity remains visible in
-        // Temporal and physically heartbeats while the predecessor fence is
-        // closed, so no replacement work can be admitted.
-        const beatsBeforeReconciliationWindow = heartbeats;
-        await Bun.sleep(6_000);
-        const reconcilingDescription = await handle.describe();
-        expect(reconcilingDescription.status.name).toBe("RUNNING");
-        const pendingDuringReconciliation = reconcilingDescription.raw.pendingActivities?.find(
+        // Current v2 closes after its bounded cancellation wait without
+        // waiting for the cancellation-ignoring activity to terminalize. The
+        // exact activity must remain visible in Temporal and physically keep
+        // heartbeating while the predecessor fence remains closed.
+        await handle.result();
+        const completedDescription = await handle.describe();
+        expect(completedDescription.status.name).toBe("COMPLETED");
+        const pendingAfterWorkflowClose = completedDescription.raw.pendingActivities?.find(
           (activity) => activity.activityId === pendingActivityId,
         );
-        expect(pendingDuringReconciliation?.activityId).toBe(pendingActivityId);
-        expect(pendingDuringReconciliation?.state).toBe(
+        expect(pendingAfterWorkflowClose?.activityId).toBe(pendingActivityId);
+        expect(pendingAfterWorkflowClose?.state).toBe(
           encodePendingActivityState("CANCEL_REQUESTED"),
         );
-        expect(heartbeats).toBeGreaterThanOrEqual(beatsBeforeReconciliationWindow + 3);
+
+        const beatsAtWorkflowClose = heartbeats;
+        await waitFor(() => heartbeats >= beatsAtWorkflowClose + 3);
         expect(replacementDispatches).toBe(0);
         expect(model.calls).toBe(0);
       } finally {
@@ -393,7 +394,7 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         try {
           await handle.terminate("cancellation-settlement lane fixture final cleanup");
         } catch {
-          // The workflow may have completed naturally after exact-activity cleanup.
+          // The workflow already closed after its bounded cancellation wait.
         }
         worker.shutdown();
         await workerRun;
@@ -403,7 +404,7 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
   );
 
   test(
-    "missing heartbeats keep persistent reconciliation and the receipt fence live",
+    "a bounded cancellation close leaves the receipt fence closed while the activity remains pending",
     async () => {
       const suffix = crypto.randomUUID();
       const access = await bootstrapWorkspace(dbClient.db, {
@@ -613,26 +614,28 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         expect(pendingActivityId).toBeTruthy();
 
         // Stop acknowledging the server heartbeat contract without allowing
-        // the local function to settle. Persistent reconciliation must not
-        // infer a physical stop, close the workflow, or admit replacement work.
+        // the local function to settle. The receipt-gated workflow closes its
+        // run after the bounded cancellation wait; it must not infer a
+        // physical stop or admit replacement work from that closure.
         stopHeartbeats = true;
         const beatsAtStop = heartbeats;
-        const ticksAtStop = hungTicks;
-        await Bun.sleep(6_000);
+        await handle.result();
         expect(heartbeats).toBe(beatsAtStop);
-        expect(hungTicks).toBeGreaterThanOrEqual(ticksAtStop + 3);
-        const reconcilingDescription = await handle.describe();
-        expect(reconcilingDescription.status.name).toBe("RUNNING");
-        const pendingDuringReconciliation = reconcilingDescription.raw.pendingActivities?.find(
+        const completedDescription = await handle.describe();
+        expect(completedDescription.status.name).toBe("COMPLETED");
+        const pendingAfterWorkflowClose = completedDescription.raw.pendingActivities?.find(
           (activity) => activity.activityId === pendingActivityId,
         );
-        expect(pendingDuringReconciliation?.activityId).toBe(pendingActivityId);
-        expect(pendingDuringReconciliation?.state).toBe(
+        expect(pendingAfterWorkflowClose?.activityId).toBe(pendingActivityId);
+        expect(pendingAfterWorkflowClose?.state).toBe(
           encodePendingActivityState("CANCEL_REQUESTED"),
         );
 
-        // Missing heartbeats are not themselves a physical quiescence proof.
-        // The disposable loop remains live until exact cleanup releases it.
+        // The bounded workflow close is not a heartbeat timeout or physical
+        // quiescence proof. The disposable loop remains live until exact
+        // cleanup releases its gate.
+        const ticksAtWorkflowClose = hungTicks;
+        await waitFor(() => hungTicks >= ticksAtWorkflowClose + 3);
         expect(replacementDispatches).toBe(0);
         expect(model.calls).toBe(0);
       } finally {
@@ -642,7 +645,7 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
             "cancellation-settlement lane failed-workflow fixture final cleanup",
           );
         } catch {
-          // The workflow may have completed naturally after exact-activity cleanup.
+          // The workflow already closed after its bounded cancellation wait.
         }
         worker.shutdown();
         await workerRun;

@@ -552,6 +552,13 @@ function SessionsIndexRouteContent({
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
+  const personalResourceConfirmationRequired =
+    createdSessionAuthority === null && personalResourceAttachment.requiresAcknowledgement;
+  const personalResourceSendBlocker = personalResourceConfirmationRequired
+    ? selectedPersonalVariableSets.length > 0
+      ? "This workspace-visible chat uses an Only me Variable Set. Confirm private credential use below before sending."
+      : "This workspace-visible chat uses an Only me resource. Confirm its use below before sending."
+    : null;
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   // 0 = no explicit request (mount uses ConsoleComposer autoFocus). >0 = same-route
   // new-session / shortcut asked us to put the caret back in the create composer.
@@ -809,7 +816,7 @@ function SessionsIndexRouteContent({
         privateCreateUnavailable ||
         personalResourceCatalogRefreshPending ||
         (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved) ||
-        (createdSessionAuthority === null && personalResourceAttachment.requiresAcknowledgement)
+        personalResourceConfirmationRequired
       )
         return false;
       if (realtimeModel && personalMachineSelected) {
@@ -1053,7 +1060,7 @@ function SessionsIndexRouteContent({
       newSessionPolicyValid &&
       !personalResourceCatalogRefreshPending &&
       (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
-      (createdSessionAuthority !== null || !personalResourceAttachment.requiresAcknowledgement) &&
+      !personalResourceConfirmationRequired &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
     pausing: false,
@@ -1135,6 +1142,9 @@ function SessionsIndexRouteContent({
             attachments={attachments}
             autoFocus
             disabled={newSessionDraft.loading}
+            messages={
+              personalResourceSendBlocker ? { sendTitle: personalResourceSendBlocker } : undefined
+            }
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
             controlsLeading={
@@ -2222,10 +2232,16 @@ function PersonalResourceAccessInline(props: {
           className="mt-0.5 size-4 shrink-0 accent-brand"
         />
         <span>
-          <span className="block font-medium text-fg">
-            Use {props.access.names.join(", ")} in this workspace-visible session
+          <span
+            className="block font-medium text-fg"
+            role={props.access.sharedAcknowledged ? undefined : "alert"}
+          >
+            {props.access.sharedAcknowledged
+              ? "Private resource use confirmed"
+              : "Confirm private credential or resource use before sending"}
           </span>
           <span className="mt-0.5 block text-2xs leading-4 text-fg-subtle">
+            Use {props.access.names.join(", ")} in this workspace-visible chat.{" "}
             {PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING}
           </span>
         </span>
