@@ -23,6 +23,8 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   requireAccessContext,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
+  type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 
@@ -46,11 +48,17 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     zValidator("json", CreateApiKeyRequest.omit({ workspaceId: true })),
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "api_keys:manage");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "api_keys:manage",
+      );
+      const grant = authorization.grant;
       const body = c.req.valid("json");
       const permissions: Permission[] =
         body.permissions.length > 0 ? (body.permissions as Permission[]) : ["workspace:read"];
-      ensureDelegablePermissions(grant.permissions, permissions);
+      ensureDelegablePermissions(authorization, permissions);
       await requireLimit(deps, {
         accountId: grant.accountId,
         workspaceId,
@@ -143,20 +151,25 @@ function requireAccountPermission(
   }
 }
 
-function ensureDelegablePermissions(grantPermissions: Permission[], requested: Permission[]): void {
+function ensureDelegablePermissions(
+  authorization: AccessGrantAuthorization,
+  requested: Permission[],
+): void {
+  const grantPermissions = authorization.grant.permissions;
   if (grantPermissions.includes("workspace:admin")) {
-    const literalOnlyPermissions = new Set<Permission>([
+    const accountLiteralPermissions = new Set<Permission>([
       "account:read",
       "account:admin",
-      "members:manage",
       "workspace:create",
       "billing:read",
       "billing:manage",
-      "secrets:read",
     ]);
+    const workspaceLiteralPermissions = new Set<Permission>(["members:manage", "secrets:read"]);
     const highTrustMissing = requested.filter(
       (permission) =>
-        literalOnlyPermissions.has(permission) && !grantPermissions.includes(permission),
+        (accountLiteralPermissions.has(permission) &&
+          !authorization.accountGrant?.permissions.includes(permission)) ||
+        (workspaceLiteralPermissions.has(permission) && !grantPermissions.includes(permission)),
     );
     if (highTrustMissing.length === 0) return;
     throw new HTTPException(403, {
