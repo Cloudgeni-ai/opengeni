@@ -688,6 +688,8 @@ BEGIN
 END
 $body$;
 
+REVOKE ALL ON FUNCTION opengeni_private.enforce_app_immutable_rows() FROM PUBLIC;
+
 CREATE TRIGGER app_source_revisions_immutable_guard
 BEFORE UPDATE OR DELETE ON app_source_revisions
 FOR EACH ROW EXECUTE FUNCTION opengeni_private.enforce_app_immutable_rows();

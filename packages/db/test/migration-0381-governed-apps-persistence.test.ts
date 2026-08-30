@@ -173,6 +173,9 @@ describe("migration 0381 governed Apps persistence", () => {
     expect(source).toContain("App build frozen file receipts are incomplete");
     expect(source).toContain("App build file freeze identity changed");
     expect(source).toContain("Immutable App history rows cannot be deleted");
+    expect(source).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.enforce_app_immutable_rows() FROM PUBLIC",
+    );
     expect(source).toContain("App GC completion does not cover the exact claim");
     expect(source).toContain("CREATE TABLE app_build_files");
     expect(source).toContain("staging_object_key text NOT NULL");
@@ -347,6 +350,26 @@ describe("migration 0381 live PostgreSQL posture", () => {
       command: "ALL",
       usingExpression: "session_reference_visible(account_id, workspace_id, source_session_id)",
       checkExpression: "session_reference_visible(account_id, workspace_id, source_session_id)",
+    });
+
+    const [immutableGuardAcl] = await clean.admin<
+      Array<{
+        publicExecute: boolean;
+      }>
+    >`
+      select
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute"
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'opengeni_private'
+        and procedure.proname = 'enforce_app_immutable_rows'
+        and pg_catalog.oidvectortypes(procedure.proargtypes) = ''`;
+    expect(immutableGuardAcl).toEqual({
+      publicExecute: false,
     });
   });
 
