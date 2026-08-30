@@ -1585,11 +1585,17 @@ async function resolveWorkspaceModelBoundarySettings(
   modelIds: readonly (string | null | undefined)[],
   retainedProductModelId?: string | null,
 ): Promise<Settings> {
+  const retainedWorkspaceModel = retainedProductModelId?.startsWith(
+    WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  );
   if (deps.catalogSourceSettings) {
     // The adapter already resolved one exact workspace catalog snapshot for
-    // this request. Re-resolving from that overlaid snapshot would feed the
-    // synthetic workspace Gateway provider back through deployment validation.
-    return deps.settings;
+    // this request. Preserve it for fresh selections, but an existing session
+    // may name a retired custom model that the active-only adapter snapshot
+    // intentionally omitted. Re-open only the unoverlaid source for that
+    // retention lookup; never feed the synthetic workspace provider back
+    // through deployment validation.
+    if (!retainedWorkspaceModel) return deps.settings;
   }
   const workspaceModelIds = modelIds.filter(
     (modelId): modelId is string =>
@@ -1599,7 +1605,7 @@ async function resolveWorkspaceModelBoundarySettings(
     deps.settings.modelCatalogSource === "database" || workspaceModelIds.length > 0;
   if (!needsWorkspaceResolution) return deps.settings;
   return (
-    await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+    await resolveWorkspaceCatalogSettings(deps.db, deps.catalogSourceSettings ?? deps.settings, {
       accountId: grant.accountId,
       workspaceId,
       ...(retainedProductModelId !== undefined ? { retainedProductModelId } : {}),
@@ -1804,13 +1810,9 @@ export async function createSessionForRequestWithOutcome(
       throw error;
     }
   }
-  let settings = await resolveWorkspaceModelBoundarySettings(
-    unresolvedDeps,
-    grant,
-    workspaceId,
-    [payload.model],
-    payload.model ?? null,
-  );
+  let settings = await resolveWorkspaceModelBoundarySettings(unresolvedDeps, grant, workspaceId, [
+    payload.model,
+  ]);
   let deps =
     settings === unresolvedDeps.settings
       ? unresolvedDeps

@@ -5,6 +5,7 @@ import {
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
+  MODEL_CATALOG_MAINTENANCE_CUTOVER,
   missingRuntimeEnvVars,
   parseDeploymentContract,
   preflightChecksFor,
@@ -372,10 +373,21 @@ describe("deployment contract", () => {
       ),
     ).toBe(true);
     expect(plan.deployCommands.some((command) => command.includes("docker push"))).toBe(true);
+    expect(plan.deployCommands.join("\n")).toContain("gcloud artifacts docker images describe");
+    expect(plan.deployCommands.join("\n")).toContain(
+      ". .agent/generated/gcp-managed/image-digests.env",
+    );
     expect(
       plan.deployCommands.some((command) => command.includes("deployment:runtime-artifacts")),
     ).toBe(true);
     expect(plan.deployCommands.some((command) => command.includes("opengeni-runtime"))).toBe(true);
+    expect(
+      plan.deployCommands.filter(
+        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
+      ),
+    ).toHaveLength(1);
+    expect(plan.deployCommands.join("\n")).not.toContain("--set migrations.enabled=false");
+    expect(plan.deployCommands.join("\n")).not.toContain("wait --for=delete pod");
     expect(
       plan.deployCommands.some((command) =>
         command.includes(".agent/generated/gcp-managed/helm-values.generated.yaml"),
@@ -416,6 +428,8 @@ describe("deployment contract", () => {
     const commands = plan.deployCommands.join("\n");
 
     expect(commands).toContain(".agent/generated/aws-managed/rds-global-bundle.pem");
+    expect(commands).toContain("aws ecr describe-images");
+    expect(commands).toContain("OPENGENI_MIGRATIONS_IMAGE_DIGEST=%s");
     expect(commands).not.toContain("${contract.profile}");
   });
 
@@ -426,7 +440,35 @@ describe("deployment contract", () => {
     expect(commands).toContain(
       'TEMPORAL_POSTGRES_TLS_ENABLED="${TEMPORAL_POSTGRES_TLS_ENABLED:-true}"',
     );
+    expect(commands).toContain("az acr repository show");
     expect(commands).not.toContain("opengeni-postgres-ca");
+  });
+
+  test("drains applications only for the exact model-catalog maintenance cutover", () => {
+    const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
+      OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
+      OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
+    });
+    const commands = plan.deployCommands.join("\n");
+
+    expect(
+      plan.deployCommands.filter(
+        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
+      ),
+    ).toHaveLength(2);
+    expect(commands).toContain("--set migrations.enabled=false");
+    expect(commands).toContain("wait --for=delete pod");
+    expect(plan.notes.join("\n")).toContain(MODEL_CATALOG_MAINTENANCE_CUTOVER);
+    expect(() =>
+      stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
+        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
+      }),
+    ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
+    expect(() =>
+      stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
+        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: "unknown-maintenance-cutover",
+      }),
+    ).toThrow("unsupported OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER");
   });
 
   test("plans pinned private OpenSandbox only when a Kubernetes deployment selects it", () => {

@@ -249,11 +249,18 @@ helm upgrade opengeni deploy/helm/opengeni \
   --wait --timeout 15m
 ```
 
-Future versions use the same second command with a new official chart/image
-version or digest. Postgres and Garage PVCs remain attached. Database migrations
-are forward-only: if the migration gate fails, the old application stays in
-place; after a migration succeeds, roll the application forward unless the
-older image is explicitly proven compatible with the new schema.
+Generated Kubernetes deployment plans default to one rolling `helm upgrade
+--install`. Profiles whose durable dependencies live inside the OpenGeni chart
+add the disabled-application revision only when the Helm release does not yet
+exist, so bootstrap can create Postgres/Temporal/NATS/object storage before the
+migration hook without turning every later release into an outage. A reviewed
+maintenance migration must be selected explicitly; migration 0383 uses
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0383_model_catalog_and_gateway_custom_models`
+plus `OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true` after the
+operator completes the documented database-role, image-digest, and application
+drain preflight. Postgres and Garage PVCs remain attached. Database migrations
+are forward-only: after a maintenance migration succeeds, remain on the new
+image/schema and fix forward.
 
 Failure behavior is intentionally uneven:
 
@@ -1822,6 +1829,18 @@ fleet is unsupported even while every process still uses `code`:
    revision using the same new chart, exact `sha256:` API/worker/web/migrations
    image digests, and values that the final upgrade will use. Mutable tags and
    registry cache state are not acceptable evidence across this drain boundary:
+
+   The generated deployment plan emits this drain only when both of these
+   operator acknowledgements are present:
+
+   ```bash
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0379_model_catalog_and_gateway_custom_models
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true
+   ```
+
+   Do not set the confirmation until the exact release/database/login binding,
+   accepted-turn handling, and no-live-application-session checks above are
+   complete. Ordinary plans omit the drain and retain rolling availability.
 
    ```bash
    helm upgrade --install "$RELEASE" deploy/helm/opengeni \

@@ -79,6 +79,17 @@ describe("AI Gateway custom model settings in Chromium", () => {
     await page.getByText("xai/grok-4.1-fast", { exact: true }).waitFor();
     await expectReceipt(page, { action: "create-model", upstreamModelId: "xai/grok-4.1-fast" });
     await page.getByRole("button", { name: "Remove xai/grok-4.1-fast" }).click();
+    const removeDialog = page.getByRole("dialog");
+    await removeDialog
+      .getByRole("heading", { name: "Remove Gateway model “xai/grok-4.1-fast”?" })
+      .waitFor();
+    await removeDialog
+      .getByText(
+        "The model disappears from new selections. Already accepted turns keep their frozen definition so they can finish safely.",
+        { exact: true },
+      )
+      .waitFor();
+    await removeDialog.getByRole("button", { name: "Remove model", exact: true }).click();
     await page.getByText("xai/grok-4.1-fast", { exact: true }).waitFor({ state: "detached" });
 
     await assertAccessibleAndBounded(page);

@@ -71,29 +71,46 @@ export async function resolveCatalogSettings(
 export async function resolveWorkspaceCatalogSettings(
   db: Database,
   envSettings: Settings,
-  input: { accountId: string; workspaceId: string; retainedProductModelId?: string | null },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    retainedProductModelId?: string | null;
+    retainedProductModelIds?: readonly (string | null | undefined)[];
+  },
 ): Promise<ResolvedCatalogSettings> {
-  const retainedUpstreamModelId = input.retainedProductModelId?.startsWith("workspace-gateway/")
-    ? input.retainedProductModelId.slice("workspace-gateway/".length)
-    : null;
-  const [resolved, activeCustomModels, retainedCustomModel] = await Promise.all([
+  const retainedUpstreamModelIds = [
+    ...(input.retainedProductModelIds ?? []),
+    input.retainedProductModelId,
+  ].flatMap((productModelId) =>
+    productModelId?.startsWith("workspace-gateway/")
+      ? [productModelId.slice("workspace-gateway/".length)]
+      : [],
+  );
+  const [resolved, activeCustomModels, ...retainedCustomModels] = await Promise.all([
     resolveCatalogSettings(db, envSettings),
-    listWorkspaceGatewayCustomModels(db, input),
-    retainedUpstreamModelId
-      ? getWorkspaceGatewayCustomModelForExecution(db, {
+    listWorkspaceGatewayCustomModels(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    }),
+    ...[...new Set(retainedUpstreamModelIds)].map(
+      async (upstreamModelId) =>
+        await getWorkspaceGatewayCustomModelForExecution(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          upstreamModelId: retainedUpstreamModelId,
-        })
-      : null,
+          upstreamModelId,
+        }),
+    ),
   ]);
-  const customModels =
-    retainedCustomModel &&
-    !activeCustomModels.some(
-      (model) => model.upstreamModelId === retainedCustomModel.upstreamModelId,
-    )
-      ? [...activeCustomModels, retainedCustomModel]
-      : activeCustomModels;
+  const customModels = [...activeCustomModels];
+  const includedUpstreamModelIds = new Set(
+    activeCustomModels.map((model) => model.upstreamModelId),
+  );
+  for (const retainedCustomModel of retainedCustomModels) {
+    if (retainedCustomModel && !includedUpstreamModelIds.has(retainedCustomModel.upstreamModelId)) {
+      customModels.push(retainedCustomModel);
+      includedUpstreamModelIds.add(retainedCustomModel.upstreamModelId);
+    }
+  }
   return {
     ...resolved,
     settings: withWorkspaceGatewayCatalogProvider(resolved.settings, customModels),

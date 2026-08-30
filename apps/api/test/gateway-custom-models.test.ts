@@ -21,6 +21,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import postgres from "postgres";
 
 import {
   createAppComposition,
@@ -43,8 +44,26 @@ const settings = testSettings({
   delegationSecret: SECRET,
 });
 
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("gateway-custom-models");
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("gateway-custom-models");
+  shared = await acquireDatabase();
   if (!shared) return;
 
   client = createDb(shared.appUrl);
@@ -314,6 +333,13 @@ describe("workspace Gateway custom model API", () => {
     expect(removed.status).toBe(204);
     expect((await (await request("/gateway-custom-models")).json()).models).toEqual([]);
 
+    await upsertWorkspaceModelPolicy(client!.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      allowedProviders: null,
+      allowedModels: null,
+    });
+
     const missingModelIdempotencyKey = crypto.randomUUID();
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const missingCreate = await publicApp.request(
@@ -336,6 +362,23 @@ describe("workspace Gateway custom model API", () => {
       expect(missingCreate.status).toBe(422);
       expect(await missingCreate.text()).toContain(productModelId);
     }
+
+    const postRetirementMcpDeps = await resolveWorkspaceMcpRouteDeps(publicRouteDeps!, grant);
+    expect(resolveModelProvider(postRetirementMcpDeps.settings, productModelId)).toBeUndefined();
+    const inheritedAfterDelete = await createSessionForRequest(
+      postRetirementMcpDeps,
+      {
+        ...grant,
+        metadata: { ...(grant.metadata ?? {}), sessionId: inheritedSession.id },
+      },
+      grant.workspaceId,
+      {
+        initialMessage: "Continue the parent model accepted before retirement",
+        resources: [],
+        sandboxBackend: "none",
+      },
+    );
+    expect(inheritedAfterDelete.model).toBe(productModelId);
 
     const switchedAfterDelete = await publicApp.request(
       `http://x/v1/workspaces/${grant.workspaceId}/sessions/${inheritedSession.id}/events`,

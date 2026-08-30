@@ -378,6 +378,12 @@ const budgets = {
   // existing Codex/settings chunks. Linux/x64 Bun 1.4 measures 2,271,792 raw
   // bytes across the same 33 files. Advance only the raw whole-KiB envelope;
   // gzip, file count, initial, per-file, lazy, and CSS caps remain fixed.
+  // The deployment catalog, managed OpenRouter route, workspace Gateway CRUD,
+  // shared picker ordering, and payment-source copy measure 2,270,892 raw /
+  // 638,128 gzip bytes across 33 files in the exact Linux/x64 Bun 1.4 CI build.
+  // Advance the raw policy envelope, gzip to 625 KiB (preserving the established
+  // 1.5-KiB platform-skew allowance), and the exact file-count cap. Initial,
+  // per-file, lazy-chunk, and CSS caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
@@ -398,10 +404,12 @@ const effectiveBudgets = {
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
+    625 * kib,
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
+    33,
   ),
 } as const;
 

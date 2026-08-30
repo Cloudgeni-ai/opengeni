@@ -93,7 +93,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
         await resolveWorkspaceCatalogSettings(db, catalogSourceSettings, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          retainedProductModelId: inheritedContinuationModel,
+          retainedProductModelIds: [inheritedContinuationModel, session.model],
         })
       ).settings;
     }

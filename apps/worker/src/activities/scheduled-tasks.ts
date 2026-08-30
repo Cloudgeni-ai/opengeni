@@ -467,7 +467,27 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskRevisionAuthority?.subjectId ??
         taskPersonalResourceAuthoritySubjectId ??
         taskConnectionAuthoritySubjectId;
-      const settings = await settingsForTask(task);
+      const acceptedTargetSessionId =
+        task.runMode === "existing_session"
+          ? task.targetSessionId
+          : task.runMode === "reusable_session"
+            ? task.reusableSessionId
+            : null;
+      // A targeted task whose exact session was deleted has no target to
+      // resolve; database admission settles that occurrence terminally
+      // (`scheduled_target_session_unavailable`) instead of retrying forever.
+      // Resolve this before the catalog so an existing session's retired
+      // custom Gateway model remains executable without becoming selectable
+      // for a new scheduled session.
+      const targetSessionExecutionBase = acceptedTargetSessionId
+        ? await getScheduledTargetSessionExecution(
+            db,
+            task.workspaceId,
+            acceptedTargetSessionId,
+            taskAuthoritySubjectId,
+          )
+        : null;
+      const settings = await settingsForTask(task, targetSessionExecutionBase?.model);
       const model = task.agentConfig.model ?? settings.openaiModel;
       const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
       let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
@@ -538,22 +558,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                       : ("portable" as const),
                   };
           })()
-        : null;
-      const acceptedTargetSessionId = generatedTarget
-        ? null
-        : task.runMode === "existing_session"
-          ? task.targetSessionId
-          : task.reusableSessionId;
-      // A targeted task whose exact session was deleted has no target to
-      // resolve; database admission settles that occurrence terminally
-      // (`scheduled_target_session_unavailable`) instead of retrying forever.
-      const targetSessionExecutionBase = acceptedTargetSessionId
-        ? await getScheduledTargetSessionExecution(
-            db,
-            task.workspaceId,
-            acceptedTargetSessionId,
-            taskAuthoritySubjectId,
-          )
         : null;
       const targetSessionExecution = targetSessionExecutionBase
         ? await (async () => {

@@ -187,4 +187,42 @@ describe("model catalog source resolution", () => {
       listCustom.mockRestore();
     }
   });
+
+  test("retains every distinct retired custom model needed by an existing-session decision", async () => {
+    const listCustom = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([]);
+    const getRetained = spyOn(
+      opengeniDb,
+      "getWorkspaceGatewayCustomModelForExecution",
+    ).mockImplementation(async (_db, input) => ({
+      id: crypto.randomUUID(),
+      accountId,
+      workspaceId,
+      upstreamModelId: input.upstreamModelId,
+      label: null,
+      createdBySubjectId: "subject-a",
+      retiredAt: new Date("2026-08-29T12:00:00.000Z"),
+      createdAt: new Date("2026-08-27T12:00:00.000Z"),
+      updatedAt: new Date("2026-08-29T12:00:00.000Z"),
+    }));
+    try {
+      const inherited = "workspace-gateway/anthropic/claude-opus-4.6";
+      const fallback = "workspace-gateway/anthropic/claude-sonnet-4.6";
+      const resolved = await resolveWorkspaceCatalogSettings(
+        {} as opengeniDb.Database,
+        testSettings(),
+        {
+          accountId,
+          workspaceId,
+          retainedProductModelIds: [inherited, fallback, inherited, "scripted-model"],
+        },
+      );
+
+      expect(canonicalConfiguredModel(resolved.settings, inherited)).toBe(inherited);
+      expect(canonicalConfiguredModel(resolved.settings, fallback)).toBe(fallback);
+      expect(getRetained).toHaveBeenCalledTimes(2);
+    } finally {
+      getRetained.mockRestore();
+      listCustom.mockRestore();
+    }
+  });
 });
