@@ -154,6 +154,7 @@ export function ManagedAuthPanel(props: {
     }
   }
 
+  const formInteractionBusy = busy || resendBusy || socialBusy !== null;
   const resendVerificationControl = verificationEmail ? (
     <div className="mt-2">
       <Button
@@ -212,6 +213,7 @@ export function ManagedAuthPanel(props: {
               type="button"
               size="sm"
               variant={mode === "signin" ? "secondary" : "ghost"}
+              disabled={formInteractionBusy}
               onClick={() => selectMode("signin")}
             >
               Sign in
@@ -220,6 +222,7 @@ export function ManagedAuthPanel(props: {
               type="button"
               size="sm"
               variant={mode === "signup" ? "secondary" : "ghost"}
+              disabled={formInteractionBusy}
               onClick={() => selectMode("signup")}
             >
               Sign up
@@ -243,6 +246,7 @@ export function ManagedAuthPanel(props: {
             <Input
               id="managed-auth-name"
               value={name}
+              disabled={formInteractionBusy}
               onChange={(event) => updateField("name", event.target.value)}
               autoComplete="name"
               className="mt-2"
@@ -266,6 +270,7 @@ export function ManagedAuthPanel(props: {
             id="managed-auth-email"
             type="email"
             value={email}
+            disabled={formInteractionBusy}
             onChange={(event) => updateField("email", event.target.value)}
             autoComplete="email"
             className="mt-2"
@@ -289,6 +294,7 @@ export function ManagedAuthPanel(props: {
             id="managed-auth-password"
             type="password"
             value={password}
+            disabled={formInteractionBusy}
             onChange={(event) => updateField("password", event.target.value)}
             autoComplete={mode === "signin" ? "current-password" : "new-password"}
             className="mt-2"
@@ -318,6 +324,7 @@ export function ManagedAuthPanel(props: {
                   type="button"
                   variant="ghost"
                   size="sm"
+                  disabled={formInteractionBusy}
                   onClick={() => selectMode(formActionMode)}
                 >
                   {formActionMode === "signin" ? "Sign in" : "Sign up"}
@@ -339,7 +346,7 @@ export function ManagedAuthPanel(props: {
             {resendVerificationControl}
           </Notice>
         ) : null}
-        <Button type="submit" className="mt-4 w-full" disabled={busy || socialBusy !== null}>
+        <Button type="submit" className="mt-4 w-full" disabled={formInteractionBusy}>
           {busy ? (
             <Loader2Icon className="size-4 animate-spin" />
           ) : (
