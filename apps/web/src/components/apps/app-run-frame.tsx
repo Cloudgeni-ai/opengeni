@@ -1,4 +1,9 @@
-import { createOgAppHostBridge, isOgJsonValue, type OgAppHostBridge } from "@opengeni/app-sdk";
+import {
+  createOgAppHostBridge,
+  isOgJsonValue,
+  OG_APP_BRIDGE_PROTOCOL,
+  type OgAppHostBridge,
+} from "@opengeni/app-sdk";
 import type {
   AppRuntimeCatalogResponse,
   CreateAppLaunchResponse,
@@ -10,9 +15,66 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 
-export const APP_RUN_IFRAME_SANDBOX = "allow-scripts";
+export const APP_RUN_BROKER_IFRAME_SANDBOX = "allow-scripts allow-same-origin";
+export const APP_RUN_INNER_IFRAME_SANDBOX = "allow-scripts allow-same-origin";
 export const APP_RUN_IFRAME_ALLOW =
   "camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'";
+
+function htmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function scriptJson(value: string): string {
+  return JSON.stringify(value)
+    .replaceAll("<", "\\u003c")
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029");
+}
+
+export function appRunBrokerDocument(
+  launchUrl: string,
+  appOrigin: string,
+  productOrigin: string,
+): string | null {
+  const safeUrl = safeAppLaunchUrl(launchUrl, appOrigin, productOrigin);
+  if (!safeUrl) return null;
+  const declaredAppOrigin = new URL(appOrigin).origin;
+  const declaredProductOrigin = new URL(productOrigin).origin;
+  const html = `<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src ${htmlAttribute(declaredAppOrigin)}; base-uri 'none'; form-action 'none'">
+<style>html,body,iframe{border:0;height:100%;margin:0;padding:0;width:100%}</style>
+<iframe id="app" src="${htmlAttribute(safeUrl)}" sandbox="${APP_RUN_INNER_IFRAME_SANDBOX}" allow="${htmlAttribute(APP_RUN_IFRAME_ALLOW)}" referrerpolicy="no-referrer" credentialless></iframe>
+<script>
+const protocol=${scriptJson(OG_APP_BRIDGE_PROTOCOL)};
+const expectedParentOrigin=${scriptJson(declaredProductOrigin)};
+const expectedAppOrigin=${scriptJson(declaredAppOrigin)};
+const frame=document.getElementById("app");
+let connected=false;
+let loaded=false;
+let pending=null;
+function deliver(){
+  if(!loaded||!pending||!frame.contentWindow)return;
+  const next=pending;
+  pending=null;
+  frame.contentWindow.postMessage(next.message,expectedAppOrigin,[next.port]);
+}
+frame.addEventListener("load",()=>{loaded=true;deliver()},{once:true});
+window.addEventListener("message",event=>{
+  const message=event.data;
+  if(connected||event.source!==parent||event.origin!==expectedParentOrigin||!message||message.protocol!==protocol||message.kind!=="connect"||event.ports.length!==1)return;
+  connected=true;
+  pending={message,port:event.ports[0]};
+  deliver();
+});
+</script>`;
+  return html;
+}
 
 export function safeAppLaunchUrl(
   launchUrl: string,
@@ -64,6 +126,10 @@ export function AppRunFrame({
     () => safeAppLaunchUrl(launch.launchUrl, launch.appOrigin, productOrigin),
     [launch.appOrigin, launch.launchUrl, productOrigin],
   );
+  const brokerDocument = useMemo(
+    () => appRunBrokerDocument(launch.launchUrl, launch.appOrigin, productOrigin),
+    [launch.appOrigin, launch.launchUrl, productOrigin],
+  );
   const toolByCapability = useMemo(
     () => new Map(catalog.tools.map((tool) => [tool.programmaticPath.join("."), tool] as const)),
     [catalog.tools],
@@ -79,13 +145,13 @@ export function AppRunFrame({
     bridgeRef.current?.close();
     bridgeRef.current = null;
     const targetWindow = iframeRef.current?.contentWindow;
-    if (!targetWindow || !safeUrl || !runtimeIdentityMatches) return;
+    if (!targetWindow || !brokerDocument || !runtimeIdentityMatches) return;
     setBridgeState("connecting");
     try {
       const bridge = createOgAppHostBridge({
         targetWindow,
         token: launch.nonce,
-        delivery: { kind: "opaque_sandbox" },
+        delivery: { kind: "exact_origin", origin: new URL(productOrigin).origin },
         context: {
           workspaceId,
           appId: app.id,
@@ -151,7 +217,8 @@ export function AppRunFrame({
     client,
     launch,
     runtimeIdentityMatches,
-    safeUrl,
+    brokerDocument,
+    productOrigin,
     toolByCapability,
     workspaceId,
   ]);
@@ -172,7 +239,7 @@ export function AppRunFrame({
     );
   }
 
-  if (!safeUrl) {
+  if (!safeUrl || !brokerDocument) {
     return (
       <div role="alert" className="rounded-lg border border-status-failed/40 p-4 text-sm text-fg">
         OpenGeni refused the app launch URL because it was not HTTPS, same-origin HTTP, or did not
@@ -214,10 +281,9 @@ export function AppRunFrame({
       <iframe
         key={reloadKey}
         ref={iframeRef}
-        src={safeUrl}
+        srcDoc={brokerDocument}
         title={`${app.title} application`}
-        sandbox={APP_RUN_IFRAME_SANDBOX}
-        allow={APP_RUN_IFRAME_ALLOW}
+        sandbox={APP_RUN_BROKER_IFRAME_SANDBOX}
         referrerPolicy="no-referrer"
         className="min-h-0 flex-1 border-0 bg-white"
         onLoad={() => {

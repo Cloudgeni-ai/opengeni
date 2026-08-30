@@ -6,7 +6,7 @@ import {
   createRootRoute,
   createRouter,
 } from "@tanstack/react-router";
-import { act, type ReactNode } from "react";
+import { act, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 import type { AppRelease, WorkspaceApp, WorkspaceAppDetailResponse } from "@opengeni/sdk/apps";
@@ -117,7 +117,13 @@ async function render(node: ReactNode) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  const route = createRootRoute({ component: () => node });
+  let updateNode: ((next: ReactNode) => void) | null = null;
+  function Harness() {
+    const [current, setCurrent] = useState(node);
+    updateNode = (next) => setCurrent(next);
+    return current;
+  }
+  const route = createRootRoute({ component: Harness });
   const router = createRouter({
     routeTree: route,
     history: createMemoryHistory({ initialEntries: ["/"] }),
@@ -127,11 +133,25 @@ async function render(node: ReactNode) {
   await settle();
   return {
     container,
+    rerender: async (next: ReactNode) => {
+      await act(async () => updateNode?.(next));
+      await settle();
+    },
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
     },
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 async function setInputValue(element: HTMLInputElement, value: string): Promise<void> {
@@ -164,6 +184,47 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
 }
 
 describe("Apps management product surface", () => {
+  test("ignores a superseded workspace inventory response", async () => {
+    const otherWorkspaceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const first = deferred<{
+      apps: WorkspaceApp[];
+      nextCursor: null;
+      truncated: false;
+    }>();
+    const second = deferred<{
+      apps: WorkspaceApp[];
+      nextCursor: null;
+      truncated: false;
+    }>();
+    const listApps = mock(async (workspaceId: string) =>
+      workspaceId === WORKSPACE_ID ? first.promise : second.promise,
+    );
+    const client = { listApps } as never;
+    const rendered = await render(<AppsRoute workspaceId={WORKSPACE_ID} client={client} />);
+
+    try {
+      await rendered.rerender(<AppsRoute workspaceId={otherWorkspaceId} client={client} />);
+      second.resolve({
+        apps: [app("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "Current workspace app")],
+        nextCursor: null,
+        truncated: false,
+      });
+      await settle();
+      expect(rendered.container.textContent).toContain("Current workspace app");
+
+      first.resolve({
+        apps: [app(APP_ID, "Stale workspace app")],
+        nextCursor: null,
+        truncated: false,
+      });
+      await settle();
+      expect(rendered.container.textContent).toContain("Current workspace app");
+      expect(rendered.container.textContent).not.toContain("Stale workspace app");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("paginates the inventory and inserts a newly created draft", async () => {
     const first = app(APP_ID, "First app");
     const second = app("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "Second app");
@@ -348,6 +409,75 @@ describe("Apps management product surface", () => {
       expect(rendered.container.textContent).not.toContain("Run app");
       expect(rendered.container.querySelector('form[aria-label="Edit Status console"]')).toBeNull();
       expect(rendered.container.textContent).toContain("This app is archived");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("runs the active preview release named by the route", async () => {
+    const current = detail();
+    current.previews = [
+      {
+        id: PREVIEW_ID,
+        accountId: ACCOUNT_ID,
+        workspaceId: WORKSPACE_ID,
+        appId: APP_ID,
+        releaseId: RELEASE_1_ID,
+        status: "active",
+        createdBySubjectId: "subject-1",
+        createdAt: NOW,
+        expiresAt: "2099-08-30T13:00:00.000Z",
+        revokedAt: null,
+      },
+    ];
+    const getRuntimeCatalog = mock(
+      async (_workspaceId: string, _appId: string, _releaseId: string) => ({
+        appId: APP_ID,
+        releaseId: RELEASE_1_ID,
+        toolPolicyRevisionId: POLICY_ID,
+        catalogDigest: SHA256,
+        tools: [],
+      }),
+    );
+    const createLaunch = mock(
+      async (
+        _workspaceId: string,
+        _appId: string,
+        _request: { previewId?: string; releaseId?: string },
+      ) => ({
+        launchId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        appId: APP_ID,
+        releaseId: RELEASE_1_ID,
+        authorityGeneration: "actor:7",
+        launchUrl: "https://apps.example.test/.opengeni/launch/token/index.html",
+        appOrigin: "https://apps.example.test",
+        nonce: "n".repeat(32),
+        expiresAt: "2099-08-30T13:15:00.000Z",
+      }),
+    );
+    const rendered = await render(
+      <AppsRoute
+        workspaceId={WORKSPACE_ID}
+        appId={APP_ID}
+        previewId={PREVIEW_ID}
+        run
+        client={
+          {
+            getApp: async () => current,
+            getRuntimeCatalog,
+            createLaunch,
+          } as never
+        }
+      />,
+    );
+
+    try {
+      expect(getRuntimeCatalog).toHaveBeenCalledTimes(1);
+      expect(getRuntimeCatalog.mock.calls[0]?.[2]).toBe(RELEASE_1_ID);
+      await act(async () => button(rendered.container, "Start app").click());
+      await settle();
+      expect(createLaunch).toHaveBeenCalledTimes(1);
+      expect(createLaunch.mock.calls[0]?.[2]).toEqual({ previewId: PREVIEW_ID });
     } finally {
       await rendered.unmount();
     }

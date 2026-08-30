@@ -17,7 +17,7 @@ import {
   PlusIcon,
   ShieldCheckIcon,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import { AppCapabilityConfirmation } from "@/components/apps/app-capability-confirmation";
 import type { AppsManagementClient } from "@/components/apps/app-management";
@@ -86,22 +86,35 @@ function AppsUnavailable() {
 export function AppsRoute({
   workspaceId,
   appId,
+  previewId,
   run = false,
   client: clientOverride,
 }: {
   workspaceId: string;
   appId?: string;
+  previewId?: string;
   run?: boolean;
   client?: AppsProductClient;
 }) {
   const injectedClient = useAppsControlClient();
   const client = clientOverride ?? injectedClient;
   if (!client) return <AppsUnavailable />;
-  if (!appId) return <AppsListRoute workspaceId={workspaceId} client={client} />;
+  if (!appId) return <AppsListRoute key={workspaceId} workspaceId={workspaceId} client={client} />;
   return run ? (
-    <AppRunRoute workspaceId={workspaceId} appId={appId} client={client} />
+    <AppRunRoute
+      key={`${workspaceId}:${appId}:${previewId ?? "published"}`}
+      workspaceId={workspaceId}
+      appId={appId}
+      previewId={previewId}
+      client={client}
+    />
   ) : (
-    <AppDetailRoute workspaceId={workspaceId} appId={appId} client={client} />
+    <AppDetailRoute
+      key={`${workspaceId}:${appId}`}
+      workspaceId={workspaceId}
+      appId={appId}
+      client={client}
+    />
   );
 }
 
@@ -118,10 +131,15 @@ function AppsListRoute({
   const [loadingMore, setLoadingMore] = useState(false);
   const [paginationError, setPaginationError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const loadGeneration = useRef(0);
   const load = useCallback(
     async (signal?: AbortSignal, cursor?: string) => {
+      const generation = ++loadGeneration.current;
       if (cursor) setLoadingMore(true);
-      else setState({ status: "loading" });
+      else {
+        setLoadingMore(false);
+        setState({ status: "loading" });
+      }
       setPaginationError(null);
       try {
         const page = await client.listApps(
@@ -129,6 +147,7 @@ function AppsListRoute({
           { limit: 50, ...(cursor ? { cursor } : {}) },
           { signal },
         );
+        if (signal?.aborted || generation !== loadGeneration.current) return;
         setState((current) => {
           if (!cursor || current.status !== "ready") return { status: "ready", data: page };
           const apps = new Map(current.data.apps.map((app) => [app.id, app]));
@@ -143,7 +162,7 @@ function AppsListRoute({
           };
         });
       } catch (error) {
-        if (!signal?.aborted) {
+        if (!signal?.aborted && generation === loadGeneration.current) {
           if (cursor) {
             setPaginationError(asError(error).message);
           } else {
@@ -151,7 +170,7 @@ function AppsListRoute({
           }
         }
       } finally {
-        if (cursor) setLoadingMore(false);
+        if (cursor && generation === loadGeneration.current) setLoadingMore(false);
       }
     },
     [client, workspaceId],
@@ -291,16 +310,22 @@ function useAppDetail(workspaceId: string, appId: string, client: AppsProductCli
   const [state, setState] = useState<LoadState<WorkspaceAppDetailResponse>>({
     status: "loading",
   });
+  const loadGeneration = useRef(0);
   const load = useCallback(
     async (signal?: AbortSignal) => {
+      const generation = ++loadGeneration.current;
       setState({ status: "loading" });
       try {
+        const data = await client.getApp(workspaceId, appId, { signal });
+        if (signal?.aborted || generation !== loadGeneration.current) return;
         setState({
           status: "ready",
-          data: await client.getApp(workspaceId, appId, { signal }),
+          data,
         });
       } catch (error) {
-        if (!signal?.aborted) setState({ status: "error", error: asError(error) });
+        if (!signal?.aborted && generation === loadGeneration.current) {
+          setState({ status: "error", error: asError(error) });
+        }
       }
     },
     [appId, client, workspaceId],
@@ -434,10 +459,12 @@ function AppDetailRoute({
 function AppRunRoute({
   workspaceId,
   appId,
+  previewId,
   client,
 }: {
   workspaceId: string;
   appId: string;
+  previewId?: string;
   client: AppsProductClient;
 }) {
   const { state, load } = useAppDetail(workspaceId, appId, client);
@@ -449,13 +476,28 @@ function AppRunRoute({
   const [launchError, setLaunchError] = useState<Error | null>(null);
   const [busy, setBusy] = useState(false);
   const [catalogRevision, setCatalogRevision] = useState(0);
+  const catalogGeneration = useRef(0);
+  const launchGeneration = useRef(0);
+  const preview =
+    state.status === "ready" && previewId
+      ? (state.data.previews.find(
+          (candidate) =>
+            candidate.id === previewId &&
+            candidate.status === "active" &&
+            new Date(candidate.expiresAt).getTime() > Date.now(),
+        ) ?? null)
+      : null;
   const release =
     state.status === "ready" && state.data.app.status === "active"
-      ? publishedRelease(state.data)
+      ? previewId
+        ? (state.data.releases.find((candidate) => candidate.id === preview?.releaseId) ?? null)
+        : publishedRelease(state.data)
       : null;
   const releaseId = release?.id ?? null;
+  const launchTargetId = preview?.id ?? releaseId;
 
   useEffect(() => {
+    const generation = ++catalogGeneration.current;
     if (!releaseId) {
       setCatalogState(null);
       return;
@@ -466,34 +508,44 @@ function AppRunRoute({
       .getRuntimeCatalog(workspaceId, appId, releaseId, {
         signal: abort.signal,
       })
-      .then((data) => setCatalogState({ status: "ready", data }))
+      .then((data) => {
+        if (!abort.signal.aborted && generation === catalogGeneration.current) {
+          setCatalogState({ status: "ready", data });
+        }
+      })
       .catch((error) => {
-        if (!abort.signal.aborted) setCatalogState({ status: "error", error: asError(error) });
+        if (!abort.signal.aborted && generation === catalogGeneration.current) {
+          setCatalogState({ status: "error", error: asError(error) });
+        }
       });
     return () => abort.abort();
   }, [appId, catalogRevision, client, releaseId, workspaceId]);
 
   useEffect(() => {
+    launchGeneration.current += 1;
     setConfirmed(false);
     setLaunch(null);
     setLaunchError(null);
-  }, [releaseId]);
+    setBusy(false);
+  }, [launchTargetId]);
 
   const start = async () => {
     if (!release || catalogState?.status !== "ready") return;
     if (catalogState.data.tools.length > 0 && !confirmed) return;
+    const generation = launchGeneration.current;
     setBusy(true);
     setLaunchError(null);
     try {
-      setLaunch(
-        await client.createLaunch(workspaceId, appId, {
-          releaseId: release.id,
-        }),
+      const created = await client.createLaunch(
+        workspaceId,
+        appId,
+        preview ? { previewId: preview.id } : { releaseId: release.id },
       );
+      if (generation === launchGeneration.current) setLaunch(created);
     } catch (error) {
-      setLaunchError(asError(error));
+      if (generation === launchGeneration.current) setLaunchError(asError(error));
     } finally {
-      setBusy(false);
+      if (generation === launchGeneration.current) setBusy(false);
     }
   };
 
@@ -516,7 +568,11 @@ function AppRunRoute({
     return (
       <ContentPage width="standard">
         <BackToApps workspaceId={workspaceId} />
-        <EmptyState>This app has no published release to run.</EmptyState>
+        <EmptyState>
+          {previewId
+            ? "This App preview is unavailable, expired, or no longer active."
+            : "This app has no published release to run."}
+        </EmptyState>
       </ContentPage>
     );
   }

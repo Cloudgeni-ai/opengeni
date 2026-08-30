@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -338,6 +338,22 @@ describe("og-app CLI", () => {
     expect(await runOgAppCli(["pack", "status"], output.io)).toBe(0);
     expect(new Uint8Array(await readFile(archivePath))).toEqual(firstArchive);
     expect(output.stderr).toEqual([]);
+  });
+
+  test("rejects oversized source files before reading them into memory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opengeni-app-pack-limit-"));
+    temporaryRoots.push(root);
+    const output = io(root);
+    expect(await runOgAppCli(["init", "status", "--name", "Status console"], output.io)).toBe(0);
+    const oversizedPath = join(root, "status", "oversized.bin");
+    await writeFile(oversizedPath, "");
+    await truncate(oversizedPath, 32 * 1024 * 1024 + 1);
+    const archivePath = join(root, "status.ogapp.tar");
+
+    await expect(
+      runOgAppCli(["pack", "status", "--output", archivePath], output.io),
+    ).rejects.toThrow("33554432-byte limit");
+    await expect(stat(archivePath)).rejects.toThrow();
   });
 
   test("deploys and resumes one checked App release without persisting credentials or signed URLs", async () => {

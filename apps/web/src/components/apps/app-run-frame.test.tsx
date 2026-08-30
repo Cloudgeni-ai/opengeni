@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  APP_RUN_BROKER_IFRAME_SANDBOX,
   APP_RUN_IFRAME_ALLOW,
-  APP_RUN_IFRAME_SANDBOX,
+  APP_RUN_INNER_IFRAME_SANDBOX,
   AppRunFrame,
+  appRunBrokerDocument,
   safeAppLaunchUrl,
 } from "./app-run-frame";
 
@@ -40,13 +42,28 @@ describe("OpenGeni App run frame security", () => {
     ).toBeNull();
   });
 
-  test("omits parent-origin, popup, and top-navigation authority", () => {
-    expect(APP_RUN_IFRAME_SANDBOX).toContain("allow-scripts");
-    expect(APP_RUN_IFRAME_SANDBOX).not.toContain("allow-forms");
-    expect(APP_RUN_IFRAME_SANDBOX).not.toContain("allow-downloads");
-    expect(APP_RUN_IFRAME_SANDBOX).not.toContain("allow-same-origin");
-    expect(APP_RUN_IFRAME_SANDBOX).not.toContain("allow-popups");
-    expect(APP_RUN_IFRAME_SANDBOX).not.toContain("allow-top-navigation");
+  test("uses a stable same-origin broker and an exact-origin inner sandbox", () => {
+    expect(APP_RUN_INNER_IFRAME_SANDBOX).toContain("allow-scripts");
+    expect(APP_RUN_INNER_IFRAME_SANDBOX).toContain("allow-same-origin");
+    expect(APP_RUN_INNER_IFRAME_SANDBOX).not.toContain("allow-forms");
+    expect(APP_RUN_INNER_IFRAME_SANDBOX).not.toContain("allow-downloads");
+    expect(APP_RUN_INNER_IFRAME_SANDBOX).not.toContain("allow-popups");
+    expect(APP_RUN_INNER_IFRAME_SANDBOX).not.toContain("allow-top-navigation");
+    const brokerHtml = appRunBrokerDocument(
+      "https://apps.example.test/launch/1",
+      "https://apps.example.test",
+      "https://app.opengeni.ai",
+    );
+    expect(brokerHtml).not.toBeNull();
+    expect(brokerHtml).toContain('src="https://apps.example.test/launch/1"');
+    expect(brokerHtml).toContain(`sandbox="${APP_RUN_INNER_IFRAME_SANDBOX}"`);
+    expect(brokerHtml).toContain('const expectedParentOrigin="https://app.opengeni.ai"');
+    expect(brokerHtml).toContain('const expectedAppOrigin="https://apps.example.test"');
+    expect(brokerHtml).toContain(
+      "frame.contentWindow.postMessage(next.message,expectedAppOrigin,[next.port])",
+    );
+    expect(brokerHtml).toContain("event.source!==parent||event.origin!==expectedParentOrigin");
+    expect(brokerHtml).toContain('frame.addEventListener("load"');
     const markup = renderToStaticMarkup(
       <AppRunFrame
         workspaceId="workspace-1"
@@ -88,12 +105,24 @@ describe("OpenGeni App run frame security", () => {
         onStop={() => undefined}
       />,
     );
-    expect(markup).toContain(`sandbox="${APP_RUN_IFRAME_SANDBOX}"`);
-    expect(markup).toContain('allow="camera');
+    const iframeMarkup = markup.slice(markup.indexOf("<iframe"));
+    expect(iframeMarkup).toContain('srcDoc="&lt;!doctype html&gt;');
+    expect(iframeMarkup).toContain(` sandbox="${APP_RUN_BROKER_IFRAME_SANDBOX}"`);
+    expect(iframeMarkup).not.toContain(' allow="');
     expect(APP_RUN_IFRAME_ALLOW).toContain("clipboard-read 'none'");
     expect(markup).toContain('referrerPolicy="no-referrer"');
     expect(markup).toContain('aria-label="Stop app"');
     expect(markup).toContain('aria-label="Reload app"');
+  });
+
+  test("rejects a broker document whose launch origin does not match the declared App origin", () => {
+    expect(
+      appRunBrokerDocument(
+        "https://attacker.example.test/launch/1",
+        "https://apps.example.test",
+        "https://app.opengeni.ai",
+      ),
+    ).toBeNull();
   });
 
   test("fails closed when launch and catalog identities disagree", () => {

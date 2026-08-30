@@ -330,7 +330,9 @@ export function appHostSecurityHeaders(frameAncestors: readonly string[]): Reado
     "font-src 'self' data:",
     "media-src 'self' blob:",
     "connect-src 'none'",
-    "worker-src 'self' blob:",
+    // Same-origin workers could register a Service Worker that survives the
+    // one-time launch document. Blob workers remain available for in-page work.
+    "worker-src blob:",
     "manifest-src 'self'",
   ].join("; ");
   return new Headers({

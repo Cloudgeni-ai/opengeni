@@ -186,13 +186,13 @@ CREATE INDEX app_source_revisions_app_created_idx
 ALTER TABLE app_source_revisions
   ADD CONSTRAINT app_source_revisions_source_session_fk
     FOREIGN KEY (workspace_id, source_session_id)
-    REFERENCES sessions(workspace_id, id) ON DELETE RESTRICT,
+    REFERENCES sessions(workspace_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
   ADD CONSTRAINT app_source_revisions_source_turn_fk
     FOREIGN KEY (workspace_id, source_turn_id)
-    REFERENCES session_turns(workspace_id, id) ON DELETE RESTRICT,
+    REFERENCES session_turns(workspace_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
   ADD CONSTRAINT app_source_revisions_source_attempt_fk
     FOREIGN KEY (workspace_id, source_attempt_id)
-    REFERENCES session_turn_attempts(workspace_id, id) ON DELETE RESTRICT;
+    REFERENCES session_turn_attempts(workspace_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE app_tool_policy_revisions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -243,10 +243,12 @@ CREATE TABLE app_builds (
   CONSTRAINT app_builds_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT app_builds_source_revision_fk FOREIGN KEY (workspace_id, app_id, source_revision_id)
-    REFERENCES app_source_revisions(workspace_id, app_id, id) ON DELETE RESTRICT,
+    REFERENCES app_source_revisions(workspace_id, app_id, id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT app_builds_tool_policy_revision_fk
     FOREIGN KEY (workspace_id, app_id, tool_policy_revision_id)
-    REFERENCES app_tool_policy_revisions(workspace_id, app_id, id) ON DELETE RESTRICT,
+    REFERENCES app_tool_policy_revisions(workspace_id, app_id, id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT app_builds_workspace_id_uq UNIQUE (workspace_id, id),
   CONSTRAINT app_builds_workspace_app_id_uq UNIQUE (workspace_id, app_id, id),
   CONSTRAINT app_builds_release_identity_uq
@@ -359,7 +361,7 @@ CREATE TABLE app_releases (
   CONSTRAINT app_releases_build_fk
     FOREIGN KEY (workspace_id, app_id, build_id, source_revision_id, tool_policy_revision_id)
     REFERENCES app_builds(workspace_id, app_id, id, source_revision_id, tool_policy_revision_id)
-    ON DELETE RESTRICT,
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT app_releases_workspace_id_uq UNIQUE (workspace_id, id),
   CONSTRAINT app_releases_workspace_app_id_uq UNIQUE (workspace_id, app_id, id),
   CONSTRAINT app_releases_app_revision_uq UNIQUE (workspace_id, app_id, revision),
@@ -440,9 +442,11 @@ CREATE TABLE app_publications (
   CONSTRAINT app_publications_workspace_account_fk FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT app_publications_release_fk FOREIGN KEY (workspace_id, app_id, release_id)
-    REFERENCES app_releases(workspace_id, app_id, id) ON DELETE RESTRICT,
+    REFERENCES app_releases(workspace_id, app_id, id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT app_publications_previous_release_fk FOREIGN KEY (workspace_id, app_id, previous_release_id)
-    REFERENCES app_releases(workspace_id, app_id, id) ON DELETE RESTRICT,
+    REFERENCES app_releases(workspace_id, app_id, id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT app_publications_workspace_id_uq UNIQUE (workspace_id, id),
   CONSTRAINT app_publications_workspace_target_id_uq UNIQUE (workspace_id, app_id, release_id, id),
   CONSTRAINT app_publications_status_chk CHECK (status IN ('active', 'retired')),
@@ -650,6 +654,8 @@ CREATE TABLE opengeni_private.app_host_routes (
   expires_at timestamptz NOT NULL,
   CONSTRAINT app_host_routes_pk PRIMARY KEY (hostname, nonce_sha256),
   CONSTRAINT app_host_routes_launch_uq UNIQUE (launch_id),
+  CONSTRAINT app_host_routes_launch_fk FOREIGN KEY (launch_id)
+    REFERENCES app_launches(id) ON DELETE CASCADE,
   CONSTRAINT app_host_routes_target_chk CHECK (
     (preview_id IS NOT NULL AND publication_id IS NULL)
     OR (preview_id IS NULL AND publication_id IS NOT NULL)
@@ -703,8 +709,16 @@ RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
 AS $body$
+DECLARE workspace_missing boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
+    IF pg_catalog.pg_trigger_depth() > 1 THEN
+      EXECUTE pg_catalog.format(
+        'SELECT NOT EXISTS (SELECT 1 FROM %I.workspaces WHERE id = $1)',
+        TG_TABLE_SCHEMA
+      ) INTO workspace_missing USING OLD.workspace_id;
+      IF workspace_missing THEN RETURN OLD; END IF;
+    END IF;
     RAISE EXCEPTION 'Immutable App history rows cannot be deleted' USING ERRCODE = '55000';
   END IF;
   IF TG_TABLE_NAME IN ('app_tool_policy_revisions', 'app_releases') THEN
@@ -1600,6 +1614,10 @@ BEGIN
       END IF;
       RETURN jsonb_build_object('replayed', true, 'toolCall', to_jsonb(call_row));
     END IF;
+    PERFORM 1 FROM apps
+    WHERE workspace_id = workspace_id_value AND id = app_id_value
+    FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'App not found' USING ERRCODE = 'P0002'; END IF;
     SELECT * INTO launch_row FROM app_launches
     WHERE workspace_id = workspace_id_value AND id = launch_id_value
       AND app_id = app_id_value AND release_id = release_id_value
@@ -1608,7 +1626,8 @@ BEGIN
       AND created_by_subject_id = actor_subject_id_value
       AND authority_hash IS NOT DISTINCT FROM NULLIF(p_input->>'authorityHash', '')
       AND authority_epoch IS NOT DISTINCT FROM NULLIF(p_input->>'authorityEpoch', '')
-      AND authority_generation = p_input->>'authorityGeneration';
+      AND authority_generation = p_input->>'authorityGeneration'
+    FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'Active App launch not found' USING ERRCODE = 'P0002'; END IF;
     SELECT app_policy.* INTO policy_row
     FROM app_releases app_release

@@ -71,6 +71,8 @@ describe("dedicated Apps byte host", () => {
     );
     expect(response.headers.get("content-security-policy")).toContain("script-src 'self'");
     expect(response.headers.get("content-security-policy")).toContain("connect-src 'none'");
+    expect(response.headers.get("content-security-policy")).toContain("worker-src blob:");
+    expect(response.headers.get("content-security-policy")).not.toContain("worker-src 'self'");
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
     expect(response.headers.get("strict-transport-security")).toBe("max-age=31536000");
     expect(response.headers.get("permissions-policy")).toContain("camera=()");

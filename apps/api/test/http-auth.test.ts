@@ -146,4 +146,27 @@ describe("configured deployment perimeter authentication", () => {
     ).toBe(401);
     expect((await app.request("/v1/webhooks/pr-review/github")).status).toBe(401);
   });
+
+  test("admits only the independently authenticated App Host resolver method and path", async () => {
+    const app = new Hono();
+    app.use(
+      "*",
+      requireAccessKey(
+        testSettings({
+          productAccessMode: "configured",
+          authRequired: true,
+          accessKey,
+        }),
+      ),
+    );
+    app.all("*", (context) => context.json({ ok: true }));
+
+    expect((await app.request("/internal/apps/resolve-launch", { method: "POST" })).status).toBe(
+      200,
+    );
+    expect((await app.request("/internal/apps/resolve-launch")).status).toBe(401);
+    expect(
+      (await app.request("/internal/apps/resolve-launch/extra", { method: "POST" })).status,
+    ).toBe(401);
+  });
 });

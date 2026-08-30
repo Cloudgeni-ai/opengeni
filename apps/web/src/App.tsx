@@ -415,6 +415,10 @@ const workspaceAppDetailRoute = createRoute({
 const workspaceAppRunRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "apps/$appId/run",
+  validateSearch: (search: Record<string, unknown>): { previewId?: string } =>
+    typeof search.previewId === "string" && SCHEDULES_SEARCH_UUID.test(search.previewId)
+      ? { previewId: search.previewId }
+      : {},
   component: AppRun,
 });
 const workspaceArtifactsRoute = createRoute({
@@ -724,7 +728,8 @@ function AppDetail() {
 }
 
 function AppRun() {
-  return <LazyAppsRoute {...workspaceAppRunRoute.useParams()} run />;
+  const { previewId } = workspaceAppRunRoute.useSearch();
+  return <LazyAppsRoute {...workspaceAppRunRoute.useParams()} previewId={previewId} run />;
 }
 
 function Artifacts() {

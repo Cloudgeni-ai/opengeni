@@ -102,12 +102,23 @@ Other missing assets return `404` without touching object storage.
 
 Responses include a restrictive CSP, denied Permissions Policy, `nosniff`,
 same-origin resource policy, HSTS, no-referrer, and private no-store/no-transform
-cache policy. The default CSP permits scripts, styles, and workers only from the
-dedicated Apps origin, sets `connect-src 'none'`, and denies forms, objects,
-child frames, and framing unless an operator explicitly configures approved
-frame ancestors. Governed tool calls therefore cross only the reviewed parent
-window bridge; app code cannot connect directly to the control-plane API. The
-origin emits neither cookies nor credentialed CORS headers.
+cache policy. The default CSP permits scripts and styles from the dedicated Apps
+origin and blob-backed workers, but it excludes the Apps origin from
+`worker-src` so a launch cannot retain authority through a same-origin Service
+Worker. It also sets `connect-src 'none'` and denies forms, objects, child
+frames, and framing unless an operator explicitly configures approved frame
+ancestors. Governed tool calls therefore cross only the reviewed parent window
+bridge; app code cannot connect directly to the control-plane API. The origin
+emits neither cookies nor credentialed CORS headers.
+
+The product page embeds a trusted same-origin `srcdoc` broker, which in turn
+embeds the launch URL in an exact-origin inner sandbox. The product transfers
+one MessagePort to the broker using the exact product origin; the broker accepts
+it only from the expected product window and forwards it once to the declared
+App origin. This preserves the configured product origin throughout the frame
+ancestor chain. Navigating the inner frame does not reload the broker or trigger
+a fresh port transfer, and a redirect to another origin cannot receive the
+original exact-origin delivery.
 
 Health endpoints report process health only. `/healthz` and `/readyz` do not
 probe the resolver or object-storage provider, so upstream failures surface as

@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import {
   AppBuildCheckReceipt as AppBuildCheckReceiptSchema,
+  WORKSPACE_APP_BUILD_FILE_MAX_BYTES,
+  WORKSPACE_APP_SOURCE_MAX_BYTES,
+  WORKSPACE_APP_SOURCE_MAX_FILES,
   type AppBuildCheckReceipt,
   type AppSignedUpload,
 } from "@opengeni/contracts/apps";
@@ -117,11 +120,52 @@ function options(args: string[], name: string): string[] {
   return values;
 }
 
+async function readStableRegularFile(
+  absolute: string,
+  info: Awaited<ReturnType<typeof lstat>>,
+): Promise<Uint8Array> {
+  const handle = await open(absolute, "r");
+  try {
+    const openedInfo = await handle.stat();
+    if (
+      !openedInfo.isFile() ||
+      openedInfo.dev !== info.dev ||
+      openedInfo.ino !== info.ino ||
+      openedInfo.size !== info.size
+    ) {
+      throw new Error(`App source changed while reading ${absolute}.`);
+    }
+    const bytes = new Uint8Array(info.size);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const read = await handle.read(bytes, offset, bytes.byteLength - offset, offset);
+      if (read.bytesRead === 0) break;
+      offset += read.bytesRead;
+    }
+    const overflow = new Uint8Array(1);
+    const extra = await handle.read(overflow, 0, 1, info.size);
+    const finalInfo = await handle.stat();
+    if (
+      offset !== bytes.byteLength ||
+      extra.bytesRead !== 0 ||
+      finalInfo.dev !== openedInfo.dev ||
+      finalInfo.ino !== openedInfo.ino ||
+      finalInfo.size !== openedInfo.size
+    ) {
+      throw new Error(`App source changed while reading ${absolute}.`);
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
 async function collectDirectory(
   root: string,
   excludedAbsolutePath?: string,
 ): Promise<PortableAppArchiveEntry[]> {
   const entries: PortableAppArchiveEntry[] = [];
+  let totalBytes = 0;
   async function visit(directory: string): Promise<void> {
     const children = await readdir(directory, { withFileTypes: true });
     children.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
@@ -141,12 +185,26 @@ async function collectDirectory(
         throw new Error(`App source may contain regular files only: ${absolute}.`);
       const info = await lstat(absolute);
       if (!info.isFile()) throw new Error(`App source changed while reading ${absolute}.`);
+      if (entries.length >= WORKSPACE_APP_SOURCE_MAX_FILES) {
+        throw new Error(`App source exceeds the ${WORKSPACE_APP_SOURCE_MAX_FILES}-file limit.`);
+      }
+      if (info.size > WORKSPACE_APP_BUILD_FILE_MAX_BYTES) {
+        throw new Error(
+          `App source file ${absolute} exceeds the ${WORKSPACE_APP_BUILD_FILE_MAX_BYTES}-byte limit.`,
+        );
+      }
+      const nextTotalBytes = totalBytes + info.size;
+      if (nextTotalBytes > WORKSPACE_APP_SOURCE_MAX_BYTES) {
+        throw new Error(`App source exceeds the ${WORKSPACE_APP_SOURCE_MAX_BYTES}-byte limit.`);
+      }
+      const bytes = await readStableRegularFile(absolute, info);
       const path = normalizePortableAppPath(relative(root, absolute).split(sep).join("/"));
       entries.push({
         path,
-        bytes: new Uint8Array(await readFile(absolute)),
+        bytes,
         ...((info.mode & 0o111) !== 0 ? { executable: true } : {}),
       });
+      totalBytes = nextTotalBytes;
     }
   }
   await visit(root);
@@ -182,9 +240,17 @@ async function validate(target: string, io: OgAppCliIo): Promise<number> {
   const absolute = resolve(io.cwd, target);
   const info = await lstat(absolute);
   if (info.isSymbolicLink()) throw new Error("og-app validate refuses symlink targets.");
+  if (!info.isDirectory() && !info.isFile()) {
+    throw new Error("og-app validate accepts directories or regular archive files only.");
+  }
+  if (info.isFile() && info.size > WORKSPACE_APP_SOURCE_MAX_BYTES) {
+    throw new Error(
+      `Portable app archive exceeds the ${WORKSPACE_APP_SOURCE_MAX_BYTES}-byte limit.`,
+    );
+  }
   const result = info.isDirectory()
     ? validatePortableAppEntries(await collectDirectory(absolute))
-    : inspectPortableAppArchive(new Uint8Array(await readFile(absolute)));
+    : inspectPortableAppArchive(await readStableRegularFile(absolute, info));
   io.stdout(
     `${JSON.stringify(
       {

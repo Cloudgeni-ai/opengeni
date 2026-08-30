@@ -190,7 +190,7 @@ export const appBuilds = pgTable(
         appSourceRevisions.appId,
         appSourceRevisions.id,
       ],
-    }).onDelete("restrict"),
+    }).onDelete("no action"),
     toolPolicy: foreignKey({
       name: "app_builds_tool_policy_revision_fk",
       columns: [table.workspaceId, table.appId, table.toolPolicyRevisionId],
@@ -199,7 +199,7 @@ export const appBuilds = pgTable(
         appToolPolicyRevisions.appId,
         appToolPolicyRevisions.id,
       ],
-    }).onDelete("restrict"),
+    }).onDelete("no action"),
     workspaceIdentity: uniqueIndex("app_builds_workspace_id_uq").on(table.workspaceId, table.id),
     workspaceAppIdentity: uniqueIndex("app_builds_workspace_app_id_uq").on(
       table.workspaceId,
@@ -303,7 +303,7 @@ export const appReleases = pgTable(
         appBuilds.sourceRevisionId,
         appBuilds.toolPolicyRevisionId,
       ],
-    }).onDelete("restrict"),
+    }).onDelete("no action"),
     workspaceIdentity: uniqueIndex("app_releases_workspace_id_uq").on(table.workspaceId, table.id),
     workspaceAppIdentity: uniqueIndex("app_releases_workspace_app_id_uq").on(
       table.workspaceId,
@@ -388,7 +388,7 @@ export const appPublications = pgTable(
       name: "app_publications_release_fk",
       columns: [table.workspaceId, table.appId, table.releaseId],
       foreignColumns: [appReleases.workspaceId, appReleases.appId, appReleases.id],
-    }).onDelete("restrict"),
+    }).onDelete("no action"),
     workspaceIdentity: uniqueIndex("app_publications_workspace_id_uq").on(
       table.workspaceId,
       table.id,
