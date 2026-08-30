@@ -186,7 +186,7 @@ describe("managed personal workspace access", () => {
     expect(personalMembershipCount).toEqual({ count: 0 });
 
     accountAdminToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
-    await createApiKey(client.db, {
+    const legacyAccountKey = await createApiKey(client.db, {
       accountId,
       workspaceId: null,
       name: "Account admin without personal access",
@@ -194,10 +194,11 @@ describe("managed personal workspace access", () => {
       keyHash: await sha256Hex(accountAdminToken),
       permissions: ["account:read", "account:admin"],
     });
+    expect(legacyAccountKey.revokedAt).not.toBeNull();
     const denied = await app.request(`http://x/v1/workspaces/${personalWorkspaceId}`, {
       headers: { authorization: `Bearer ${accountAdminToken}` },
     });
-    expect(denied.status).toBe(403);
+    expect(denied.status).toBe(401);
   });
 
   test("organization API keys manage shared workspaces while personal workspaces stay excluded", async () => {
@@ -210,7 +211,10 @@ describe("managed personal workspace access", () => {
 
     const compatibilityOrganizationToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
     const compatibilityWorkspaceToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
-    const compatibilityRows = await shared.admin<Array<{ id: string; credentialKind: string }>>`
+    const compatibilityLegacyToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const compatibilityRows = await shared.admin<
+      Array<{ id: string; credentialKind: string; revokedAt: string | null }>
+    >`
       insert into api_keys (
         account_id, workspace_id, name, prefix, key_hash, permissions
       ) values (
@@ -223,16 +227,26 @@ describe("managed personal workspace access", () => {
         ${compatibilityWorkspaceToken.slice(0, 14)},
         ${await sha256Hex(compatibilityWorkspaceToken)},
         '["workspace:read"]'::jsonb
+      ), (
+        ${accountId}, null, 'Previous-version ambiguous account key',
+        ${compatibilityLegacyToken.slice(0, 14)},
+        ${await sha256Hex(compatibilityLegacyToken)},
+        '["account:read"]'::jsonb
       )
-      returning id, credential_kind as "credentialKind"`;
+      returning id, credential_kind as "credentialKind", revoked_at::text as "revokedAt"`;
     expect(compatibilityRows.map(({ credentialKind }) => credentialKind)).toEqual([
       "organization",
       "workspace",
+      "legacy_account",
     ]);
+    expect(compatibilityRows[0]?.revokedAt).toBeNull();
+    expect(compatibilityRows[1]?.revokedAt).toBeNull();
+    expect(compatibilityRows[2]?.revokedAt).not.toBeNull();
     await shared.admin`
       delete from api_keys
       where id = ${compatibilityRows[0]!.id}
-         or id = ${compatibilityRows[1]!.id}`;
+         or id = ${compatibilityRows[1]!.id}
+         or id = ${compatibilityRows[2]!.id}`;
 
     expect(
       (
@@ -240,15 +254,14 @@ describe("managed personal workspace access", () => {
           headers: { authorization: `Bearer ${accountAdminToken}` },
         })
       ).status,
-    ).toBe(403);
+    ).toBe(401);
     const legacyAccountInventory = await app.request("http://x/v1/workspaces", {
       headers: { authorization: `Bearer ${accountAdminToken}` },
     });
-    expect(legacyAccountInventory.status).toBe(200);
-    expect(await legacyAccountInventory.json()).toEqual([]);
+    expect(legacyAccountInventory.status).toBe(401);
 
     const legacyWideToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
-    await createApiKey(client.db, {
+    const legacyWideKey = await createApiKey(client.db, {
       accountId,
       workspaceId: null,
       name: "Legacy account key with workspace-shaped permissions",
@@ -256,6 +269,7 @@ describe("managed personal workspace access", () => {
       keyHash: await sha256Hex(legacyWideToken),
       permissions: organizationApiKeyPermissions,
     });
+    expect(legacyWideKey.revokedAt).not.toBeNull();
     const legacyWideHeaders = { authorization: `Bearer ${legacyWideToken}` };
     expect(
       (
@@ -263,21 +277,21 @@ describe("managed personal workspace access", () => {
           headers: legacyWideHeaders,
         })
       ).status,
-    ).toBe(403);
+    ).toBe(401);
     expect(
-      await (
+      (
         await app.request("http://x/v1/workspaces", {
           headers: legacyWideHeaders,
         })
-      ).json(),
-    ).toEqual([]);
+      ).status,
+    ).toBe(401);
     expect(
       (
         await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
           headers: legacyWideHeaders,
         })
       ).status,
-    ).toBe(403);
+    ).toBe(401);
 
     const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
     await createApiKey(client.db, {

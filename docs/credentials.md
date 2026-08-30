@@ -41,6 +41,12 @@ Rules that hold across the table:
   product tenants to opaque workspace ids, and proxy browser operations through
   the product backend. See [`product-integration.md`](product-integration.md).
 
+- **Ambiguous legacy account keys are revoked on upgrade.** Migration 0382
+  marks historical null-workspace keys without explicit organization provenance
+  as `legacy_account` and revokes them so a pre-change API instance cannot keep
+  accepting them during a rolling deployment. Reissue the integration through
+  the organization API-key control plane; do not reuse a legacy token.
+
 - **Managed browser slots do not expose provider credentials.** In `dual` and
   `broker`, a safe browser projection names bounded slot display metadata and one
   selected actor. Unselected Better Auth sessions remain server-side; add/re-auth

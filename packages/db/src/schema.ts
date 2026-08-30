@@ -1130,7 +1130,11 @@ export const apiKeys = pgTable(
         and ${table.credentialKind} = 'workspace'
       ) or (
         ${table.workspaceId} is null
-        and ${table.credentialKind} in ('organization', 'legacy_account')
+        and ${table.credentialKind} = 'organization'
+      ) or (
+        ${table.workspaceId} is null
+        and ${table.credentialKind} = 'legacy_account'
+        and ${table.revokedAt} is not null
       )`,
     ),
   }),

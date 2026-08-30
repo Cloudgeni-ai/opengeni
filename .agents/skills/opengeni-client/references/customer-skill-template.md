@@ -40,6 +40,9 @@ kind is `"shared"`. Personal workspaces are excluded and must never be used as
 a default fallback. Persist the returned opaque workspace ID and pass the exact
 product-selected Skills inline in `CreateSessionRequest.skills` for every
 product-created session; there is no organization-wide Skill inheritance.
+Use a key issued by the organization API-key control plane. Do not reuse an
+ambiguous legacy null-workspace token; provenance migrations revoke those keys
+so old and new API instances both fail closed during rollout.
 
 If the selected shape is a workspace API key, configure one pre-provisioned
 workspace ID and never call `ensureWorkspace` or an organization API-key route.

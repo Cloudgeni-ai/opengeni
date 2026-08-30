@@ -11,10 +11,19 @@ ALTER TABLE api_keys
 ALTER TABLE api_keys NO FORCE ROW LEVEL SECURITY;
 
 UPDATE api_keys
-SET credential_kind = CASE
-  WHEN workspace_id IS NOT NULL THEN 'workspace'
-  ELSE 'legacy_account'
-END;
+SET
+  credential_kind = CASE
+    WHEN workspace_id IS NOT NULL THEN 'workspace'
+    ELSE 'legacy_account'
+  END,
+  revoked_at = CASE
+    WHEN workspace_id IS NULL THEN COALESCE(revoked_at, CURRENT_TIMESTAMP)
+    ELSE revoked_at
+  END,
+  updated_at = CASE
+    WHEN workspace_id IS NULL AND revoked_at IS NULL THEN CURRENT_TIMESTAMP
+    ELSE updated_at
+  END;
 
 ALTER TABLE api_keys FORCE ROW LEVEL SECURITY;
 
@@ -37,6 +46,15 @@ BEGIN
     END IF;
   END IF;
 
+  -- Old application versions authorize every active null-workspace row by
+  -- shape alone. Keep ambiguous legacy rows unusable through that old lookup
+  -- path for the entire rolling window; only the exact previous organization
+  -- writer above may create an active null-workspace credential.
+  IF NEW.credential_kind = 'legacy_account' AND NEW.revoked_at IS NULL THEN
+    NEW.revoked_at := CURRENT_TIMESTAMP;
+    NEW.updated_at := CURRENT_TIMESTAMP;
+  END IF;
+
   RETURN NEW;
 END;
 $function$;
@@ -44,7 +62,7 @@ $function$;
 REVOKE ALL ON FUNCTION opengeni_private.normalize_api_key_credential_kind() FROM PUBLIC;
 
 CREATE TRIGGER api_keys_00_normalize_credential_kind
-BEFORE INSERT OR UPDATE OF workspace_id, credential_kind, permissions
+BEFORE INSERT OR UPDATE OF workspace_id, credential_kind, permissions, revoked_at
 ON api_keys
 FOR EACH ROW
 EXECUTE FUNCTION opengeni_private.normalize_api_key_credential_kind();
@@ -57,7 +75,9 @@ ALTER TABLE api_keys
   CHECK (
     (workspace_id IS NOT NULL AND credential_kind = 'workspace')
     OR
-    (workspace_id IS NULL AND credential_kind IN ('organization', 'legacy_account'))
+    (workspace_id IS NULL AND credential_kind = 'organization')
+    OR
+    (workspace_id IS NULL AND credential_kind = 'legacy_account' AND revoked_at IS NOT NULL)
   ) NOT VALID;
 
 ALTER TABLE api_keys
@@ -68,4 +88,4 @@ CREATE INDEX api_keys_organization_account_idx
   WHERE credential_kind = 'organization';
 
 COMMENT ON COLUMN api_keys.credential_kind IS
-  'Persisted API-key provenance. Only organization keys receive organization-wide shared-workspace authority.';
+  'Persisted API-key provenance. Only organization keys receive organization-wide shared-workspace authority; ambiguous legacy account keys are revoked.';

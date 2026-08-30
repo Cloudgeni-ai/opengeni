@@ -82,6 +82,11 @@ Rotate by creating the replacement, switching backend traffic, and then
 revoking the old key. Do not use the legacy workspace-scoped API-key routes for
 a new multi-workspace product integration.
 
+Upgrades that introduce explicit organization-key provenance revoke ambiguous
+historical null-workspace keys. If an integration predates the organization
+API-key control plane, create a new organization key through the route above,
+replace the stored backend secret, and discard the legacy token.
+
 Organization keys have one fixed scope: `account:read`, `workspace:create`,
 `workspace:read`, `workspace:admin`, and `api_keys:manage`. Workspace admin
 implies ordinary workspace operations but not the literal `secrets:read`
