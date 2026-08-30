@@ -15,11 +15,13 @@ import {
 } from "@opengeni/runtime";
 import {
   calculateGatewayReportedCostBreakdown,
+  calculateGatewayReportedProviderCostMicros,
   calculateModelUsageCostBreakdown,
   configuredModelPricingSchedules,
   resolveModelProvider,
   responseSatisfiesLatencyMode,
   OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
   type ModelUsageInput,
   type ModelProviderApi,
   type Settings,
@@ -261,7 +263,6 @@ export async function processModelResponseTerminalEvent(input: {
           : {}),
         usage: responseUsage.usage,
         normalizedUsage,
-        gatewayManaged: input.provider === OPENGENI_GATEWAY_PROVIDER_ID,
         gatewayBilling: responseUsage.gatewayBilling,
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
@@ -406,7 +407,6 @@ export async function processCompactionModelUsageEvent(input: {
           : {}),
         usage: input.usage.usage,
         normalizedUsage,
-        gatewayManaged: input.provider === OPENGENI_GATEWAY_PROVIDER_ID,
         gatewayBilling: input.usage.gatewayBilling,
         sourceKey,
         observability: input.observability,
@@ -590,7 +590,6 @@ export async function recordModelUsageAndDebitCredits(
     externallyBilled: boolean;
     chargesOpenGeniCredits?: boolean;
     countsTowardTokenCap?: boolean;
-    gatewayManaged?: boolean;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
@@ -609,16 +608,31 @@ export async function recordModelUsageAndDebitCredits(
   const totalTokens = sanitizedUsage.totalTokens ?? 0;
   const chargesOpenGeniCredits = input.chargesOpenGeniCredits ?? !input.externallyBilled;
   const countsTowardTokenCap = input.countsTowardTokenCap ?? !input.externallyBilled;
-  const gatewayBilling = input.gatewayManaged ? input.gatewayBilling : undefined;
+  const resolvedGatewayModel = input.gatewayBilling
+    ? resolveModelProvider(settings, input.model)
+    : undefined;
+  const gatewayProviderId = resolvedGatewayModel?.provider.id;
+  const gatewayBilling =
+    gatewayProviderId === OPENGENI_GATEWAY_PROVIDER_ID ||
+    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID
+      ? input.gatewayBilling
+      : undefined;
+  const allowedProviders = resolvedGatewayModel?.model.requestPolicy?.gateway.only;
+  const unpinnedWorkspaceGatewayModel =
+    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID && allowedProviders === undefined;
   if (gatewayBilling) {
-    const allowedProviders = resolveModelProvider(settings, input.model)?.model.requestPolicy
-      ?.gateway.only;
     if (
-      !allowedProviders ||
-      !(allowedProviders as readonly string[]).includes(gatewayBilling.finalProvider)
+      !unpinnedWorkspaceGatewayModel &&
+      (!allowedProviders ||
+        !(allowedProviders as readonly string[]).includes(gatewayBilling.finalProvider))
     ) {
       throw new Error(
         `AI Gateway reported unapproved provider ${gatewayBilling.finalProvider} for ${input.model}`,
+      );
+    }
+    if (unpinnedWorkspaceGatewayModel && chargesOpenGeniCredits) {
+      throw new Error(
+        `Workspace Gateway custom model ${input.model} cannot charge OpenGeni credits without pinned pricing`,
       );
     }
   }
@@ -629,12 +643,19 @@ export async function recordModelUsageAndDebitCredits(
       ? input.model.slice("codex/".length)
       : null;
   const pricingBreakdown = gatewayBilling
-    ? calculateGatewayReportedCostBreakdown(
-        settings,
-        input.model,
-        gatewayBilling.inferenceCostUsd,
-        { inputTokens },
-      )
+    ? unpinnedWorkspaceGatewayModel
+      ? {
+          providerCostMicros: calculateGatewayReportedProviderCostMicros(
+            gatewayBilling.inferenceCostUsd,
+          ),
+          creditCostMicros: 0,
+        }
+      : calculateGatewayReportedCostBreakdown(
+          settings,
+          input.model,
+          gatewayBilling.inferenceCostUsd,
+          { inputTokens },
+        )
     : configuredPricingModel
       ? calculateModelUsageCostBreakdown(settings, configuredPricingModel, sanitizedUsage, {
           latencyMode: input.latencyMode ?? "standard",
@@ -693,6 +714,7 @@ export async function recordModelUsageAndDebitCredits(
       estimatedProviderCostMicros,
       pricingSource,
       normalizedUsage,
+      ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
   }
   const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";

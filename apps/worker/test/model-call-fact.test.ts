@@ -278,7 +278,6 @@ describe("recordAuthoritativeModelCallFact", () => {
       turnAttemptId: "attempt-gateway-incomplete",
       model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
       externallyBilled: false,
-      gatewayManaged: true,
       gatewayBilling: { finalProvider: "baseten", inferenceCostUsd: "0.00000325" },
       usage: { inputTokens: "invalid", outputTokens: 8, totalTokens: 8 },
       sourceKey: "response-gateway-incomplete",

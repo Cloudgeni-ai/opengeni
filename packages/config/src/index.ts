@@ -4995,6 +4995,37 @@ export function calculateGatewayReportedCostMicros(
     .creditCostMicros;
 }
 
+type GatewayReportedCostDecimal = {
+  providerNumerator: bigint;
+  decimalScale: bigint;
+  providerCostMicros: number;
+};
+
+function parseGatewayReportedCostDecimal(inferenceCostUsd: string): GatewayReportedCostDecimal {
+  const match = /^(0|[1-9]\d*)(?:\.(\d{1,18}))?$/.exec(inferenceCostUsd);
+  if (!match) {
+    throw new Error("Invalid AI Gateway inference cost");
+  }
+  const fraction = match[2] ?? "";
+  const decimalDigits = BigInt(`${match[1]}${fraction}`);
+  const decimalScale = 10n ** BigInt(fraction.length);
+  const providerNumerator = decimalDigits * 1_000_000n;
+  const providerCostMicros = (providerNumerator + decimalScale - 1n) / decimalScale;
+  if (providerCostMicros > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("AI Gateway inference cost exceeds the supported billing range");
+  }
+  return {
+    providerNumerator,
+    decimalScale,
+    providerCostMicros: Number(providerCostMicros),
+  };
+}
+
+/** Exact provider-reported Gateway cost without requiring an OpenGeni price schedule. */
+export function calculateGatewayReportedProviderCostMicros(inferenceCostUsd: string): number {
+  return parseGatewayReportedCostDecimal(inferenceCostUsd).providerCostMicros;
+}
+
 export function calculateGatewayReportedCostBreakdown(
   settings: Settings,
   model: string,
@@ -5006,27 +5037,17 @@ export function calculateGatewayReportedCostBreakdown(
     throw new Error(`Missing model pricing for ${model}`);
   }
   const pricing = selectModelPricing(schedule, positiveInt(options?.inputTokens));
-  const match = /^(0|[1-9]\d*)(?:\.(\d{1,18}))?$/.exec(inferenceCostUsd);
-  if (!match) {
-    throw new Error("Invalid AI Gateway inference cost");
-  }
-  const fraction = match[2] ?? "";
-  const decimalDigits = BigInt(`${match[1]}${fraction}`);
-  const decimalScale = 10n ** BigInt(fraction.length);
-  const providerNumerator = decimalDigits * 1_000_000n;
-  const providerMicros = (providerNumerator + decimalScale - 1n) / decimalScale;
+  const { providerNumerator, decimalScale, providerCostMicros } =
+    parseGatewayReportedCostDecimal(inferenceCostUsd);
   const marginBps = BigInt(10_000 + (pricing.marginBps ?? 0));
   const numerator = providerNumerator * marginBps;
   const denominator = decimalScale * 10_000n;
   const creditMicros = (numerator + denominator - 1n) / denominator;
-  if (
-    providerMicros > BigInt(Number.MAX_SAFE_INTEGER) ||
-    creditMicros > BigInt(Number.MAX_SAFE_INTEGER)
-  ) {
+  if (creditMicros > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("AI Gateway inference cost exceeds the supported billing range");
   }
   return {
-    providerCostMicros: Number(providerMicros),
+    providerCostMicros,
     creditCostMicros: Number(creditMicros),
   };
 }

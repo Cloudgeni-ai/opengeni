@@ -125,7 +125,6 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
           turnAttemptId: "attempt-gateway",
           model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
           externallyBilled: false,
-          gatewayManaged: true,
           gatewayBilling: { finalProvider: "baseten", inferenceCostUsd: "0.00000325" },
           usage: {
             inputTokens: 9,
@@ -172,7 +171,6 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
             turnAttemptId: "attempt-gateway-rejected",
             model: OPENGENI_GATEWAY_MODELS.deepseek.productId,
             externallyBilled: false,
-            gatewayManaged: true,
             gatewayBilling: { finalProvider: "unapproved", inferenceCostUsd: "0.01" },
             usage: { inputTokens: 9, outputTokens: 8, totalTokens: 17 },
             sourceKey: "response-gateway-rejected",
@@ -229,7 +227,6 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
           turnAttemptId: "attempt-catalog-gateway",
           model: productId,
           externallyBilled: false,
-          gatewayManaged: true,
           gatewayBilling: { finalProvider: "fireworks", inferenceCostUsd: "0.000001" },
           usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
           sourceKey: "response-catalog-gateway",

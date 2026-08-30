@@ -2,7 +2,12 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
-import type { Settings } from "@opengeni/config";
+import {
+  withWorkspaceGatewayCredential,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  type Settings,
+} from "@opengeni/config";
 import { TurnExecutionPolicyV1, type ResourceRef } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
@@ -1746,6 +1751,109 @@ describe("production model-response usage callback authority", () => {
       );
     } finally {
       recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("settles unpinned workspace Gateway terminal usage as external audit data", async () => {
+    const upstreamModelId = "anthropic/claude-sonnet-4.6";
+    const model = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${upstreamModelId}`;
+    const settings = withWorkspaceGatewayCredential(
+      testSettings({ billingMode: "stripe", usageLimitsMode: "managed" }),
+      "vck_workspace_test",
+      [{ upstreamModelId }],
+    );
+    const event = new RunRawModelStreamEvent({
+      type: "response_done",
+      response: {
+        id: "resp-workspace-gateway",
+        output: [],
+        providerMetadata: {
+          gateway: {
+            routing: { finalProvider: "anthropic" },
+            inferenceCost: "0.00000325",
+          },
+        },
+        usage: { inputTokens: 9, outputTokens: 8, totalTokens: 17 },
+      },
+    } as any);
+    const usageRows: Array<Record<string, unknown>> = [];
+    const facts: Array<Record<string, unknown>> = [];
+    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        usageRows.push(input as unknown as Record<string, unknown>);
+      },
+    );
+    const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(
+      async (_db, input) => {
+        facts.push(input as unknown as Record<string, unknown>);
+        return undefined as never;
+      },
+    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("workspace Gateway usage must not debit OpenGeni credits");
+      },
+    );
+    try {
+      const result = await processModelResponseTerminalEvent({
+        event,
+        state: createModelResponseEventState(),
+        dispatchId: "activity-workspace-gateway",
+        settings,
+        db: {} as any,
+        observability: createObservability(settings, { component: "worker" }),
+        publish: (async (batch: any[]) => ({
+          accepted: true,
+          events: batch.map((entry) => ({
+            ...entry,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })),
+        })) as any,
+        accountId: "acct-1",
+        workspaceId: "ws-1",
+        sessionId: "sess-workspace-gateway",
+        turnId: "turn-workspace-gateway",
+        turnAttemptId: "attempt-workspace-gateway",
+        provider: WORKSPACE_GATEWAY_PROVIDER_ID,
+        providerApi: "responses",
+        model,
+        metricProvider: WORKSPACE_GATEWAY_PROVIDER_ID,
+        externallyBilled: true,
+        chargesOpenGeniCredits: false,
+        countsTowardTokenCap: false,
+        servingCredentialId: null,
+        priorSessionCredentialId: null,
+        emittedSourceKeys: new Set<string>(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async () => undefined,
+      });
+
+      expect(result).toMatchObject({
+        status: "processed",
+        authoritative: true,
+        sourceKey: "resp-workspace-gateway",
+      });
+      expect(usageRows).toEqual([
+        expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
+      ]);
+      expect(facts).toEqual([
+        expect.objectContaining({
+          provider: "anthropic",
+          model,
+          billingPath: "external",
+          pricedCostMicros: 0,
+          estimatedProviderCostMicros: 4,
+          pricingSource: "gateway_reported",
+        }),
+      ]);
+      expect(debitSpy).not.toHaveBeenCalled();
+    } finally {
+      usageSpy.mockRestore();
+      factSpy.mockRestore();
+      debitSpy.mockRestore();
     }
   });
 

@@ -8,6 +8,7 @@ import {
   assertTurnExecutionPolicyMatchesConfigV1,
   calculateGatewayReportedCostBreakdown,
   calculateGatewayReportedCostMicros,
+  calculateGatewayReportedProviderCostMicros,
   calculateModelUsageCostBreakdown,
   calculateModelUsageCostMicros,
   canonicalizeConfiguredModelId,
@@ -300,6 +301,14 @@ describe("curated AI Gateway catalogue", () => {
         "NaN",
       ),
     ).toThrow("Invalid AI Gateway inference cost");
+  });
+
+  test("reads exact Gateway provider cost without requiring a product price", () => {
+    expect(calculateGatewayReportedProviderCostMicros("0.00000325")).toBe(4);
+    expect(calculateGatewayReportedProviderCostMicros("1.23456789")).toBe(1_234_568);
+    expect(() => calculateGatewayReportedProviderCostMicros("NaN")).toThrow(
+      "Invalid AI Gateway inference cost",
+    );
   });
 });
 
