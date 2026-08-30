@@ -238,11 +238,13 @@ import {
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
 import {
+  SESSION_WAIT_COMPLETION_EVENT_TYPES,
   SESSION_WAIT_DEFAULT_SECONDS,
   SESSION_WAIT_EVENT_TYPES,
   SESSION_WAIT_EVENTS_PER_TARGET,
   SESSION_WAIT_MAX_SECONDS,
   SESSION_WAIT_MAX_TARGETS,
+  sessionWaitCompletionEventMatches,
   waitForSessionChanges,
 } from "./session-wait";
 import {
@@ -4706,7 +4708,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session); returns immediately when anything already changed. Only turn lifecycle, agent.message.completed, blocking failures, goal facts, and session status/control changes count as a change; raw deltas, tool receipts, and sandbox diagnostics never wake it. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
+        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session). waitFor=change is the backward-compatible default and returns on turn lifecycle, agent.message.completed, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
         inputSchema: {
           targets: z4
             .array(
@@ -4723,10 +4725,16 @@ function registerWorkspaceOrchestrationTools(
             .describe(
               "Also return when your own session has pending machine input (default true).",
             ),
+          waitFor: z4
+            .enum(["change", "completion"])
+            .optional()
+            .describe(
+              "change (default) returns on relevant activity; completion ignores messages, goal/progress, maintenance, and continuation segments until a result-bearing final turn or blocker.",
+            ),
           maxWaitSeconds: z4.number().int().min(1).max(SESSION_WAIT_MAX_SECONDS).optional(),
         },
       },
-      async ({ targets, includeOwnPendingUpdates, maxWaitSeconds }, extra) => {
+      async ({ targets, includeOwnPendingUpdates, waitFor, maxWaitSeconds }, extra) => {
         const distinct = new Set(targets.map((target) => target.sessionId));
         if (distinct.size !== targets.length) {
           throw new Error("session_wait targets must name distinct sessions");
@@ -4738,6 +4746,8 @@ function registerWorkspaceOrchestrationTools(
           await requireSession(deps.db, grant.workspaceId, target.sessionId);
         }
         const ownSessionId = includeOwnPendingUpdates === false ? null : callerSessionId;
+        const targetEventTypes =
+          waitFor === "completion" ? SESSION_WAIT_COMPLETION_EVENT_TYPES : SESSION_WAIT_EVENT_TYPES;
         // The API serves one transport per POST, so the worker's MCP cancel
         // notification never reaches this handler; the route binds the HTTP
         // request's abort to transport.close() (mcp/request-abort.ts), which
@@ -4754,6 +4764,9 @@ function registerWorkspaceOrchestrationTools(
             targets,
             ownSessionId,
             maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
+            targetEventTypes,
+            targetEventMatches:
+              waitFor === "completion" ? sessionWaitCompletionEventMatches : undefined,
             signal,
             source: {
               reauthorizeTargets: async (sessionIds) => {
@@ -4772,7 +4785,7 @@ function registerWorkspaceOrchestrationTools(
                   direction: "after",
                   limit: SESSION_WAIT_EVENTS_PER_TARGET,
                   payloadMode: "full",
-                  includeTypes: SESSION_WAIT_EVENT_TYPES,
+                  includeTypes: targetEventTypes,
                   maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
                 });
                 return { events: page.events, hasMore: page.hasMore };
@@ -4883,7 +4896,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker). The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {
