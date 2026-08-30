@@ -5,6 +5,7 @@ import {
   createApiKey,
   createDb,
   createWorkspace,
+  countWorkspacesForAccount,
   ensureManagedAccessForUserWithOrganizationMemberships,
   managedPersonalWorkspacePermissions,
   type DbClient,
@@ -27,6 +28,7 @@ let userId = "";
 let accountId = "";
 let personalWorkspaceId = "";
 let accountAdminToken = "";
+let apiDeps: ApiRouteDeps | null = null;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const externalAdminUrl = process.env.OPENGENI_ORG_TENANCY_POSTGRES_ADMIN_URL;
 const externalAppUrl = process.env.OPENGENI_ORG_TENANCY_POSTGRES_APP_URL;
@@ -87,7 +89,7 @@ beforeAll(async () => {
     )`;
 
   app = new Hono();
-  const deps = {
+  apiDeps = {
     db: client.db,
     settings: testSettings({ productAccessMode: "managed" }),
     managedAuth: {
@@ -105,8 +107,8 @@ beforeAll(async () => {
       },
     } as never,
   } as ApiRouteDeps;
-  registerApiKeyRoutes(app, deps);
-  registerWorkspaceRoutes(app, deps);
+  registerApiKeyRoutes(app, apiDeps);
+  registerWorkspaceRoutes(app, apiDeps);
 }, 180_000);
 
 afterAll(async () => {
@@ -307,6 +309,46 @@ describe("managed personal workspace access", () => {
       from workspace_memberships
       where workspace_id = ${firstBody.workspace.id}`;
     expect(membershipCount).toEqual({ count: 0 });
+
+    const workspaceCount = await countWorkspacesForAccount(client.db, accountId);
+    const limitedApp = new Hono();
+    registerWorkspaceRoutes(limitedApp, {
+      ...apiDeps!,
+      settings: testSettings({
+        productAccessMode: "managed",
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxWorkspacesPerAccount: workspaceCount }),
+      }),
+    });
+
+    const replayAtLimit = await limitedApp.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId,
+        externalSource: "personal-workspace-access-test",
+        externalId: "tenant-1",
+        name: "Ignored at limit",
+      }),
+    });
+    expect(replayAtLimit.status).toBe(200);
+    expect(await replayAtLimit.json()).toMatchObject({
+      created: false,
+      workspace: { id: firstBody.workspace.id, name: "Tenant one" },
+    });
+
+    const createAtLimit = await limitedApp.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId,
+        externalSource: "personal-workspace-access-test",
+        externalId: "tenant-over-limit",
+        name: "Tenant over limit",
+      }),
+    });
+    expect(createAtLimit.status).toBe(429);
+    expect(await countWorkspacesForAccount(client.db, accountId)).toBe(workspaceCount);
   });
 
   test("organization API key routes isolate null-workspace keys and support rotation", async () => {

@@ -2287,6 +2287,28 @@ export class WorkspaceExternalIdentityConflictError extends Error {
   }
 }
 
+export async function findWorkspaceByExternalIdentity(
+  db: Database,
+  input: {
+    externalSource: string;
+    externalId: string;
+  },
+): Promise<Workspace | null> {
+  const [row] = await db
+    .select()
+    .from(schema.workspaces)
+    .where(
+      and(
+        eq(schema.workspaces.externalSource, input.externalSource),
+        eq(schema.workspaces.externalId, input.externalId),
+      ),
+    )
+    .limit(1);
+  if (!row) return null;
+  const kind = await workspaceKindProjection(db, row);
+  return mapWorkspace(row, await workspaceControlProjection(db, row.id), kind);
+}
+
 /**
  * Create an organization workspace exactly once for a stable external tenant
  * identity. The global unique index is the concurrency arbiter. A replay never
