@@ -134,6 +134,19 @@ describe("AI Gateway custom model settings in Chromium", () => {
       await mobilePage.setViewportSize({ width: 844, height: 390 });
       expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
       await assertAccessibleAndBounded(mobilePage);
+
+      await mobilePage.setViewportSize({ width: 390, height: 844 });
+      const maximumSlug = "a".repeat(238);
+      await slug.fill(maximumSlug);
+      await add.click();
+      await expectReceipt(mobilePage, { action: "create-model", upstreamModelId: maximumSlug });
+      await mobilePage.getByRole("button", { name: `Remove ${maximumSlug}` }).click();
+      const dialog = mobilePage.getByRole("dialog");
+      await dialog
+        .getByRole("heading", { name: `Remove Gateway model “${maximumSlug}”?` })
+        .waitFor();
+      await assertDialogBounded(mobilePage);
+      await dialog.getByRole("button", { name: "Cancel" }).click();
     } finally {
       await mobileContext.close();
     }
@@ -164,6 +177,28 @@ async function expectReceipt(page: Page, expected: Record<string, unknown>): Pro
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   expect(receipt).toMatchObject(expected);
+}
+
+async function waitForAriaLabelFocus(page: Page, ariaLabel: string): Promise<void> {
+  await page.waitForFunction(
+    (expectedAriaLabel) => document.activeElement?.getAttribute("aria-label") === expectedAriaLabel,
+    ariaLabel,
+  );
+}
+
+async function assertDialogBounded(page: Page): Promise<void> {
+  const bounds = await page.getByRole("dialog").evaluate((dialog) => {
+    const rect = dialog.getBoundingClientRect();
+    return {
+      left: rect.left,
+      right: rect.right,
+      viewportWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    };
+  });
+  expect(bounds.left).toBeGreaterThanOrEqual(0);
+  expect(bounds.right).toBeLessThanOrEqual(bounds.viewportWidth + 1);
+  expect(bounds.scrollWidth).toBeLessThanOrEqual(bounds.viewportWidth + 1);
 }
 
 async function assertAccessibleAndBounded(page: Page): Promise<void> {

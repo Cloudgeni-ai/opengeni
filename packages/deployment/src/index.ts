@@ -1612,7 +1612,7 @@ export function stackPlanFor(
     ),
     verifyCommands: verifyCommands(contract, platformDependencies, productOverlay),
     destroyCommands: destroyCommands(contract, terraformRoot, platformDependencies),
-    notes: planNotes(contract, env),
+    notes: planNotes(contract, env, productOverlay),
   };
 }
 
@@ -1797,6 +1797,28 @@ const MAINTENANCE_IMAGE_DIGEST_ENV = {
   migrations: "OPENGENI_MIGRATIONS_IMAGE_DIGEST",
 } as const;
 
+function validatedImageDigests(
+  env: Record<string, string | undefined>,
+  purpose: string,
+): Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string> {
+  const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
+  const digests = Object.fromEntries(
+    Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV).map(([component, name]) => {
+      const digest = env[name]?.trim() ?? "";
+      if (!exactSha256Digest.test(digest)) {
+        throw new Error(`${name} must be an exact sha256 digest for ${purpose}`);
+      }
+      return [component, digest];
+    }),
+  ) as Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string>;
+  if (digests.migrations !== digests.api) {
+    throw new Error(
+      "OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST because migrations run from the API image",
+    );
+  }
+  return digests;
+}
+
 function maintenanceImageDigestHelmArgs(
   contract: DeploymentContract,
   terraformRoot: string | null,
@@ -1814,21 +1836,7 @@ function maintenanceImageDigestHelmArgs(
   // Local Kubernetes derives one content identity from the freshly built
   // Docker image IDs and binds both Helm revisions to that persisted tag.
   if (contract.runtime.cloud === "local") return "";
-  const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
-  const digests = Object.fromEntries(
-    Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV).map(([component, name]) => {
-      const digest = env[name]?.trim() ?? "";
-      if (!exactSha256Digest.test(digest)) {
-        throw new Error(`${name} must be an exact sha256 digest for a maintenance cutover`);
-      }
-      return [component, digest];
-    }),
-  ) as Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string>;
-  if (digests.migrations !== digests.api) {
-    throw new Error(
-      "OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST because migrations run from the API image",
-    );
-  }
+  const digests = validatedImageDigests(env, "a maintenance cutover");
   return Object.entries(digests)
     .map(([component, digest]) => ` --set-string ${component}.image.digest=${digest}`)
     .join("");
@@ -1983,6 +1991,18 @@ function deployCommands(
   ];
   if (terraformRoot) {
     const overlayArg = productOverlay === "none" ? "" : ` --product-overlay ${productOverlay}`;
+    const productionPromotion = productOverlay === "managed-saas-production";
+    const promotedDigests = productionPromotion
+      ? validatedImageDigests(env, "managed production promotion")
+      : null;
+    const runtimeImageEnvPrefix = promotedDigests
+      ? Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV)
+          .map(
+            ([component, name]) =>
+              `${name}=${promotedDigests[component as keyof typeof promotedDigests]}`,
+          )
+          .join(" ") + " "
+      : `set -a && . .agent/generated/${contract.profile}/image-digests.env && set +a && `;
     commands.unshift(
       `terraform -chdir=${terraformRoot} init -backend=false`,
       `terraform -chdir=${terraformRoot} plan -var-file=terraform.tfvars`,
@@ -1991,9 +2011,13 @@ function deployCommands(
     commands.push(
       `mkdir -p .agent/generated/${contract.profile}`,
       `terraform -chdir=${terraformRoot} output -json > .agent/generated/${contract.profile}/terraform-output.json`,
-      ...imageBuildPushCommands(contract, terraformRoot),
-      imageDigestResolutionCommand(contract, terraformRoot),
-      `set -a && . .agent/generated/${contract.profile}/image-digests.env && set +a && OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" bun run deployment:runtime-artifacts -- --profile ${contract.profile}${overlayArg} --terraform-output .agent/generated/${contract.profile}/terraform-output.json --out-dir .agent/generated/${contract.profile}`,
+      ...(productionPromotion
+        ? promotedImageDigestVerificationCommands(contract, terraformRoot, promotedDigests!)
+        : [
+            ...imageBuildPushCommands(contract, terraformRoot),
+            imageDigestResolutionCommand(contract, terraformRoot),
+          ]),
+      `${runtimeImageEnvPrefix}OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" bun run deployment:runtime-artifacts -- --profile ${contract.profile}${overlayArg} --terraform-output .agent/generated/${contract.profile}/terraform-output.json --out-dir .agent/generated/${contract.profile}`,
       `kubectl -n ${contract.runtime.namespace ?? "opengeni"} create secret generic opengeni-runtime --from-env-file=.agent/generated/${contract.profile}/runtime.env --dry-run=client -o yaml | kubectl apply -f -`,
     );
   }
@@ -2109,6 +2133,35 @@ function imageDigestResolutionCommand(contract: DeploymentContract, terraformRoo
     );
   }
   throw new Error(`immutable image digest resolution is unsupported for ${contract.runtime.cloud}`);
+}
+
+function promotedImageDigestVerificationCommands(
+  contract: DeploymentContract,
+  terraformRoot: string,
+  digests: Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string>,
+): string[] {
+  const components = ["api", "worker", "web"] as const;
+  if (contract.runtime.cloud === "azure") {
+    return components.map(
+      (component) =>
+        `ACR_LOGIN_SERVER="$(terraform -chdir=${terraformRoot} output -raw acr_login_server)" && ACR_NAME="\${ACR_LOGIN_SERVER%%.*}" && test "$(az acr repository show --name "$ACR_NAME" --image "opengeni-${component}@${digests[component]}" --query digest -o tsv)" = "${digests[component]}"`,
+    );
+  }
+  if (contract.runtime.cloud === "aws") {
+    return components.map(
+      (component) =>
+        `AWS_REGION="$(terraform -chdir=${terraformRoot} output -raw region)" && IMAGE="$(terraform -chdir=${terraformRoot} output -json ecr_repository_urls | jq -r .${component})" && test "$(aws ecr describe-images --region "$AWS_REGION" --repository-name "\${IMAGE#*/}" --image-ids imageDigest="${digests[component]}" --query 'imageDetails[0].imageDigest' --output text)" = "${digests[component]}"`,
+    );
+  }
+  if (contract.runtime.cloud === "gcp") {
+    return components.map(
+      (component) =>
+        `GCP_IMAGE_REGISTRY="$(terraform -chdir=${terraformRoot} output -json helm_set_values | jq -r '."global.imageRegistry"')" && test "$(gcloud artifacts docker images describe "$GCP_IMAGE_REGISTRY/opengeni-${component}@${digests[component]}" --format='value(image_summary.digest)')" = "${digests[component]}"`,
+    );
+  }
+  throw new Error(
+    `managed production image promotion is unsupported for ${contract.runtime.cloud}`,
+  );
 }
 
 function destroyCommands(
@@ -2323,6 +2376,7 @@ function usesOfficialPlatformChart(
 function planNotes(
   contract: DeploymentContract,
   env: Record<string, string | undefined>,
+  productOverlay: ProductOverlayId,
 ): string[] {
   const notes = [
     "Keep provider resource names, generated credentials, kubeconfigs, Terraform state, and filled tfvars in private operator-controlled storage outside the repository.",
@@ -2358,6 +2412,11 @@ function planNotes(
   if (requestedMaintenanceCutover(env)) {
     notes.push(
       `This plan includes the explicit ${MODEL_CATALOG_MAINTENANCE_CUTOVER} application drain; keep the application stopped until migration 0383 and the final exact-digest upgrade succeed.`,
+    );
+  }
+  if (productOverlay === "managed-saas-production") {
+    notes.push(
+      "Managed production is promotion-only: pre-promote the staging-proven API, worker, and web manifests into the destination registry, then supply that exact four-digest receipt. The plan verifies and deploys those digests without rebuilding images.",
     );
   }
   return notes;

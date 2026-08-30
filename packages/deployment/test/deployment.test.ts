@@ -974,7 +974,13 @@ describe("deployment contract", () => {
   test("renders production managed SaaS posture as digest-pinned promotion without deployment shared key", () => {
     const contract = contractForProfile("azure-managed", "managed-saas-production");
     const vars = requiredRuntimeEnvVars(contract);
-    const plan = stackPlanFor(contract, "managed-saas-production");
+    expect(() => stackPlanFor(contract, "managed-saas-production")).toThrow(
+      "OPENGENI_API_IMAGE_DIGEST must be an exact sha256 digest for managed production promotion",
+    );
+    const plan = stackPlanFor(contract, "managed-saas-production", {
+      ...maintenanceImageDigests,
+    });
+    const deployCommands = plan.deployCommands.join("\n");
 
     expect(contract.product.publicBaseUrl).toBe("https://app.opengeni.ai");
     expect(contract.access.mode).toBe("externalGateway");
@@ -986,6 +992,13 @@ describe("deployment contract", () => {
     expect(vars).not.toContain("OPENGENI_ACCESS_KEY");
     expect(vars).toContain("OPENGENI_BETTER_AUTH_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_WEBHOOK_SECRET");
+    expect(deployCommands).not.toContain("docker build");
+    expect(deployCommands).not.toContain("image-digests.env");
+    expect(deployCommands).toContain("az acr repository show");
+    for (const [name, digest] of Object.entries(maintenanceImageDigests)) {
+      expect(deployCommands).toContain(`${name}=${digest}`);
+    }
+    expect(plan.notes.join("\n")).toContain("promotion-only");
     expect(
       plan.deployCommands.some((command) =>
         command.includes("--product-overlay managed-saas-production"),
@@ -1040,7 +1053,7 @@ describe("deployment contract", () => {
         OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
         OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
         OPENGENI_IMAGE_TAG: "release-prod",
-        ...testImageDigests,
+        ...maintenanceImageDigests,
         OPENGENI_MODAL_APP_NAME: "opengeni-prod",
         OPENGENI_MODAL_TOKEN_ID: "modal-token-id",
         OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
@@ -1067,13 +1080,16 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1"');
     expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
     expect(artifacts.helmValuesYaml).toContain(
-      `digest: "${testImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
+      `digest: "${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
     );
     expect(artifacts.helmValuesYaml).toContain(
-      `digest: "${testImageDigests.OPENGENI_WORKER_IMAGE_DIGEST}"`,
+      `digest: "${maintenanceImageDigests.OPENGENI_WORKER_IMAGE_DIGEST}"`,
     );
     expect(artifacts.helmValuesYaml).toContain(
-      `digest: "${testImageDigests.OPENGENI_WEB_IMAGE_DIGEST}"`,
+      `digest: "${maintenanceImageDigests.OPENGENI_WEB_IMAGE_DIGEST}"`,
+    );
+    expect(artifacts.helmValuesYaml).toContain(
+      `digest: "${maintenanceImageDigests.OPENGENI_MIGRATIONS_IMAGE_DIGEST}"`,
     );
   });
 

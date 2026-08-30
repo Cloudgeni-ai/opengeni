@@ -74,6 +74,7 @@ export function AiGatewayConnectionCardWithClient(
     useState<WorkspaceGatewayCustomModel | null>(null);
   const [open, setOpen] = useState(false);
   const activeRef = useRef(true);
+  const connectionRequestGenerationRef = useRef(0);
   const customModelsRequestGenerationRef = useRef(0);
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const removeButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -121,6 +122,7 @@ export function AiGatewayConnectionCardWithClient(
   }, [client, props.workspaceId]);
 
   const refresh = useCallback(async () => {
+    const connectionRequestGeneration = ++connectionRequestGenerationRef.current;
     const customModelsRequestGeneration = ++customModelsRequestGenerationRef.current;
     const [connectionResult, modelsResult] = await Promise.allSettled([
       props.canManageConnection
@@ -129,28 +131,31 @@ export function AiGatewayConnectionCardWithClient(
       client.listWorkspaceGatewayCustomModels(props.workspaceId),
     ]);
     if (!activeRef.current) return;
-    if (connectionResult.status === "fulfilled") {
-      if (props.canManageConnection) {
-        setConnections(connectionResult.value as ConnectionMetadata[]);
+    if (connectionRequestGeneration === connectionRequestGenerationRef.current) {
+      if (connectionResult.status === "fulfilled") {
+        if (props.canManageConnection) {
+          setConnections(connectionResult.value as ConnectionMetadata[]);
+        } else {
+          setReadOnlyConnected(
+            (connectionResult.value as { models: WorkspaceModelCatalogModel[] }).models.some(
+              (model) =>
+                model.source === "workspace_gateway" &&
+                model.credentialReadiness.status === "ready",
+            ),
+          );
+        }
+        setError(null);
       } else {
-        setReadOnlyConnected(
-          (connectionResult.value as { models: WorkspaceModelCatalogModel[] }).models.some(
-            (model) =>
-              model.source === "workspace_gateway" && model.credentialReadiness.status === "ready",
-          ),
+        setConnections([]);
+        setReadOnlyConnected(false);
+        setError(
+          connectionResult.reason instanceof Error
+            ? connectionResult.reason.message
+            : String(connectionResult.reason),
         );
       }
-      setError(null);
-    } else {
-      setConnections([]);
-      setReadOnlyConnected(false);
-      setError(
-        connectionResult.reason instanceof Error
-          ? connectionResult.reason.message
-          : String(connectionResult.reason),
-      );
+      setLoaded(true);
     }
-    setLoaded(true);
     if (customModelsRequestGeneration === customModelsRequestGenerationRef.current) {
       if (modelsResult.status === "fulfilled") {
         setCustomModels(modelsResult.value.models);
@@ -196,7 +201,9 @@ export function AiGatewayConnectionCardWithClient(
               metadata,
             });
       if (!activeRef.current) return;
+      connectionRequestGenerationRef.current += 1;
       setConnections((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
+      setLoaded(true);
       setApiKey("");
       setOpen(false);
       props.onConnectionChange?.();
@@ -217,7 +224,9 @@ export function AiGatewayConnectionCardWithClient(
     try {
       const revoked = await client.deleteConnection(props.workspaceId, connection.id);
       if (!activeRef.current) return;
+      connectionRequestGenerationRef.current += 1;
       setConnections((current) => current.map((item) => (item.id === revoked.id ? revoked : item)));
+      setLoaded(true);
       setOpen(false);
       props.onConnectionChange?.();
       toast.success("Vercel AI Gateway disconnected");
@@ -501,9 +510,14 @@ export function AiGatewayConnectionCardWithClient(
           if (!next) setModelPendingRemoval(null);
         }}
         title={
-          modelPendingRemoval
-            ? `Remove Gateway model “${modelPendingRemoval.upstreamModelId}”?`
-            : "Remove Gateway model?"
+          modelPendingRemoval ? (
+            <>
+              Remove Gateway model “
+              <span className="break-all">{modelPendingRemoval.upstreamModelId}</span>”?
+            </>
+          ) : (
+            "Remove Gateway model?"
+          )
         }
         description="The model disappears from new selections. Already accepted turns keep their frozen definition so they can finish safely."
         confirmLabel="Remove model"

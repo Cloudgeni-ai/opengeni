@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "b
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type {
   ConnectionMetadata,
+  CreateConnectionRequest,
   WorkspaceGatewayCustomModel,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
@@ -19,6 +20,18 @@ const getWorkspaceModelCatalog = mock(
     models: [],
   }),
 );
+const createConnection = mock(
+  async (_workspaceId: string, _request: CreateConnectionRequest): Promise<ConnectionMetadata> =>
+    gatewayConnection(),
+);
+const updateConnection = mock(
+  async (_workspaceId: string, _connectionId: string): Promise<ConnectionMetadata> =>
+    gatewayConnection(),
+);
+const deleteConnection = mock(
+  async (_workspaceId: string, _connectionId: string): Promise<ConnectionMetadata> =>
+    gatewayConnection("revoked"),
+);
 const createWorkspaceGatewayCustomModel = mock(
   async (
     _workspaceId: string,
@@ -35,6 +48,9 @@ const context = {
   client: {
     listConnections,
     getWorkspaceModelCatalog,
+    createConnection,
+    updateConnection,
+    deleteConnection,
     listWorkspaceGatewayCustomModels,
     createWorkspaceGatewayCustomModel,
     deleteWorkspaceGatewayCustomModel,
@@ -73,6 +89,32 @@ function customModel(upstreamModelId: string): WorkspaceGatewayCustomModel {
     id: crypto.randomUUID(),
     upstreamModelId,
     label: null,
+    createdAt: "2026-08-27T12:00:00.000Z",
+    updatedAt: "2026-08-27T12:00:00.000Z",
+  };
+}
+
+function gatewayConnection(status: ConnectionMetadata["status"] = "active"): ConnectionMetadata {
+  return {
+    id: "33333333-3333-4333-8333-333333333333",
+    accountId: "11111111-1111-4111-8111-111111111111",
+    workspaceId: "workspace-a",
+    subjectId: null,
+    providerDomain: "ai-gateway.vercel.sh",
+    kind: "api_key",
+    status,
+    grantedScopes: [],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: status === "active" ? 1 : 2,
+    metadata: {
+      credentialRole: "vercel_ai_gateway",
+      credentialLabel: "Vercel AI Gateway",
+    },
+    createdBySubjectId: "user:fixture-admin",
+    updatedBySubjectId: "user:fixture-admin",
     createdAt: "2026-08-27T12:00:00.000Z",
     updatedAt: "2026-08-27T12:00:00.000Z",
   };
@@ -165,6 +207,9 @@ afterAll(() => {
 beforeEach(() => {
   listConnections.mockClear();
   getWorkspaceModelCatalog.mockClear();
+  createConnection.mockClear();
+  updateConnection.mockClear();
+  deleteConnection.mockClear();
   listWorkspaceGatewayCustomModels.mockClear();
   createWorkspaceGatewayCustomModel.mockClear();
   deleteWorkspaceGatewayCustomModel.mockClear();
@@ -172,6 +217,9 @@ beforeEach(() => {
   toastError.mockClear();
   listConnections.mockImplementation(async () => []);
   getWorkspaceModelCatalog.mockImplementation(async () => ({ models: [] }));
+  createConnection.mockImplementation(async () => gatewayConnection());
+  updateConnection.mockImplementation(async () => gatewayConnection());
+  deleteConnection.mockImplementation(async () => gatewayConnection("revoked"));
   listWorkspaceGatewayCustomModels.mockImplementation(async () => ({ models: [] }));
   createWorkspaceGatewayCustomModel.mockImplementation(async (_workspaceId, request) =>
     customModel(request.upstreamModelId),
@@ -299,6 +347,46 @@ describe("AiGatewayConnectionCard custom models", () => {
       });
       expect(container.textContent).toContain("workspace-b/model");
       expect(container.textContent).not.toContain("workspace-a/model");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("does not let a delayed startup snapshot overwrite a successful connection", async () => {
+    let resolveInitialModels:
+      | ((value: { models: WorkspaceGatewayCustomModel[] }) => void)
+      | undefined;
+    listConnections.mockImplementation(async () => []);
+    listWorkspaceGatewayCustomModels.mockImplementation(
+      async () =>
+        await new Promise<{ models: WorkspaceGatewayCustomModel[] }>((resolve) => {
+          resolveInitialModels = resolve;
+        }),
+    );
+    const { container, root } = await renderCard();
+
+    try {
+      const keyInput = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway key"]',
+      )!;
+      await setInputValue(keyInput, "fixture-key");
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Connect"))
+          ?.click();
+        await flush();
+      });
+      expect(container.textContent).toContain("Connected");
+      expect(container.textContent).toContain("Disconnect");
+
+      await act(async () => {
+        resolveInitialModels?.({ models: [] });
+        await flush();
+      });
+      expect(container.textContent).toContain("Connected");
+      expect(container.textContent).toContain("Disconnect");
+      expect(createConnection).toHaveBeenCalledTimes(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();
