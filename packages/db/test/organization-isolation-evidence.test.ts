@@ -328,11 +328,6 @@ async function seedResources(
       values (${session.id}, 1, 'evidence.probe', ${accountId}, ${workspaceId})
       returning id
     `;
-    await tx`
-      update sessions
-      set last_sequence = 1
-      where workspace_id = ${workspaceId} and id = ${session.id}
-    `;
     return inserted;
   });
   resources.push({ family: "session event", table: "session_events", id: event!.id });

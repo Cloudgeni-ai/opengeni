@@ -352,16 +352,20 @@ describe("durable host export (real PostgreSQL)", () => {
       await tx`select pg_advisory_xact_lock_shared(
         hashtextextended(${`session-tenancy:${delayed.grant.workspaceId!}`}, 0)
       )`;
-      const [sequence] = await tx<Array<{ value: number }>>`
-        update sessions set last_sequence = last_sequence + 1
-        where workspace_id = ${delayed.grant.workspaceId!} and id = ${delayed.session.id}
-        returning last_sequence as value`;
+      const [cursor] = await tx<Array<{ value: number }>>`
+        select last_sequence as value
+        from session_event_cursors
+        where workspace_id = ${delayed.grant.workspaceId!}
+          and session_id = ${delayed.session.id}
+        for update`;
+      if (!cursor) throw new Error("Delayed host-export session cursor is missing");
+      const sequence = cursor.value + 1;
       await tx`
         insert into session_events (
           id, account_id, workspace_id, session_id, sequence, type, payload
         ) values (
           ${delayedEventId}, ${delayed.grant.accountId}, ${delayed.grant.workspaceId!},
-          ${delayed.session.id}, ${sequence!.value}, 'agent.message.completed',
+          ${delayed.session.id}, ${sequence}, 'agent.message.completed',
           ${tx.json({ text: "delayed commit" })}
         )`;
       markDelayedReady();
