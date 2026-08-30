@@ -130,6 +130,10 @@ describe("AI Gateway custom model settings in Chromium", () => {
 
       await assertAccessibleAndBounded(mobilePage);
       await mobilePage.screenshot({ path: `${evidenceDir}narrow-390x844.png`, fullPage: true });
+
+      await mobilePage.setViewportSize({ width: 844, height: 390 });
+      expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
+      await assertAccessibleAndBounded(mobilePage);
     } finally {
       await mobileContext.close();
     }

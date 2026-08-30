@@ -627,6 +627,7 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(document.activeElement).toBe(input);
       expect(input.className).toContain("text-base");
       expect(input.className).toContain("sm:text-xs");
+      expect(input.className).toContain("pointer-coarse:text-base");
     } finally {
       await act(async () => root.unmount());
       container.remove();
