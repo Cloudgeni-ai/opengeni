@@ -179,6 +179,11 @@ BEGIN
     RETURN NEW;
   END IF;
 
+  PERFORM pg_catalog.set_config(
+    'opengeni.session_variable_set_attachments_v1',
+    '1',
+    true
+  );
   fenced_access_capability_id :=
     opengeni_private.open_session_tenancy_fenced_access(
       session_tenancy_fence_target_schema()
@@ -230,6 +235,11 @@ BEGIN
   IF NEW.last_sequence IS NOT DISTINCT FROM OLD.last_sequence THEN
     RETURN NEW;
   END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.session_variable_set_attachments_v1',
+    '1',
+    true
+  );
   fenced_access_capability_id :=
     opengeni_private.open_session_tenancy_fenced_access(
       session_tenancy_fence_target_schema()
@@ -275,28 +285,47 @@ DECLARE
   fenced_access_capability_id uuid;
   current_sequence integer;
 BEGIN
+  PERFORM pg_catalog.set_config(
+    'opengeni.session_variable_set_attachments_v1',
+    '1',
+    true
+  );
   fenced_access_capability_id :=
     opengeni_private.open_session_tenancy_fenced_access(
       session_tenancy_fence_target_schema()
     );
-  IF NOT EXISTS (
-    SELECT 1 FROM sessions session
-    WHERE session.account_id = NEW.account_id
-      AND session.workspace_id = NEW.workspace_id
-      AND session.id = NEW.id
-  ) THEN
-    PERFORM opengeni_private.close_session_tenancy_fenced_access(
-      fenced_access_capability_id
-    );
-    RETURN NULL;
-  END IF;
   SELECT cursor.last_sequence
   INTO current_sequence
   FROM session_event_cursors cursor
   WHERE cursor.account_id = NEW.account_id
     AND cursor.workspace_id = NEW.workspace_id
     AND cursor.session_id = NEW.id;
-  IF NOT FOUND OR NEW.last_sequence > current_sequence THEN
+  IF NOT FOUND THEN
+    -- A session inserted and then deleted in the same transaction legitimately
+    -- loses its cursor through ON DELETE CASCADE before this deferred trigger
+    -- runs. Consult the wider row only on that exceptional path; ordinary
+    -- validation stays entirely on the narrow authoritative cursor and does
+    -- not evaluate unrelated sessions RLS protocol policies.
+    PERFORM 1 FROM sessions session
+    WHERE session.account_id = NEW.account_id
+      AND session.workspace_id = NEW.workspace_id
+      AND session.id = NEW.id;
+    IF NOT FOUND THEN
+      PERFORM opengeni_private.close_session_tenancy_fenced_access(
+        fenced_access_capability_id
+      );
+      RETURN NULL;
+    END IF;
+    RAISE EXCEPTION USING
+      ERRCODE = '55000',
+      MESSAGE = 'session event compatibility projection has no cursor',
+      DETAIL = pg_catalog.format(
+        'session_id=%s session=%s',
+        NEW.id,
+        NEW.last_sequence
+      );
+  END IF;
+  IF NEW.last_sequence > current_sequence THEN
     RAISE EXCEPTION USING
       ERRCODE = '55000',
       MESSAGE = 'session event compatibility projection is ahead of its cursor',
@@ -332,6 +361,11 @@ DECLARE
   inserted_group record;
   current_sequence integer;
 BEGIN
+  PERFORM pg_catalog.set_config(
+    'opengeni.session_variable_set_attachments_v1',
+    '1',
+    true
+  );
   fenced_access_capability_id :=
     opengeni_private.open_session_tenancy_fenced_access(
       session_tenancy_fence_target_schema()
