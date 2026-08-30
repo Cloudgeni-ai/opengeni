@@ -5,15 +5,21 @@ import type {
   OpenGeniAppsControlTransport,
 } from "@opengeni/sdk/apps";
 
-import { request as apiRequest } from "@/api";
+import { ApiError, request as apiRequest } from "@/api";
 
 const APP_CSRF_HEADER = "x-opengeni-app-csrf";
+const APP_CSRF_REFRESH_SKEW_MS = 5_000;
 
 type ApiRequest = <T>(path: string, init?: RequestInit) => Promise<T>;
 
 type AppCsrfResponse = Readonly<{
   token: string;
   expiresInSeconds: number;
+}>;
+
+type AppCsrfState = Readonly<{
+  token: string;
+  expiresAtMs: number;
 }>;
 
 function segment(value: string): string {
@@ -48,25 +54,47 @@ function jsonRequest(
  */
 export function createOpenGeniAppsHttpTransport(
   request: ApiRequest = apiRequest,
+  now: () => number = Date.now,
 ): OpenGeniAppsControlTransport {
-  const csrfByWorkspace = new Map<string, string>();
+  let csrfState: AppCsrfState | null = null;
+  let csrfMint: Promise<AppCsrfState> | null = null;
 
-  const csrf = async (workspaceId: string, signal?: AbortSignal): Promise<string> => {
-    const cached = csrfByWorkspace.get(workspaceId);
-    if (cached) return cached;
-    const response = await request<AppCsrfResponse>(`${appsBase(workspaceId)}/csrf`, {
-      method: "GET",
-      ...(signal ? { signal } : {}),
-    });
-    if (
-      typeof response.token !== "string" ||
-      response.token.length < 32 ||
-      response.token.length > 256
-    ) {
-      throw new Error("OpenGeni returned an invalid Apps CSRF token.");
+  const csrf = async (
+    workspaceId: string,
+    signal?: AbortSignal,
+    forceRefresh = false,
+  ): Promise<string> => {
+    if (!forceRefresh && csrfState && csrfState.expiresAtMs - APP_CSRF_REFRESH_SKEW_MS > now()) {
+      return csrfState.token;
     }
-    csrfByWorkspace.set(workspaceId, response.token);
-    return response.token;
+    if (csrfMint) return (await csrfMint).token;
+    const mint = (async (): Promise<AppCsrfState> => {
+      const response = await request<AppCsrfResponse>(`${appsBase(workspaceId)}/csrf`, {
+        method: "GET",
+        ...(signal ? { signal } : {}),
+      });
+      if (
+        typeof response.token !== "string" ||
+        response.token.length < 32 ||
+        response.token.length > 256 ||
+        !Number.isSafeInteger(response.expiresInSeconds) ||
+        response.expiresInSeconds < 30 ||
+        response.expiresInSeconds > 86_400
+      ) {
+        throw new Error("OpenGeni returned an invalid Apps CSRF token.");
+      }
+      return {
+        token: response.token,
+        expiresAtMs: now() + response.expiresInSeconds * 1_000,
+      };
+    })();
+    csrfMint = mint;
+    try {
+      csrfState = await mint;
+      return csrfState.token;
+    } finally {
+      if (csrfMint === mint) csrfMint = null;
+    }
   };
 
   const mutation = async <T>(
@@ -77,19 +105,27 @@ export function createOpenGeniAppsHttpTransport(
     headers?: HeadersInit,
     method: "POST" | "PATCH" = "POST",
   ): Promise<T> => {
+    const send = async (token: string): Promise<T> =>
+      await request<T>(
+        path,
+        jsonRequest(
+          options.signal,
+          body,
+          {
+            ...Object.fromEntries(new Headers(headers).entries()),
+            [APP_CSRF_HEADER]: token,
+          },
+          method,
+        ),
+      );
     const token = await csrf(workspaceId, options.signal);
-    return await request<T>(
-      path,
-      jsonRequest(
-        options.signal,
-        body,
-        {
-          ...Object.fromEntries(new Headers(headers).entries()),
-          [APP_CSRF_HEADER]: token,
-        },
-        method,
-      ),
-    );
+    try {
+      return await send(token);
+    } catch (error) {
+      if (!isAppCsrfAdmissionFailure(error)) throw error;
+      if (csrfState?.token === token) csrfState = null;
+      return await send(await csrf(workspaceId, options.signal, true));
+    }
   };
 
   return Object.freeze({
@@ -287,4 +323,12 @@ export function createOpenGeniAppsHttpTransport(
       throw new Error(`Unsupported Apps control operation: ${String(operation)}`);
     },
   });
+}
+
+function isAppCsrfAdmissionFailure(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 403 &&
+    error.body.includes("Apps browser mutation admission failed")
+  );
 }

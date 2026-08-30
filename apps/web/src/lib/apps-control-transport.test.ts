@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { OpenGeniAppsControlOperationMap } from "@opengeni/sdk/apps";
 
+import { ApiError } from "@/api";
+
 import { createOpenGeniAppsHttpTransport } from "./apps-control-transport";
 
 const WORKSPACE_ID = "workspace / one";
@@ -207,5 +209,100 @@ describe("standalone Apps HTTP transport", () => {
         request: {},
       }),
     ).rejects.toThrow("invalid Apps CSRF token");
+  });
+
+  test("shares the one cookie-coupled token across workspaces", async () => {
+    const calls: Array<{ path: string; init: RequestInit | undefined }> = [];
+    const transport = createOpenGeniAppsHttpTransport(async (path, init) => {
+      calls.push({ path, init });
+      if (path.endsWith("/csrf")) {
+        return { token: "c".repeat(43), expiresInSeconds: 3600 } as never;
+      }
+      return {} as never;
+    });
+
+    for (const workspaceId of ["workspace-a", "workspace-b", "workspace-a"]) {
+      await transport.request("apps.create", {
+        workspaceId,
+        request: {} as never,
+      });
+    }
+
+    expect(calls.filter(({ path }) => path.endsWith("/csrf"))).toHaveLength(1);
+    expect(
+      calls
+        .filter(({ path }) => !path.endsWith("/csrf"))
+        .map(({ init }) => new Headers(init?.headers).get("x-opengeni-app-csrf")),
+    ).toEqual(["c".repeat(43), "c".repeat(43), "c".repeat(43)]);
+  });
+
+  test("refreshes an expiring token before the browser cookie expires", async () => {
+    const calls: Array<{ path: string; init: RequestInit | undefined }> = [];
+    let nowMs = 1_000_000;
+    let mintCount = 0;
+    const transport = createOpenGeniAppsHttpTransport(
+      async (path, init) => {
+        calls.push({ path, init });
+        if (path.endsWith("/csrf")) {
+          mintCount += 1;
+          return {
+            token: (mintCount === 1 ? "c" : "d").repeat(43),
+            expiresInSeconds: 30,
+          } as never;
+        }
+        return {} as never;
+      },
+      () => nowMs,
+    );
+
+    await transport.request("apps.create", {
+      workspaceId: WORKSPACE_ID,
+      request: {} as never,
+    });
+    nowMs += 26_000;
+    await transport.request("apps.create", {
+      workspaceId: WORKSPACE_ID,
+      request: {} as never,
+    });
+
+    expect(calls.filter(({ path }) => path.endsWith("/csrf"))).toHaveLength(2);
+    expect(
+      calls
+        .filter(({ path }) => !path.endsWith("/csrf"))
+        .map(({ init }) => new Headers(init?.headers).get("x-opengeni-app-csrf")),
+    ).toEqual(["c".repeat(43), "d".repeat(43)]);
+  });
+
+  test("remints and retries once after explicit CSRF admission failure", async () => {
+    const calls: Array<{ path: string; init: RequestInit | undefined }> = [];
+    let mintCount = 0;
+    let mutationCount = 0;
+    const transport = createOpenGeniAppsHttpTransport(async (path, init) => {
+      calls.push({ path, init });
+      if (path.endsWith("/csrf")) {
+        mintCount += 1;
+        return {
+          token: (mintCount === 1 ? "c" : "d").repeat(43),
+          expiresInSeconds: 3600,
+        } as never;
+      }
+      mutationCount += 1;
+      if (mutationCount === 1) {
+        throw new ApiError(403, '{"message":"Apps browser mutation admission failed"}');
+      }
+      return {} as never;
+    });
+
+    await transport.request("apps.create", {
+      workspaceId: WORKSPACE_ID,
+      request: {} as never,
+    });
+
+    expect(calls.map(({ path }) => path.endsWith("/csrf"))).toEqual([true, false, true, false]);
+    expect(
+      calls
+        .filter(({ path }) => !path.endsWith("/csrf"))
+        .map(({ init }) => new Headers(init?.headers).get("x-opengeni-app-csrf")),
+    ).toEqual(["c".repeat(43), "d".repeat(43)]);
   });
 });

@@ -5,6 +5,7 @@ import { HTTPException } from "hono/http-exception";
 import {
   assertAppSourceCompletionIdentity,
   createAppSourceDownloadSignature,
+  preflightAppSourceCompletion,
 } from "../src/apps-application";
 
 const settings = testSettings({ appHostResolverKey: "k".repeat(64) });
@@ -77,6 +78,72 @@ describe("App source completion identity", () => {
         expect(error).toBeInstanceOf(HTTPException);
         expect((error as HTTPException).status).toBe(409);
         expect((error as Error).message).toBe("App source upload identity changed");
+      }
+    }
+  });
+
+  test("allows only active uploads to enter immutable verification", () => {
+    for (const status of ["uploading", "verifying"] as const) {
+      expect(
+        preflightAppSourceCompletion(
+          {
+            sourceRevision: {
+              ...sourceRevision,
+              status,
+              fileCount: null,
+            } as never,
+            frozenVersionToken: null,
+          },
+          {
+            expectedContentSha256: sourceRevision.contentSha256,
+            expectedSizeBytes: sourceRevision.sizeBytes,
+          },
+        ),
+      ).toEqual({ kind: "verify" });
+    }
+  });
+
+  test("reconstructs the stored receipt for a cheap ready replay", () => {
+    expect(
+      preflightAppSourceCompletion(
+        {
+          sourceRevision: {
+            ...sourceRevision,
+            status: "ready",
+            fileCount: 12,
+          } as never,
+          frozenVersionToken: "source-version-1",
+        },
+        {
+          expectedContentSha256: sourceRevision.contentSha256,
+          expectedSizeBytes: sourceRevision.sizeBytes,
+        },
+      ),
+    ).toEqual({ kind: "replay", frozenVersionToken: "source-version-1" });
+  });
+
+  test("rejects settled sources before immutable verification", () => {
+    for (const status of ["failed", "expired", "deleting", "deleted"] as const) {
+      try {
+        preflightAppSourceCompletion(
+          {
+            sourceRevision: {
+              ...sourceRevision,
+              status,
+              fileCount: null,
+            } as never,
+            frozenVersionToken: null,
+          },
+          {
+            expectedContentSha256: sourceRevision.contentSha256,
+            expectedSizeBytes: sourceRevision.sizeBytes,
+          },
+        );
+        throw new Error("expected App source lifecycle rejection");
+      } catch (error) {
+        expect(error).toBeInstanceOf(HTTPException);
+        expect((error as HTTPException).status).toBe(422);
+        expect((error as Error).message).toBe("App source upload is already settled");
       }
     }
   });

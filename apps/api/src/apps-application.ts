@@ -52,6 +52,7 @@ import {
   updateWorkspaceApp,
   type AppBuildFrozenFileReceipt,
   type AppBuildStoragePlan,
+  type AppSourceStorageRef,
   type Database,
 } from "@opengeni/db";
 import { createImmutableRawObjectReader, type ObjectStorage } from "@opengeni/storage";
@@ -226,7 +227,6 @@ export function createDatabaseAppsApplication(input: {
     },
 
     async completeSourceUpload({ authority, appId, sourceRevisionId, request }, options) {
-      const objectStore = storage();
       const source = await appPersistence(() =>
         getAppSourceStorageRef(input.db, {
           accountId: authority.accountId,
@@ -235,7 +235,25 @@ export function createDatabaseAppsApplication(input: {
           sourceRevisionId,
         }),
       );
-      assertAppSourceCompletionIdentity(source.sourceRevision, request);
+      const preflight = preflightAppSourceCompletion(source, request);
+      if (preflight.kind === "replay") {
+        await appPersistence(() =>
+          completeAppSourceUpload(input.db, {
+            accountId: authority.accountId,
+            workspaceId: authority.workspaceId,
+            actorSubjectId: authority.subjectId,
+            appId,
+            sourceRevisionId,
+            expectedContentSha256: source.sourceRevision.contentSha256,
+            expectedSizeBytes: source.sourceRevision.sizeBytes,
+            fileCount: request.fileCount,
+            frozenVersionToken: preflight.frozenVersionToken,
+            idempotencyKey: request.idempotencyKey,
+          }),
+        );
+        return await detail(input.db, authority, appId);
+      }
+      const objectStore = storage();
       const ports = immutablePorts(objectStore);
       const frozen = await freezeAppSourceArchive({
         ...ports,
@@ -473,7 +491,6 @@ export function createDatabaseAppsApplication(input: {
     },
 
     async completeBuild({ authority, appId, buildId, request }, options) {
-      const objectStore = storage();
       const plan = await appPersistence(() =>
         getAppBuildStoragePlan(input.db, {
           accountId: authority.accountId,
@@ -499,6 +516,7 @@ export function createDatabaseAppsApplication(input: {
           }),
         );
       }
+      const objectStore = storage();
       const frozen = await freezeAppBuildObjects({
         ...immutablePorts(objectStore),
         workspaceId: authority.workspaceId,
@@ -1010,6 +1028,30 @@ export function assertAppSourceCompletionIdentity(
       message: "App source upload identity changed",
     });
   }
+}
+
+type AppSourceCompletionPreflight =
+  | Readonly<{ kind: "verify" }>
+  | Readonly<{ kind: "replay"; frozenVersionToken: string }>;
+
+export function preflightAppSourceCompletion(
+  source: Pick<AppSourceStorageRef, "sourceRevision" | "frozenVersionToken">,
+  request: Readonly<{
+    expectedContentSha256: string;
+    expectedSizeBytes: number;
+  }>,
+): AppSourceCompletionPreflight {
+  assertAppSourceCompletionIdentity(source.sourceRevision, request);
+  if (["uploading", "verifying"].includes(source.sourceRevision.status)) {
+    return { kind: "verify" };
+  }
+  if (source.sourceRevision.status !== "ready") {
+    throw new HTTPException(422, { message: "App source upload is already settled" });
+  }
+  if (!source.frozenVersionToken || source.sourceRevision.fileCount === null) {
+    throw new HTTPException(422, { message: "Completed App source receipts are incomplete" });
+  }
+  return { kind: "replay", frozenVersionToken: source.frozenVersionToken };
 }
 
 export function verifiedAppBuildManifestBytes(
