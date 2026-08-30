@@ -2,11 +2,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
+  countWorkspacesForAccount,
   createDb,
   createWorkspace,
   ensureWorkspaceByExternalIdentity,
   listSharedWorkspacesForAccount,
   WorkspaceExternalIdentityConflictError,
+  WorkspaceLimitExceededError,
   type DbClient,
 } from "../src";
 
@@ -132,6 +134,34 @@ describe("external workspace provisioning", () => {
         name: "Second owner",
       }),
     ).rejects.toBeInstanceOf(WorkspaceExternalIdentityConflictError);
+  });
+
+  test("direct and external creators share one account workspace-limit fence", async () => {
+    if (!client) return;
+    const accountId = await createAccount("Cross-route workspace limit");
+    const maxWorkspacesPerAccount = 1;
+    const results = await Promise.allSettled([
+      createWorkspace(client.db, {
+        accountId,
+        name: "Direct workspace",
+        maxWorkspacesPerAccount,
+      }),
+      ensureWorkspaceByExternalIdentity(client.db, {
+        accountId,
+        externalSource: `cross-route-limit-${crypto.randomUUID()}`,
+        externalId: "tenant-1",
+        name: "External workspace",
+        maxWorkspacesPerAccount,
+      }),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]?.reason).toBeInstanceOf(WorkspaceLimitExceededError);
+    expect(await countWorkspacesForAccount(client.db, accountId)).toBe(1);
   });
 
   test("organization inventory excludes the canonical personal-workspace pointer", async () => {

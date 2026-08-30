@@ -2241,9 +2241,16 @@ export async function createWorkspace(
     externalSource?: string | null;
     externalId?: string | null;
     agentInstructions?: string | null;
+    maxWorkspacesPerAccount?: number | null;
   },
 ): Promise<Workspace> {
   return await db.transaction(async (tx) => {
+    const transaction = tx as unknown as Database;
+    if (workspaceLimitConfigured(input.maxWorkspacesPerAccount)) {
+      await setRlsContext(transaction, { accountId: input.accountId, workspaceId: null });
+    }
+    await acquireWorkspaceLimitLock(transaction, input.accountId, input.maxWorkspacesPerAccount);
+    await assertWorkspaceCapacity(transaction, input.accountId, input.maxWorkspacesPerAccount);
     const [row] = await tx
       .insert(schema.workspaces)
       .values({
@@ -2258,7 +2265,7 @@ export async function createWorkspace(
     if (!row) {
       throw new Error("Failed to create workspace");
     }
-    await setRlsContext(tx as unknown as Database, {
+    await setRlsContext(transaction, {
       accountId: row.accountId,
       workspaceId: row.id,
     });
@@ -2309,6 +2316,43 @@ export async function findWorkspaceByExternalIdentity(
   return mapWorkspace(row, await workspaceControlProjection(db, row.id), kind);
 }
 
+export class WorkspaceLimitExceededError extends Error {
+  constructor(readonly limit: number) {
+    super(`Workspace limit reached (${limit})`);
+    this.name = "WorkspaceLimitExceededError";
+  }
+}
+
+function workspaceLimitConfigured(limit: number | null | undefined): limit is number {
+  return limit !== null && limit !== undefined;
+}
+
+async function acquireWorkspaceLimitLock(
+  db: Database,
+  accountId: string,
+  limit: number | null | undefined,
+): Promise<void> {
+  if (!workspaceLimitConfigured(limit)) return;
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-limit:${accountId}`}, 0))`,
+  );
+}
+
+async function assertWorkspaceCapacity(
+  db: Database,
+  accountId: string,
+  limit: number | null | undefined,
+): Promise<void> {
+  if (!workspaceLimitConfigured(limit)) return;
+  const [{ count } = { count: 0 }] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.accountId, accountId));
+  if (Number(count) >= limit) {
+    throw new WorkspaceLimitExceededError(limit);
+  }
+}
+
 /**
  * Create an organization workspace exactly once for a stable external tenant
  * identity. The global unique index is the concurrency arbiter. A replay never
@@ -2323,9 +2367,44 @@ export async function ensureWorkspaceByExternalIdentity(
     name: string;
     slug?: string | null;
     agentInstructions?: string | null;
+    maxWorkspacesPerAccount?: number | null;
   },
 ): Promise<{ workspace: Workspace; created: boolean }> {
   return await db.transaction(async (tx) => {
+    const transaction = tx as unknown as Database;
+    await setRlsContext(transaction, { accountId: input.accountId, workspaceId: null });
+    await acquireWorkspaceLimitLock(transaction, input.accountId, input.maxWorkspacesPerAccount);
+
+    const [existingBeforeCreate] = await tx
+      .select()
+      .from(schema.workspaces)
+      .where(
+        and(
+          eq(schema.workspaces.externalSource, input.externalSource),
+          eq(schema.workspaces.externalId, input.externalId),
+        ),
+      )
+      .limit(1);
+    if (existingBeforeCreate) {
+      if (existingBeforeCreate.accountId !== input.accountId) {
+        throw new WorkspaceExternalIdentityConflictError();
+      }
+      const kind = await workspaceKindProjection(transaction, existingBeforeCreate);
+      if (kind !== "shared") {
+        throw new WorkspaceExternalIdentityConflictError();
+      }
+      return {
+        workspace: mapWorkspace(
+          existingBeforeCreate,
+          await workspaceControlProjection(transaction, existingBeforeCreate.id),
+          kind,
+        ),
+        created: false,
+      };
+    }
+
+    await assertWorkspaceCapacity(transaction, input.accountId, input.maxWorkspacesPerAccount);
+
     const [inserted] = await tx
       .insert(schema.workspaces)
       .values({
@@ -2342,7 +2421,7 @@ export async function ensureWorkspaceByExternalIdentity(
       .returning();
 
     if (inserted) {
-      await setRlsContext(tx as unknown as Database, {
+      await setRlsContext(transaction, {
         accountId: inserted.accountId,
         workspaceId: inserted.id,
       });
@@ -2379,14 +2458,14 @@ export async function ensureWorkspaceByExternalIdentity(
     if (!existing || existing.accountId !== input.accountId) {
       throw new WorkspaceExternalIdentityConflictError();
     }
-    const kind = await workspaceKindProjection(tx as unknown as Database, existing);
+    const kind = await workspaceKindProjection(transaction, existing);
     if (kind !== "shared") {
       throw new WorkspaceExternalIdentityConflictError();
     }
     return {
       workspace: mapWorkspace(
         existing,
-        await workspaceControlProjection(tx as unknown as Database, existing.id),
+        await workspaceControlProjection(transaction, existing.id),
         kind,
       ),
       created: false,
@@ -3627,17 +3706,99 @@ export async function createApiKey(
     keyHash: string;
     permissions: Permission[];
     expiresAt?: Date | null;
+    credentialKind?: schema.ApiKeyCredentialKind;
+  },
+): Promise<ApiKey> {
+  const workspaceId = input.workspaceId ?? null;
+  const credentialKind = input.credentialKind ?? (workspaceId ? "workspace" : "legacy_account");
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb
+      .insert(schema.apiKeys)
+      .values({
+        accountId: input.accountId,
+        workspaceId,
+        name: input.name,
+        description: input.description ?? null,
+        credentialKind,
+        prefix: input.prefix,
+        keyHash: input.keyHash,
+        permissions: input.permissions,
+        expiresAt: input.expiresAt ?? null,
+      })
+      .returning();
+    if (!row) {
+      throw new Error("Failed to create API key");
+    }
+    return mapApiKey(row);
+  });
+}
+
+export class OrganizationApiKeyLimitExceededError extends Error {
+  constructor(readonly limit: number) {
+    super(`API key limit reached (${limit})`);
+    this.name = "OrganizationApiKeyLimitExceededError";
+  }
+}
+
+/**
+ * Create an explicitly proven organization key under one account-scoped lock.
+ * An authenticating organization key may open exactly one temporary overlap
+ * slot at the configured cap so it can create a replacement before revocation.
+ */
+export async function createOrganizationApiKey(
+  db: Database,
+  input: {
+    accountId: string;
+    name: string;
+    description?: string | null;
+    prefix: string;
+    keyHash: string;
+    permissions: Permission[];
+    expiresAt?: Date | null;
+    maxActiveKeys?: number | null;
+    rotationSourceApiKeyId?: string | null;
   },
 ): Promise<ApiKey> {
   return await withRlsContext(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
+    { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
+      if (input.maxActiveKeys !== null && input.maxActiveKeys !== undefined) {
+        await scopedDb.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`organization-api-key:${input.accountId}`}, 0))`,
+        );
+        const activePredicate = and(
+          eq(schema.apiKeys.accountId, input.accountId),
+          isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
+          isNull(schema.apiKeys.revokedAt),
+          or(isNull(schema.apiKeys.expiresAt), gt(schema.apiKeys.expiresAt, new Date())),
+        );
+        const [{ count } = { count: 0 }] = await scopedDb
+          .select({ count: sql<number>`count(*)::int` })
+          .from(schema.apiKeys)
+          .where(activePredicate);
+        const activeCount = Number(count);
+        let rotationOverlapAllowed = false;
+        if (activeCount === input.maxActiveKeys && input.rotationSourceApiKeyId) {
+          const [rotationSource] = await scopedDb
+            .select({ id: schema.apiKeys.id })
+            .from(schema.apiKeys)
+            .where(and(activePredicate, eq(schema.apiKeys.id, input.rotationSourceApiKeyId)))
+            .limit(1);
+          rotationOverlapAllowed = Boolean(rotationSource);
+        }
+        if (activeCount >= input.maxActiveKeys && !rotationOverlapAllowed) {
+          throw new OrganizationApiKeyLimitExceededError(input.maxActiveKeys);
+        }
+      }
+
       const [row] = await scopedDb
         .insert(schema.apiKeys)
         .values({
           accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
+          workspaceId: null,
+          credentialKind: "organization",
           name: input.name,
           description: input.description ?? null,
           prefix: input.prefix,
@@ -3646,9 +3807,7 @@ export async function createApiKey(
           expiresAt: input.expiresAt ?? null,
         })
         .returning();
-      if (!row) {
-        throw new Error("Failed to create API key");
-      }
+      if (!row) throw new Error("Failed to create organization API key");
       return mapApiKey(row);
     },
   );
@@ -3670,7 +3829,13 @@ export async function listOrganizationApiKeys(db: Database, accountId: string): 
     const rows = await scopedDb
       .select()
       .from(schema.apiKeys)
-      .where(and(eq(schema.apiKeys.accountId, accountId), isNull(schema.apiKeys.workspaceId)))
+      .where(
+        and(
+          eq(schema.apiKeys.accountId, accountId),
+          isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
+        ),
+      )
       .orderBy(desc(schema.apiKeys.createdAt));
     return rows.map(mapApiKey);
   });
@@ -3711,6 +3876,7 @@ export async function countActiveOrganizationApiKeysForAccount(
         and(
           eq(schema.apiKeys.accountId, accountId),
           isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
           sql`${schema.apiKeys.revokedAt} is null`,
           sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
         ),
@@ -3756,6 +3922,7 @@ export async function revokeOrganizationApiKey(
         and(
           eq(schema.apiKeys.accountId, accountId),
           isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
           eq(schema.apiKeys.id, apiKeyId),
         ),
       )
@@ -3767,7 +3934,7 @@ export async function revokeOrganizationApiKey(
 export async function findActiveApiKeyByHash(
   db: Database,
   keyHash: string,
-): Promise<ApiKey | null> {
+): Promise<(ApiKey & { credentialKind: schema.ApiKeyCredentialKind }) | null> {
   return await db.transaction(async (tx) => {
     await tx.execute(sql`select set_config('opengeni.api_key_hash', ${keyHash}, true)`);
     const [row] = await tx
@@ -3789,7 +3956,10 @@ export async function findActiveApiKeyByHash(
       .update(schema.apiKeys)
       .set({ lastUsedAt: now, updatedAt: now })
       .where(eq(schema.apiKeys.id, row.id));
-    return mapApiKey({ ...row, lastUsedAt: now });
+    return {
+      ...mapApiKey({ ...row, lastUsedAt: now }),
+      credentialKind: row.credentialKind,
+    };
   });
 }
 

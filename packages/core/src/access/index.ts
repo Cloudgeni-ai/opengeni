@@ -541,7 +541,7 @@ async function apiKeyAccessContext(
     defaultAccountId: apiKey.accountId,
     defaultWorkspaceId: apiKey.workspaceId,
   } satisfies AccessContext;
-  if (apiKey.workspaceId === null) {
+  if (apiKey.workspaceId === null && apiKey.credentialKind === "organization") {
     accountScopedApiKeyContexts.set(
       context,
       Object.freeze({

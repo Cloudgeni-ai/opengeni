@@ -152,7 +152,11 @@ export function LoadErrorState({
   onRetry: () => void;
 }) {
   return (
-    <div className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-fg">
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-fg"
+    >
       <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium">{title}</div>

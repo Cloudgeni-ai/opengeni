@@ -1090,6 +1090,8 @@ export const organizationUserResourceAuthorities = pgTable(
   }),
 );
 
+export type ApiKeyCredentialKind = "workspace" | "organization" | "legacy_account";
+
 export const apiKeys = pgTable(
   "api_keys",
   {
@@ -1102,6 +1104,7 @@ export const apiKeys = pgTable(
     }),
     name: text("name").notNull(),
     description: text("description"),
+    credentialKind: text("credential_kind").$type<ApiKeyCredentialKind>().notNull(),
     prefix: text("prefix").notNull(),
     keyHash: text("key_hash").notNull(),
     permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
@@ -1119,6 +1122,20 @@ export const apiKeys = pgTable(
     descriptionValid: check(
       "api_keys_description_check",
       sql`${table.description} is null or length(${table.description}) between 1 and 500`,
+    ),
+    credentialKindValid: check(
+      "api_keys_credential_kind_check",
+      sql`(
+        ${table.workspaceId} is not null
+        and ${table.credentialKind} = 'workspace'
+      ) or (
+        ${table.workspaceId} is null
+        and ${table.credentialKind} = 'organization'
+      ) or (
+        ${table.workspaceId} is null
+        and ${table.credentialKind} = 'legacy_account'
+        and ${table.revokedAt} is not null
+      )`,
     ),
   }),
 );
