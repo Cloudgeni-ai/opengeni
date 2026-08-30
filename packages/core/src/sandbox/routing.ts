@@ -26,6 +26,7 @@ import {
   verifyDirectWorkspaceMutationSettlement,
   verifyRetainedProcessMutationSettlement,
   type Database,
+  type SandboxRetainedProcess,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
 import { settleSessionBackgroundCommandForRetainedProcess } from "@opengeni/db/session-background-commands";
@@ -84,6 +85,20 @@ export function directRetainedProcessMatchesBackend(
     durable.routeTargetId === backend.sandboxId &&
     durable.routeEpoch === backend.activeEpoch
   );
+}
+
+export function retainedProcessBackgroundSettlement(
+  process: Pick<SandboxRetainedProcess, "state" | "exitCode" | "settlementReason">,
+  fallback: RoutingRetainedProcessTerminalProof,
+): { outcome: "exited" | "lost"; exitCode: number | null; reason: string } {
+  if (process.state === "active") {
+    throw new Error("Retained-process settlement returned an active durable process");
+  }
+  return {
+    outcome: process.state,
+    exitCode: process.exitCode,
+    reason: process.settlementReason ?? fallback.reason,
+  };
 }
 
 export type ChannelARoutingServices = {
@@ -423,7 +438,7 @@ export function wrapChannelABoxWithRouting(
             "API retained-process settlement lost its exact durable backend identity",
           );
         }
-        await settleRetainedProcess(db, {
+        const settlement = await settleRetainedProcess(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
           sessionId: ids.sessionId,
@@ -434,14 +449,13 @@ export function wrapChannelABoxWithRouting(
           reason: proof.reason,
           idleGraceMs: settings.sandboxIdleGraceMs,
         });
+        const backgroundSettlement = retainedProcessBackgroundSettlement(settlement.process, proof);
         await settleSessionBackgroundCommandForRetainedProcess(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
           sessionId: ids.sessionId,
           retainedProcessId: process.id,
-          outcome: proof.outcome,
-          exitCode: proof.exitCode,
-          reason: proof.reason,
+          ...backgroundSettlement,
         });
       }
     : undefined;

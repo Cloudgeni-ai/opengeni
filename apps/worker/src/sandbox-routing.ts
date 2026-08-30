@@ -672,7 +672,7 @@ function settleRetainedProcessForTurn(
     ) {
       throw new Error("Retained-process settlement lost its exact durable backend identity");
     }
-    await settleRetainedProcess(services.db, {
+    const settlement = await settleRetainedProcess(services.db, {
       accountId: fence.accountId,
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
@@ -683,14 +683,17 @@ function settleRetainedProcessForTurn(
       reason: proof.reason,
       idleGraceMs: services.settings.sandboxIdleGraceMs,
     });
+    if (settlement.process.state === "active") {
+      throw new Error("Retained-process settlement returned an active durable process");
+    }
     await settleSessionBackgroundCommandForRetainedProcess(services.db, {
       accountId: fence.accountId,
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
       retainedProcessId: process.id,
-      outcome: proof.outcome,
-      exitCode: proof.exitCode,
-      reason: proof.reason,
+      outcome: settlement.process.state,
+      exitCode: settlement.process.exitCode,
+      reason: settlement.process.settlementReason ?? proof.reason,
     });
   };
 }

@@ -24,6 +24,7 @@ import {
   retainedProcessSettlementIdentity,
   retainWorkspaceMutationProcess,
   SandboxRetainedProcessPromotionFencedError,
+  SandboxRetainedProcessTerminalError,
   SandboxWorkspaceMutationFencedError,
   settleRetainedProcess,
   type Database,
@@ -1298,19 +1299,23 @@ describe("retained-process terminal-owner reconciliation", () => {
       idleGraceMs: SETTINGS.sandboxIdleGraceMs,
     });
     expect(replay.settled).toBe(false);
-    await expect(
-      settleRetainedProcess(db, {
-        accountId: fixture.accountId,
-        workspaceId: fixture.workspaceId,
-        sessionId: fixture.sessionId,
-        processId: fixture.process.id,
-        expected: retainedProcessSettlementIdentity(terminal),
-        outcome: "lost",
-        exitCode: null,
-        reason: "provider_session_lost_banner",
-        idleGraceMs: SETTINGS.sandboxIdleGraceMs,
-      }),
-    ).rejects.toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    const conflicting = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(terminal),
+      outcome: "lost",
+      exitCode: null,
+      reason: "provider_session_lost_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    }).catch((error) => error);
+    expect(conflicting).toBeInstanceOf(SandboxRetainedProcessTerminalError);
+    expect(conflicting).toMatchObject({
+      code: "process_fenced",
+      state: "exited",
+      exitCode: 23,
+    });
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(
       /opengeni_retained_process_reconciliation_total\{[^}]*outcome="settled_exited"[^}]*\} 1/,
@@ -1483,7 +1488,9 @@ describe("retained-process terminal-owner reconciliation", () => {
       processId: fixture.process.id,
       expected,
       reconciliationClaimId: claimId,
-      ...proof,
+      outcome: "lost",
+      exitCode: null,
+      reason: "provider_session_lost_banner",
       idleGraceMs: SETTINGS.sandboxIdleGraceMs,
     });
     const successor = await settlementProjection(fixture);
@@ -1496,6 +1503,25 @@ describe("retained-process terminal-owner reconciliation", () => {
       refcount: 0,
       leaseEpoch: expected.leaseEpoch + 1,
       instanceId: "retained-process-successor",
+    });
+    const replay = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected,
+      outcome: "lost",
+      exitCode: null,
+      reason: "provider_session_lost_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    expect(replay).toMatchObject({
+      settled: false,
+      process: {
+        state: "lost",
+        exitCode: null,
+        settlementReason: "provider_instance_not_found",
+      },
     });
   }, 60_000);
 

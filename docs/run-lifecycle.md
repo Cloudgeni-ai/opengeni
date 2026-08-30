@@ -1043,7 +1043,11 @@ workspace mutation admission.
 If that process's durable row already records exit or loss, a later model-visible
 `write_stdin` remains fenced before provider dispatch but returns the stored
 terminal exit/loss banner. It never labels a permanently dead handle as a
-retryable platform fault or calls the provider again.
+retryable platform fault or calls the provider again. If provider polling and a
+lease-loss reconciler race to settle the same terminal state, the first durable
+state and evidence reason win; a later matching state/exit proof is idempotent
+and unpins the local route even when its bounded evidence reason differs, while
+a contradictory state or exit code remains outcome-unknown and pinned.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
