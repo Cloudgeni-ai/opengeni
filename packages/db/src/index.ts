@@ -44862,11 +44862,12 @@ export class SandboxWorkspaceMutationFencedError extends Error {
   }
 }
 
-/** A process-scoped mutation named a durable retained process that has already
- * reached a terminal state. This remains a fence—the provider must not be
- * called again—but carries the existing terminal result so model-facing shell
- * tools can report completion/loss instead of presenting a retryable platform
- * failure for a handle that can never become active again. */
+/** An operation named a durable retained process that has already reached a
+ * terminal state. This remains a fence—the provider must not be called again
+ * and contradictory proof must not overwrite durable truth—but carries the
+ * existing terminal result so routing can reconcile a concurrent settlement
+ * or report completion/loss instead of presenting a retryable platform failure
+ * for a handle that can never become active again. */
 export class SandboxRetainedProcessTerminalError extends SandboxWorkspaceMutationFencedError {
   readonly name = "SandboxRetainedProcessTerminalError";
 
@@ -47339,7 +47340,8 @@ export async function countExpiredDrainingSandboxLeases(
 
 /** Settle an exact retained process only after exit or definitive loss proof.
  * The process row, parent admission, non-TTL holder, and lease count transition
- * commit atomically. Duplicate identical proof is idempotent; conflicting proof
+ * commit atomically. A duplicate terminal state + exit code is idempotent and
+ * preserves the first durable evidence reason; contradictory physical truth
  * fails closed. */
 export async function settleRetainedProcess(
   db: Database,
@@ -47401,15 +47403,8 @@ export async function settleRetainedProcess(
           );
         }
         if (process.state !== "active") {
-          if (
-            process.state !== input.outcome ||
-            process.exitCode !== exitCode ||
-            process.settlementReason !== reason
-          ) {
-            throw new SandboxWorkspaceMutationFencedError(
-              "process_fenced",
-              "Retained process already carries different terminal proof",
-            );
+          if (process.state !== input.outcome || process.exitCode !== exitCode) {
+            throw new SandboxRetainedProcessTerminalError(process.state, process.exitCode);
           }
           await tx
             .update(schema.sandboxPtySessions)

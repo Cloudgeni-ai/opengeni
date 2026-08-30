@@ -498,6 +498,55 @@ function retainedProcessTerminalProof(
   return exitCode === null ? null : { outcome: "exited", exitCode, reason: "provider_exit_banner" };
 }
 
+type DurableRetainedProcessTerminal = {
+  state: "exited" | "lost";
+  exitCode: number | null;
+};
+
+/** Recognize the structural DB fence without importing @opengeni/db into this
+ * routing leaf. Property reads are guarded so a hostile thrown Proxy cannot
+ * replace the original routing outcome. */
+function durableRetainedProcessTerminal(error: unknown): DurableRetainedProcessTerminal | null {
+  try {
+    if (!error || typeof error !== "object") return null;
+    const terminal = error as {
+      name?: unknown;
+      code?: unknown;
+      state?: unknown;
+      exitCode?: unknown;
+    };
+    if (
+      terminal.name !== "SandboxRetainedProcessTerminalError" ||
+      terminal.code !== "process_fenced" ||
+      (terminal.state !== "exited" && terminal.state !== "lost") ||
+      (terminal.exitCode !== null &&
+        (typeof terminal.exitCode !== "number" || !Number.isSafeInteger(terminal.exitCode)))
+    ) {
+      return null;
+    }
+    if (terminal.state === "lost" && terminal.exitCode !== null) return null;
+    return { state: terminal.state, exitCode: terminal.exitCode };
+  } catch {
+    return null;
+  }
+}
+
+function terminalResult(
+  terminal: DurableRetainedProcessTerminal,
+  providerSessionId: number,
+): string {
+  return terminal.state === "exited" && terminal.exitCode !== null
+    ? `Process exited with code ${terminal.exitCode}\n\nOutput:\n`
+    : `write_stdin failed: session not found: ${providerSessionId}`;
+}
+
+function terminalMatchesProof(
+  terminal: DurableRetainedProcessTerminal,
+  proof: RoutingRetainedProcessTerminalProof,
+): boolean {
+  return terminal.state === proof.outcome && terminal.exitCode === proof.exitCode;
+}
+
 function formatExecResult(result: unknown): string {
   if (typeof result === "string") return result;
   if (!result || typeof result !== "object") {
@@ -885,6 +934,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     try {
       await record.settlement;
     } catch (error) {
+      const durableTerminal = durableRetainedProcessTerminal(error);
+      if (durableTerminal && terminalMatchesProof(durableTerminal, pending.proof)) {
+        // Another authority settled the same physical terminal outcome first.
+        // The reason may differ (for example provider-instance loss versus the
+        // local provider-session-lost banner), but state + exit code are the
+        // immutable physical truth. Forget the local route without replaying.
+        record.settlement = null;
+        record.pendingTerminal = null;
+        this.retainedProcesses.delete(record.process.providerSessionId);
+        return;
+      }
       // A failed DB settlement is not permission to forget the physical process.
       // Keep the exact route and immutable proof so the next control poll retries
       // settlement without issuing a command against a new backend.
@@ -933,11 +993,22 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
     await this.ensureParentPromotion(record);
     const op = "writeStdin";
-    const admission = await this.deps.beforeProcessMutation?.({
-      op,
-      backend: record.backend,
-      process: record.process,
-    });
+    let admission: unknown;
+    try {
+      admission = await this.deps.beforeProcessMutation?.({
+        op,
+        backend: record.backend,
+        process: record.process,
+      });
+    } catch (error) {
+      const durableTerminal = durableRetainedProcessTerminal(error);
+      if (!durableTerminal) throw error;
+      // Durable settlement won the race before this model-visible mutation was
+      // admitted. Never call the provider; return the stored result through the
+      // ordinary output path so the turn controller drops its shell registration.
+      this.retainedProcesses.delete(providerSessionId);
+      return terminalResult(durableTerminal, providerSessionId);
+    }
     const write = record.backend.session.writeStdin;
     if (!write) throw new RoutingUnsupportedError(op, record.backend.kind);
     let result: string;
