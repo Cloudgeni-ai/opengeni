@@ -284,7 +284,6 @@ async function settleOrganizationMembershipProtocols(
                     eq(schema.sessions.accountId, settlement.accountId),
                     eq(schema.sessions.workspaceId, workspaceId),
                     eq(schema.sessions.id, settlement.sessionId),
-                    eq(schema.sessions.lastSequence, session.lastSequence),
                   ),
                 )
                 .returning({ id: schema.sessions.id });

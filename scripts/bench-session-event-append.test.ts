@@ -24,6 +24,10 @@ describe("session event append benchmark receipts", () => {
     expect(source).toContain('server.fsync !== "on"');
     expect(source).toContain('server.synchronousCommit !== "on"');
     expect(source).toContain('server.fullPageWrites !== "on"');
+    expect(source).toContain('!forceRls.get("session_event_cursors")');
+    expect(source).toContain('sessionEventCursorsForceRls: forceRls.get("session_event_cursors")');
+    expect(source).toContain("left join session_event_cursors cursor");
+    expect(source).toContain("projectionAheadSessions");
   });
 
   test("reports nearest-rank latency percentiles", () => {

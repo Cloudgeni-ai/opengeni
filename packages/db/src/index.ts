@@ -28710,9 +28710,17 @@ async function createSessionInTransaction(
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
       ]);
+      const [canonicalExisting] = await canonicalSessionRowsFromEventCursors(
+        tx,
+        input.workspaceId,
+        [existing],
+      );
+      if (!canonicalExisting) {
+        throw new Error(`Session event cursor missing for session ${existing.id}`);
+      }
       await input.beforeCreateCommit?.(tx, existing.id);
       return {
-        session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
+        session: await mapSessionWithControl(tx, canonicalExisting, grouped.get(existing.id) ?? []),
         created: false,
         denied: false,
       };
@@ -28915,9 +28923,21 @@ async function createSessionInTransaction(
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
         ]);
+        const [canonicalExisting] = await canonicalSessionRowsFromEventCursors(
+          tx,
+          input.workspaceId,
+          [existing],
+        );
+        if (!canonicalExisting) {
+          throw new Error(`Session event cursor missing for session ${existing.id}`);
+        }
         await input.beforeCreateCommit?.(tx, existing.id);
         return {
-          session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
+          session: await mapSessionWithControl(
+            tx,
+            canonicalExisting,
+            grouped.get(existing.id) ?? [],
+          ),
           created: false,
           denied: false,
         };
@@ -29046,8 +29066,10 @@ export async function getSessionByCreateIdempotencyKey(
       )
       .limit(1);
     if (!row) return null;
+    const [session] = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, [row]);
+    if (!session) throw new Error(`Session event cursor missing for session ${row.id}`);
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
-    return await mapSessionWithControl(scopedDb, row, grouped.get(row.id) ?? []);
+    return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
   });
 }
 
@@ -29063,8 +29085,10 @@ export async function getSession(
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!row) return null;
+    const [session] = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, [row]);
+    if (!session) throw new Error(`Session event cursor missing for session ${row.id}`);
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
-    return await mapSessionWithControl(scopedDb, row, grouped.get(row.id) ?? []);
+    return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
   });
 }
 
@@ -29664,7 +29688,9 @@ export async function getAnySessionInGroup(
         ),
       )
       .limit(1);
-    return row ? await mapSessionWithControl(scopedDb, row) : null;
+    if (!row) return null;
+    const [session] = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, [row]);
+    return session ? await mapSessionWithControl(scopedDb, session) : null;
   });
 }
 
@@ -29970,6 +29996,51 @@ function mapSessionPin(
     : { pinned: false, pinnedAt: null, pinVersion: 0 };
 }
 
+type SessionRow = typeof schema.sessions.$inferSelect;
+
+/**
+ * Public sequence and unread projections are cursor-authoritative after the
+ * raw-lane activation. The compatibility column may intentionally lag raw
+ * deltas, but it may never lead the durable cursor.
+ */
+async function canonicalSessionRowsFromEventCursors(
+  db: Database,
+  workspaceId: string,
+  rows: readonly SessionRow[],
+): Promise<SessionRow[]> {
+  if (rows.length === 0) return [];
+  const sessionIds = [...new Set(rows.map((row) => row.id))];
+  const cursors = await db
+    .select({
+      accountId: schema.sessionEventCursors.accountId,
+      workspaceId: schema.sessionEventCursors.workspaceId,
+      sessionId: schema.sessionEventCursors.sessionId,
+      lastSequence: schema.sessionEventCursors.lastSequence,
+    })
+    .from(schema.sessionEventCursors)
+    .where(
+      and(
+        eq(schema.sessionEventCursors.workspaceId, workspaceId),
+        inArray(schema.sessionEventCursors.sessionId, sessionIds),
+      ),
+    );
+  const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
+  return rows.map((row) => {
+    const cursor = cursorBySessionId.get(row.id);
+    if (
+      !cursor ||
+      cursor.accountId !== row.accountId ||
+      cursor.workspaceId !== row.workspaceId ||
+      cursor.lastSequence < row.lastSequence
+    ) {
+      throw new Error(`Session event cursor invariant failed for session ${row.id}`);
+    }
+    return cursor.lastSequence === row.lastSequence
+      ? row
+      : { ...row, lastSequence: cursor.lastSequence };
+  });
+}
+
 function mapSessionAttention(
   session: Pick<typeof schema.sessions.$inferSelect, "lastSequence">,
   row: SessionPinRow | null | undefined,
@@ -30152,6 +30223,10 @@ export async function sessionTreeStatsForSessions(
         stats."attentionSince",
         stats.truncated
       from ${schema.sessions} root
+      join ${schema.sessionEventCursors} root_cursor
+        on root_cursor.account_id = root.account_id
+       and root_cursor.workspace_id = root.workspace_id
+       and root_cursor.session_id = root.id
       join ${schema.workspaceInferenceControls} workspace_control
         on workspace_control.workspace_id = root.workspace_id
       cross join lateral (
@@ -30166,7 +30241,7 @@ export async function sessionTreeStatsForSessions(
           select
             root.id,
             root.status,
-            root.last_sequence,
+            root_cursor.last_sequence,
             greatest(
               case
                 when workspace_control.workspace_state = 'paused'
@@ -30191,7 +30266,7 @@ export async function sessionTreeStatsForSessions(
           select
             child.id,
             child.status,
-            child.last_sequence,
+            child_cursor.last_sequence,
             greatest(
               case
                 -- A subtree resume defeats every inherited pause older than it.
@@ -30214,6 +30289,10 @@ export async function sessionTreeStatsForSessions(
             descendants.path || child.id
           from descendants
           join ${schema.sessions} child on child.parent_session_id = descendants.id
+          join ${schema.sessionEventCursors} child_cursor
+            on child_cursor.account_id = child.account_id
+           and child_cursor.workspace_id = child.workspace_id
+           and child_cursor.session_id = child.id
           where child.workspace_id = ${workspaceId}
             and descendants.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
             -- Parent links are expected to form a tree, but legacy/manual rows
@@ -30994,6 +31073,14 @@ export async function listSessionsForSubject(
           ...pinnedRows.map((row) => row.session.id),
           ...pageRows.map((row) => row.session.id),
         ];
+        const canonicalSessions = await canonicalSessionRowsFromEventCursors(
+          tx,
+          workspaceId,
+          [...pinnedRows, ...pageRows].map((row) => row.session),
+        );
+        const canonicalSessionById = new Map(
+          canonicalSessions.map((session) => [session.id, session]),
+        );
         const mcpServers = await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
         const rootRelatedIds = await sessionIdsCoveredByAuthorizationRoots(
           tx,
@@ -31018,25 +31105,28 @@ export async function listSessionsForSubject(
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
         ): Session => {
-          const control = controls.get(row.session.id);
-          if (!control) throw new Error(`Effective control missing for session ${row.session.id}`);
+          const session = canonicalSessionById.get(row.session.id);
+          if (!session)
+            throw new Error(`Session event cursor missing for session ${row.session.id}`);
+          const control = controls.get(session.id);
+          if (!control) throw new Error(`Effective control missing for session ${session.id}`);
           return projectSessionForRelatedAccess(
             withRequiresActionSince(
               {
                 ...mapSession(
-                  row.session,
+                  session,
                   control,
-                  mcpServers.get(row.session.id) ?? [],
+                  mcpServers.get(session.id) ?? [],
                   mapSessionPin(row.pin),
-                  mapSessionAttention(row.session, row.pin),
+                  mapSessionAttention(session, row.pin),
                   mapSessionArchive(row.pin),
                   { subjectId: options.subjectId, activated: tenancyActivated },
                 ),
-                treeStats: treeStats.get(row.session.id) ?? EMPTY_SESSION_TREE_STATS,
+                treeStats: treeStats.get(session.id) ?? EMPTY_SESSION_TREE_STATS,
               },
               requiresActionSince,
             ),
-            rootRelatedIds.has(row.session.id) ? "root" : "target",
+            rootRelatedIds.has(session.id) ? "root" : "target",
           );
         };
         return {
@@ -31108,6 +31198,10 @@ export async function getSessionForSubject(
       )
       .limit(1);
     if (!row) return null;
+    const [session] = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, [
+      row.session,
+    ]);
+    if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
@@ -31115,10 +31209,10 @@ export async function getSessionForSubject(
     return projectSessionForRelatedAccess(
       await mapSessionWithControl(
         scopedDb,
-        row.session,
+        session,
         mcpServers.get(sessionId) ?? [],
         mapSessionPin(row.pin),
-        mapSessionAttention(row.session, row.pin),
+        mapSessionAttention(session, row.pin),
         mapSessionArchive(row.pin),
         undefined,
         { subjectId, activated: tenancyActivated },
@@ -31157,7 +31251,7 @@ export async function setSessionPin(
         // API grant cannot recreate a pin after removal commits.
         await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
         await requireSessionPersonalStateWriteAuthority(tx, input);
-        const [session] = await tx
+        const [storedSession] = await tx
           .select()
           .from(schema.sessions)
           .where(
@@ -31167,7 +31261,12 @@ export async function setSessionPin(
             ),
           )
           .limit(1);
-        if (!session) return null;
+        if (!storedSession) return null;
+        const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
+          storedSession,
+        ]);
+        if (!session)
+          throw new Error(`Session event cursor missing for session ${input.sessionId}`);
         const [existing] = await tx
           .select()
           .from(schema.sessionPins)
@@ -31298,7 +31397,7 @@ export async function setSessionAttention(
         await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
         await requireSessionPersonalStateWriteAuthority(tx, input);
 
-        const [session] = await tx
+        const [storedSession] = await tx
           .select()
           .from(schema.sessions)
           .where(
@@ -31308,7 +31407,12 @@ export async function setSessionAttention(
             ),
           )
           .limit(1);
-        if (!session) return null;
+        if (!storedSession) return null;
+        const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
+          storedSession,
+        ]);
+        if (!session)
+          throw new Error(`Session event cursor missing for session ${input.sessionId}`);
 
         const [existing] = await tx
           .select()
@@ -31461,7 +31565,7 @@ export async function setSessionArchive(
         await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
         await requireSessionPersonalStateWriteAuthority(tx, input);
 
-        const [session] = await tx
+        const [storedSession] = await tx
           .select()
           .from(schema.sessions)
           .where(
@@ -31472,7 +31576,12 @@ export async function setSessionArchive(
             ),
           )
           .limit(1);
-        if (!session) return null;
+        if (!storedSession) return null;
+        const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
+          storedSession,
+        ]);
+        if (!session)
+          throw new Error(`Session event cursor missing for session ${input.sessionId}`);
 
         const [existing] = await tx
           .select()
@@ -31622,17 +31731,18 @@ export async function listSessions(
       .where(and(...filters))
       .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
       .limit(limit);
+    const canonicalRows = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, rows);
     const grouped = await sessionMcpServerMetadataForSessions(
       scopedDb,
       workspaceId,
-      rows.map((row) => row.id),
+      canonicalRows.map((row) => row.id),
     );
     const controls = await sessionControlProjections(
       scopedDb,
       workspaceId,
-      rows.map((row) => row.id),
+      canonicalRows.map((row) => row.id),
     );
-    return rows.map((row) => {
+    return canonicalRows.map((row) => {
       const control = controls.get(row.id);
       if (!control) throw new Error(`Effective control missing for session ${row.id}`);
       return mapSession(row, control, grouped.get(row.id) ?? []);
@@ -33166,19 +33276,20 @@ export async function getSessionLineage(
       .select()
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
+    const canonicalRows = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, rows);
     const grouped = await sessionMcpServerMetadataForSessions(
       scopedDb,
       workspaceId,
-      rows.map((row) => row.id),
+      canonicalRows.map((row) => row.id),
     );
     const controls = await sessionControlProjections(scopedDb, workspaceId, ids);
     const requiresActionSince = await sessionRequiresActionSinceForSessions(
       scopedDb,
       workspaceId,
-      rows.filter((row) => row.status === "requires_action").map((row) => row.id),
+      canonicalRows.filter((row) => row.status === "requires_action").map((row) => row.id),
     );
     const sessionsById = new Map(
-      rows.map((row) => {
+      canonicalRows.map((row) => {
         const control = controls.get(row.id);
         if (!control) throw new Error(`Effective control missing for session ${row.id}`);
         return [
@@ -34887,11 +34998,13 @@ async function lockTurnAttemptWriteFenceTx(
     turnId: string;
     executionGeneration: number;
     attemptId: string;
+    sessionLock?: "no_key_update" | "key_share";
   },
 ): Promise<TurnAttemptFenceResult> {
   const locks = await lockSessionEventWriteRows(tx, {
     workspaceId: input.workspaceId,
     controlLock: "share",
+    sessionLock: input.sessionLock ?? "no_key_update",
     sessionIds: [input.sessionId],
     turnIds: [input.turnId],
     attemptIds: [input.attemptId],
@@ -58397,6 +58510,7 @@ async function acknowledgeConsumedChildLifecycleNotices(
   if (!fence?.acquired) return;
   const pins = schema.sessionPins;
   const sessions = schema.sessions;
+  const cursors = schema.sessionEventCursors;
   await withTemporarySubjectRls(tx, subjectId, async () => {
     await tx.execute(sql`
       insert into ${pins} (
@@ -58411,16 +58525,20 @@ async function acknowledgeConsumedChildLifecycleNotices(
         -- at the absent-row projection so a concurrent pin/archive writer
         -- holding that projection stays valid.
         false, null, 0,
-        ${sessions.lastSequence}, false, 0,
+        ${cursors.lastSequence}, false, 0,
         false, null, 0
       from ${sessions}
+      join ${cursors}
+        on ${cursors.accountId} = ${sessions.accountId}
+       and ${cursors.workspaceId} = ${sessions.workspaceId}
+       and ${cursors.sessionId} = ${sessions.id}
       where ${and(
         eq(sessions.workspaceId, input.workspaceId),
         eq(sessions.parentSessionId, input.sessionId),
         inArray(sessions.id, [...input.childSessionIds]),
         // Nothing to acknowledge on a child with no durable events: the
         // absent-row projection already reports it read.
-        gt(sessions.lastSequence, 0),
+        gt(cursors.lastSequence, 0),
       )}
       order by ${sessions.id}
       on conflict (subject_id, workspace_id, session_id) do update
@@ -67814,6 +67932,12 @@ const SESSION_EVENT_RAW_DELTA_TYPE_SET: ReadonlySet<string> = new Set(
   SESSION_EVENT_RAW_DELTA_TYPES,
 );
 
+export function sessionEventRawLaneEnabled(
+  value = process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED,
+): boolean {
+  return !["0", "false", "off", "disabled"].includes(value?.trim().toLowerCase() ?? "");
+}
+
 /** Raw streaming fragments advance the durable sequence, not monitoring activity. */
 function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }>): boolean {
   return inputs.some((input) => !SESSION_EVENT_RAW_DELTA_TYPE_SET.has(input.type));
@@ -68407,6 +68531,7 @@ export type SessionEventAppendPhaseOutcome =
   | "ok"
   | "rejected"
   | "mutation_skipped"
+  | "projection_skipped"
   | "escalated"
   | "error";
 export type SessionEventAppendPhaseObservation = {
@@ -68497,6 +68622,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
     eventCount: inputs.length,
   };
   const initiallyAdvancesActivity = sessionEventTypesAdvanceActivity(inputs);
+  const rawLaneEnabled = sessionEventRawLaneEnabled();
   const persistence = {
     stage: "session_events.append_for_turn_attempt",
     eventTypes,
@@ -68538,6 +68664,8 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                     turnId,
                     executionGeneration,
                     attemptId,
+                    sessionLock:
+                      activityGateOpen || !rawLaneEnabled ? "no_key_update" : "key_share",
                   }),
                 (fenceResult) => (fenceResult.allowed ? "ok" : "rejected"),
               );
@@ -68662,6 +68790,27 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                   occurredAt: input.occurredAt ?? now,
                 };
               });
+              const advancesActivity = sessionEventTypesAdvanceActivity(values);
+              const rawLaneIsolated = !advancesActivity && rawLaneEnabled;
+              if (rawLaneIsolated) {
+                // Migration 0379 keeps legacy SQL writers fail-closed while
+                // allowing this exact cursor-owned raw range to avoid a
+                // per-row compatibility lookup. The AFTER statement trigger
+                // still validates and advances the range atomically.
+                await tx.execute(
+                  sql`select set_config(
+                    'opengeni.session_event_raw_cursor_range_v1',
+                    ${JSON.stringify({
+                      accountId: session.accountId,
+                      workspaceId,
+                      sessionId,
+                      firstSequence: session.lastSequence + 1,
+                      lastSequence: sequence,
+                    })},
+                    true
+                  )`,
+                );
+              }
               const inserted = await runSessionEventAppendPhase(
                 observer,
                 { ...phaseInput, phase: "event_insert" },
@@ -68716,18 +68865,21 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                 observer,
                 { ...phaseInput, phase: "sequence_update" },
                 async () =>
-                  await tx
-                    .update(schema.sessions)
-                    .set({
-                      lastSequence: sequence,
-                      ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: now } : {}),
-                    })
-                    .where(
-                      and(
-                        eq(schema.sessions.workspaceId, workspaceId),
-                        eq(schema.sessions.id, sessionId),
-                      ),
-                    ),
+                  advancesActivity || !rawLaneIsolated
+                    ? await tx
+                        .update(schema.sessions)
+                        .set({
+                          lastSequence: sequence,
+                          ...(advancesActivity ? { updatedAt: now } : {}),
+                        })
+                        .where(
+                          and(
+                            eq(schema.sessions.workspaceId, workspaceId),
+                            eq(schema.sessions.id, sessionId),
+                          ),
+                        )
+                    : undefined,
+                () => (rawLaneIsolated ? "projection_skipped" : "ok"),
               );
               return {
                 events: inserted.map(mapEvent),
