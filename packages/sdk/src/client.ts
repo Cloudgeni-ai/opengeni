@@ -3919,12 +3919,13 @@ export class OpenGeniClient {
       throw new OpenGeniApiError(502, "computer frame metadata is invalid");
     }
     const bytes = await readBoundedResponseBytes(response, 256 * 1024, null);
-    if (
-      metadata.computerSessionId !== computerSessionId ||
-      metadata.targetId !== targetId ||
-      metadata.mediaType !== mediaType ||
-      metadata.sha256 !== (await sha256Hex(bytes))
-    ) {
+    const mismatchReason = computerFrameEvidenceMismatchReason(metadata, {
+      computerSessionId,
+      targetId,
+      mediaType,
+      sha256: await sha256Hex(bytes),
+    });
+    if (mismatchReason) {
       throw new OpenGeniApiError(502, "computer frame evidence does not match its request");
     }
     return { ...metadata, data: bytes };
@@ -7715,6 +7716,30 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const owned = Uint8Array.from(bytes);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", owned.buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+type ComputerFrameEvidenceMismatchReason =
+  | "frame_session_mismatch"
+  | "frame_target_mismatch"
+  | "frame_media_mismatch"
+  | "frame_digest_mismatch";
+
+function computerFrameEvidenceMismatchReason(
+  metadata: ReturnType<typeof decodeComputerFrameMetadataHeader>,
+  expected: {
+    computerSessionId: string;
+    targetId: string;
+    mediaType: "image/jpeg" | "image/png";
+    sha256: string;
+  },
+): ComputerFrameEvidenceMismatchReason | null {
+  if (metadata.computerSessionId !== expected.computerSessionId) {
+    return "frame_session_mismatch";
+  }
+  if (metadata.targetId !== expected.targetId) return "frame_target_mismatch";
+  if (metadata.mediaType !== expected.mediaType) return "frame_media_mismatch";
+  if (metadata.sha256 !== expected.sha256) return "frame_digest_mismatch";
+  return null;
 }
 
 async function cancelResponseBody(response: Response, reason: string): Promise<void> {
