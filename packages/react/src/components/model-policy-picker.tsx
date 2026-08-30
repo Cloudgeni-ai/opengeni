@@ -13,6 +13,7 @@ import { DropdownMenu } from "radix-ui";
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -547,6 +548,17 @@ export function useModelPolicyPickerState(props: ModelPolicyPickerProps) {
   const open = props.open ?? uncontrolledOpen;
   const rows = effectiveRows(props);
   const [nav, setNav] = usePickerNavState(props.sessionKey, rows, props.model);
+  const previousControlledOpen = useRef(props.open);
+  useEffect(() => {
+    const wasOpen = previousControlledOpen.current;
+    previousControlledOpen.current = props.open;
+    if (props.open === true && wasOpen !== true) {
+      setNav(defaultNavState(rows, props.model));
+    }
+    // Reset only on the controlled closed-to-open edge; ordinary rerenders
+    // deliberately preserve the current drill-down page.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.open]);
   const setOpen = (next: boolean) => {
     if (next) {
       setNav(defaultNavState(rows, props.model));

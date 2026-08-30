@@ -198,19 +198,20 @@ describe("ModelPolicyPicker", () => {
     expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
   });
 
-  test("reopens on the active model's Thinking options", async () => {
+  test("a controlled reopen returns to the active model's Thinking options", async () => {
     const hook = await renderHook(
-      () =>
+      (open: boolean) =>
         useModelPolicyPickerState({
           models: MODELS,
           model: "codex/gpt-5.6-sol",
           effort: "high",
           latencyMode: "standard",
+          open,
           onModelChange: () => {},
           onEffortChange: () => {},
           onLatencyModeChange: () => {},
         }),
-      undefined,
+      false as boolean,
     );
     try {
       expect(hook.result.current.nav).toEqual({
@@ -228,8 +229,7 @@ describe("ModelPolicyPicker", () => {
       );
       expect(hook.result.current.nav.level).toBe("models");
 
-      await actRun(() => hook.result.current.setOpen(false));
-      await actRun(() => hook.result.current.setOpen(true));
+      await hook.rerender(true);
       expect(hook.result.current.nav).toEqual({
         level: "thinking",
         rail: "codex_subscription",
