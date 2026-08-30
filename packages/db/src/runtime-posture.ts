@@ -47,7 +47,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
 
 const AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE =
   "enforce_automatic_session_title_policy_v1()";
-const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fanout_outbox_v1";
+const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE =
+  "automatic_session_title_fanout_outbox_v1";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
@@ -153,7 +154,8 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_workspace_operation_receipts",
   "self_service_organization_setup_receipts",
 ] as const;
-const PRIVATE_SESSION_CREATE_POLICY_ROUTINE = "get_private_session_create_policy(uuid, uuid, text)";
+const PRIVATE_SESSION_CREATE_POLICY_ROUTINE =
+  "get_private_session_create_policy(uuid, uuid, text)";
 const ORGANIZATION_PRIVATE_SESSION_SETTINGS_READ_ROUTINE =
   "get_organization_private_session_settings(uuid, text)";
 const ORGANIZATION_PRIVATE_SESSION_SETTINGS_UPDATE_ROUTINE =
@@ -183,7 +185,8 @@ const ORGANIZATION_PRIVATE_SESSION_ROUTINE_AUTHORITY_TABLES = {
 const ORGANIZATION_PRIVATE_SESSION_ROUTINES = Object.keys(
   ORGANIZATION_PRIVATE_SESSION_ROUTINE_AUTHORITY_TABLES,
 );
-const ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE = "organization_private_sessions_enabled(uuid)";
+const ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE =
+  "organization_private_sessions_enabled(uuid)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE =
   "preference_registry_create_knowledge_proposal_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, uuid, text, text, text, text, integer, text, jsonb, timestamp with time zone, text)";
 const PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES = [
@@ -256,15 +259,19 @@ const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
 ] as const;
 const PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
   "personal_resource_delegation_capability_active(text)";
-const PERSONAL_RESOURCE_CAPABILITY_TABLE = "personal_resource_delegation_capabilities";
+const PERSONAL_RESOURCE_CAPABILITY_TABLE =
+  "personal_resource_delegation_capabilities";
 const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
   "scheduled_personal_resource_capability_active(text)";
-const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE = "scheduled_personal_resource_capabilities";
-const VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE = "variable_set_authority_capability_active(text)";
+const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE =
+  "scheduled_personal_resource_capabilities";
+const VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE =
+  "variable_set_authority_capability_active(text)";
 const VARIABLE_SET_CAPABILITY_TABLE = "variable_set_authority_capabilities";
 const PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE =
   "personal_document_authority_capability_active(text)";
-const PERSONAL_DOCUMENT_CAPABILITY_TABLE = "personal_document_authority_capabilities";
+const PERSONAL_DOCUMENT_CAPABILITY_TABLE =
+  "personal_document_authority_capabilities";
 const PERSONAL_DOCUMENT_AUTHORITY_ROUTINES = [
   "create_personal_document_authority(uuid, uuid, uuid)",
   "resolve_document_original_file(uuid, uuid, text, uuid)",
@@ -294,9 +301,11 @@ const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "materialize_scoped_variable_set_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid)",
   "materialize_scoped_variable_set_for_session(uuid, uuid, uuid, uuid)",
 ] as const;
-const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE = "scoped_compute_capability_active(text)";
+const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE =
+  "scoped_compute_capability_active(text)";
 const SCOPED_COMPUTE_CAPABILITY_TABLE = "scoped_compute_capabilities";
-const CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE = "connection_tenancy_backfill_capabilities";
+const CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE =
+  "connection_tenancy_backfill_capabilities";
 const CONNECTION_TENANCY_BACKFILL_CAPABILITY_PREDICATE_ROUTINE =
   "connection_tenancy_backfill_capability_active(uuid)";
 const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
@@ -371,7 +380,8 @@ const ORGANIZATION_RECOVERY_AUTHORITY_TABLES = [
 ] as const;
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
-const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
+const SESSION_REFERENCE_VISIBLE_ROUTINE =
+  "session_reference_visible(uuid, uuid, uuid)";
 const TASK_NOTE_CAPABILITY_ROUTINES = [
   "create_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, integer)",
   "archive_task_note_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
@@ -480,8 +490,10 @@ const FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer)";
 const REPLAY_APPLIED_SESSION_FORK_ROUTINE =
   "replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer)";
-const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uuid, integer)";
-const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE = "session_tenancy_any_product_activation()";
+const SESSION_TENANCY_ACTIVATED_ROUTINE =
+  "session_tenancy_product_activated(uuid, integer)";
+const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE =
+  "session_tenancy_any_product_activation()";
 const SESSION_TENANCY_QUIESCENCE_ROUTINE =
   "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
 const TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE =
@@ -520,11 +532,14 @@ const XAI_CREATE_CREDENTIAL_ROUTINE =
   "create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone)";
 const XAI_DISCONNECT_CREDENTIAL_ROUTINE =
   "disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb)";
-const XAI_SNAPSHOT_VALIDATOR_ROUTINE = "xai_provider_account_authority_snapshot_v1_valid(jsonb)";
+const XAI_SNAPSHOT_VALIDATOR_ROUTINE =
+  "xai_provider_account_authority_snapshot_v1_valid(jsonb)";
 const XAI_AUTHORITY_LIVE_ROUTINE =
   "xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)";
-const XAI_POOL_VISIBLE_ROUTINE = "xai_subscription_pool_visible(uuid, uuid, text, text, uuid)";
-const XAI_RESOLVE_POOL_ROUTINE = "resolve_xai_authority_pool(uuid, uuid, text, jsonb)";
+const XAI_POOL_VISIBLE_ROUTINE =
+  "xai_subscription_pool_visible(uuid, uuid, text, text, uuid)";
+const XAI_RESOLVE_POOL_ROUTINE =
+  "resolve_xai_authority_pool(uuid, uuid, text, jsonb)";
 const XAI_REVALIDATE_CREDENTIAL_ROUTINE =
   "revalidate_xai_subscription_authority(uuid, text, uuid, jsonb)";
 const XAI_AUTHORITY_TABLES = [
@@ -553,6 +568,21 @@ const APP_LIFECYCLE_ROUTINES = [
   "settle_archived_app_gc_command(jsonb)",
   "app_launch_command(jsonb)",
   "app_tool_call_command(jsonb)",
+] as const;
+const APP_LIFECYCLE_AUTHORITY_TABLES = [
+  "app_build_files",
+  "app_builds",
+  "app_gc_claims",
+  "app_launches",
+  "app_lifecycle_operations",
+  "app_object_tombstones",
+  "app_previews",
+  "app_publications",
+  "app_releases",
+  "app_source_revisions",
+  "app_tool_calls",
+  "app_tool_policy_revisions",
+  "apps",
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
@@ -612,9 +642,8 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
 export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [
   CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
 ] as const;
-const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string>(
-  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
-);
+const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET =
+  new Set<string>(RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES);
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
@@ -641,6 +670,7 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  */
 export const FORCE_RLS_TABLES = [
   "agent_run_states",
+  "api_keys",
   "app_build_files",
   "app_builds",
   "app_gc_claims",
@@ -654,7 +684,6 @@ export const FORCE_RLS_TABLES = [
   "app_tool_calls",
   "app_tool_policy_revisions",
   "apps",
-  "api_keys",
   "attached_browser_devices",
   "attached_browser_inventories",
   "audit_events",
@@ -1216,7 +1245,9 @@ export const RUNTIME_READ_ONLY_TABLES = [
 ] as const;
 
 /** Existing runtime authorities that may be observed and advanced, never created or deleted. */
-export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions"] as const;
+export const RUNTIME_READ_UPDATE_TABLES = [
+  "workspace_session_activity_revisions",
+] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
@@ -1421,7 +1452,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "workspace_variable_sets",
 ] as const;
 
-export type RuntimeTableDmlPrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
+export type RuntimeTableDmlPrivilege =
+  "SELECT" | "INSERT" | "UPDATE" | "DELETE";
 export type RuntimeTablePrivilegeContract = Readonly<
   Record<string, readonly RuntimeTableDmlPrivilege[]>
 >;
@@ -1429,22 +1461,33 @@ export type RuntimeTablePrivilegeContract = Readonly<
 const FULL_DML_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
 
 /** Exact per-table DML contract. Absence means no direct table privileges. */
-export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract = Object.freeze({
-  ...Object.fromEntries(RUNTIME_FULL_DML_TABLES.map((table) => [table, FULL_DML_PRIVILEGES])),
-  ...Object.fromEntries(RUNTIME_READ_ONLY_TABLES.map((table) => [table, ["SELECT"] as const])),
-  ...Object.fromEntries(
-    RUNTIME_READ_UPDATE_TABLES.map((table) => [table, ["SELECT", "UPDATE"] as const]),
-  ),
-  ...Object.fromEntries(
-    RUNTIME_READ_INSERT_TABLES.map((table) => [table, ["SELECT", "INSERT"] as const]),
-  ),
-  ...Object.fromEntries(
-    RUNTIME_READ_INSERT_UPDATE_TABLES.map((table) => [
-      table,
-      ["SELECT", "INSERT", "UPDATE"] as const,
-    ]),
-  ),
-});
+export const RUNTIME_TABLE_PRIVILEGES: RuntimeTablePrivilegeContract =
+  Object.freeze({
+    ...Object.fromEntries(
+      RUNTIME_FULL_DML_TABLES.map((table) => [table, FULL_DML_PRIVILEGES]),
+    ),
+    ...Object.fromEntries(
+      RUNTIME_READ_ONLY_TABLES.map((table) => [table, ["SELECT"] as const]),
+    ),
+    ...Object.fromEntries(
+      RUNTIME_READ_UPDATE_TABLES.map((table) => [
+        table,
+        ["SELECT", "UPDATE"] as const,
+      ]),
+    ),
+    ...Object.fromEntries(
+      RUNTIME_READ_INSERT_TABLES.map((table) => [
+        table,
+        ["SELECT", "INSERT"] as const,
+      ]),
+    ),
+    ...Object.fromEntries(
+      RUNTIME_READ_INSERT_UPDATE_TABLES.map((table) => [
+        table,
+        ["SELECT", "INSERT", "UPDATE"] as const,
+      ]),
+    ),
+  });
 
 /** All tables with any direct runtime DML; retained as the aggregate public contract. */
 export const RUNTIME_DML_TABLES = Object.freeze(
@@ -1578,14 +1621,19 @@ function resultRows<T>(result: unknown): T[] {
   if (Array.isArray(rows)) {
     return rows as T[];
   }
-  throw new Error("Runtime database posture query returned an unsupported result shape");
+  throw new Error(
+    "Runtime database posture query returned an unsupported result shape",
+  );
 }
 
 function sorted(values: Iterable<string>): string[] {
   return [...values].sort((a, b) => a.localeCompare(b));
 }
 
-function difference(left: ReadonlySet<string>, right: ReadonlySet<string>): string[] {
+function difference(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): string[] {
   return sorted([...left].filter((value) => !right.has(value)));
 }
 
@@ -1596,9 +1644,11 @@ export async function inspectRuntimeDatabasePosture(
 ): Promise<RuntimeDatabasePosture> {
   const targetSchema = options.targetSchema?.trim() || "public";
   const targetSchemaCapabilityRoutines =
-    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
+    options.targetSchemaCapabilityRoutines ??
+    RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
   const targetSchemaForbiddenRoutines =
-    options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
+    options.targetSchemaForbiddenRoutines ??
+    RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
 
   return await db.transaction(
     async (tx) => {
@@ -1625,7 +1675,9 @@ export async function inspectRuntimeDatabasePosture(
       );
       const identity = identityRows[0];
       if (!identity) {
-        throw new Error("Runtime database posture could not resolve the current PostgreSQL role");
+        throw new Error(
+          "Runtime database posture could not resolve the current PostgreSQL role",
+        );
       }
 
       const mappedIdentity: RuntimeDatabaseIdentity = {
@@ -1649,9 +1701,12 @@ export async function inspectRuntimeDatabasePosture(
       // FORCE-RLS deployments, so inspect the value-free predicate before the
       // scoped catalog fast-path.
       const activationRows = resultRows<{ activated: boolean }>(
-        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
+        await tx.execute(
+          sql`select session_tenancy_any_product_activation() as activated`,
+        ),
       );
-      const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
+      const sessionTenancyProductActivationPresent =
+        activationRows[0]?.activated === true;
       const variableSetCutoverRows = resultRows<{ present: boolean }>(
         await tx.execute(sql`
           select to_regprocedure(
@@ -1682,9 +1737,12 @@ export async function inspectRuntimeDatabasePosture(
       }
 
       const relationshipRows = resultRows<RoleRelationshipCatalogRow>(
-        await tx.execute(sql.raw(roleRelationshipsCatalogQuery("current_user"))),
+        await tx.execute(
+          sql.raw(roleRelationshipsCatalogQuery("current_user")),
+        ),
       );
-      const memberships = classifyRoleRelationships(relationshipRows).unsafeRelationships;
+      const memberships =
+        classifyRoleRelationships(relationshipRows).unsafeRelationships;
 
       const schemas = resultRows<{
         name: string;
@@ -1873,9 +1931,10 @@ export async function inspectRuntimeDatabasePosture(
             and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
               array[
                 ${sql.join(
-                  [...targetSchemaCapabilityRoutines, ...targetSchemaForbiddenRoutines].map(
-                    (name) => sql`${name}`,
-                  ),
+                  [
+                    ...targetSchemaCapabilityRoutines,
+                    ...targetSchemaForbiddenRoutines,
+                  ].map((name) => sql`${name}`),
                   sql`, `,
                 )}
               ]::text[]
@@ -1951,7 +2010,9 @@ export function evaluateRuntimeDatabasePosture(
   const identity = posture.identity;
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
-    violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
+    violations.push(
+      "database is missing the 0352 session Variable Set attachment runtime receipt",
+    );
   }
 
   if (
@@ -1989,11 +2050,16 @@ export function evaluateRuntimeDatabasePosture(
       (options.protectedTables ? [] : PROTECTED_NO_DIRECT_DML_TABLES),
   );
   const targetSchemaCapabilityRoutines =
-    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
+    options.targetSchemaCapabilityRoutines ??
+    RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
   const targetSchemaForbiddenRoutines =
-    options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
+    options.targetSchemaForbiddenRoutines ??
+    RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
 
-  if (identity.currentUser !== expectedRole || identity.sessionUser !== expectedRole) {
+  if (
+    identity.currentUser !== expectedRole ||
+    identity.sessionUser !== expectedRole
+  ) {
     violations.push(
       `runtime identity must be ${expectedRole} (current_user=${identity.currentUser}, session_user=${identity.sessionUser})`,
     );
@@ -2005,7 +2071,8 @@ export function evaluateRuntimeDatabasePosture(
   if (identity.createDatabase) violations.push("runtime role has CREATEDB");
   if (identity.replication) violations.push("runtime role has REPLICATION");
   if (identity.inherit) violations.push("runtime role must be NOINHERIT");
-  if (identity.databaseOwner === expectedRole) violations.push("runtime role owns the database");
+  if (identity.databaseOwner === expectedRole)
+    violations.push("runtime role owns the database");
   if (identity.canCreateInDatabase) {
     violations.push("runtime role has CREATE on the current database");
   }
@@ -2013,17 +2080,25 @@ export function evaluateRuntimeDatabasePosture(
     violations.push(`row_security is ${identity.rowSecurity}, expected on`);
   }
   if (posture.memberships.length > 0) {
-    violations.push(`runtime role has memberships: ${sorted(posture.memberships).join(", ")}`);
+    violations.push(
+      `runtime role has memberships: ${sorted(posture.memberships).join(", ")}`,
+    );
   }
   if (posture.ownedSchemas.length > 0) {
-    violations.push(`runtime role owns schemas: ${sorted(posture.ownedSchemas).join(", ")}`);
+    violations.push(
+      `runtime role owns schemas: ${sorted(posture.ownedSchemas).join(", ")}`,
+    );
   }
   if (posture.ownedRelations.length > 0) {
-    violations.push(`runtime role owns relations: ${sorted(posture.ownedRelations).join(", ")}`);
+    violations.push(
+      `runtime role owns relations: ${sorted(posture.ownedRelations).join(", ")}`,
+    );
   }
 
   for (const schemaName of new Set([targetSchema, "opengeni_private"])) {
-    const schema = posture.schemas.find((candidate) => candidate.name === schemaName);
+    const schema = posture.schemas.find(
+      (candidate) => candidate.name === schemaName,
+    );
     if (!schema) {
       violations.push(`required schema ${schemaName} is missing`);
       continue;
@@ -2031,19 +2106,28 @@ export function evaluateRuntimeDatabasePosture(
     if (schema.owner === expectedRole) {
       violations.push(`runtime role owns schema ${schemaName}`);
     }
-    if (!schema.usage) violations.push(`runtime role lacks USAGE on schema ${schemaName}`);
-    if (schema.create) violations.push(`runtime role has CREATE on schema ${schemaName}`);
+    if (!schema.usage)
+      violations.push(`runtime role lacks USAGE on schema ${schemaName}`);
+    if (schema.create)
+      violations.push(`runtime role has CREATE on schema ${schemaName}`);
   }
 
-  const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  const tableByName = new Map(
+    posture.tables.map((table) => [table.name, table]),
+  );
   const actualRlsTables = new Set(
-    posture.tables.filter((table) => table.rlsEnabled).map((table) => table.name),
+    posture.tables
+      .filter((table) => table.rlsEnabled)
+      .map((table) => table.name),
   );
   const classifiedProtectedTables = new Set([
     ...directRuntimeTables,
     ...protectedNoDirectDmlTables,
   ]);
-  const unclassifiedProtectedTables = difference(protectedTables, classifiedProtectedTables);
+  const unclassifiedProtectedTables = difference(
+    protectedTables,
+    classifiedProtectedTables,
+  );
   if (unclassifiedProtectedTables.length > 0) {
     violations.push(
       `protected tables lack an explicit privilege class: ${unclassifiedProtectedTables.join(", ")}`,
@@ -2051,14 +2135,21 @@ export function evaluateRuntimeDatabasePosture(
   }
   const protectedNoDirectDmlOverlap = difference(
     protectedNoDirectDmlTables,
-    new Set([...protectedNoDirectDmlTables].filter((table) => !directRuntimeTables.has(table))),
+    new Set(
+      [...protectedNoDirectDmlTables].filter(
+        (table) => !directRuntimeTables.has(table),
+      ),
+    ),
   );
   if (protectedNoDirectDmlOverlap.length > 0) {
     violations.push(
       `protected no-direct-DML tables also declare runtime privileges: ${protectedNoDirectDmlOverlap.join(", ")}`,
     );
   }
-  const nonProtectedNoDirectDmlTables = difference(protectedNoDirectDmlTables, protectedTables);
+  const nonProtectedNoDirectDmlTables = difference(
+    protectedNoDirectDmlTables,
+    protectedTables,
+  );
   if (nonProtectedNoDirectDmlTables.length > 0) {
     violations.push(
       `no-direct-DML tables are absent from the protected contract: ${nonProtectedNoDirectDmlTables.join(", ")}`,
@@ -2067,11 +2158,15 @@ export function evaluateRuntimeDatabasePosture(
   const catalogTables = new Set(tableByName.keys());
   const missingRuntimeTables = difference(directRuntimeTables, catalogTables);
   if (missingRuntimeTables.length > 0) {
-    violations.push(`runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`);
+    violations.push(
+      `runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`,
+    );
   }
   const missingTables = difference(protectedTables, catalogTables);
   if (missingTables.length > 0) {
-    violations.push(`protected tables are missing: ${missingTables.join(", ")}`);
+    violations.push(
+      `protected tables are missing: ${missingTables.join(", ")}`,
+    );
   }
   const undeclaredRlsTables = difference(actualRlsTables, protectedTables);
   if (undeclaredRlsTables.length > 0) {
@@ -2090,12 +2185,16 @@ export function evaluateRuntimeDatabasePosture(
       ["REFERENCES", table.references],
       ["TRIGGER", table.trigger],
     ] as const;
-    const expectedPrivileges = new Set<string>(tablePrivileges[table.name] ?? []);
+    const expectedPrivileges = new Set<string>(
+      tablePrivileges[table.name] ?? [],
+    );
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
     }
     const missingPrivileges = privileges
-      .filter(([privilege, granted]) => expectedPrivileges.has(privilege) && !granted)
+      .filter(
+        ([privilege, granted]) => expectedPrivileges.has(privilege) && !granted,
+      )
       .map(([privilege]) => privilege);
     if (missingPrivileges.length > 0) {
       violations.push(
@@ -2103,7 +2202,9 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     const excessPrivileges = privileges
-      .filter(([privilege, granted]) => !expectedPrivileges.has(privilege) && granted)
+      .filter(
+        ([privilege, granted]) => !expectedPrivileges.has(privilege) && granted,
+      )
       .map(([privilege]) => privilege);
     if (excessPrivileges.length > 0) {
       violations.push(
@@ -2115,15 +2216,23 @@ export function evaluateRuntimeDatabasePosture(
   for (const tableName of protectedTables) {
     const table = tableByName.get(tableName);
     if (!table) continue;
-    if (!table.rlsEnabled) violations.push(`table ${tableName} does not ENABLE RLS`);
-    if (!table.rlsForced) violations.push(`table ${tableName} does not FORCE RLS`);
-    if (!table.rlsActive) violations.push(`table ${tableName} has inactive RLS for runtime role`);
-    if (table.policyCount < 1) violations.push(`table ${tableName} has no RLS policy`);
+    if (!table.rlsEnabled)
+      violations.push(`table ${tableName} does not ENABLE RLS`);
+    if (!table.rlsForced)
+      violations.push(`table ${tableName} does not FORCE RLS`);
+    if (!table.rlsActive)
+      violations.push(`table ${tableName} has inactive RLS for runtime role`);
+    if (table.policyCount < 1)
+      violations.push(`table ${tableName} has no RLS policy`);
   }
 
-  const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
+  const targetSchemaOwner = posture.schemas.find(
+    (schema) => schema.name === targetSchema,
+  )?.owner;
   for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
-    const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
+    const matches = posture.targetRoutines.filter(
+      (routine) => routine.name === forbiddenRoutine,
+    );
     if (matches.length !== 1) {
       violations.push(
         `owner-internal target-schema helper ${forbiddenRoutine} is missing or ambiguous`,
@@ -2136,21 +2245,28 @@ export function evaluateRuntimeDatabasePosture(
         `owner-internal target-schema helper ${routine.name} is not SECURITY DEFINER`,
       );
     }
-    const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+    const authorityOwner =
+      tableByName.get("sessions")?.owner ?? targetSchemaOwner;
     if (authorityOwner && routine.owner !== authorityOwner) {
       violations.push(
         `owner-internal target-schema helper ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
       );
     }
     if (routine.execute) {
-      violations.push(`runtime role has forbidden owner-internal helper ${routine.name}`);
+      violations.push(
+        `runtime role has forbidden owner-internal helper ${routine.name}`,
+      );
     }
     if (routine.publicExecute) {
-      violations.push(`PUBLIC has forbidden owner-internal helper ${routine.name}`);
+      violations.push(
+        `PUBLIC has forbidden owner-internal helper ${routine.name}`,
+      );
     }
   }
   for (const expectedRoutine of targetSchemaCapabilityRoutines) {
-    const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
+    const matches = posture.targetRoutines.filter(
+      (routine) => routine.name === expectedRoutine,
+    );
     if (matches.length !== 1) {
       violations.push(
         `target-schema runtime capability ${expectedRoutine} is missing or ambiguous`,
@@ -2165,9 +2281,36 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     } else if (!routine.securityDefiner) {
-      violations.push(`target-schema runtime capability ${routine.name} is not SECURITY DEFINER`);
+      violations.push(
+        `target-schema runtime capability ${routine.name} is not SECURITY DEFINER`,
+      );
     }
-    if (
+    if ((APP_LIFECYCLE_ROUTINES as readonly string[]).includes(routine.name)) {
+      const missingAuthorityTables = APP_LIFECYCLE_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = APP_LIFECYCLE_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
+        );
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (
       routine.name === GOOGLE_DRIVE_FILE_AUTHORIZATION_ROUTINE ||
       routine.name === GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE
     ) {
@@ -2179,10 +2322,12 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
+        const authorityTables = GOOGLE_DRIVE_AUTHORITY_TABLES.map((tableName) =>
+          tableByName.get(tableName)!,
         );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
+        );
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -2194,9 +2339,10 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (routine.name === KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE) {
-      const missingAuthorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
-        (tableName) => !tableByName.has(tableName),
-      );
+      const missingAuthorityTables =
+        KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.filter(
+          (tableName) => !tableByName.has(tableName),
+        );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
@@ -2205,7 +2351,9 @@ export function evaluateRuntimeDatabasePosture(
         const authorityTables = KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES.map(
           (tableName) => tableByName.get(tableName)!,
         );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
+        );
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -2217,15 +2365,21 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (routine.name === MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE) {
-      const authorityTables = MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES.filter(
-        (tableName) => tableByName.has(tableName),
-      ).map((tableName) => tableByName.get(tableName)!);
-      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      const authorityTables =
+        MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES.filter((tableName) =>
+          tableByName.has(tableName),
+        ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(
+        authorityTables.map((table) => table.owner),
+      );
       if (authorityOwners.size > 1) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
         );
-      } else if (authorityTables[0] && routine.owner !== authorityTables[0].owner) {
+      } else if (
+        authorityTables[0] &&
+        routine.owner !== authorityTables[0].owner
+      ) {
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0].owner}`,
         );
@@ -2234,18 +2388,22 @@ export function evaluateRuntimeDatabasePosture(
       if (!tableByName.has("governed_learning_decision_receipts")) {
         continue;
       }
-      const missingAuthorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.filter(
-        (tableName) => !tableByName.has(tableName),
-      );
+      const missingAuthorityTables =
+        GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.filter(
+          (tableName) => !tableByName.has(tableName),
+        );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
+        const authorityTables =
+          GOVERNED_LEARNING_EVALUATION_AUTHORITY_TABLES.map((tableName) =>
+            tableByName.get(tableName)!,
+          );
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
         );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -2262,19 +2420,26 @@ export function evaluateRuntimeDatabasePosture(
       )
     ) {
       if (!tableByName.has("governed_learning_decision_receipts")) continue;
-      const missingAuthorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.filter(
-        (name) => !tableByName.has(name),
-      );
+      const missingAuthorityTables =
+        GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.filter(
+          (name) => !tableByName.has(name),
+        );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.map(
-          (name) => tableByName.get(name)!,
+        const authorityTables =
+          GOVERNED_LEARNING_INSPECTION_AUTHORITY_TABLES.map((name) =>
+            tableByName.get(name)!,
+          );
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
         );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
-        if (authorityOwners.size !== 1 || routine.owner !== authorityTables[0]!.owner) {
+        if (
+          authorityOwners.size !== 1 ||
+          routine.owner !== authorityTables[0]!.owner
+        ) {
           violations.push(
             `target-schema runtime capability ${routine.name} owner does not match governed-learning inspection authority`,
           );
@@ -2288,18 +2453,22 @@ export function evaluateRuntimeDatabasePosture(
       if (!tableByName.has("governed_learning_activation_receipts")) {
         continue;
       }
-      const missingAuthorityTables = GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.filter(
-        (tableName) => !tableByName.has(tableName),
-      );
+      const missingAuthorityTables =
+        GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.filter(
+          (tableName) => !tableByName.has(tableName),
+        );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
+        const authorityTables =
+          GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES.map((tableName) =>
+            tableByName.get(tableName)!,
+          );
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
         );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -2315,18 +2484,22 @@ export function evaluateRuntimeDatabasePosture(
         routine.name as (typeof COMPANY_PROFILE_AGENT_ADMIN_ROUTINES)[number],
       )
     ) {
-      const missingAuthorityTables = COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.filter(
-        (tableName) => !tableByName.has(tableName),
-      );
+      const missingAuthorityTables =
+        COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.filter(
+          (tableName) => !tableByName.has(tableName),
+        );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
+        const authorityTables =
+          COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.map((tableName) =>
+            tableByName.get(tableName)!,
+          );
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
         );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -2338,20 +2511,26 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (
-      (ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES as readonly string[]).includes(routine.name)
+      (
+        ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES as readonly string[]
+      ).includes(routine.name)
     ) {
-      const missingAuthorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.filter(
-        (tableName) => !tableByName.has(tableName),
-      );
+      const missingAuthorityTables =
+        ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.filter(
+          (tableName) => !tableByName.has(tableName),
+        );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
+        const authorityTables =
+          ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES.map((tableName) =>
+            tableByName.get(tableName)!,
+          );
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
         );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -2363,7 +2542,9 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (
-      (ORGANIZATION_PRIVATE_SESSION_ROUTINES as readonly string[]).includes(routine.name)
+      (ORGANIZATION_PRIVATE_SESSION_ROUTINES as readonly string[]).includes(
+        routine.name,
+      )
     ) {
       if (!tableByName.has("organization_private_session_settings")) {
         continue;
@@ -2380,8 +2561,12 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = authorityTableNames.map((tableName) => tableByName.get(tableName)!);
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        const authorityTables = authorityTableNames.map((tableName) =>
+          tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
+        );
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -2396,18 +2581,22 @@ export function evaluateRuntimeDatabasePosture(
       if (!tableByName.has("company_brain_preference_proposal_receipts")) {
         continue;
       }
-      const missingAuthorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.filter(
-        (tableName) => !tableByName.has(tableName),
-      );
+      const missingAuthorityTables =
+        PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.filter(
+          (tableName) => !tableByName.has(tableName),
+        );
       if (missingAuthorityTables.length > 0) {
         violations.push(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
+        const authorityTables =
+          PREFERENCE_KNOWLEDGE_PROPOSAL_AUTHORITY_TABLES.map((tableName) =>
+            tableByName.get(tableName)!,
+          );
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
         );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -2418,12 +2607,20 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
-    } else if ((ORGANIZATION_RECOVERY_ROUTINES as readonly string[]).includes(routine.name)) {
-      const authorityTables = ORGANIZATION_RECOVERY_AUTHORITY_TABLES.filter((tableName) =>
-        tableByName.has(tableName),
+    } else if (
+      (ORGANIZATION_RECOVERY_ROUTINES as readonly string[]).includes(
+        routine.name,
+      )
+    ) {
+      const authorityTables = ORGANIZATION_RECOVERY_AUTHORITY_TABLES.filter(
+        (tableName) => tableByName.has(tableName),
       ).map((tableName) => tableByName.get(tableName)!);
-      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
-      if (authorityTables.length !== ORGANIZATION_RECOVERY_AUTHORITY_TABLES.length) {
+      const authorityOwners = new Set(
+        authorityTables.map((table) => table.owner),
+      );
+      if (
+        authorityTables.length !== ORGANIZATION_RECOVERY_AUTHORITY_TABLES.length
+      ) {
         violations.push(
           `target-schema runtime capability ${routine.name} organization recovery authority tables are missing`,
         );
@@ -2436,12 +2633,21 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
         );
       }
-    } else if ((MANAGED_AUTH_SESSION_SET_ROUTINES as readonly string[]).includes(routine.name)) {
-      const authorityTables = MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.filter((tableName) =>
-        tableByName.has(tableName),
+    } else if (
+      (MANAGED_AUTH_SESSION_SET_ROUTINES as readonly string[]).includes(
+        routine.name,
+      )
+    ) {
+      const authorityTables = MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.filter(
+        (tableName) => tableByName.has(tableName),
       ).map((tableName) => tableByName.get(tableName)!);
-      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
-      if (authorityTables.length !== MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.length) {
+      const authorityOwners = new Set(
+        authorityTables.map((table) => table.owner),
+      );
+      if (
+        authorityTables.length !==
+        MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.length
+      ) {
         violations.push(
           `target-schema runtime capability ${routine.name} managed auth session-set authority tables are missing`,
         );
@@ -2454,12 +2660,21 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
         );
       }
-    } else if ((CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(routine.name)) {
-      const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter((tableName) =>
-        tableByName.has(tableName),
+    } else if (
+      (CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(
+        routine.name,
+      )
+    ) {
+      const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter(
+        (tableName) => tableByName.has(tableName),
       ).map((tableName) => tableByName.get(tableName)!);
-      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
-      if (authorityTables.length !== CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.length) {
+      const authorityOwners = new Set(
+        authorityTables.map((table) => table.owner),
+      );
+      if (
+        authorityTables.length !==
+        CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.length
+      ) {
         violations.push(
           `target-schema runtime capability ${routine.name} canonical identity authority tables are missing`,
         );
@@ -2473,12 +2688,16 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     } else if (
-      (PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)
+      (
+        PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES as readonly string[]
+      ).includes(routine.name)
     ) {
-      const authorityTables = PERSONAL_GITHUB_REPOSITORY_AUTHORITY_TABLES.map((tableName) =>
-        tableByName.get(tableName),
+      const authorityTables = PERSONAL_GITHUB_REPOSITORY_AUTHORITY_TABLES.map(
+        (tableName) => tableByName.get(tableName),
       ).filter((table): table is RuntimeTablePosture => table !== undefined);
-      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      const authorityOwners = new Set(
+        authorityTables.map((table) => table.owner),
+      );
       if (authorityOwners.size > 1) {
         violations.push(
           `target-schema runtime capability ${routine.name} personal GitHub repository authority table owners do not match`,
@@ -2492,20 +2711,34 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (
-      (PERSONAL_DOCUMENT_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name) ||
-      (DOCUMENT_MIGRATION_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)
+      (PERSONAL_DOCUMENT_AUTHORITY_ROUTINES as readonly string[]).includes(
+        routine.name,
+      ) ||
+      (DOCUMENT_MIGRATION_AUTHORITY_ROUTINES as readonly string[]).includes(
+        routine.name,
+      )
     ) {
-      const authorityOwner = tableByName.get("documents")?.owner ?? targetSchemaOwner;
+      const authorityOwner =
+        tableByName.get("documents")?.owner ?? targetSchemaOwner;
       if (authorityOwner && routine.owner !== authorityOwner) {
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match document authority owner ${authorityOwner}`,
         );
       }
-    } else if ((VARIABLE_SET_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
-      const authorityTables = ["workspace_variable_sets", "workspace_variable_set_variables"]
+    } else if (
+      (VARIABLE_SET_AUTHORITY_ROUTINES as readonly string[]).includes(
+        routine.name,
+      )
+    ) {
+      const authorityTables = [
+        "workspace_variable_sets",
+        "workspace_variable_set_variables",
+      ]
         .map((tableName) => tableByName.get(tableName))
         .filter((table): table is RuntimeTablePosture => table !== undefined);
-      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      const authorityOwners = new Set(
+        authorityTables.map((table) => table.owner),
+      );
       if (authorityOwners.size > 1) {
         violations.push(
           `target-schema runtime capability ${routine.name} variable-set table owners do not match`,
@@ -2518,11 +2751,22 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
-    } else if ((SCOPED_COMPUTE_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
-      const authorityTables = ["rigs", "rig_versions", "enrollments", "sandboxes"]
+    } else if (
+      (SCOPED_COMPUTE_AUTHORITY_ROUTINES as readonly string[]).includes(
+        routine.name,
+      )
+    ) {
+      const authorityTables = [
+        "rigs",
+        "rig_versions",
+        "enrollments",
+        "sandboxes",
+      ]
         .map((tableName) => tableByName.get(tableName))
         .filter((table): table is RuntimeTablePosture => table !== undefined);
-      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      const authorityOwners = new Set(
+        authorityTables.map((table) => table.owner),
+      );
       if (authorityOwners.size > 1) {
         violations.push(
           `target-schema runtime capability ${routine.name} scoped-compute table owners do not match`,
@@ -2536,7 +2780,8 @@ export function evaluateRuntimeDatabasePosture(
         }
       }
     } else if (SESSION_AUTHORITY_ROUTINES.has(routine.name)) {
-      const authorityOwner = tableByName.get("sessions")?.owner ?? targetSchemaOwner;
+      const authorityOwner =
+        tableByName.get("sessions")?.owner ?? targetSchemaOwner;
       if (authorityOwner && routine.owner !== authorityOwner) {
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
@@ -2565,10 +2810,12 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = XAI_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
+        const authorityTables = XAI_AUTHORITY_TABLES.map((tableName) =>
+          tableByName.get(tableName)!,
         );
-        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        const authorityOwners = new Set(
+          authorityTables.map((table) => table.owner),
+        );
         if (authorityOwners.size !== 1) {
           violations.push(
             `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
@@ -2585,32 +2832,47 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     if (!routine.execute) {
-      violations.push(`runtime role lacks target-schema capability ${routine.name}`);
+      violations.push(
+        `runtime role lacks target-schema capability ${routine.name}`,
+      );
     }
-    const publicPolicyPredicate = RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(
-      routine.name,
-    );
+    const publicPolicyPredicate =
+      RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(
+        routine.name,
+      );
     if (publicPolicyPredicate && !routine.publicExecute) {
-      violations.push(`PUBLIC lacks required shared-policy predicate ${routine.name}`);
+      violations.push(
+        `PUBLIC lacks required shared-policy predicate ${routine.name}`,
+      );
     } else if (!publicPolicyPredicate && routine.publicExecute) {
-      violations.push(`PUBLIC has forbidden target-schema capability ${routine.name}`);
+      violations.push(
+        `PUBLIC has forbidden target-schema capability ${routine.name}`,
+      );
     }
   }
 
   const artifactOutbox = tableByName.get("editable_artifact_live_outbox");
   if (artifactOutbox) {
     if (!artifactOutbox.artifactOutboxDispatcherPolicy) {
-      violations.push("table editable_artifact_live_outbox lacks its owner dispatcher RLS policy");
+      violations.push(
+        "table editable_artifact_live_outbox lacks its owner dispatcher RLS policy",
+      );
     }
     for (const expectedRoutine of ARTIFACT_OUTBOX_CAPABILITY_ROUTINES) {
-      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      const matches = posture.privateRoutines.filter(
+        (routine) => routine.name === expectedRoutine,
+      );
       if (matches.length !== 1) {
-        violations.push(`artifact outbox capability ${expectedRoutine} is missing or ambiguous`);
+        violations.push(
+          `artifact outbox capability ${expectedRoutine} is missing or ambiguous`,
+        );
         continue;
       }
       const routine = matches[0]!;
       if (!routine.securityDefiner) {
-        violations.push(`artifact outbox capability ${routine.name} is not SECURITY DEFINER`);
+        violations.push(
+          `artifact outbox capability ${routine.name} is not SECURITY DEFINER`,
+        );
       }
       if (routine.owner !== artifactOutbox.owner) {
         violations.push(
@@ -2633,10 +2895,13 @@ export function evaluateRuntimeDatabasePosture(
     AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
     AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
   ]);
-  const automaticTitleFanoutCatalogPresent = posture.privateRoutines.some((routine) =>
-    automaticTitleFanoutRoutineNames.has(routine.name),
+  const automaticTitleFanoutCatalogPresent = posture.privateRoutines.some(
+    (routine) => automaticTitleFanoutRoutineNames.has(routine.name),
   );
-  if (automaticTitleFanoutCatalogPresent && automaticTitleFanoutOutboxes.length !== 1) {
+  if (
+    automaticTitleFanoutCatalogPresent &&
+    automaticTitleFanoutOutboxes.length !== 1
+  ) {
     violations.push(
       `automatic session title fanout private outbox ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE} is missing or ambiguous`,
     );
@@ -2680,7 +2945,9 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     for (const expectedRoutine of AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES) {
-      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      const matches = posture.privateRoutines.filter(
+        (routine) => routine.name === expectedRoutine,
+      );
       if (matches.length !== 1) {
         violations.push(
           `automatic session title fanout capability ${expectedRoutine} is missing or ambiguous`,
@@ -2710,7 +2977,8 @@ export function evaluateRuntimeDatabasePosture(
       }
     }
     const enqueueMatches = posture.privateRoutines.filter(
-      (routine) => routine.name === AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
+      (routine) =>
+        routine.name === AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
     );
     if (enqueueMatches.length !== 1) {
       violations.push(
@@ -2740,7 +3008,8 @@ export function evaluateRuntimeDatabasePosture(
       }
     }
     const policyTriggerMatches = posture.privateRoutines.filter(
-      (routine) => routine.name === AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
+      (routine) =>
+        routine.name === AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
     );
     if (policyTriggerMatches.length !== 1) {
       violations.push(
@@ -2771,7 +3040,9 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
-  const artifactMaterializationJobs = tableByName.get("editable_artifact_materialization_jobs");
+  const artifactMaterializationJobs = tableByName.get(
+    "editable_artifact_materialization_jobs",
+  );
   if (artifactMaterializationJobs) {
     for (const tableName of [
       "editable_artifact_materialization_jobs",
@@ -2783,11 +3054,15 @@ export function evaluateRuntimeDatabasePosture(
     ]) {
       const table = tableByName.get(tableName);
       if (table && !table.artifactMaterializerPolicy) {
-        violations.push(`table ${tableName} lacks its owner materializer RLS policy`);
+        violations.push(
+          `table ${tableName} lacks its owner materializer RLS policy`,
+        );
       }
     }
     for (const expectedRoutine of ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES) {
-      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      const matches = posture.privateRoutines.filter(
+        (routine) => routine.name === expectedRoutine,
+      );
       if (matches.length !== 1) {
         violations.push(
           `artifact materializer capability ${expectedRoutine} is missing or ambiguous`,
@@ -2796,7 +3071,9 @@ export function evaluateRuntimeDatabasePosture(
       }
       const routine = matches[0]!;
       if (!routine.securityDefiner) {
-        violations.push(`artifact materializer capability ${routine.name} is not SECURITY DEFINER`);
+        violations.push(
+          `artifact materializer capability ${routine.name} is not SECURITY DEFINER`,
+        );
       }
       if (routine.owner !== artifactMaterializationJobs.owner) {
         violations.push(
@@ -2813,7 +3090,9 @@ export function evaluateRuntimeDatabasePosture(
   const artifactAuthority = tableByName.get("editable_artifacts");
   if (artifactAuthority) {
     const matches = posture.privateRoutines.filter((routine) =>
-      routine.name.startsWith("advance_editable_artifact_authorization_revision("),
+      routine.name.startsWith(
+        "advance_editable_artifact_authorization_revision(",
+      ),
     );
     if (matches.length !== 1) {
       violations.push(
@@ -2864,7 +3143,9 @@ export function evaluateRuntimeDatabasePosture(
   const artifactLiveTickets = tableByName.get("editable_artifact_live_tickets");
   if (artifactLiveTickets) {
     for (const expectedRoutine of ARTIFACT_LIVE_TICKET_CAPABILITY_ROUTINES) {
-      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      const matches = posture.privateRoutines.filter(
+        (routine) => routine.name === expectedRoutine,
+      );
       if (matches.length !== 1) {
         violations.push(
           `artifact live ticket capability ${expectedRoutine} is missing or ambiguous`,
@@ -2873,7 +3154,9 @@ export function evaluateRuntimeDatabasePosture(
       }
       const routine = matches[0]!;
       if (!routine.securityDefiner) {
-        violations.push(`artifact live ticket capability ${routine.name} is not SECURITY DEFINER`);
+        violations.push(
+          `artifact live ticket capability ${routine.name} is not SECURITY DEFINER`,
+        );
       }
       if (routine.owner !== artifactLiveTickets.owner) {
         violations.push(
@@ -2881,11 +3164,15 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
       if (!routine.execute) {
-        violations.push(`runtime role lacks artifact live ticket capability ${routine.name}`);
+        violations.push(
+          `runtime role lacks artifact live ticket capability ${routine.name}`,
+        );
       }
     }
     for (const internalRoutine of ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES) {
-      const matches = posture.privateRoutines.filter((routine) => routine.name === internalRoutine);
+      const matches = posture.privateRoutines.filter(
+        (routine) => routine.name === internalRoutine,
+      );
       if (matches.length !== 1) {
         violations.push(
           `artifact live ticket internal routine ${internalRoutine} is missing or ambiguous`,
@@ -2904,7 +3191,9 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
       if (routine.execute) {
-        violations.push(`runtime role has forbidden ticket schema resolver ${routine.name}`);
+        violations.push(
+          `runtime role has forbidden ticket schema resolver ${routine.name}`,
+        );
       }
     }
   }
@@ -2913,7 +3202,8 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === PERSONAL_RESOURCE_CAPABILITY_TABLE,
   );
   const personalResourceCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) => routine.name === PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) =>
+      routine.name === PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (personalResourceCapabilityTables.length !== 1) {
     violations.push(
@@ -2942,7 +3232,9 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     if (!routine.execute) {
-      violations.push(`runtime role lacks personal-resource capability predicate ${routine.name}`);
+      violations.push(
+        `runtime role lacks personal-resource capability predicate ${routine.name}`,
+      );
     }
     if (routine.publicExecute) {
       violations.push(
@@ -2966,7 +3258,8 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === PERSONAL_DOCUMENT_CAPABILITY_TABLE,
   );
   const personalDocumentCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) => routine.name === PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) =>
+      routine.name === PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (personalDocumentCapabilityTables.length !== 1) {
     violations.push(
@@ -2995,7 +3288,9 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     if (!routine.execute) {
-      violations.push(`runtime role lacks personal-document capability predicate ${routine.name}`);
+      violations.push(
+        `runtime role lacks personal-document capability predicate ${routine.name}`,
+      );
     }
     if (routine.publicExecute) {
       violations.push(
@@ -3019,7 +3314,8 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === DOCUMENT_MIGRATION_CAPABILITY_TABLE,
   );
   const documentMigrationCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) => routine.name === DOCUMENT_MIGRATION_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) =>
+      routine.name === DOCUMENT_MIGRATION_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (documentMigrationCapabilityTables.length !== 1) {
     violations.push(
@@ -3048,7 +3344,9 @@ export function evaluateRuntimeDatabasePosture(
       );
     }
     if (!routine.execute) {
-      violations.push(`runtime role lacks document-migration capability predicate ${routine.name}`);
+      violations.push(
+        `runtime role lacks document-migration capability predicate ${routine.name}`,
+      );
     }
     if (routine.publicExecute) {
       violations.push(
@@ -3072,7 +3370,8 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE,
   );
   const scheduledCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) => routine.name === SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) =>
+      routine.name === SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (scheduledCapabilityTables.length !== 1) {
     violations.push(
@@ -3084,7 +3383,10 @@ export function evaluateRuntimeDatabasePosture(
       `scheduled personal-resource capability predicate ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
     );
   }
-  if (scheduledCapabilityTables.length === 1 && scheduledCapabilityRoutines.length === 1) {
+  if (
+    scheduledCapabilityTables.length === 1 &&
+    scheduledCapabilityRoutines.length === 1
+  ) {
     const table = scheduledCapabilityTables[0]!;
     const routine = scheduledCapabilityRoutines[0]!;
     if (routine.owner !== table.owner) {
@@ -3137,7 +3439,10 @@ export function evaluateRuntimeDatabasePosture(
         `variable-set capability predicate ${VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
       );
     }
-    if (variableSetCapabilityTables.length === 1 && variableSetCapabilityRoutines.length === 1) {
+    if (
+      variableSetCapabilityTables.length === 1 &&
+      variableSetCapabilityRoutines.length === 1
+    ) {
       const table = variableSetCapabilityTables[0]!;
       const routine = variableSetCapabilityRoutines[0]!;
       if (routine.owner !== table.owner) {
@@ -3151,10 +3456,14 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
       if (!routine.execute) {
-        violations.push(`runtime role lacks variable-set capability predicate ${routine.name}`);
+        violations.push(
+          `runtime role lacks variable-set capability predicate ${routine.name}`,
+        );
       }
       if (routine.publicExecute) {
-        violations.push(`PUBLIC has forbidden variable-set capability predicate ${routine.name}`);
+        violations.push(
+          `PUBLIC has forbidden variable-set capability predicate ${routine.name}`,
+        );
       }
       const directPrivileges = [
         ["SELECT", table.select],
@@ -3201,10 +3510,14 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
       if (!routine.execute) {
-        violations.push(`runtime role lacks scoped-compute capability predicate ${routine.name}`);
+        violations.push(
+          `runtime role lacks scoped-compute capability predicate ${routine.name}`,
+        );
       }
       if (routine.publicExecute) {
-        violations.push(`PUBLIC has forbidden scoped-compute capability predicate ${routine.name}`);
+        violations.push(
+          `PUBLIC has forbidden scoped-compute capability predicate ${routine.name}`,
+        );
       }
       const directPrivileges = [
         ["SELECT", table.select],
@@ -3228,7 +3541,8 @@ export function evaluateRuntimeDatabasePosture(
     (table) => table.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE,
   );
   const connectionBackfillCapabilityRoutines = posture.privateRoutines.filter(
-    (routine) => routine.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_PREDICATE_ROUTINE,
+    (routine) =>
+      routine.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_PREDICATE_ROUTINE,
   );
   if (connectionBackfillCapabilityTables.length !== 1) {
     violations.push(
@@ -3283,9 +3597,13 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
-    const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(
+      routine.name,
+    );
     if (!routine.execute && !ownerInternalRoutine) {
-      violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
+      violations.push(
+        `runtime role lacks EXECUTE on private routine ${routine.name}`,
+      );
     }
   }
 
