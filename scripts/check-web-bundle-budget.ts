@@ -1,7 +1,12 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 
-import { EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, KIB as kib } from "./web-bundle-budget-policy";
+import {
+  EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+  KIB as kib,
+  PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
+  PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
+} from "./web-bundle-budget-policy";
 
 type ManifestEntry = {
   file: string;
@@ -375,6 +380,11 @@ const budgets = {
   // gzip bytes across 33 files. Advance raw through the shared policy envelope,
   // gzip to 629 KiB (2,245 bytes of headroom), and file count to 33. Initial
   // byte, per-file, lazy-chunk, and CSS caps remain fixed.
+  // A browser acceptance build with its supported configured loopback API URL
+  // exposes one additional direct-session chunk and measures 2,269,339 raw /
+  // 637,787 gzip bytes across 33 files. Preserve a full KiB of raw and gzip
+  // headroom around that exact Linux/x64 Bun 1.4 measurement; every initial,
+  // per-file, lazy-chunk, and CSS cap remains fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
@@ -392,8 +402,16 @@ const budgets = {
 // per-file, lazy, and CSS cap unchanged.
 const effectiveBudgets = {
   ...budgets,
-  directSessionGzip: Math.max(budgets.directSessionGzip, 629 * kib),
-  directSessionFiles: Math.max(budgets.directSessionFiles, 33),
+  directSessionGzip: Math.max(
+    budgets.directSessionGzip,
+    629 * kib,
+    PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
+  ),
+  directSessionFiles: Math.max(
+    budgets.directSessionFiles,
+    33,
+    PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
+  ),
 } as const;
 
 const repoRoot = path.resolve(import.meta.dir, "..");

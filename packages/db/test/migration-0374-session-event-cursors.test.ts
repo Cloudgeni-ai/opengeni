@@ -83,7 +83,9 @@ describe("migration 0374 session event cursors", () => {
           applied_at timestamptz not null default now()
         )
       `);
-      await sql`insert into schema_migrations (name) values (${migrationName})`;
+      await sql`
+        insert into schema_migrations (name)
+        values (${migrationName}), ('0379_session_event_raw_lane_activation.sql')`;
       await migrate(blank.databaseUrl);
 
       const suffix = crypto.randomUUID();

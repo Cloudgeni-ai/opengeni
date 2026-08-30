@@ -1,5 +1,31 @@
 # @opengeni/core
 
+## 2.6.1
+
+### Patch Changes
+
+- 4bacdd3: Add fixed-scope organization API keys, idempotent external tenant workspace provisioning, Personal-workspace exclusion, and the matching SDK and integration guidance.
+- Updated dependencies [c3b43a5]
+- Updated dependencies [fab355b]
+- Updated dependencies [b471a90]
+- Updated dependencies [973b1dd]
+- Updated dependencies [e41285f]
+- Updated dependencies [1f289a0]
+- Updated dependencies [c9ac869]
+- Updated dependencies [96624a7]
+- Updated dependencies [fab355b]
+- Updated dependencies [fab355b]
+- Updated dependencies [4bacdd3]
+- Updated dependencies [72de39c]
+  - @opengeni/db@3.7.1
+  - @opengeni/contracts@2.9.1
+  - @opengeni/runtime@2.0.0
+  - @opengeni/events@0.4.9
+  - @opengeni/config@0.22.4
+  - @opengeni/documents@0.8.11
+  - @opengeni/observability@0.8.13
+  - @opengeni/storage@0.2.114
+
 ## 2.6.0
 
 ### Minor Changes

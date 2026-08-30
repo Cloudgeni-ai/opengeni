@@ -42,8 +42,13 @@ describe("organization administration surface", () => {
     expect(routeSource).toContain('section === "recovery"');
     expect(routeSource).toContain("OrganizationRecoverySection");
     expect(routeSource).toContain("OrganizationKnowledgePrompt");
+    expect(routeSource).toContain("OrganizationCompanyProfileAgentPolicy");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
+    expect(routeSource).toContain('accountGrant?.role === "owner"');
     expect(routeSource).toContain('"account:admin"');
+    expect(routeSource).toContain("client.getCompanyProfileAgentPolicy(");
+    expect(routeSource).toContain("client.updateCompanyProfileAgentPolicy(");
+    expect(routeSource).toContain('label: "Autonomous"');
     expect(routeSource).toContain("Organization identity is read-only for you");
     expect(recoverySource).toContain("overview.eligibleMembers");
     expect(recoverySource).not.toContain("listOrganizationAdministrationMembers");

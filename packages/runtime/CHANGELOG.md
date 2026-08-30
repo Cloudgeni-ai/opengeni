@@ -1,5 +1,23 @@
 # @opengeni/runtime
 
+## 2.0.0
+
+### Major Changes
+
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. The legacy runtime desktop API remains exported only as a deprecated, fail-closed migration shell; because direct sandbox desktop control and model-bound tools are no longer functional, release `@opengeni/runtime` as the next major. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+
+### Patch Changes
+
+- 973b1dd: Keep a rejected best-effort MCP connection group fail-open and preparation-telemetered without downgrading required MCP connection failures.
+- e41285f: Overlap optional MCP preparation with first inference even when artifact tooling is enabled, keep optional eager integrations off the first-token critical path, reuse immutable large-history projections incrementally, and expose fenced event-append phase latency without changing durable ordering.
+- Updated dependencies [b471a90]
+- Updated dependencies [96624a7]
+- Updated dependencies [4bacdd3]
+  - @opengeni/contracts@2.9.1
+  - @opengeni/sdk@3.3.1
+  - @opengeni/config@0.22.4
+  - @opengeni/codemode@0.4.21
+
 ## 1.5.0
 
 ### Minor Changes

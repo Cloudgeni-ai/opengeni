@@ -3931,6 +3931,19 @@ describe("provider-neutral browser account acceptance", () => {
       await accountMenuTrigger(page, beta.displayName).waitFor({
         timeout: 30_000,
       });
+      const deepLinkSelectionSettledAt = performance.now();
+      const deepLinkSelectionAcceptance = actorMutationAcceptances
+        .filter(({ path }) => path === "/v1/auth/session-set/select")
+        .at(-1);
+      if (!deepLinkSelectionAcceptance?.actorEpoch) {
+        throw new Error("deep-link selection did not expose its accepted actor epoch");
+      }
+      await retirePendingReadsAfterConfirmedActorTransition(page, pageProblems, {
+        confirmedActorEpoch: deepLinkSelectionAcceptance.actorEpoch,
+        confirmedAt: deepLinkSelectionSettledAt,
+        oldWorkspaceId: alpha.workspaceId,
+      });
+      await waitForFiniteReadQuiescence(pageProblems);
       await expectAndConsumeConsoleErrors(
         page,
         pageProblems,

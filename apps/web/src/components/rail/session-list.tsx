@@ -125,9 +125,10 @@ import {
   subscribeToSessionPinChanges,
 } from "@/lib/session-pins";
 import {
-  applySessionAttentionProjection,
+  applySessionAttentionProjections,
   localSessionDeliveryAttentionCounts,
   latestSessionAttentionProjection,
+  notifySessionAttentionChanged,
   subscribeToLocalSessionDeliveryAttention,
   subscribeToSessionAttentionChanges,
   type SessionAttentionProjection,
@@ -259,6 +260,28 @@ export function SessionList() {
   const sessionClient = context.client;
   const setContextSession = context.setSession;
   const navigate = useNavigate();
+  const activeSessionId = useRouterState({
+    select: (state): string | null => {
+      const match = /\/sessions\/([^/]+)/.exec(state.location.pathname);
+      return match?.[1] ?? null;
+    },
+  });
+  const [documentForeground, setDocumentForeground] = useState(() =>
+    Boolean(document.visibilityState === "visible" && document.hasFocus()),
+  );
+  useEffect(() => {
+    const reconcileDocumentForeground = () => {
+      setDocumentForeground(document.visibilityState === "visible" && document.hasFocus());
+    };
+    window.addEventListener("focus", reconcileDocumentForeground);
+    window.addEventListener("blur", reconcileDocumentForeground);
+    document.addEventListener("visibilitychange", reconcileDocumentForeground);
+    return () => {
+      window.removeEventListener("focus", reconcileDocumentForeground);
+      window.removeEventListener("blur", reconcileDocumentForeground);
+      document.removeEventListener("visibilitychange", reconcileDocumentForeground);
+    };
+  }, []);
   // Poll so running sessions surface and move to the top without a manual
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
@@ -715,16 +738,35 @@ export function SessionList() {
           : override.session,
       );
     }
-    for (const [id, override] of attentionOverrides) {
-      const current = source.get(id);
-      if (current) source.set(id, applySessionAttentionProjection(current, override));
-    }
     for (const [id, override] of channelMoveOverrides) {
       const current = source.get(id);
       if (current) source.set(id, applySessionChannelMove(current, override));
     }
-    return [...source.values()];
-  }, [attentionOverrides, channelMoveOverrides, pinOverrides, serverSessions]);
+    const projectedAttention = new Map(attentionOverrides);
+    const active = activeSessionId ? source.get(activeSessionId) : null;
+    if (documentForeground && active?.unread && active.workspaceId === rail.workspaceId) {
+      const foregroundProjection: SessionAttentionProjection = {
+        id: active.id,
+        workspaceId: active.workspaceId,
+        unread: false,
+        attentionVersion: active.attentionVersion,
+        lastSequence: active.lastSequence,
+      };
+      projectedAttention.set(
+        active.id,
+        latestSessionAttentionProjection(projectedAttention.get(active.id), foregroundProjection),
+      );
+    }
+    return applySessionAttentionProjections([...source.values()], projectedAttention);
+  }, [
+    activeSessionId,
+    attentionOverrides,
+    channelMoveOverrides,
+    documentForeground,
+    pinOverrides,
+    rail.workspaceId,
+    serverSessions,
+  ]);
 
   const verifySessionChannelMove = useCallback(
     (sessionId: string, operation: number): Promise<void> => {
@@ -1035,12 +1077,6 @@ export function SessionList() {
     setContextSession,
   ]);
 
-  const activeSessionId = useRouterState({
-    select: (state): string | null => {
-      const match = /\/sessions\/([^/]+)/.exec(state.location.pathname);
-      return match?.[1] ?? null;
-    },
-  });
   // Only a route transition or keyboard navigation may reveal a row. Polls and
   // pagination replace `flat` too, so a derived focus index is not itself
   // permission to move this scroll container.
@@ -2822,6 +2858,7 @@ function SessionRow(props: {
   onRequestDelete: RequestDeleteFn;
 }) {
   const rail = useRail();
+  const context = useAppContext();
   const title = sessionDisplayTitle(props.session);
   const rename = useInlineRename(props.session, props.onRename);
   const contextPinSelection = useRef(false);
@@ -2937,6 +2974,58 @@ function SessionRow(props: {
             onFocus={props.onFocus}
             onClick={(event) => {
               if (isModifiedNavigationClick(event)) return;
+              if (
+                props.session.unread &&
+                !props.session.archived &&
+                document.visibilityState === "visible" &&
+                document.hasFocus()
+              ) {
+                const projection: SessionAttentionProjection = {
+                  id: props.session.id,
+                  workspaceId: props.session.workspaceId,
+                  unread: false,
+                  attentionVersion: props.session.attentionVersion,
+                  lastSequence: props.session.lastSequence,
+                };
+                // A rail click is already a foreground view. Commit its exact
+                // known frontier before route data loads so a fast second
+                // navigation cannot cancel the read.
+                notifySessionAttentionChanged(projection);
+                const acceptedTransition = context.captureWorkspaceInvocation(
+                  props.session.workspaceId,
+                );
+                if (acceptedTransition) {
+                  const acknowledge = (retry: boolean): void => {
+                    void context.client
+                      .updateSessionAttention(props.session.workspaceId, props.session.id, {
+                        unread: false,
+                        acknowledgedThroughSequence: props.session.lastSequence,
+                      })
+                      .then((updated) => {
+                        if (
+                          context.ownsWorkspaceInvocation(
+                            props.session.workspaceId,
+                            acceptedTransition,
+                          )
+                        ) {
+                          notifySessionAttentionChanged(updated);
+                        }
+                      })
+                      .catch(() => {
+                        if (
+                          retry &&
+                          context.ownsWorkspaceInvocation(
+                            props.session.workspaceId,
+                            acceptedTransition,
+                          )
+                        ) {
+                          acknowledge(false);
+                        }
+                      });
+                  };
+                  acknowledge(true);
+                }
+              }
               if (!rail.isMobile) {
                 requestSessionComposerFocus(rail.workspaceId, props.session.id);
               }

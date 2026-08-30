@@ -1357,6 +1357,7 @@ export type Session = {
         pausedDescendants: number;
         failedDescendants: number;
         unreadDescendants?: number | undefined;
+        unreadFailedDescendants?: number | undefined;
         activelyWorkingDescendants?: number | undefined;
         /**
          * Earliest moment one of the counted `attentionDescendants` entered

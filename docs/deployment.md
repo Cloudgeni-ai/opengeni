@@ -454,6 +454,33 @@ organization membership table, `workspaces`, and `workspace_memberships`. A
 live listed session rejects the cutover with SQLSTATE `55000`. After commit,
 never restart a pre-0348 image; remain in maintenance and fix forward.
 
+### Session-event raw-lane cutover (0379)
+
+`0379_session_event_raw_lane_activation.sql` moves accepted raw exact-attempt
+appends off the wide `sessions` row while retaining cursor allocation, exact
+turn/attempt fencing, and semantic state/event atomicity. Old API readers expose
+`sessions.last_sequence`, and old SQL writers allocate from that projection, so
+the cutover is drained rather than rolling:
+
+1. stop every API, control worker, and turn worker using the target database;
+2. supply the exact runtime login list through
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`;
+3. prove those roles have zero other sessions in `pg_stat_activity`;
+4. apply 0379 from the exact new image and require it in `schema_migrations`;
+5. start only that image generation and require readiness before reopening
+   admission.
+
+The migration repeats the role drain before and after exclusive locks on
+`sessions`, `session_event_cursors`, and `session_events`, temporarily opens the
+complete FORCE-RLS inventory to the migration owner, and refuses missing
+cursors, sequence gaps, duplicates, or a session projection ahead of its
+cursor. A deferred constraint keeps that projection from leading after commit.
+For a forward application rollback, set
+`OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false`: the current image keeps cursor
+validation active but restores wide-session locking and raw compatibility
+writes. Do not restart a pre-0379 image after isolated raw traffic until the
+session projection has been synchronized to every cursor under maintenance.
+
 Two operator-visible consequences follow the commit. `POST /v1/organizations`
 becomes the one-time setup entry point rather than an organization factory: a
 human who already holds an organization membership can no longer create a

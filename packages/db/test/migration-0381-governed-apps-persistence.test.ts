@@ -33,7 +33,7 @@ import {
   apps,
 } from "../src/schema";
 
-const migrationUrl = new URL("../drizzle/0379_governed_apps_persistence.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0381_governed_apps_persistence.sql", import.meta.url);
 
 const tables = [
   "apps",
@@ -58,7 +58,7 @@ const protectedTables: readonly string[] = [
 ];
 const readOnlyTables = tables.filter((table) => !protectedTables.includes(table));
 
-describe("migration 0379 governed Apps persistence", () => {
+describe("migration 0381 governed Apps persistence", () => {
   test("is additive, tenant-composite, FORCE-RLS, and preserves HTML Artifacts", async () => {
     const source = await Bun.file(migrationUrl).text();
     expect(source).toStartWith("-- deployment-mode: rolling");

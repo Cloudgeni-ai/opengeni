@@ -1485,14 +1485,14 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
       "eeeeeeee-0000-4000-8000-000000000002",
     );
 
-    // Rig sessionA's NEXT append to REJECT: move the compatibility projection
-    // ahead of its durable cursor. Cursor-authoritative writers fail closed on
-    // that exact mixed-version invariant before inserting events. sessionB is
-    // untouched, so the fan-out must continue after sessionA's isolated error.
+    // Rig sessionA's NEXT append to REJECT by removing its durable cursor.
+    // Cursor-authoritative writers fail closed when the cursor row is missing.
+    // sessionB is untouched, so the fan-out must continue after sessionA's
+    // isolated error.
     await admin`
-      update sessions
-      set last_sequence = last_sequence + 1
-      where id = ${sessionA.id}`;
+      delete from session_event_cursors
+      where workspace_id = ${workspaceId}
+        and session_id = ${sessionA.id}`;
 
     // Capture warns; call the handler directly so the per-session log is observable.
     const warns: Array<{ message: string; meta?: Record<string, unknown> }> = [];

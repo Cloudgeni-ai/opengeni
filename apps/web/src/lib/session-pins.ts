@@ -510,6 +510,10 @@ function sameTreeStats(a: SessionTreeStats | undefined, b: SessionTreeStats | un
     a.attentionDescendants === b.attentionDescendants &&
     a.pausedDescendants === b.pausedDescendants &&
     a.failedDescendants === b.failedDescendants &&
+    (a.unreadFailedDescendants ?? a.failedDescendants) ===
+      (b.unreadFailedDescendants ?? b.failedDescendants) &&
+    (a.unreadDescendants ?? 0) === (b.unreadDescendants ?? 0) &&
+    (a.activelyWorkingDescendants ?? 0) === (b.activelyWorkingDescendants ?? 0) &&
     (a.attentionSince ?? null) === (b.attentionSince ?? null) &&
     a.truncated === b.truncated
   );

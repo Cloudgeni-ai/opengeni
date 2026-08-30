@@ -182,10 +182,14 @@ describe("migration 0303 session tenancy product activation", () => {
       });
       provisioningPromise = provisioningClient
         .begin(async (transaction) => {
+          // New-account lifecycle triggers may reach relations held by the
+          // cutover before the account INSERT returns. Signal before that
+          // boundary so this test still proves the setup transaction is
+          // serialized rather than deadlocking its own release barrier.
+          provisioningStarted();
           const [organization] = await transaction<{ id: string }[]>`
           insert into managed_accounts (name)
           values ('greenfield boundary race') returning id`;
-          provisioningStarted();
           await transaction`
           insert into workspaces (account_id, name, external_source, external_id)
           values (
