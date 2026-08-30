@@ -31,14 +31,118 @@ describe("standalone Apps HTTP transport", () => {
       workspaceId: WORKSPACE_ID,
       appId: APP_ID,
     });
+    await transport.request("apps.source.download", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      sourceRevisionId: "source / one",
+    });
+    await transport.request("apps.build.uploads.list", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      buildId: "build / one",
+      query: { limit: 100, cursor: "uploads / next" },
+    });
 
     expect(calls.map(({ path }) => path)).toEqual([
       "/v1/workspaces/workspace%20%2F%20one/apps?limit=25&cursor=next+%2F+page",
       "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one",
       "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/runtime/catalog?releaseId=release+%2F+one",
       "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/runtime/available-catalog",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/source-revisions/source%20%2F%20one/download",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/builds/build%20%2F%20one/uploads?limit=100&cursor=uploads+%2F+next",
     ]);
     expect(calls.every(({ init }) => init?.method === "GET")).toBe(true);
+  });
+
+  test("maps the complete authoring lifecycle with one CSRF token", async () => {
+    const calls: Array<{ path: string; init: RequestInit | undefined }> = [];
+    const transport = createOpenGeniAppsHttpTransport(async (path, init) => {
+      calls.push({ path, init });
+      if (path.endsWith("/csrf")) {
+        return { token: "c".repeat(43), expiresInSeconds: 3600 } as never;
+      }
+      return {} as never;
+    });
+
+    await transport.request("apps.create", {
+      workspaceId: WORKSPACE_ID,
+      request: {} as never,
+    });
+    await transport.request("apps.update", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      request: {} as never,
+    });
+    await transport.request("apps.toolPolicy.create", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      request: {} as never,
+    });
+    await transport.request("apps.source.begin", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      request: {} as never,
+    });
+    await transport.request("apps.source.complete", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      sourceRevisionId: "source / one",
+      request: {} as never,
+    });
+    await transport.request("apps.build.prepare", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      request: {} as never,
+    });
+    await transport.request("apps.build.complete", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      buildId: "build / one",
+      request: {} as never,
+    });
+    await transport.request("apps.release.promote", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      request: {} as never,
+    });
+    await transport.request("apps.preview.create", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+      request: {} as never,
+    });
+    for (const operation of [
+      "apps.publish",
+      "apps.rollback",
+      "apps.unpublish",
+      "apps.archive",
+    ] as const) {
+      await transport.request(operation, {
+        workspaceId: WORKSPACE_ID,
+        appId: APP_ID,
+        request: {} as never,
+      });
+    }
+
+    expect(calls.filter(({ path }) => path.endsWith("/csrf"))).toHaveLength(1);
+    expect(calls.slice(1).map(({ path }) => path)).toEqual([
+      "/v1/workspaces/workspace%20%2F%20one/apps",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/tool-policies",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/source-revisions",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/source-revisions/source%20%2F%20one/complete",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/builds",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/builds/build%20%2F%20one/complete",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/releases",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/previews",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/publish",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/rollback",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/unpublish",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/archive",
+    ]);
+    expect(calls[2]!.init?.method).toBe("PATCH");
+    expect(
+      calls.slice(1).every(({ init }) => new Headers(init?.headers).has("x-opengeni-app-csrf")),
+    ).toBe(true);
   });
 
   test("mints one bounded CSRF token and binds launch/tool identities in headers", async () => {

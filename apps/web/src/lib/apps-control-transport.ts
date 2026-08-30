@@ -24,9 +24,14 @@ function appsBase(workspaceId: string): string {
   return `/v1/workspaces/${segment(workspaceId)}/apps`;
 }
 
-function jsonRequest(signal: AbortSignal | undefined, body: unknown, headers?: HeadersInit) {
+function jsonRequest(
+  signal: AbortSignal | undefined,
+  body: unknown,
+  headers?: HeadersInit,
+  method: "POST" | "PATCH" = "POST",
+) {
   return {
-    method: "POST",
+    method,
     ...(signal ? { signal } : {}),
     headers,
     body: JSON.stringify(body),
@@ -70,14 +75,20 @@ export function createOpenGeniAppsHttpTransport(
     body: unknown,
     options: OpenGeniAppsControlRequestOptions,
     headers?: HeadersInit,
+    method: "POST" | "PATCH" = "POST",
   ): Promise<T> => {
     const token = await csrf(workspaceId, options.signal);
     return await request<T>(
       path,
-      jsonRequest(options.signal, body, {
-        ...Object.fromEntries(new Headers(headers).entries()),
-        [APP_CSRF_HEADER]: token,
-      }),
+      jsonRequest(
+        options.signal,
+        body,
+        {
+          ...Object.fromEntries(new Headers(headers).entries()),
+          [APP_CSRF_HEADER]: token,
+        },
+        method,
+      ),
     );
   };
 
@@ -104,6 +115,128 @@ export function createOpenGeniAppsHttpTransport(
           method: "GET",
           ...(options.signal ? { signal: options.signal } : {}),
         })) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.create") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.create"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          appsBase(value.workspaceId),
+          value.request,
+          options,
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.update") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.update"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}`,
+          value.request,
+          options,
+          undefined,
+          "PATCH",
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.toolPolicy.create") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.toolPolicy.create"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/tool-policies`,
+          value.request,
+          options,
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.source.begin") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.source.begin"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/source-revisions`,
+          value.request,
+          options,
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.source.complete") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.source.complete"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/source-revisions/${segment(value.sourceRevisionId)}/complete`,
+          value.request,
+          options,
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.source.download") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.source.download"]["input"];
+        return (await request(
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/source-revisions/${segment(value.sourceRevisionId)}/download`,
+          {
+            method: "GET",
+            ...(options.signal ? { signal: options.signal } : {}),
+          },
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.build.prepare") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.build.prepare"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/builds`,
+          value.request,
+          options,
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.build.uploads.list") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.build.uploads.list"]["input"];
+        const query = new URLSearchParams();
+        if (value.query.limit !== undefined) query.set("limit", String(value.query.limit));
+        if (value.query.cursor !== undefined) query.set("cursor", value.query.cursor);
+        const suffix = query.size > 0 ? `?${query.toString()}` : "";
+        return (await request(
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/builds/${segment(value.buildId)}/uploads${suffix}`,
+          {
+            method: "GET",
+            ...(options.signal ? { signal: options.signal } : {}),
+          },
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.build.complete") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.build.complete"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/builds/${segment(value.buildId)}/complete`,
+          value.request,
+          options,
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.release.promote") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.release.promote"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/releases`,
+          value.request,
+          options,
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (operation === "apps.preview.create") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.preview.create"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/previews`,
+          value.request,
+          options,
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      if (
+        operation === "apps.publish" ||
+        operation === "apps.rollback" ||
+        operation === "apps.unpublish" ||
+        operation === "apps.archive"
+      ) {
+        const value = input as { workspaceId: string; appId: string; request: unknown };
+        const action = operation.slice("apps.".length);
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/${action}`,
+          value.request,
+          options,
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
       }
       if (operation === "apps.runtime.catalog") {
         const value = input as OpenGeniAppsControlOperationMap["apps.runtime.catalog"]["input"];
@@ -136,19 +269,22 @@ export function createOpenGeniAppsHttpTransport(
           options,
         )) as OpenGeniAppsControlOperationMap[K]["output"];
       }
-      const value = input as OpenGeniAppsControlOperationMap["apps.runtime.tool.call"]["input"];
-      return (await mutation(
-        value.workspaceId,
-        `${appsBase(value.workspaceId)}/${segment(value.appId)}/runtime/tool-calls`,
-        value.request,
-        options,
-        {
-          "x-opengeni-app-release-id": value.releaseId,
-          "x-opengeni-app-launch-id": value.launchId,
-          "x-opengeni-app-authority-generation": value.authorityGeneration,
-          "x-opengeni-app-launch-nonce": value.launchNonce,
-        },
-      )) as OpenGeniAppsControlOperationMap[K]["output"];
+      if (operation === "apps.runtime.tool.call") {
+        const value = input as OpenGeniAppsControlOperationMap["apps.runtime.tool.call"]["input"];
+        return (await mutation(
+          value.workspaceId,
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/runtime/tool-calls`,
+          value.request,
+          options,
+          {
+            "x-opengeni-app-release-id": value.releaseId,
+            "x-opengeni-app-launch-id": value.launchId,
+            "x-opengeni-app-authority-generation": value.authorityGeneration,
+            "x-opengeni-app-launch-nonce": value.launchNonce,
+          },
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
+      throw new Error(`Unsupported Apps control operation: ${String(operation)}`);
     },
   });
 }
