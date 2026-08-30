@@ -613,6 +613,12 @@ BEGIN
 END
 $apps_force_rls$;
 
+CREATE POLICY session_visibility_isolation
+  ON app_source_revisions AS RESTRICTIVE
+  FOR ALL
+  USING (session_reference_visible(account_id, workspace_id, source_session_id))
+  WITH CHECK (session_reference_visible(account_id, workspace_id, source_session_id));
+
 CREATE FUNCTION opengeni_private.enforce_app_immutable_rows()
 RETURNS trigger
 LANGUAGE plpgsql

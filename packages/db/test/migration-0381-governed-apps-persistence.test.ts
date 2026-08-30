@@ -86,6 +86,11 @@ describe("migration 0381 governed Apps persistence", () => {
     }
     expect(source).toContain("ALTER TABLE %I FORCE ROW LEVEL SECURITY");
     expect(source).toContain("opengeni_private.workspace_rls_visible(account_id, workspace_id)");
+    expect(source).toContain("CREATE POLICY session_visibility_isolation");
+    expect(source).toContain("ON app_source_revisions AS RESTRICTIVE");
+    expect(source).toContain(
+      "session_reference_visible(account_id, workspace_id, source_session_id)",
+    );
     expect(source.match(/^  CONSTRAINT .*_workspace_account_fk/gmu)).toHaveLength(13);
     expect(source).toContain("FOREIGN KEY (workspace_id, app_id, source_revision_id)");
     expect(source).toContain("FOREIGN KEY (workspace_id, app_id, tool_policy_revision_id)");
@@ -323,6 +328,26 @@ describe("migration 0381 live PostgreSQL posture", () => {
       order by relation.relname`;
     expect(forced).toHaveLength(tables.length);
     expect(forced.every((row) => row.forced)).toBe(true);
+
+    const [sourceVisibilityPolicy] = await clean.admin<
+      Array<{
+        permissive: string;
+        command: string;
+        usingExpression: string;
+        checkExpression: string;
+      }>
+    >`
+      select permissive, cmd as command, qual as "usingExpression", with_check as "checkExpression"
+      from pg_policies
+      where schemaname = current_schema()
+        and tablename = 'app_source_revisions'
+        and policyname = 'session_visibility_isolation'`;
+    expect(sourceVisibilityPolicy).toEqual({
+      permissive: "RESTRICTIVE",
+      command: "ALL",
+      usingExpression: "session_reference_visible(account_id, workspace_id, source_session_id)",
+      checkExpression: "session_reference_visible(account_id, workspace_id, source_session_id)",
+    });
   });
 
   test("admits only scoped capability calls for the non-owner runtime role", async () => {
