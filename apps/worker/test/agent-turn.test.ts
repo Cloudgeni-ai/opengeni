@@ -1,6 +1,6 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
-import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
+import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
 import { TurnExecutionPolicyV1, type ResourceRef } from "@opengeni/contracts";
@@ -4954,6 +4954,36 @@ describe("transient provider error classifier", () => {
     }
   });
 
+  test("classifies exact Modal TaskExecStart DNS failure as typed same-turn recovery", () => {
+    const details =
+      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443";
+    const clientError = Object.assign(
+      new Error(
+        `/modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: ${details}`,
+      ),
+      {
+        name: "ClientError",
+        path: "/modal.task_command_router.TaskCommandRouter/TaskExecStart",
+        code: 14,
+        details,
+      },
+    );
+    const wrapped = new ToolCallError("Failed to run function tools", clientError);
+
+    expect(agentRunFailurePayload(wrapped)).toEqual({
+      error:
+        "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
+      code: "sandbox_command_start_unavailable",
+      retryable: true,
+    });
+    expect(
+      providerRecoveryResult({
+        failureCode: "sandbox_command_start_unavailable",
+        attemptNumber: 1,
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+  });
+
   test("classifies node/undici network fault codes as transient", () => {
     for (const code of ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "EPIPE"]) {
       expect(isTransientProviderError(Object.assign(new Error("socket"), { code }))).toBe(true);
@@ -5111,6 +5141,7 @@ describe("transient provider error classifier", () => {
     for (const failureCode of [
       "provider_unavailable",
       "upstream_connectivity_unavailable",
+      "sandbox_command_start_unavailable",
       "mcp_transport_timeout",
       "mcp_transport_unavailable",
       POST_COMPACTION_CONTINUATION_EMPTY_CODE,
