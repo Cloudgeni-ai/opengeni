@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import {
+  AutomationNormalizedEvent,
+  signDelegatedAccessToken,
+  type Permission,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   bootstrapWorkspace,
@@ -8,6 +12,7 @@ import {
   createWorkspaceGatewayCustomModel,
   createDb,
   deleteWorkspaceGatewayCustomModel,
+  getAutomationSourceSecret,
   deleteWorkspace,
   type DbClient,
 } from "@opengeni/db";
@@ -18,7 +23,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
-import { registerAutomationRoutes } from "../src/routes/automations";
+import { acceptAutomationEvent, registerAutomationRoutes } from "../src/routes/automations";
 
 const DELEGATION_SECRET = "automation-authorization-test-secret";
 let shared: SharedTestDatabase;
@@ -240,5 +245,47 @@ describe("automation route authorization", () => {
       runIds: [],
     });
     expect(triggeredRuns).toEqual([]);
+  });
+
+  test("records an unmatched event without requiring the deployment catalog", async () => {
+    const source = await getAutomationSourceSecret(client.db, {
+      accountId,
+      workspaceId,
+      sourceId,
+    });
+    if (!source) throw new Error("automation source fixture is unavailable");
+    const occurrenceKey = `unmatched:${crypto.randomUUID()}`;
+
+    const result = await acceptAutomationEvent(
+      {
+        settings: testSettings({ modelCatalogSource: "database" }),
+        db: client.db,
+        workflowClient: {
+          triggerAutomationRun: async (input) => {
+            triggeredRuns.push(input);
+          },
+        },
+      } as unknown as ApiRouteDeps,
+      source,
+      {
+        deliveryKey: occurrenceKey,
+        requestDigest: "c".repeat(64),
+        normalizedEvent: AutomationNormalizedEvent.parse({
+          adapterId: source.adapterId,
+          eventType: "unmatched.event",
+          occurrenceKey,
+          occurredAt: null,
+          subject: null,
+          resource: null,
+          payload: {},
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({
+      accepted: true,
+      ignoredReason: "no_matching_triggers",
+      runIds: [],
+    });
   });
 });

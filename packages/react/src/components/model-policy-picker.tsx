@@ -198,6 +198,7 @@ function isCodexModel(model: ClientModel): boolean {
 
 function billingClassForMissingSelection(modelId: string): PickerBillingClass {
   if (modelId.startsWith("workspace-gateway/")) return "byok";
+  if (modelId.startsWith("openrouter/")) return "external";
   if (modelId.startsWith("codex/")) return "codex_subscription";
   if (modelId.startsWith("supergrok/")) return "supergrok_subscription";
   return "opengeni_credits";

@@ -426,57 +426,66 @@ export async function acceptAutomationEvent(
       message: `automation event matches more than ${AUTOMATION_MAX_MATCHED_TRIGGERS} triggers`,
     });
   }
-  const stored = await withWorkspaceGatewayCustomModelReadLock(
-    deps.db,
-    { accountId: source.accountId, workspaceId: source.workspaceId },
-    async (lockedDb) => {
-      const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
-      const catalogSettings = (
-        await resolveWorkspaceCatalogSettings(lockedDb, catalogSourceSettings, {
+  const stored =
+    matchingByEvent.length === 0
+      ? await recordAutomationEvent(deps.db, {
           accountId: source.accountId,
           workspaceId: source.workspaceId,
+          sourceId: source.id,
+          sourceVersion: source.version,
+          sourceConfiguration: source.configuration,
+          matchedTriggerRevisions: [],
+          deliveryKey: input.deliveryKey,
+          requestDigest: input.requestDigest,
+          normalizedEvent: input.normalizedEvent,
+          ignoredReason: "no_matching_triggers",
         })
-      ).settings;
-      const matchingAtAcceptance = [];
-      for (const trigger of matchingByEvent) {
-        try {
-          const requestedModel = trigger.sessionTemplate.model ?? catalogSettings.openaiModel;
-          const model = canonicalConfiguredModel(catalogSettings, requestedModel);
-          if (!model) continue;
-          await assertWorkspaceModelPolicyAllows(
-            lockedDb,
-            catalogSettings,
-            source.workspaceId,
-            model,
-          );
-          matchingAtAcceptance.push(trigger);
-        } catch (error) {
-          if (isUnprocessableEntity(error)) continue;
-          throw error;
-        }
-      }
-      return await recordAutomationEvent(lockedDb, {
-        accountId: source.accountId,
-        workspaceId: source.workspaceId,
-        sourceId: source.id,
-        sourceVersion: source.version,
-        sourceConfiguration: source.configuration,
-        matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
-          triggerId: trigger.id,
-          revision: trigger.revision,
-        })),
-        deliveryKey: input.deliveryKey,
-        requestDigest: input.requestDigest,
-        normalizedEvent: input.normalizedEvent,
-        ignoredReason:
-          matchingByEvent.length === 0
-            ? "no_matching_triggers"
-            : matchingAtAcceptance.length === 0
-              ? "no_executable_triggers"
-              : null,
-      });
-    },
-  );
+      : await withWorkspaceGatewayCustomModelReadLock(
+          deps.db,
+          { accountId: source.accountId, workspaceId: source.workspaceId },
+          async (lockedDb) => {
+            const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
+            const catalogSettings = (
+              await resolveWorkspaceCatalogSettings(lockedDb, catalogSourceSettings, {
+                accountId: source.accountId,
+                workspaceId: source.workspaceId,
+              })
+            ).settings;
+            const matchingAtAcceptance = [];
+            for (const trigger of matchingByEvent) {
+              try {
+                const requestedModel = trigger.sessionTemplate.model ?? catalogSettings.openaiModel;
+                const model = canonicalConfiguredModel(catalogSettings, requestedModel);
+                if (!model) continue;
+                await assertWorkspaceModelPolicyAllows(
+                  lockedDb,
+                  catalogSettings,
+                  source.workspaceId,
+                  model,
+                );
+                matchingAtAcceptance.push(trigger);
+              } catch (error) {
+                if (isUnprocessableEntity(error)) continue;
+                throw error;
+              }
+            }
+            return await recordAutomationEvent(lockedDb, {
+              accountId: source.accountId,
+              workspaceId: source.workspaceId,
+              sourceId: source.id,
+              sourceVersion: source.version,
+              sourceConfiguration: source.configuration,
+              matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
+                triggerId: trigger.id,
+                revision: trigger.revision,
+              })),
+              deliveryKey: input.deliveryKey,
+              requestDigest: input.requestDigest,
+              normalizedEvent: input.normalizedEvent,
+              ignoredReason: matchingAtAcceptance.length === 0 ? "no_executable_triggers" : null,
+            });
+          },
+        );
   const matching = await getAutomationTriggerRevisions(deps.db, {
     workspaceId: source.workspaceId,
     refs: stored.event.matchedTriggerRevisions,

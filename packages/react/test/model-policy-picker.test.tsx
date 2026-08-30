@@ -391,6 +391,25 @@ describe("ModelPolicyPicker", () => {
     ).toBeNull();
   });
 
+  test("preserves the External billing rail for a removed OpenRouter selection", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="openrouter/retired/provider-model:free"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeTruthy();
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeNull();
+  });
+
   test("renders the External rail mark for an anonymous provider", async () => {
     const external: ClientModel = {
       id: "opencode/x-preview-f-free",
