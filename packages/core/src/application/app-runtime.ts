@@ -3,7 +3,6 @@ import type {
   AppRuntimeCatalogResponse,
   AppRuntimeToolCallRequest,
   AppRuntimeToolCallResponse,
-  AppToolDescriptor,
 } from "@opengeni/contracts/apps";
 import type {
   CanonicalToolDescriptor,

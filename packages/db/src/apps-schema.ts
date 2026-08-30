@@ -110,12 +110,8 @@ export const appSourceRevisions = pgTable(
       table.appId,
       table.revision,
     ),
-    stagingObject: uniqueIndex("app_source_revisions_staging_object_uq").on(
-      table.stagingObjectKey,
-    ),
-    frozenObject: uniqueIndex("app_source_revisions_frozen_object_uq").on(
-      table.frozenObjectKey,
-    ),
+    stagingObject: uniqueIndex("app_source_revisions_staging_object_uq").on(table.stagingObjectKey),
+    frozenObject: uniqueIndex("app_source_revisions_frozen_object_uq").on(table.frozenObjectKey),
     appCreated: index("app_source_revisions_app_created_idx").on(
       table.workspaceId,
       table.appId,
@@ -308,10 +304,7 @@ export const appReleases = pgTable(
         appBuilds.toolPolicyRevisionId,
       ],
     }).onDelete("restrict"),
-    workspaceIdentity: uniqueIndex("app_releases_workspace_id_uq").on(
-      table.workspaceId,
-      table.id,
-    ),
+    workspaceIdentity: uniqueIndex("app_releases_workspace_id_uq").on(table.workspaceId, table.id),
     workspaceAppIdentity: uniqueIndex("app_releases_workspace_app_id_uq").on(
       table.workspaceId,
       table.appId,
@@ -357,10 +350,7 @@ export const appPreviews = pgTable(
       columns: [table.workspaceId, table.appId, table.releaseId],
       foreignColumns: [appReleases.workspaceId, appReleases.appId, appReleases.id],
     }).onDelete("cascade"),
-    workspaceIdentity: uniqueIndex("app_previews_workspace_id_uq").on(
-      table.workspaceId,
-      table.id,
-    ),
+    workspaceIdentity: uniqueIndex("app_previews_workspace_id_uq").on(table.workspaceId, table.id),
     workspaceTargetIdentity: uniqueIndex("app_previews_workspace_target_id_uq").on(
       table.workspaceId,
       table.appId,
@@ -458,10 +448,7 @@ export const appLaunches = pgTable(
         appPublications.id,
       ],
     }).onDelete("cascade"),
-    workspaceIdentity: uniqueIndex("app_launches_workspace_id_uq").on(
-      table.workspaceId,
-      table.id,
-    ),
+    workspaceIdentity: uniqueIndex("app_launches_workspace_id_uq").on(table.workspaceId, table.id),
     workspaceReleaseIdentity: uniqueIndex("app_launches_workspace_release_id_uq").on(
       table.workspaceId,
       table.appId,
@@ -577,10 +564,7 @@ export const appGcClaims = pgTable(
       columns: [table.workspaceId, table.appId],
       foreignColumns: [apps.workspaceId, apps.id],
     }).onDelete("cascade"),
-    workspaceIdentity: uniqueIndex("app_gc_claims_workspace_id_uq").on(
-      table.workspaceId,
-      table.id,
-    ),
+    workspaceIdentity: uniqueIndex("app_gc_claims_workspace_id_uq").on(table.workspaceId, table.id),
     workspaceAppIdentity: uniqueIndex("app_gc_claims_workspace_app_id_uq").on(
       table.workspaceId,
       table.appId,

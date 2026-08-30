@@ -568,13 +568,13 @@ function resolverUrl(value: string): string {
   return url.toString();
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
-  const contentLength = response.headers.get("content-length");
+async function readBoundedJson(resolverResponse: Response): Promise<unknown> {
+  const contentLength = resolverResponse.headers.get("content-length");
   if (contentLength && Number(contentLength) > APP_HOST_RESOLVER_RESPONSE_MAX_BYTES) {
     throw new Error("App-host resolver response is too large");
   }
-  if (!response.body) throw new Error("App-host resolver response is empty");
-  const reader = response.body.getReader();
+  if (!resolverResponse.body) throw new Error("App-host resolver response is empty");
+  const reader = resolverResponse.body.getReader();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   for (;;) {

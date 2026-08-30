@@ -179,10 +179,7 @@ export function typecheckProjects(graph = createWorkspaceGraph()): string[] {
   for (const pkg of graph.packages) {
     if (existsSync(join(pkg.dir, "tsconfig.json"))) projects.push(normalizePath(pkg.dir));
   }
-  if (
-    existsSync(join("apps/app-host", "tsconfig.json")) &&
-    !projects.includes("apps/app-host")
-  ) {
+  if (existsSync(join("apps/app-host", "tsconfig.json")) && !projects.includes("apps/app-host")) {
     projects.push("apps/app-host");
   }
   return projects;

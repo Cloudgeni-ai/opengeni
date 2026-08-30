@@ -40,9 +40,7 @@ const NOW = "2026-08-30T12:00:00.000Z";
 const LATER = "2026-08-30T13:00:00.000Z";
 
 afterEach(async () => {
-  await Promise.all(
-    temporaryRoots.splice(0).map((root) => rm(root, { recursive: true })),
-  );
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true })));
 });
 
 function io(
@@ -63,9 +61,7 @@ function io(
   };
 }
 
-function checkReceipt(
-  kind: AppBuildCheckReceipt["kind"],
-): AppBuildCheckReceipt {
+function checkReceipt(kind: AppBuildCheckReceipt["kind"]): AppBuildCheckReceipt {
   return {
     kind,
     status: "succeeded",
@@ -158,8 +154,7 @@ function deployFixture() {
         } as never;
       }
       if (operation === "apps.toolPolicy.create") {
-        const value =
-          input as OpenGeniAppsControlOperationMap["apps.toolPolicy.create"]["input"];
+        const value = input as OpenGeniAppsControlOperationMap["apps.toolPolicy.create"]["input"];
         appVersion += 1;
         policy = {
           id: POLICY_ID,
@@ -175,8 +170,7 @@ function deployFixture() {
         return detail() as never;
       }
       if (operation === "apps.source.begin") {
-        const value =
-          input as OpenGeniAppsControlOperationMap["apps.source.begin"]["input"];
+        const value = input as OpenGeniAppsControlOperationMap["apps.source.begin"]["input"];
         source = {
           id: SOURCE_ID,
           accountId: ACCOUNT_ID,
@@ -204,8 +198,7 @@ function deployFixture() {
         } as never;
       }
       if (operation === "apps.source.complete") {
-        const value =
-          input as OpenGeniAppsControlOperationMap["apps.source.complete"]["input"];
+        const value = input as OpenGeniAppsControlOperationMap["apps.source.complete"]["input"];
         source = {
           ...source!,
           status: "ready",
@@ -217,8 +210,7 @@ function deployFixture() {
         return detail() as never;
       }
       if (operation === "apps.build.prepare") {
-        const value =
-          input as OpenGeniAppsControlOperationMap["apps.build.prepare"]["input"];
+        const value = input as OpenGeniAppsControlOperationMap["apps.build.prepare"]["input"];
         buildManifest = value.request.manifest;
         build = {
           id: BUILD_ID,
@@ -331,12 +323,7 @@ describe("og-app CLI", () => {
     temporaryRoots.push(root);
     const output = io(root);
 
-    expect(
-      await runOgAppCli(
-        ["init", "status", "--name", "Status console"],
-        output.io,
-      ),
-    ).toBe(0);
+    expect(await runOgAppCli(["init", "status", "--name", "Status console"], output.io)).toBe(0);
     const entry = await readFile(join(root, "status", "index.html"), "utf8");
     expect(entry).toContain("Status console");
     expect(entry).not.toContain("@opengeni/app-sdk");
@@ -345,9 +332,7 @@ describe("og-app CLI", () => {
     expect(await runOgAppCli(["pack", "status"], output.io)).toBe(0);
     const archivePath = join(root, "status.ogapp.tar");
     const firstArchive = new Uint8Array(await readFile(archivePath));
-    expect(inspectPortableAppArchive(firstArchive).sourceManifest.slug).toBe(
-      "status-console",
-    );
+    expect(inspectPortableAppArchive(firstArchive).sourceManifest.slug).toBe("status-console");
 
     await rm(archivePath);
     expect(await runOgAppCli(["pack", "status"], output.io)).toBe(0);
@@ -360,12 +345,7 @@ describe("og-app CLI", () => {
     temporaryRoots.push(root);
     const sessionCookie = "better-auth.session_token=must-not-persist";
     const output = io(root, { OPENGENI_SESSION_COOKIE: sessionCookie });
-    expect(
-      await runOgAppCli(
-        ["init", "status", "--name", "Status console"],
-        output.io,
-      ),
-    ).toBe(0);
+    expect(await runOgAppCli(["init", "status", "--name", "Status console"], output.io)).toBe(0);
     output.stdout.splice(0);
 
     const fixture = deployFixture();
@@ -423,11 +403,9 @@ describe("og-app CLI", () => {
     expect(checks).toEqual(["typecheck", "test", "build"]);
     expect(uploads).toHaveLength(3);
     expect(uploads.every((upload) => upload.byteLength > 0)).toBe(true);
-    expect(
-      uploads.every(
-        (upload) => !Object.keys(upload.headers).includes("authorization"),
-      ),
-    ).toBe(true);
+    expect(uploads.every((upload) => !Object.keys(upload.headers).includes("authorization"))).toBe(
+      true,
+    );
     expect(clientInputs).toEqual([
       {
         baseUrl: "https://api.example.test",
@@ -446,12 +424,7 @@ describe("og-app CLI", () => {
       previewUrl: "https://preview.example.test/run",
       published: true,
     });
-    const statePath = join(
-      root,
-      ".opengeni",
-      "deployments",
-      `${DEPLOYMENT_ID}.json`,
-    );
+    const statePath = join(root, ".opengeni", "deployments", `${DEPLOYMENT_ID}.json`);
     const stateText = await readFile(statePath, "utf8");
     expect(stateText).not.toContain(sessionCookie);
     expect(stateText).not.toContain("must-not-persist");
@@ -486,11 +459,9 @@ describe("og-app CLI", () => {
     expect(await runOgAppCli(args, output.io, dependencies)).toBe(0);
     expect(checks).toHaveLength(checkCount);
     expect(uploads).toHaveLength(uploadCount);
-    expect(
-      fixture.calls.filter(({ operation }) =>
-        mutatingOperations.has(operation),
-      ),
-    ).toHaveLength(mutationCount);
+    expect(fixture.calls.filter(({ operation }) => mutatingOperations.has(operation))).toHaveLength(
+      mutationCount,
+    );
     expect(JSON.parse(output.stdout.at(-1)!)).toMatchObject({
       deploymentId: DEPLOYMENT_ID,
       appId: APP_ID,
@@ -505,12 +476,7 @@ describe("og-app CLI", () => {
     const output = io(root, {
       OPENGENI_SESSION_COOKIE: "better-auth.session_token=cli-only",
     });
-    expect(
-      await runOgAppCli(
-        ["init", "status", "--name", "Status console"],
-        output.io,
-      ),
-    ).toBe(0);
+    expect(await runOgAppCli(["init", "status", "--name", "Status console"], output.io)).toBe(0);
     const previousApiKey = process.env.OPENGENI_API_KEY;
     const previousSessionCookie = process.env.OPENGENI_SESSION_COOKIE;
     process.env.OPENGENI_API_KEY = "api-key-must-not-reach-checks";
@@ -545,8 +511,7 @@ describe("og-app CLI", () => {
     } finally {
       if (previousApiKey === undefined) delete process.env.OPENGENI_API_KEY;
       else process.env.OPENGENI_API_KEY = previousApiKey;
-      if (previousSessionCookie === undefined)
-        delete process.env.OPENGENI_SESSION_COOKIE;
+      if (previousSessionCookie === undefined) delete process.env.OPENGENI_SESSION_COOKIE;
       else process.env.OPENGENI_SESSION_COOKIE = previousSessionCookie;
     }
   });

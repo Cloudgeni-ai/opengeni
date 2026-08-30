@@ -467,10 +467,10 @@ describe("raw immutable HEAD/range conformance (S3-compatible)", () => {
           new URL(request.url).pathname.replace(/^\/test-bucket\//, ""),
         );
         if (key !== "apps/releases/release/assets/index.html") {
-          return new Response(
-            "<Error><Code>NoSuchKey</Code><Message>missing</Message></Error>",
-            { status: 404, headers: { "content-type": "application/xml" } },
-          );
+          return new Response("<Error><Code>NoSuchKey</Code><Message>missing</Message></Error>", {
+            status: 404,
+            headers: { "content-type": "application/xml" },
+          });
         }
         if (request.method === "HEAD") {
           return new Response(null, {
@@ -582,7 +582,7 @@ describe("raw immutable HEAD/range conformance (Azure Blob)", () => {
         });
         if (!decodeURIComponent(url.pathname).endsWith(`/test-container/${key}`)) {
           return new Response(
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>BlobNotFound</Code><Message>missing</Message></Error>",
+            '<?xml version="1.0" encoding="utf-8"?><Error><Code>BlobNotFound</Code><Message>missing</Message></Error>',
             {
               status: 404,
               headers: {
@@ -607,7 +607,7 @@ describe("raw immutable HEAD/range conformance (Azure Blob)", () => {
         }
         if (request.headers.get("if-match") !== serviceHeaders.etag) {
           return new Response(
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>ConditionNotMet</Code><Message>changed</Message></Error>",
+            '<?xml version="1.0" encoding="utf-8"?><Error><Code>ConditionNotMet</Code><Message>changed</Message></Error>',
             {
               status: 412,
               headers: {

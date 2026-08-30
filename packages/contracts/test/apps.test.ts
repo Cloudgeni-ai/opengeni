@@ -46,9 +46,9 @@ describe("OpenGeni Apps contracts", () => {
       totalBytes: 12,
     };
     expect(AppBuildManifest.safeParse(manifest).success).toBe(true);
-    expect(
-      AppBuildManifest.safeParse({ ...manifest, entryPath: "missing.html" }).success,
-    ).toBe(false);
+    expect(AppBuildManifest.safeParse({ ...manifest, entryPath: "missing.html" }).success).toBe(
+      false,
+    );
     expect(AppBuildManifest.safeParse({ ...manifest, totalBytes: 11 }).success).toBe(false);
     expect(
       AppBuildManifest.safeParse({

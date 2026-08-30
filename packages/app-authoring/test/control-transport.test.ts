@@ -35,18 +35,14 @@ describe("og-app authoring HTTP transport", () => {
       request: {} as never,
     });
 
-    expect(
-      calls.filter(({ url }) => url.pathname.endsWith("/csrf")),
-    ).toHaveLength(1);
+    expect(calls.filter(({ url }) => url.pathname.endsWith("/csrf"))).toHaveLength(1);
     expect(calls.map(({ url }) => `${url.pathname}${url.search}`)).toEqual([
       "/v1/workspaces/workspace%20%2F%20one/apps/csrf",
       "/v1/workspaces/workspace%20%2F%20one/apps",
       "/v1/workspaces/workspace%20%2F%20one/apps",
     ]);
     const csrfHeaders = new Headers(calls[0]!.init?.headers);
-    expect(csrfHeaders.get("cookie")).toBe(
-      "better-auth.session_token=session-value",
-    );
+    expect(csrfHeaders.get("cookie")).toBe("better-auth.session_token=session-value");
     expect(csrfHeaders.has("authorization")).toBe(false);
     for (const call of calls.slice(1)) {
       const headers = new Headers(call.init?.headers);
@@ -91,8 +87,7 @@ describe("og-app authoring HTTP transport", () => {
         baseUrl: "https://api.example.test",
         auth: {
           kind: "human_session",
-          cookie:
-            "better-auth.session_token=session; opengeni.app_csrf=caller-controlled",
+          cookie: "better-auth.session_token=session; opengeni.app_csrf=caller-controlled",
         },
       }),
     ).toThrow("must not include opengeni.app_csrf");
@@ -121,9 +116,7 @@ describe("og-app authoring HTTP transport", () => {
       thrown = error;
     }
     expect(thrown).toBeInstanceOf(Error);
-    expect((thrown as Error).message).toBe(
-      "OpenGeni Apps request failed with HTTP 502.",
-    );
+    expect((thrown as Error).message).toBe("OpenGeni Apps request failed with HTTP 502.");
     expect((thrown as Error).message).not.toContain(marker);
   });
 });

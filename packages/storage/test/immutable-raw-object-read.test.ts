@@ -166,7 +166,6 @@ function memoryStorage(initialBytes: Uint8Array): {
   return fixture;
 }
 
-
 async function consume(stream: ReadableStream<Uint8Array>): Promise<Uint8Array[]> {
   const chunks: Uint8Array[] = [];
   const reader = stream.getReader();

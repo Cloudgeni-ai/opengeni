@@ -280,7 +280,7 @@ function sameAuthority(left: AppCurrentHumanAuthority, right: AppCurrentHumanAut
 function samePermissions(left: readonly Permission[], right: readonly Permission[]): boolean {
   if (left.length !== right.length) return false;
   const expected = new Set(right);
-  return expected.size === left.length && left.every((permission) => expected.has(permission));
+  return expected.size === left.length && left.every((value) => expected.has(value));
 }
 
 function identityKey(identity: CanonicalToolDescriptor["identity"]): string {

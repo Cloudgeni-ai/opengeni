@@ -53,12 +53,7 @@ function exactOrigin(value: string, label: string): string {
 }
 
 function secret(value: string, label: string, maximum: number): string {
-  if (
-    !value ||
-    value.length > maximum ||
-    value.trim() !== value ||
-    /[\r\n\u0000]/u.test(value)
-  ) {
+  if (!value || value.length > maximum || value.trim() !== value || /[\r\n\u0000]/u.test(value)) {
     throw new TypeError(`${label} is invalid.`);
   }
   return value;
@@ -72,9 +67,7 @@ function appsBase(workspaceId: string): string {
   return `/v1/workspaces/${segment(workspaceId)}/apps`;
 }
 
-function query(
-  values: Readonly<Record<string, string | number | undefined>>,
-): string {
+function query(values: Readonly<Record<string, string | number | undefined>>): string {
   const parameters = new URLSearchParams();
   for (const [name, value] of Object.entries(values)) {
     if (value !== undefined) parameters.set(name, String(value));
@@ -87,8 +80,7 @@ function route(
   input: OpenGeniAppsControlOperationMap[OpenGeniAppsControlOperation]["input"],
 ): Route {
   if (operation === "apps.list") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.list"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.list"]["input"];
     return {
       method: "GET",
       path: `${appsBase(value.workspaceId)}${query(value.query)}`,
@@ -102,8 +94,7 @@ function route(
     };
   }
   if (operation === "apps.create") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.create"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.create"]["input"];
     return {
       method: "POST",
       path: appsBase(value.workspaceId),
@@ -112,8 +103,7 @@ function route(
     };
   }
   if (operation === "apps.toolPolicy.create") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.toolPolicy.create"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.toolPolicy.create"]["input"];
     return {
       method: "POST",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/tool-policies`,
@@ -130,8 +120,7 @@ function route(
     };
   }
   if (operation === "apps.source.begin") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.source.begin"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.source.begin"]["input"];
     return {
       method: "POST",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/source-revisions`,
@@ -140,8 +129,7 @@ function route(
     };
   }
   if (operation === "apps.source.complete") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.source.complete"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.source.complete"]["input"];
     return {
       method: "POST",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/source-revisions/${segment(value.sourceRevisionId)}/complete`,
@@ -150,8 +138,7 @@ function route(
     };
   }
   if (operation === "apps.build.prepare") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.build.prepare"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.build.prepare"]["input"];
     return {
       method: "POST",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/builds`,
@@ -160,16 +147,14 @@ function route(
     };
   }
   if (operation === "apps.build.uploads.list") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.build.uploads.list"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.build.uploads.list"]["input"];
     return {
       method: "GET",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/builds/${segment(value.buildId)}/uploads${query(value.query)}`,
     };
   }
   if (operation === "apps.build.complete") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.build.complete"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.build.complete"]["input"];
     return {
       method: "POST",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/builds/${segment(value.buildId)}/complete`,
@@ -178,8 +163,7 @@ function route(
     };
   }
   if (operation === "apps.release.promote") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.release.promote"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.release.promote"]["input"];
     return {
       method: "POST",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/releases`,
@@ -188,8 +172,7 @@ function route(
     };
   }
   if (operation === "apps.preview.create") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.preview.create"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.preview.create"]["input"];
     return {
       method: "POST",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/previews`,
@@ -198,8 +181,7 @@ function route(
     };
   }
   if (operation === "apps.publish") {
-    const value =
-      input as OpenGeniAppsControlOperationMap["apps.publish"]["input"];
+    const value = input as OpenGeniAppsControlOperationMap["apps.publish"]["input"];
     return {
       method: "POST",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/publish`,
@@ -207,16 +189,13 @@ function route(
       mutation: true,
     };
   }
-  throw new Error(
-    `The authoring HTTP transport does not support ${operation}.`,
-  );
+  throw new Error(`The authoring HTTP transport does not support ${operation}.`);
 }
 
 function errorMessage(status: number, body: string): string {
   try {
     const parsed = JSON.parse(body) as { message?: unknown; error?: unknown };
-    const candidate =
-      typeof parsed.message === "string" ? parsed.message : parsed.error;
+    const candidate = typeof parsed.message === "string" ? parsed.message : parsed.error;
     if (typeof candidate === "string" && candidate.length > 0) {
       return `OpenGeni Apps request failed (${status}): ${candidate.slice(0, ERROR_BODY_MAX_BYTES)}`;
     }
@@ -239,9 +218,7 @@ async function readErrorBody(response: Response): Promise<string> {
       if (chunk.done) break;
       const remaining = ERROR_BODY_MAX_BYTES - received;
       const bytes =
-        chunk.value.byteLength > remaining
-          ? chunk.value.subarray(0, remaining)
-          : chunk.value;
+        chunk.value.byteLength > remaining ? chunk.value.subarray(0, remaining) : chunk.value;
       received += bytes.byteLength;
       result += decoder.decode(bytes, { stream: true });
       if (bytes.byteLength !== chunk.value.byteLength) {
@@ -290,19 +267,14 @@ export function createOgAppAuthoringHttpTransport(
     if (target.mutation && auth.kind === "human_session") {
       csrfToken = csrfByWorkspace.get(workspaceId);
       if (!csrfToken) {
-        const response = await fetchImpl(
-          new URL(`${appsBase(workspaceId)}/csrf`, baseUrl),
-          {
-            method: "GET",
-            redirect: "error",
-            headers: { accept: "application/json", cookie: auth.cookie },
-            ...(requestOptions.signal ? { signal: requestOptions.signal } : {}),
-          },
-        );
+        const response = await fetchImpl(new URL(`${appsBase(workspaceId)}/csrf`, baseUrl), {
+          method: "GET",
+          redirect: "error",
+          headers: { accept: "application/json", cookie: auth.cookie },
+          ...(requestOptions.signal ? { signal: requestOptions.signal } : {}),
+        });
         if (!response.ok) {
-          throw new Error(
-            errorMessage(response.status, await readErrorBody(response)),
-          );
+          throw new Error(errorMessage(response.status, await readErrorBody(response)));
         }
         const text = await response.text();
         const parsed = JSON.parse(text) as { token?: unknown };
@@ -320,16 +292,13 @@ export function createOgAppAuthoringHttpTransport(
 
     const headers = new Headers(target.headers);
     headers.set("accept", "application/json");
-    if (target.body !== undefined)
-      headers.set("content-type", "application/json");
+    if (target.body !== undefined) headers.set("content-type", "application/json");
     if (auth.kind === "api_key") {
       headers.set("authorization", `Bearer ${auth.apiKey}`);
     } else {
       headers.set(
         "cookie",
-        csrfToken
-          ? `${auth.cookie}; ${APP_CSRF_COOKIE}=${csrfToken}`
-          : auth.cookie,
+        csrfToken ? `${auth.cookie}; ${APP_CSRF_COOKIE}=${csrfToken}` : auth.cookie,
       );
       if (target.mutation) {
         headers.set("origin", baseUrl);
@@ -341,15 +310,11 @@ export function createOgAppAuthoringHttpTransport(
       method: target.method,
       redirect: "error",
       headers,
-      ...(target.body === undefined
-        ? {}
-        : { body: JSON.stringify(target.body) }),
+      ...(target.body === undefined ? {} : { body: JSON.stringify(target.body) }),
       ...(requestOptions.signal ? { signal: requestOptions.signal } : {}),
     });
     if (!response.ok) {
-      throw new Error(
-        errorMessage(response.status, await readErrorBody(response)),
-      );
+      throw new Error(errorMessage(response.status, await readErrorBody(response)));
     }
     const text = await response.text();
     if (response.status === 204 || text.length === 0) return null;

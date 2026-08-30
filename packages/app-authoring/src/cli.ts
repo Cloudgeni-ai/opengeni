@@ -1,14 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import {
-  lstat,
-  mkdir,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import {
@@ -61,10 +53,7 @@ export type OgAppCliDependencies = Readonly<{
     apiKey?: string;
     sessionCookie?: string;
   }) => AppsDeployClient;
-  putSignedUpload?: (
-    upload: AppSignedUpload,
-    bytes: Uint8Array,
-  ) => Promise<void>;
+  putSignedUpload?: (upload: AppSignedUpload, bytes: Uint8Array) => Promise<void>;
   runCheck?: (
     kind: AppBuildCheckReceipt["kind"],
     command: string,
@@ -98,8 +87,7 @@ function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   if (index < 0) return undefined;
   const value = args[index + 1];
-  if (!value || value.startsWith("--"))
-    throw new Error(`${name} requires a value.`);
+  if (!value || value.startsWith("--")) throw new Error(`${name} requires a value.`);
   return value;
 }
 
@@ -122,8 +110,7 @@ function options(args: string[], name: string): string[] {
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] !== name) continue;
     const value = args[index + 1];
-    if (!value || value.startsWith("--"))
-      throw new Error(`${name} requires a value.`);
+    if (!value || value.startsWith("--")) throw new Error(`${name} requires a value.`);
     values.push(value);
     index += 1;
   }
@@ -137,20 +124,13 @@ async function collectDirectory(
   const entries: PortableAppArchiveEntry[] = [];
   async function visit(directory: string): Promise<void> {
     const children = await readdir(directory, { withFileTypes: true });
-    children.sort((left, right) =>
-      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
-    );
+    children.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
     for (const child of children) {
-      if (
-        child.name === ".git" ||
-        child.name === ".opengeni" ||
-        child.name === "node_modules"
-      ) {
+      if (child.name === ".git" || child.name === ".opengeni" || child.name === "node_modules") {
         continue;
       }
       const absolute = join(directory, child.name);
-      if (excludedAbsolutePath && resolve(absolute) === excludedAbsolutePath)
-        continue;
+      if (excludedAbsolutePath && resolve(absolute) === excludedAbsolutePath) continue;
       if (child.isSymbolicLink())
         throw new Error(`App source may not contain symlink ${absolute}.`);
       if (child.isDirectory()) {
@@ -158,15 +138,10 @@ async function collectDirectory(
         continue;
       }
       if (!child.isFile())
-        throw new Error(
-          `App source may contain regular files only: ${absolute}.`,
-        );
+        throw new Error(`App source may contain regular files only: ${absolute}.`);
       const info = await lstat(absolute);
-      if (!info.isFile())
-        throw new Error(`App source changed while reading ${absolute}.`);
-      const path = normalizePortableAppPath(
-        relative(root, absolute).split(sep).join("/"),
-      );
+      if (!info.isFile()) throw new Error(`App source changed while reading ${absolute}.`);
+      const path = normalizePortableAppPath(relative(root, absolute).split(sep).join("/"));
       entries.push({
         path,
         bytes: new Uint8Array(await readFile(absolute)),
@@ -199,17 +174,14 @@ async function initialize(args: string[], io: OgAppCliIo): Promise<number> {
     `<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>${manifest.name.replace(/[&<>"']/gu, "")}</title>\n</head>\n<body>\n  <main>\n    <h1>${manifest.name.replace(/[&<>"']/gu, "")}</h1>\n    <p>Your OpenGeni App is ready to build.</p>\n  </main>\n</body>\n</html>\n`,
     { flag: "wx", mode: 0o600 },
   );
-  io.stdout(
-    `${JSON.stringify({ directory, manifest: manifestPath, entryPath }, null, 2)}\n`,
-  );
+  io.stdout(`${JSON.stringify({ directory, manifest: manifestPath, entryPath }, null, 2)}\n`);
   return 0;
 }
 
 async function validate(target: string, io: OgAppCliIo): Promise<number> {
   const absolute = resolve(io.cwd, target);
   const info = await lstat(absolute);
-  if (info.isSymbolicLink())
-    throw new Error("og-app validate refuses symlink targets.");
+  if (info.isSymbolicLink()) throw new Error("og-app validate refuses symlink targets.");
   const result = info.isDirectory()
     ? validatePortableAppEntries(await collectDirectory(absolute))
     : inspectPortableAppArchive(new Uint8Array(await readFile(absolute)));
@@ -223,10 +195,7 @@ async function validate(target: string, io: OgAppCliIo): Promise<number> {
         appVersion: result.sourceManifest.appVersion,
         entryPath: result.sourceManifest.entryPath,
         fileCount: result.entries.length,
-        totalBytes: result.entries.reduce(
-          (total, entry) => total + entry.bytes.byteLength,
-          0,
-        ),
+        totalBytes: result.entries.reduce((total, entry) => total + entry.bytes.byteLength, 0),
       },
       null,
       2,
@@ -238,10 +207,7 @@ async function validate(target: string, io: OgAppCliIo): Promise<number> {
 async function pack(args: string[], io: OgAppCliIo): Promise<number> {
   const directory = resolve(io.cwd, positional(args)[0] ?? ".");
   const requestedOutput = option(args, "--output");
-  const output = resolve(
-    io.cwd,
-    requestedOutput ?? `${basename(directory)}.ogapp.tar`,
-  );
+  const output = resolve(io.cwd, requestedOutput ?? `${basename(directory)}.ogapp.tar`);
   const entries = await collectDirectory(directory, output);
   const { sourceManifest } = validatePortableAppEntries(entries);
   const archive = createPortableAppArchive(entries);
@@ -290,8 +256,7 @@ type OgAppDeployState = {
   published?: boolean;
 };
 
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DEPLOY_STATE_KEYS = new Set<keyof OgAppDeployState>([
   "schemaVersion",
   "deploymentId",
@@ -373,8 +338,7 @@ function requiredOptionOrEnv(
   environmentName: string,
 ): string {
   const value = option(args, optionName) ?? io.env?.[environmentName];
-  if (!value?.trim())
-    throw new Error(`${optionName} or ${environmentName} is required.`);
+  if (!value?.trim()) throw new Error(`${optionName} or ${environmentName} is required.`);
   return value.trim();
 }
 
@@ -416,10 +380,7 @@ function defaultRunCheck(
   };
 }
 
-async function defaultPutSignedUpload(
-  upload: AppSignedUpload,
-  bytes: Uint8Array,
-): Promise<void> {
+async function defaultPutSignedUpload(upload: AppSignedUpload, bytes: Uint8Array): Promise<void> {
   const response = await fetch(upload.url, {
     method: upload.method,
     redirect: "error",
@@ -483,9 +444,7 @@ async function readDeployState(path: string): Promise<OgAppDeployState | null> {
   const allowedToolSelectors = value?.allowedToolSelectors;
   if (
     !value ||
-    Object.keys(value).some(
-      (key) => !DEPLOY_STATE_KEYS.has(key as keyof OgAppDeployState),
-    ) ||
+    Object.keys(value).some((key) => !DEPLOY_STATE_KEYS.has(key as keyof OgAppDeployState)) ||
     value.schemaVersion !== 1 ||
     typeof value.deploymentId !== "string" ||
     !UUID.test(value.deploymentId) ||
@@ -502,41 +461,31 @@ async function readDeployState(path: string): Promise<OgAppDeployState | null> {
     Object.keys(checkCommands).length !== 3 ||
     [checkCommands.typecheck, checkCommands.test, checkCommands.build].some(
       (command) =>
-        typeof command !== "string" ||
-        command.length === 0 ||
-        command.trim() !== command,
+        typeof command !== "string" || command.length === 0 || command.trim() !== command,
     ) ||
     !checks ||
     !Array.isArray(allowedToolSelectors) ||
     allowedToolSelectors.some(
       (selector) =>
-        typeof selector !== "string" ||
-        selector.length === 0 ||
-        selector.trim() !== selector,
+        typeof selector !== "string" || selector.length === 0 || selector.trim() !== selector,
     ) ||
     new Set(allowedToolSelectors).size !== allowedToolSelectors.length ||
     DEPLOY_STATE_UUID_KEYS.some((key) => {
       const candidate = value[key];
-      return (
-        candidate !== undefined &&
-        (typeof candidate !== "string" || !UUID.test(candidate))
-      );
+      return candidate !== undefined && (typeof candidate !== "string" || !UUID.test(candidate));
     }) ||
     DEPLOY_STATE_VERSION_KEYS.some((key) => {
       const candidate = value[key];
       return (
         candidate !== undefined &&
-        (typeof candidate !== "number" ||
-          !Number.isSafeInteger(candidate) ||
-          candidate <= 0)
+        (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate <= 0)
       );
     }) ||
     DEPLOY_STATE_BOOLEAN_KEYS.some((key) => {
       const candidate = value[key];
       return candidate !== undefined && typeof candidate !== "boolean";
     }) ||
-    (value.sourceCompleted === true &&
-      typeof value.sourceRevisionId !== "string") ||
+    (value.sourceCompleted === true && typeof value.sourceRevisionId !== "string") ||
     (value.buildCompleted === true && typeof value.buildId !== "string") ||
     (value.published === true && typeof value.releaseId !== "string")
   ) {
@@ -544,9 +493,7 @@ async function readDeployState(path: string): Promise<OgAppDeployState | null> {
   }
   let parsedChecks: AppBuildCheckReceipt[];
   try {
-    parsedChecks = checks.map((check) =>
-      AppBuildCheckReceiptSchema.parse(check),
-    );
+    parsedChecks = checks.map((check) => AppBuildCheckReceiptSchema.parse(check));
   } catch {
     throw new Error("The og-app deployment state file is invalid.");
   }
@@ -562,10 +509,7 @@ async function readDeployState(path: string): Promise<OgAppDeployState | null> {
   return { ...(value as OgAppDeployState), checks: parsedChecks };
 }
 
-async function writeDeployState(
-  path: string,
-  state: OgAppDeployState,
-): Promise<void> {
+async function writeDeployState(path: string, state: OgAppDeployState): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
@@ -579,19 +523,11 @@ async function writeDeployState(
   }
 }
 
-function latestByRevision<T extends { revision: number }>(
-  values: readonly T[],
-): T | null {
-  return (
-    [...values].sort((left, right) => right.revision - left.revision)[0] ?? null
-  );
+function latestByRevision<T extends { revision: number }>(values: readonly T[]): T | null {
+  return [...values].sort((left, right) => right.revision - left.revision)[0] ?? null;
 }
 
-async function findAppBySlug(
-  client: AppsDeployClient,
-  workspaceId: string,
-  slug: string,
-) {
+async function findAppBySlug(client: AppsDeployClient, workspaceId: string, slug: string) {
   let cursor: string | undefined;
   for (let page = 0; page < 100; page += 1) {
     const result = await client.listApps(workspaceId, {
@@ -611,15 +547,11 @@ function selectedToolIdentities(
   tools: readonly { identity: { serverId: string; toolName: string } }[],
 ) {
   const available = new Map(
-    tools.map((tool) => [
-      `${tool.identity.serverId}/${tool.identity.toolName}`,
-      tool.identity,
-    ]),
+    tools.map((tool) => [`${tool.identity.serverId}/${tool.identity.toolName}`, tool.identity]),
   );
   return selectors.map((selector) => {
     const identity = available.get(selector);
-    if (!identity)
-      throw new Error(`Requested App tool is unavailable: ${selector}.`);
+    if (!identity) throw new Error(`Requested App tool is unavailable: ${selector}.`);
     return identity;
   });
 }
@@ -630,12 +562,7 @@ async function deploy(
   dependencies: OgAppCliDependencies,
 ): Promise<number> {
   const directory = resolve(io.cwd, positional(args)[0] ?? ".");
-  const workspaceId = requiredOptionOrEnv(
-    args,
-    io,
-    "--workspace",
-    "OPENGENI_WORKSPACE_ID",
-  );
+  const workspaceId = requiredOptionOrEnv(args, io, "--workspace", "OPENGENI_WORKSPACE_ID");
   if (!UUID.test(workspaceId)) throw new Error("--workspace must be a UUID.");
   const baseUrl = exactHttpOrigin(
     requiredOptionOrEnv(args, io, "--base-url", "OPENGENI_BASE_URL"),
@@ -646,10 +573,8 @@ async function deploy(
     throw new Error("--app-id must be a UUID.");
   }
   const requestedDeploymentId = option(args, "--deployment-id");
-  const deploymentId =
-    requestedDeploymentId ?? (dependencies.randomUuid ?? randomUUID)();
-  if (!UUID.test(deploymentId))
-    throw new Error("--deployment-id must be a UUID.");
+  const deploymentId = requestedDeploymentId ?? (dependencies.randomUuid ?? randomUUID)();
+  if (!UUID.test(deploymentId)) throw new Error("--deployment-id must be a UUID.");
   const statePath = resolve(
     io.cwd,
     option(args, "--state") ?? `.opengeni/deployments/${deploymentId}.json`,
@@ -668,26 +593,17 @@ async function deploy(
     );
   }
   for (const credential of [apiKey, sessionCookie]) {
-    if (
-      credential &&
-      Object.values(commands).some((command) => command.includes(credential))
-    ) {
-      throw new Error(
-        "App check commands must not contain the configured OpenGeni credential.",
-      );
+    if (credential && Object.values(commands).some((command) => command.includes(credential))) {
+      throw new Error("App check commands must not contain the configured OpenGeni credential.");
     }
   }
   const runCheck = dependencies.runCheck ?? defaultRunCheck;
   const toolSelectors = options(args, "--allow-tool");
   if (
-    toolSelectors.some(
-      (selector) => selector.length === 0 || selector.trim() !== selector,
-    ) ||
+    toolSelectors.some((selector) => selector.length === 0 || selector.trim() !== selector) ||
     new Set(toolSelectors).size !== toolSelectors.length
   ) {
-    throw new Error(
-      "--allow-tool selectors must be unique non-empty serverId/toolName values.",
-    );
+    throw new Error("--allow-tool selectors must be unique non-empty serverId/toolName values.");
   }
   const checks =
     state?.checks ??
@@ -699,9 +615,7 @@ async function deploy(
   const archive = createPortableAppArchive(entries);
   const sourceSha256 = sha256Hex(archive);
   const manifest = createAppBuildManifest(entries, sourceManifest.entryPath);
-  const manifestSha256 = sha256Hex(
-    new TextEncoder().encode(JSON.stringify(manifest)),
-  );
+  const manifestSha256 = sha256Hex(new TextEncoder().encode(JSON.stringify(manifest)));
   if (!state) {
     state = {
       schemaVersion: 1,
@@ -724,9 +638,7 @@ async function deploy(
     JSON.stringify(state.checkCommands) !== JSON.stringify(commands) ||
     JSON.stringify(state.allowedToolSelectors) !== JSON.stringify(toolSelectors)
   ) {
-    throw new Error(
-      "The deployment state does not match this App source or target.",
-    );
+    throw new Error("The deployment state does not match this App source or target.");
   }
 
   const createClient = dependencies.createAppsClient ?? defaultCreateAppsClient;
@@ -735,8 +647,7 @@ async function deploy(
     ...(apiKey ? { apiKey } : {}),
     ...(sessionCookie ? { sessionCookie } : {}),
   });
-  const putSignedUpload =
-    dependencies.putSignedUpload ?? defaultPutSignedUpload;
+  const putSignedUpload = dependencies.putSignedUpload ?? defaultPutSignedUpload;
 
   let detail;
   if (state.appId) {
@@ -749,11 +660,7 @@ async function deploy(
     state.appId = detail.app.id;
     await writeDeployState(statePath, state);
   } else {
-    const existing = await findAppBySlug(
-      client,
-      workspaceId,
-      sourceManifest.slug,
-    );
+    const existing = await findAppBySlug(client, workspaceId, sourceManifest.slug);
     if (existing) {
       state.appId = existing.id;
     } else {
@@ -771,22 +678,13 @@ async function deploy(
     detail = await client.getApp(workspaceId, state.appId);
   }
   const appId = state.appId;
-  if (detail.app.status !== "active")
-    throw new Error("The target App is not active.");
+  if (detail.app.status !== "active") throw new Error("The target App is not active.");
 
   let toolPolicy = state.toolPolicyRevisionId
-    ? (detail.toolPolicies.find(
-        (candidate) => candidate.id === state.toolPolicyRevisionId,
-      ) ?? null)
+    ? (detail.toolPolicies.find((candidate) => candidate.id === state.toolPolicyRevisionId) ?? null)
     : latestByRevision(detail.toolPolicies);
-  if (
-    !state.toolPolicyRevisionId &&
-    (!toolPolicy || toolSelectors.length > 0)
-  ) {
-    const available = await client.getAvailableRuntimeCatalog(
-      workspaceId,
-      appId,
-    );
+  if (!state.toolPolicyRevisionId && (!toolPolicy || toolSelectors.length > 0)) {
+    const available = await client.getAvailableRuntimeCatalog(workspaceId, appId);
     state.policyExpectedVersion ??= detail.app.version;
     await writeDeployState(statePath, state);
     detail = await client.createToolPolicy(workspaceId, appId, {
@@ -796,8 +694,7 @@ async function deploy(
       idempotencyKey: stableOperationId(deploymentId, "tool-policy"),
     });
     toolPolicy = latestByRevision(detail.toolPolicies);
-    if (!toolPolicy)
-      throw new Error("OpenGeni did not return the created App tool policy.");
+    if (!toolPolicy) throw new Error("OpenGeni did not return the created App tool policy.");
     state.toolPolicyRevisionId = toolPolicy.id;
     await writeDeployState(statePath, state);
   }
@@ -820,24 +717,18 @@ async function deploy(
     state.sourceRevisionId = source.sourceRevision.id;
     await writeDeployState(statePath, state);
     await putSignedUpload(source.stagingUpload, archive);
-    detail = await client.completeSourceUpload(
-      workspaceId,
-      appId,
-      state.sourceRevisionId,
-      {
-        expectedContentSha256: sourceSha256,
-        expectedSizeBytes: archive.byteLength,
-        fileCount: entries.length,
-        idempotencyKey: stableOperationId(deploymentId, "source-complete"),
-      },
-    );
+    detail = await client.completeSourceUpload(workspaceId, appId, state.sourceRevisionId, {
+      expectedContentSha256: sourceSha256,
+      expectedSizeBytes: archive.byteLength,
+      fileCount: entries.length,
+      idempotencyKey: stableOperationId(deploymentId, "source-complete"),
+    });
     state.sourceCompleted = true;
     await writeDeployState(statePath, state);
   } else {
     detail = await client.getApp(workspaceId, appId);
   }
-  if (!state.sourceRevisionId)
-    throw new Error("The App source revision is unavailable.");
+  if (!state.sourceRevisionId) throw new Error("The App source revision is unavailable.");
 
   state.buildExpectedVersion ??= detail.app.version;
   await writeDeployState(statePath, state);
@@ -853,42 +744,27 @@ async function deploy(
     });
     state.buildId = prepared.build.id;
     await writeDeployState(statePath, state);
-    const entriesByPath = new Map(
-      entries.map((entry) => [entry.path, entry.bytes]),
-    );
+    const entriesByPath = new Map(entries.map((entry) => [entry.path, entry.bytes]));
     for (;;) {
       for (const upload of prepared.uploads) {
         const bytes = entriesByPath.get(upload.path);
-        if (!bytes)
-          throw new Error(
-            `OpenGeni requested an unknown App file: ${upload.path}.`,
-          );
+        if (!bytes) throw new Error(`OpenGeni requested an unknown App file: ${upload.path}.`);
         await putSignedUpload(upload.stagingUpload, bytes);
       }
       if (!prepared.nextCursor) break;
-      const page = await client.listBuildUploads(
-        workspaceId,
-        appId,
-        state.buildId,
-        {
-          cursor: prepared.nextCursor,
-        },
-      );
+      const page = await client.listBuildUploads(workspaceId, appId, state.buildId, {
+        cursor: prepared.nextCursor,
+      });
       prepared = {
         ...prepared,
         uploads: page.uploads,
         nextCursor: page.nextCursor,
       };
     }
-    const completed = await client.completeBuild(
-      workspaceId,
-      appId,
-      state.buildId,
-      {
-        expectedManifestSha256: manifestSha256,
-        idempotencyKey: stableOperationId(deploymentId, "build-complete"),
-      },
-    );
+    const completed = await client.completeBuild(workspaceId, appId, state.buildId, {
+      expectedManifestSha256: manifestSha256,
+      idempotencyKey: stableOperationId(deploymentId, "build-complete"),
+    });
     state.buildCompleted = true;
     state.promoteExpectedVersion ??= completed.app.version;
     await writeDeployState(statePath, state);
@@ -928,9 +804,7 @@ async function deploy(
     await client.publish(workspaceId, appId, {
       releaseId: state.releaseId,
       expectedAppVersion: state.publishExpectedVersion,
-      reason:
-        option(args, "--reason") ??
-        `Deploy ${sourceManifest.appVersion} with og-app`,
+      reason: option(args, "--reason") ?? `Deploy ${sourceManifest.appVersion} with og-app`,
       idempotencyKey: stableOperationId(deploymentId, "publish"),
     });
     state.published = true;
@@ -964,20 +838,14 @@ export async function runOgAppCli(
 ): Promise<number> {
   const command = args[0];
   const rest = args.slice(1);
-  if (
-    !command ||
-    command === "--help" ||
-    command === "-h" ||
-    command === "help"
-  ) {
+  if (!command || command === "--help" || command === "-h" || command === "help") {
     io.stdout(`${usage()}\n`);
     return command ? 0 : 1;
   }
   if (command === "init") return await initialize(rest, io);
   if (command === "validate") {
     const target = positional(rest)[0];
-    if (!target)
-      throw new Error("og-app validate requires a directory or archive.");
+    if (!target) throw new Error("og-app validate requires a directory or archive.");
     return await validate(target, io);
   }
   if (command === "pack") return await pack(rest, io);
