@@ -1880,7 +1880,7 @@ fleet is unsupported even while every process still uses `code`:
    operator acknowledgements are present:
 
    ```bash
-   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0379_model_catalog_and_gateway_custom_models
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0383_model_catalog_and_gateway_custom_models
    export OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true
    ```
 
