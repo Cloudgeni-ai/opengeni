@@ -1538,10 +1538,12 @@ BEGIN
     IF NOT FOUND THEN RAISE EXCEPTION 'App tool call not found' USING ERRCODE = 'P0002'; END IF;
     IF call_row.status <> 'pending' THEN
       IF call_row.status IS DISTINCT FROM p_input->>'status'
-        OR call_row.output IS DISTINCT FROM CASE
-          WHEN p_input->>'status' = 'succeeded' THEN p_input->'output' ELSE NULL END
-        OR call_row.error IS DISTINCT FROM CASE
-          WHEN p_input->>'status' = 'failed' THEN p_input->'error' ELSE NULL END
+        OR call_row.output IS DISTINCT FROM (
+          CASE WHEN p_input->>'status' = 'succeeded' THEN p_input->'output' ELSE NULL END
+        )
+        OR call_row.error IS DISTINCT FROM (
+          CASE WHEN p_input->>'status' = 'failed' THEN p_input->'error' ELSE NULL END
+        )
       THEN
         RAISE EXCEPTION 'App tool operation settlement was reused with different output'
           USING ERRCODE = '22023';

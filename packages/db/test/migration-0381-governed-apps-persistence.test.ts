@@ -1,16 +1,27 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { getTableName } from "drizzle-orm";
+import postgres from "postgres";
+
+import {
+  acquireOwnerMigratedTestDatabase,
+  type OwnerMigratedTestDatabase,
+} from "@opengeni/testing";
 
 import {
   archiveWorkspaceApp,
   claimArchivedAppGc,
   completeAppBuild,
+  createWorkspaceApp,
   createDatabaseAppLaunchResolver,
   getAppReleaseToolPolicy,
+  listWorkspaceApps,
   prepareAppBuild,
   promoteAppBuild,
   settleArchivedAppGc,
 } from "../src/apps";
+import { createDb, nestedPostgresSqlState } from "../src";
+import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 import {
   FORCE_RLS_TABLES,
   PROTECTED_NO_DIRECT_DML_TABLES,
@@ -34,6 +45,10 @@ import {
 } from "../src/schema";
 
 const migrationUrl = new URL("../drizzle/0381_governed_apps_persistence.sql", import.meta.url);
+const migrationName = "0381_governed_apps_persistence.sql";
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
+const externalAdminUrl = process.env.OPENGENI_TEST_THROWAWAY_DATABASE_ADMIN_URL?.trim();
+const externalAppPassword = "apps-postgres-test-password";
 
 const tables = [
   "apps",
@@ -163,6 +178,8 @@ describe("migration 0381 governed Apps persistence", () => {
     expect(source).toContain("action_value = 'archive_app'");
     expect(source).toContain("App tool operation was reused with different input");
     expect(source).toContain("App tool operation settlement was reused with different output");
+    expect(source).toContain("call_row.output IS DISTINCT FROM (\n          CASE");
+    expect(source).toContain("call_row.error IS DISTINCT FROM (\n          CASE");
     expect(source).toContain("policy_row.allowed_tools @> jsonb_build_array(p_input->'identity')");
     expect(source).toContain("SECURITY DEFINER");
     expect(source).toContain("SET search_path = pg_catalog, %I, pg_temp");
@@ -202,3 +219,315 @@ describe("migration 0381 governed Apps persistence", () => {
     expect(source).not.toContain("GRANT UPDATE ON TABLE %I.apps");
   });
 });
+
+let clean: OwnerMigratedTestDatabase | null = null;
+let upgrade: OwnerMigratedTestDatabase | null = null;
+let cleanAccountId = "";
+let cleanWorkspaceId = "";
+let otherWorkspaceId = "";
+let upgradedArtifactId = "";
+
+beforeAll(async () => {
+  clean = await acquireAppsOwnerDatabase("migration-0381-apps-clean");
+  upgrade = await acquireAppsOwnerDatabase("migration-0381-apps-upgrade");
+  if (!clean || !upgrade) {
+    if (requireRealDatabase) {
+      throw new Error(
+        "[migration-0381-governed-apps] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+      );
+    }
+    return;
+  }
+
+  await migrate(clean.ownerUrl);
+  await provisionRoles(clean.adminUrl, {
+    appPassword: clean.appPassword,
+    rlsStrategy: "force",
+  });
+  const [cleanAccount] = await clean.admin<Array<{ id: string }>>`
+    insert into managed_accounts (name) values (${`apps-clean-${crypto.randomUUID()}`}) returning id`;
+  cleanAccountId = cleanAccount!.id;
+  const cleanWorkspaces = await Promise.all(
+    ["primary", "other"].map(async (name) => {
+      const [workspace] = await clean!.admin<Array<{ id: string }>>`
+        insert into workspaces (account_id, name)
+        values (${cleanAccountId}, ${`apps-${name}-${crypto.randomUUID()}`}) returning id`;
+      await clean!.admin`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${workspace!.id}, ${cleanAccountId})`;
+      return workspace!.id;
+    }),
+  );
+  cleanWorkspaceId = cleanWorkspaces[0]!;
+  otherWorkspaceId = cleanWorkspaces[1]!;
+
+  const upgradeOwner = postgres(upgrade.ownerUrl, {
+    max: 1,
+    prepare: false,
+    onnotice: () => undefined,
+  });
+  try {
+    await upgradeOwner.unsafe(
+      'CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())',
+    );
+    await upgradeOwner`
+      insert into schema_migrations (name) values (${migrationName}) on conflict do nothing`;
+  } finally {
+    await upgradeOwner.end();
+  }
+  await migrate(upgrade.ownerUrl);
+
+  const [upgradeAccount] = await upgrade.admin<Array<{ id: string }>>`
+    insert into managed_accounts (name) values (${`apps-upgrade-${crypto.randomUUID()}`}) returning id`;
+  const [upgradeWorkspace] = await upgrade.admin<Array<{ id: string }>>`
+    insert into workspaces (account_id, name)
+    values (${upgradeAccount!.id}, ${`apps-upgrade-${crypto.randomUUID()}`}) returning id`;
+  const [artifact] = await upgrade.admin<Array<{ id: string }>>`
+    insert into workspace_artifacts (
+      account_id, workspace_id, slug, title, created_by_subject_id
+    ) values (
+      ${upgradeAccount!.id}, ${upgradeWorkspace!.id}, 'legacy-html', 'Legacy HTML',
+      'human:legacy'
+    ) returning id`;
+  upgradedArtifactId = artifact!.id;
+
+  await upgrade.admin`delete from schema_migrations where name = ${migrationName}`;
+  await migrate(upgrade.ownerUrl);
+  await provisionRoles(upgrade.adminUrl, {
+    appPassword: upgrade.appPassword,
+    rlsStrategy: "force",
+  });
+}, 900_000);
+
+afterAll(async () => {
+  await clean?.release();
+  await upgrade?.release();
+}, 180_000);
+
+describe("migration 0381 live PostgreSQL posture", () => {
+  test("applies cleanly as a NOSUPERUSER NOBYPASSRLS owner with FORCE RLS", async () => {
+    if (!clean) return;
+    const [owner] = await clean.admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
+      select rolsuper as superuser, rolbypassrls as "bypassRls"
+      from pg_roles where rolname = ${clean.ownerRole}`;
+    expect(owner).toEqual({ superuser: false, bypassRls: false });
+
+    const migrationRows = await clean.admin<Array<{ name: string }>>`
+      select name from schema_migrations where name = ${migrationName}`;
+    expect(Array.from(migrationRows)).toEqual([{ name: migrationName }]);
+
+    const forced = await clean.admin<Array<{ name: string; forced: boolean }>>`
+      select relation.relname::text as name, relation.relforcerowsecurity as forced
+      from pg_class relation
+      where relation.relname = any(${clean.admin.array([...tables])})
+      order by relation.relname`;
+    expect(forced).toHaveLength(tables.length);
+    expect(forced.every((row) => row.forced)).toBe(true);
+  });
+
+  test("admits only scoped capability calls for the non-owner runtime role", async () => {
+    if (!clean) return;
+    const actorSubjectId = `human:${crypto.randomUUID()}`;
+    const appUrl = runtimeUrl(clean.adminUrl, clean.appPassword);
+    const client = createDb(appUrl, { max: 2, rlsStrategy: "force" });
+    const rawApp = postgres(appUrl, { max: 1, prepare: false, onnotice: () => undefined });
+    try {
+      const created = await createWorkspaceApp(client.db, {
+        accountId: cleanAccountId,
+        workspaceId: cleanWorkspaceId,
+        actorSubjectId,
+        slug: "live-app",
+        title: "Live App",
+        idempotencyKey: crypto.randomUUID(),
+      });
+      expect(created.replayed).toBe(false);
+
+      const own = await listWorkspaceApps(client.db, {
+        accountId: cleanAccountId,
+        workspaceId: cleanWorkspaceId,
+      });
+      const other = await listWorkspaceApps(client.db, {
+        accountId: cleanAccountId,
+        workspaceId: otherWorkspaceId,
+      });
+      expect(own.apps.map((app) => app.id)).toContain(created.app.id);
+      expect(other.apps).toEqual([]);
+
+      const owner = postgres(clean.ownerUrl, {
+        max: 1,
+        prepare: false,
+        onnotice: () => undefined,
+      });
+      try {
+        const ownerRows = await owner<Array<{ id: string }>>`
+          select id from apps where id = ${created.app.id}`;
+        expect(Array.from(ownerRows)).toEqual([]);
+      } finally {
+        await owner.end();
+      }
+
+      expect(
+        await capturedSqlState(
+          rawApp`
+            insert into apps (
+              account_id, workspace_id, slug, title, created_by_subject_id
+            ) values (
+              ${cleanAccountId}, ${cleanWorkspaceId}, 'direct-dml', 'Direct DML',
+              ${actorSubjectId}
+            )`,
+        ),
+      ).toBe("42501");
+
+      expect(
+        await capturedSqlState(
+          rawApp.begin(async (transaction) => {
+            await transaction`select
+              set_config('opengeni.account_id', ${cleanAccountId}, true),
+              set_config('opengeni.workspace_id', ${cleanWorkspaceId}, true),
+              set_config('opengeni.subject_id', ${actorSubjectId}, true)`;
+            await transaction`
+              select create_workspace_app_command(${transaction.json({
+                accountId: cleanAccountId,
+                workspaceId: cleanWorkspaceId,
+                actorSubjectId: `human:${crypto.randomUUID()}`,
+                slug: "actor-mismatch",
+                title: "Actor mismatch",
+                idempotencyKey: crypto.randomUUID(),
+              })}::jsonb)`;
+          }),
+        ),
+      ).toBe("42501");
+    } finally {
+      await rawApp.end();
+      await client.close();
+    }
+  });
+
+  test("upgrades a pre-0381 database without changing existing HTML Artifacts", async () => {
+    if (!upgrade) return;
+    const [artifact] = await upgrade.admin<
+      Array<{ id: string; slug: string; title: string; status: string }>
+    >`
+      select id, slug, title, status from workspace_artifacts where id = ${upgradedArtifactId}`;
+    expect(artifact).toEqual({
+      id: upgradedArtifactId,
+      slug: "legacy-html",
+      title: "Legacy HTML",
+      status: "active",
+    });
+    const [appsTable] = await upgrade.admin<Array<{ present: boolean }>>`
+      select to_regclass('public.apps') is not null as present`;
+    expect(appsTable).toEqual({ present: true });
+    const [migration] = await upgrade.admin<Array<{ count: number }>>`
+      select count(*)::int as count from schema_migrations where name = ${migrationName}`;
+    expect(migration).toEqual({ count: 1 });
+  });
+});
+
+async function acquireAppsOwnerDatabase(label: string): Promise<OwnerMigratedTestDatabase | null> {
+  if (!externalAdminUrl) return await acquireOwnerMigratedTestDatabase(label);
+
+  const databaseName = `og_${label.replace(/[^a-z0-9]/giu, "_").slice(0, 24)}_${crypto
+    .randomUUID()
+    .replaceAll("-", "")
+    .slice(0, 12)}`;
+  const ownerRole = `${databaseName}_owner`.slice(0, 63);
+  const ownerPassword = crypto.randomUUID().replaceAll("-", "");
+  const rootUrl = new URL(externalAdminUrl);
+  rootUrl.pathname = "/postgres";
+  const root = postgres(rootUrl.toString(), {
+    max: 1,
+    prepare: false,
+    onnotice: () => undefined,
+  });
+  let admin: postgres.Sql | null = null;
+  try {
+    await root.unsafe(
+      `CREATE ROLE ${quoteIdentifier(ownerRole)} WITH LOGIN NOSUPERUSER NOBYPASSRLS ` +
+        `NOCREATEROLE NOCREATEDB NOREPLICATION PASSWORD '${ownerPassword}'`,
+    );
+    await root.unsafe(
+      `CREATE DATABASE ${quoteIdentifier(databaseName)} OWNER ${quoteIdentifier(ownerRole)}`,
+    );
+    await root.end();
+
+    const adminUrl = new URL(externalAdminUrl);
+    adminUrl.pathname = `/${databaseName}`;
+    admin = postgres(adminUrl.toString(), {
+      max: 2,
+      prepare: false,
+      onnotice: () => undefined,
+    });
+    await admin.unsafe("CREATE EXTENSION IF NOT EXISTS pgcrypto");
+    await admin.unsafe("CREATE EXTENSION IF NOT EXISTS vector");
+    await admin.unsafe(`GRANT CREATE, USAGE ON SCHEMA public TO ${quoteIdentifier(ownerRole)}`);
+
+    const ownerUrl = new URL(adminUrl);
+    ownerUrl.username = ownerRole;
+    ownerUrl.password = ownerPassword;
+    let released = false;
+    return {
+      ownerUrl: ownerUrl.toString(),
+      ownerRole,
+      adminUrl: adminUrl.toString(),
+      admin,
+      appPassword: externalAppPassword,
+      release: async () => {
+        if (released) return;
+        released = true;
+        await admin?.end().catch(() => undefined);
+        const cleanup = postgres(rootUrl.toString(), {
+          max: 1,
+          prepare: false,
+          onnotice: () => undefined,
+        });
+        await cleanup
+          .unsafe(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`)
+          .catch(() => undefined);
+        await cleanup
+          .unsafe(`DROP ROLE IF EXISTS ${quoteIdentifier(ownerRole)}`)
+          .catch(() => undefined);
+        await cleanup.end().catch(() => undefined);
+      },
+    };
+  } catch (error) {
+    await admin?.end().catch(() => undefined);
+    await root.end().catch(() => undefined);
+    const cleanup = postgres(rootUrl.toString(), {
+      max: 1,
+      prepare: false,
+      onnotice: () => undefined,
+    });
+    await cleanup
+      .unsafe(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`)
+      .catch(() => undefined);
+    await cleanup
+      .unsafe(`DROP ROLE IF EXISTS ${quoteIdentifier(ownerRole)}`)
+      .catch(() => undefined);
+    await cleanup.end().catch(() => undefined);
+    throw error;
+  }
+}
+
+function runtimeUrl(adminUrl: string, password: string): string {
+  const url = new URL(adminUrl);
+  url.username = "opengeni_app";
+  url.password = password;
+  return url.toString();
+}
+
+function quoteIdentifier(value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(value)) {
+    throw new Error(`Invalid test database identifier: ${value}`);
+  }
+  return `"${value}"`;
+}
+
+async function capturedSqlState(promise: Promise<unknown>): Promise<string | null> {
+  try {
+    await promise;
+    return null;
+  } catch (error) {
+    return nestedPostgresSqlState(error);
+  }
+}
