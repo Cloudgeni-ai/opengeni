@@ -316,6 +316,7 @@ type BrowserRequestFailureInput = {
   acceptedActorTransitions?: readonly ActorMutationAcceptance[];
   actorEpoch: string | null;
   dispatchPhase: string;
+  engine?: EngineName;
   failedAt?: number;
   failure: string;
   method: string;
@@ -481,13 +482,22 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
       DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES.get(input.responsePhase)?.has(
         input.dispatchPhase,
       ) === true);
+  const isExpectedWebKitReauthenticationChunkCancellation =
+    input.engine === "webkit" &&
+    input.failure.trim() === "Load request cancelled" &&
+    input.method === "GET" &&
+    input.actorEpoch === null &&
+    input.dispatchPhase === "slot-revocation-reauthentication" &&
+    input.responsePhase === "slot-revocation-reauthentication" &&
+    /^\/assets\/realtime-[A-Za-z0-9_-]+\.js$/u.test(pathname);
   if (
     isExpectedScopedActorReadCancellation ||
     isAcceptedActorTransitionCancellation ||
     isExpectedLogoutAllBoundedStreamCancellation ||
     isExpectedEvidenceCatalogCancellation ||
     isExpectedDocumentSessionPageCancellation ||
-    isExpectedDocumentBootstrapCancellation
+    isExpectedDocumentBootstrapCancellation ||
+    isExpectedWebKitReauthenticationChunkCancellation
   ) {
     return null;
   }
@@ -986,6 +996,7 @@ function observeBrowser(page: Page): BrowserProblems {
         acceptedActorTransitions: actorMutationAcceptances,
         actorEpoch: dispatch?.actorEpoch ?? null,
         dispatchPhase: dispatch?.phase ?? "unknown",
+        engine: requestedEngine as EngineName,
         failedAt,
         failure,
         method: request.method(),
@@ -2884,6 +2895,37 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/assets/app.js`,
       }),
     ).toContain("/assets/app.js");
+    const webKitReauthenticationChunk = {
+      ...oldActorRead,
+      actorEpoch: null,
+      dispatchPhase: "slot-revocation-reauthentication",
+      engine: "webkit",
+      failure: "Load request cancelled",
+      responsePhase: "slot-revocation-reauthentication",
+      url: `${publicOrigin}/assets/realtime-CVOxTMJe.js`,
+    } satisfies BrowserRequestFailureInput;
+    expect(requestFailureProblem(webKitReauthenticationChunk)).toBeNull();
+    expect(requestFailureProblem({ ...webKitReauthenticationChunk, engine: "chromium" })).toContain(
+      "/assets/realtime-CVOxTMJe.js",
+    );
+    expect(
+      requestFailureProblem({
+        ...webKitReauthenticationChunk,
+        failure: "Load request failed",
+      }),
+    ).toContain("Load request failed");
+    expect(
+      requestFailureProblem({
+        ...webKitReauthenticationChunk,
+        responsePhase: "logout-one",
+      }),
+    ).toContain("response=logout-one");
+    expect(
+      requestFailureProblem({
+        ...webKitReauthenticationChunk,
+        url: `${publicOrigin}/assets/index-CVOxTMJe.js`,
+      }),
+    ).toContain("/assets/index-CVOxTMJe.js");
     const evidenceCatalogRead = {
       ...oldActorRead,
       dispatchPhase: "responsive-evidence-bootstrap",
