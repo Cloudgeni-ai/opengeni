@@ -614,7 +614,10 @@ export function OrgSettingsRoute({
             {canManageOrganizationKnowledge ? (
               <>
                 {canManageCompanyProfileAgentPolicy ? (
-                  <OrganizationCompanyProfileAgentPolicy workspaceId={workspaceId} />
+                  <OrganizationCompanyProfileAgentPolicy
+                    key={`${identityKey}:company-profile-agent-policy`}
+                    workspaceId={workspaceId}
+                  />
                 ) : (
                   <p className="border-b border-border pb-6 text-xs leading-5 text-fg-muted">
                     Agent-managed organization identity is owner-only. Ask an organization owner to

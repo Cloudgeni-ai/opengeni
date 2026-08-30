@@ -8,9 +8,12 @@ import * as SonnerPackage from "sonner";
 import * as ReactPackage from "@opengeni/react";
 import * as RouterPackage from "@tanstack/react-router";
 import * as ContextModule from "@/context";
+import type { CompanyProfileAgentPolicy } from "@/types";
 
 const accountId = "account-strict";
 const workspaceId = "workspace-strict";
+const otherAccountId = "account-other";
+const otherWorkspaceId = "workspace-other";
 const timestamp = "2026-08-20T10:00:00.000Z";
 const toastError = mock((_message: string) => undefined);
 let accountRole: "owner" | "admin" = "owner";
@@ -49,12 +52,15 @@ const listCompanyProfile = mock(async (_workspaceId: string, _options: { limit: 
   activationEvents: [],
   nextAfterRevision: null,
 }));
-const getCompanyProfileAgentPolicy = mock(async (_workspaceId: string) => ({
+const defaultGetCompanyProfileAgentPolicy = async (
+  _workspaceId: string,
+): Promise<CompanyProfileAgentPolicy> => ({
   organizationId: accountId,
   mode: "suggest" as const,
   version: 0,
   updatedAt: timestamp,
-}));
+});
+const getCompanyProfileAgentPolicy = mock(defaultGetCompanyProfileAgentPolicy);
 const updateCompanyProfileAgentPolicy = mock(
   async (
     _workspaceId: string,
@@ -313,6 +319,86 @@ describe("organization billing StrictMode ownership", () => {
 
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  test("discards an old organization policy load after the route identity changes", async () => {
+    getCompanyProfileAgentPolicy.mockClear();
+    updateCompanyProfileAgentPolicy.mockClear();
+    let resolveOldPolicy!: (value: CompanyProfileAgentPolicy) => void;
+    const oldPolicy = new Promise<CompanyProfileAgentPolicy>((resolve) => {
+      resolveOldPolicy = resolve;
+    });
+    getCompanyProfileAgentPolicy.mockImplementation(async (seenWorkspaceId) => {
+      if (seenWorkspaceId === workspaceId) return await oldPolicy;
+      return {
+        organizationId: otherAccountId,
+        mode: "automatic",
+        version: 7,
+        updatedAt: timestamp,
+      };
+    });
+
+    const workspace = context.workspaces[0]!;
+    const grant = context.accessContext.accountGrants[0]!;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="knowledge" />);
+      });
+      await flush();
+      expect(getCompanyProfileAgentPolicy).toHaveBeenCalledWith(workspaceId);
+
+      workspace.id = otherWorkspaceId;
+      workspace.accountId = otherAccountId;
+      grant.accountId = otherAccountId;
+      context.accessContext.defaultAccountId = otherAccountId;
+      context.accessContext.defaultWorkspaceId = otherWorkspaceId;
+      await act(async () => {
+        root.render(<OrgSettingsRoute workspaceId={otherWorkspaceId} section="knowledge" />);
+      });
+      await flush();
+
+      const selectedMode = () =>
+        container.querySelector<HTMLInputElement>(
+          'input[name="company-profile-agent-policy"]:checked',
+        )?.value;
+      expect(selectedMode()).toBe("automatic");
+
+      await act(async () =>
+        resolveOldPolicy({
+          organizationId: accountId,
+          mode: "suggest",
+          version: 0,
+          updatedAt: timestamp,
+        }),
+      );
+      await flush();
+      expect(selectedMode()).toBe("automatic");
+
+      const off = container.querySelector<HTMLInputElement>(
+        'input[name="company-profile-agent-policy"][value="off"]',
+      );
+      if (!off) throw new Error("Missing Off policy option");
+      await act(async () => off.click());
+      await act(async () => button(container, "Save autonomy mode").click());
+      await flush();
+      expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledWith(
+        otherWorkspaceId,
+        expect.objectContaining({ mode: "off", expectedVersion: 7 }),
+      );
+    } finally {
+      getCompanyProfileAgentPolicy.mockImplementation(defaultGetCompanyProfileAgentPolicy);
+      workspace.id = workspaceId;
+      workspace.accountId = accountId;
+      grant.accountId = accountId;
+      context.accessContext.defaultAccountId = accountId;
+      context.accessContext.defaultWorkspaceId = workspaceId;
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   test("does not load the owner-only agent identity policy for an account administrator", async () => {
