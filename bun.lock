@@ -107,6 +107,18 @@
         "typescript": "7.0.2",
       },
     },
+    "apps/app-host": {
+      "name": "@opengeni/app-host",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opengeni/config": "workspace:*",
+        "@opengeni/contracts": "workspace:*",
+        "@opengeni/storage": "workspace:*",
+      },
+      "devDependencies": {
+        "typescript": "7.0.2",
+      },
+    },
     "apps/browser-extension": {
       "name": "@opengeni/browser-extension",
       "version": "0.1.0",
@@ -1346,6 +1358,8 @@
     "@opengeni/api-router": ["@opengeni/api-router@workspace:apps/api"],
 
     "@opengeni/app-authoring": ["@opengeni/app-authoring@workspace:packages/app-authoring"],
+
+    "@opengeni/app-host": ["@opengeni/app-host@workspace:apps/app-host"],
 
     "@opengeni/app-sdk": ["@opengeni/app-sdk@workspace:packages/app-sdk"],
 

@@ -194,6 +194,56 @@ describe("browser analytics configuration", () => {
   });
 });
 
+describe("OpenGeni Apps configuration", () => {
+  const enabledAppsEnvironment = {
+    OPENGENI_APPS_ENABLED: "true",
+    OPENGENI_APP_ORIGIN_TEMPLATE: "https://{appId}.apps.example.test",
+    OPENGENI_APP_HOST_RESOLVER_KEY: "k".repeat(32),
+    OPENGENI_WEB_BASE_URL: "https://console.example.test",
+    OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+    OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "apps-access-key",
+    OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "apps-secret-key",
+  } satisfies NodeJS.ProcessEnv;
+
+  test("keeps Apps disabled without requiring deployment infrastructure", () => {
+    expect(withEnv({}, () => getSettings()).appsEnabled).toBe(false);
+  });
+
+  test("accepts a complete dedicated-origin Apps deployment", () => {
+    const settings = withEnv(enabledAppsEnvironment, () => getSettings());
+    expect(settings.appsEnabled).toBe(true);
+    expect(settings.appOriginTemplate).toBe("https://{appId}.apps.example.test");
+  });
+
+  test("requires the origin, resolver, browser, and object-storage boundaries", () => {
+    for (const [missing, message] of [
+      ["OPENGENI_APP_ORIGIN_TEMPLATE", "OPENGENI_APP_ORIGIN_TEMPLATE is required"],
+      ["OPENGENI_APP_HOST_RESOLVER_KEY", "OPENGENI_APP_HOST_RESOLVER_KEY is required"],
+      ["OPENGENI_WEB_BASE_URL", "OPENGENI_WEB_BASE_URL or OPENGENI_PUBLIC_BASE_URL"],
+      ["OPENGENI_OBJECT_STORAGE_ENDPOINT", "configured immutable object storage is required"],
+    ] as const) {
+      const environment = { ...enabledAppsEnvironment };
+      delete environment[missing];
+      expect(() => withEnv(environment, () => getSettings())).toThrow(message);
+    }
+  });
+
+  test("requires the exact App id as the dedicated HTTPS host label", () => {
+    for (const template of [
+      "https://preview-{appId}.apps.example.test",
+      "https://preview.{appId}.apps.example.test",
+      "https://apps.example.test/{appId}",
+      "http://{appId}.apps.example.test",
+    ]) {
+      expect(() =>
+        withEnv({ ...enabledAppsEnvironment, OPENGENI_APP_ORIGIN_TEMPLATE: template }, () =>
+          getSettings(),
+        ),
+      ).toThrow("exact App id as its leftmost host label");
+    }
+  });
+});
+
 describe("remote browser placement configuration", () => {
   test("keeps provider credentials optional and parses bounded launch policy", () => {
     const defaults = withEnv({}, () => getSettings());

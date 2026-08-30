@@ -78,11 +78,14 @@ WORKDIR /src
 # the repository workspace list by scripts/release-image-workflow-contract.test.ts.
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
+COPY apps/app-host/package.json apps/app-host/package.json
 COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
+COPY packages/app-authoring/package.json packages/app-authoring/package.json
+COPY packages/app-sdk/package.json packages/app-sdk/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
 COPY packages/artifact-kernel-wasm-spreadsheet/package.json packages/artifact-kernel-wasm-spreadsheet/package.json
@@ -108,6 +111,7 @@ COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
 COPY packages/testing/package.json packages/testing/package.json
+COPY packages/tool-runtime/package.json packages/tool-runtime/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 # The cache mount only holds Bun's download cache; the exact lock-resolved

@@ -5292,6 +5292,7 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
 
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
+  validateAppsSettings(settings);
   if (settings.goalIdleBackoffMs.some((delayMs) => delayMs > settings.goalIdleBackoffMaxMs)) {
     throw new Error(
       `OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS (${settings.goalIdleBackoffMaxMs})`,
@@ -6062,6 +6063,50 @@ export function resolveNatsControlPlaneAuth(settings: Settings): NatsControlPlan
     return null;
   }
   return { user, password };
+}
+
+function validateAppsSettings(settings: Settings): void {
+  if (!settings.appsEnabled) return;
+  if (!settings.appOriginTemplate) {
+    throw new Error("OPENGENI_APP_ORIGIN_TEMPLATE is required when OPENGENI_APPS_ENABLED=true");
+  }
+  const sampleAppId = "11111111-1111-4111-8111-111111111111";
+  const occurrences = settings.appOriginTemplate.split("{appId}").length - 1;
+  let appOrigin: URL;
+  try {
+    appOrigin = new URL(settings.appOriginTemplate.replace("{appId}", sampleAppId));
+  } catch {
+    throw new Error(
+      "OPENGENI_APP_ORIGIN_TEMPLATE must resolve to a dedicated HTTPS origin with the exact App id as its leftmost host label",
+    );
+  }
+  if (
+    occurrences !== 1 ||
+    appOrigin.protocol !== "https:" ||
+    appOrigin.username ||
+    appOrigin.password ||
+    appOrigin.pathname !== "/" ||
+    appOrigin.search ||
+    appOrigin.hash ||
+    appOrigin.hostname.split(".", 1)[0] !== sampleAppId
+  ) {
+    throw new Error(
+      "OPENGENI_APP_ORIGIN_TEMPLATE must resolve to a dedicated HTTPS origin with the exact App id as its leftmost host label",
+    );
+  }
+  if (!settings.appHostResolverKey) {
+    throw new Error("OPENGENI_APP_HOST_RESOLVER_KEY is required when OPENGENI_APPS_ENABLED=true");
+  }
+  if (!canonicalPublicOrigin(settings.webBaseUrl ?? settings.publicBaseUrl)) {
+    throw new Error(
+      "OPENGENI_WEB_BASE_URL or OPENGENI_PUBLIC_BASE_URL must be a credential-free HTTP(S) origin when OPENGENI_APPS_ENABLED=true",
+    );
+  }
+  if (!objectStorageConfiguredForWorkspaceArchives(settings)) {
+    throw new Error(
+      "configured immutable object storage is required when OPENGENI_APPS_ENABLED=true",
+    );
+  }
 }
 
 function splitCsv(raw: string): string[] {

@@ -10,7 +10,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "README.md"
   ],
   "type": "module",
   "sideEffects": false,

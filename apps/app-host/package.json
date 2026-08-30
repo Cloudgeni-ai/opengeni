@@ -1,0 +1,24 @@
+{
+  "name": "@opengeni/app-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dedicated immutable-byte host for sandboxed OpenGeni Apps.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opengeni/config": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/storage": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
