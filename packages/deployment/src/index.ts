@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export const DeploymentProfileId = z.enum([
@@ -27,88 +26,6 @@ const MANAGED_SAAS_PRODUCTION_PROFILES = [
 function supportsManagedSaasProduction(profile: DeploymentProfileId): boolean {
   return MANAGED_SAAS_PRODUCTION_PROFILES.some((candidate) => candidate === profile);
 }
-
-const exactSourceSha = /^[a-f0-9]{40}$/u;
-const exactSha256 = /^[a-f0-9]{64}$/u;
-const exactImageDigest = /^sha256:[a-f0-9]{64}$/u;
-const releaseChartArtifact = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}\.tgz$/u;
-const immutableArtifactName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u;
-const immutableEvidenceUrl = z
-  .string()
-  .url()
-  .refine((value) => {
-    const url = new URL(value);
-    return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash;
-  }, "staging acceptance evidence URL must be an unsigned HTTPS URL without credentials, query, or fragment");
-
-export const ManagedProductionPromotionReceipt = z
-  .object({
-    schemaVersion: z.literal(1),
-    sourceSha: z.string().regex(exactSourceSha),
-    sourceTreeSha: z.string().regex(exactSourceSha),
-    imageDigests: z
-      .object({
-        api: z.string().regex(exactImageDigest),
-        migration: z.string().regex(exactImageDigest),
-        worker: z.string().regex(exactImageDigest),
-        web: z.string().regex(exactImageDigest),
-      })
-      .strict(),
-    chart: z
-      .object({
-        version: z.string().min(1),
-        artifact: z.string().regex(releaseChartArtifact),
-        bytesSha256: z.string().regex(exactSha256),
-      })
-      .strict(),
-    stagingAcceptance: z
-      .object({
-        deploymentRevision: z.string().regex(exactSourceSha),
-        acceptedAt: z.string().datetime({ offset: true }),
-        evidenceUrl: immutableEvidenceUrl,
-        evidenceArtifact: z.string().regex(immutableArtifactName),
-        evidenceSha256: z.string().regex(exactSha256),
-      })
-      .strict(),
-  })
-  .strict()
-  .superRefine((receipt, ctx) => {
-    if (receipt.imageDigests.migration !== receipt.imageDigests.api) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["imageDigests", "migration"],
-        message: "managed production migration digest must equal the API digest",
-      });
-    }
-    if (receipt.stagingAcceptance.deploymentRevision !== receipt.sourceSha) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["stagingAcceptance", "deploymentRevision"],
-        message: "staging acceptance deployment revision must equal sourceSha",
-      });
-    }
-  });
-export type ManagedProductionPromotionReceipt = z.infer<typeof ManagedProductionPromotionReceipt>;
-
-export function buildManagedProductionPromotionReceipt(value: unknown): {
-  receipt: ManagedProductionPromotionReceipt;
-  json: string;
-  sha256: string;
-} {
-  const receipt = ManagedProductionPromotionReceipt.parse(value);
-  const json = JSON.stringify(receipt);
-  return {
-    receipt,
-    json,
-    sha256: createHash("sha256").update(json).digest("hex"),
-  };
-}
-
-const MANAGED_PRODUCTION_PROMOTION_RECEIPT_ENV =
-  "OPENGENI_MANAGED_PRODUCTION_PROMOTION_RECEIPT_JSON" as const;
-const MANAGED_PRODUCTION_PROMOTION_RECEIPT_SHA_ENV =
-  "OPENGENI_MANAGED_PRODUCTION_PROMOTION_RECEIPT_SHA256" as const;
-const MANAGED_PRODUCTION_CHART_ARCHIVE_ENV = "OPENGENI_MANAGED_PRODUCTION_CHART_ARCHIVE" as const;
 
 export const ProductOverlayId = z.enum(["none", "managed-saas-staging", "managed-saas-production"]);
 export type ProductOverlayId = z.infer<typeof ProductOverlayId>;
@@ -1742,18 +1659,14 @@ export function generateRuntimeArtifacts(
   terraformOutputs: TerraformOutputs,
   env: Record<string, string | undefined> = process.env,
 ): DeploymentRuntimeArtifacts {
-  const productionPromotion =
-    contract.productOverlay === "managed-saas-production"
-      ? validatedManagedProductionPromotion(env)
-      : null;
-  const effectiveEnv = productionPromotion
-    ? managedProductionEnvironment(env, productionPromotion)
-    : env;
+  if (contract.productOverlay === "managed-saas-production") {
+    validatedImageDigests(env, "managed production promotion");
+  }
   const helmSetValues = terraformOutputObject(terraformOutputs, "helm_set_values");
-  addGeneratedImageValues(helmSetValues, effectiveEnv.OPENGENI_IMAGE_TAG ?? "latest", effectiveEnv);
-  addRuntimeConfigHelmValues(helmSetValues, contract, effectiveEnv);
+  addGeneratedImageValues(helmSetValues, env.OPENGENI_IMAGE_TAG ?? "latest", env);
+  addRuntimeConfigHelmValues(helmSetValues, contract, env);
   const helmValues = nestedObjectFromHelmSetValues(helmSetValues);
-  const runtimeValues = runtimeEnvValues(contract, terraformOutputs, effectiveEnv);
+  const runtimeValues = runtimeEnvValues(contract, terraformOutputs, env);
   const immutableImageDigestInputs =
     contract.runtime.platform === "kubernetes" && contract.runtime.cloud !== "local"
       ? [
@@ -1766,9 +1679,7 @@ export function generateRuntimeArtifacts(
   const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
   const missingEnvVars = [
     ...runtimeValues.filter((entry) => entry.required && !entry.value).map((entry) => entry.key),
-    ...immutableImageDigestInputs.filter(
-      (name) => !exactSha256Digest.test(effectiveEnv[name] ?? ""),
-    ),
+    ...immutableImageDigestInputs.filter((name) => !exactSha256Digest.test(env[name] ?? "")),
   ];
   const requiredEnvVars = [
     ...runtimeValues.filter((entry) => entry.required).map((entry) => entry.key),
@@ -1931,10 +1842,11 @@ function validatedImageDigests(
   env: Record<string, string | undefined>,
   purpose: string,
 ): Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string> {
+  const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
   const digests = Object.fromEntries(
     Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV).map(([component, name]) => {
       const digest = env[name]?.trim() ?? "";
-      if (!exactImageDigest.test(digest)) {
+      if (!exactSha256Digest.test(digest)) {
         throw new Error(`${name} must be an exact sha256 digest for ${purpose}`);
       }
       return [component, digest];
@@ -1946,91 +1858,6 @@ function validatedImageDigests(
     );
   }
   return digests;
-}
-
-function validatedManagedProductionPromotion(
-  env: Record<string, string | undefined>,
-): ManagedProductionPromotionReceipt {
-  const rawReceipt = env[MANAGED_PRODUCTION_PROMOTION_RECEIPT_ENV];
-  if (!rawReceipt?.trim()) {
-    throw new Error(
-      `${MANAGED_PRODUCTION_PROMOTION_RECEIPT_ENV} is required for managed production promotion`,
-    );
-  }
-  if (Buffer.byteLength(rawReceipt, "utf8") > 1024 * 1024) {
-    throw new Error("managed production promotion receipt exceeds 1 MiB");
-  }
-  const expectedReceiptSha = env[MANAGED_PRODUCTION_PROMOTION_RECEIPT_SHA_ENV]?.trim() ?? "";
-  if (!exactSha256.test(expectedReceiptSha)) {
-    throw new Error(
-      `${MANAGED_PRODUCTION_PROMOTION_RECEIPT_SHA_ENV} must be an exact lowercase SHA-256`,
-    );
-  }
-  const actualReceiptSha = createHash("sha256").update(rawReceipt).digest("hex");
-  if (actualReceiptSha !== expectedReceiptSha) {
-    throw new Error("managed production promotion receipt SHA-256 does not match its JSON bytes");
-  }
-  const chartArchive = env[MANAGED_PRODUCTION_CHART_ARCHIVE_ENV]?.trim();
-  if (!chartArchive) {
-    throw new Error(
-      `${MANAGED_PRODUCTION_CHART_ARCHIVE_ENV} is required for managed production promotion`,
-    );
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawReceipt);
-  } catch (error) {
-    throw new Error("managed production promotion receipt is not valid JSON", { cause: error });
-  }
-  return ManagedProductionPromotionReceipt.parse(parsed);
-}
-
-function managedProductionImageDigests(
-  receipt: ManagedProductionPromotionReceipt,
-): Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string> {
-  return {
-    api: receipt.imageDigests.api,
-    worker: receipt.imageDigests.worker,
-    web: receipt.imageDigests.web,
-    migrations: receipt.imageDigests.migration,
-  };
-}
-
-function managedProductionImageDigestEnv(
-  receipt: ManagedProductionPromotionReceipt,
-): Record<string, string> {
-  const digests = managedProductionImageDigests(receipt);
-  return {
-    OPENGENI_API_IMAGE_DIGEST: digests.api,
-    OPENGENI_WORKER_IMAGE_DIGEST: digests.worker,
-    OPENGENI_WEB_IMAGE_DIGEST: digests.web,
-    OPENGENI_MIGRATIONS_IMAGE_DIGEST: digests.migrations,
-  };
-}
-
-function managedProductionEnvironment(
-  env: Record<string, string | undefined>,
-  receipt: ManagedProductionPromotionReceipt,
-): Record<string, string | undefined> {
-  return {
-    ...env,
-    ...managedProductionImageDigestEnv(receipt),
-    OPENGENI_IMAGE_TAG: receipt.sourceSha,
-    OPENGENI_DEPLOYMENT_REVISION: receipt.sourceSha,
-  };
-}
-
-function managedProductionPromotionVerificationCommand(
-  receipt: ManagedProductionPromotionReceipt,
-  receiptSha256: string,
-): string {
-  return [
-    `test "$(printf '%s' "$${MANAGED_PRODUCTION_PROMOTION_RECEIPT_ENV}" | sha256sum | awk '{print $1}')" = "${receiptSha256}"`,
-    `test "$(git rev-parse HEAD)" = "${receipt.sourceSha}"`,
-    `test "$(git rev-parse 'HEAD^{tree}')" = "${receipt.sourceTreeSha}"`,
-    `test "$(basename -- "$${MANAGED_PRODUCTION_CHART_ARCHIVE_ENV}")" = "${receipt.chart.artifact}"`,
-    `test "$(sha256sum "$${MANAGED_PRODUCTION_CHART_ARCHIVE_ENV}" | awk '{print $1}')" = "${receipt.chart.bytesSha256}"`,
-  ].join(" && ");
 }
 
 function maintenanceImageDigestHelmArgs(
@@ -2109,16 +1936,7 @@ function deployCommands(
   productOverlay: ProductOverlayId,
   env: Record<string, string | undefined>,
 ): string[] {
-  const productionPromotion =
-    productOverlay === "managed-saas-production" ? validatedManagedProductionPromotion(env) : null;
-  const effectiveEnv = productionPromotion
-    ? managedProductionEnvironment(env, productionPromotion)
-    : env;
-  const maintenanceImageValuesArg = maintenanceImageDigestHelmArgs(
-    contract,
-    terraformRoot,
-    effectiveEnv,
-  );
+  const maintenanceImageValuesArg = maintenanceImageDigestHelmArgs(contract, terraformRoot, env);
   if (contract.profile === "local-compose") {
     return ["bun run dev"];
   }
@@ -2215,8 +2033,9 @@ function deployCommands(
   ];
   if (terraformRoot) {
     const overlayArg = productOverlay === "none" ? "" : ` --product-overlay ${productOverlay}`;
+    const productionPromotion = productOverlay === "managed-saas-production";
     const promotedDigests = productionPromotion
-      ? managedProductionImageDigests(productionPromotion)
+      ? validatedImageDigests(env, "managed production promotion")
       : null;
     const runtimeImageEnvPrefix = promotedDigests
       ? Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV)
@@ -2224,44 +2043,28 @@ function deployCommands(
             ([component, name]) =>
               `${name}=${promotedDigests[component as keyof typeof promotedDigests]}`,
           )
-          .concat(
-            `OPENGENI_IMAGE_TAG=${productionPromotion!.sourceSha}`,
-            `OPENGENI_DEPLOYMENT_REVISION=${productionPromotion!.sourceSha}`,
-          )
           .join(" ") + " "
       : `set -a && . .agent/generated/${contract.profile}/image-digests.env && set +a && `;
-    if (productionPromotion) {
-      const receiptSha256 = env[MANAGED_PRODUCTION_PROMOTION_RECEIPT_SHA_ENV]!.trim();
-      commands.unshift(
-        `terraform -chdir=${terraformRoot} init -backend=false`,
-        `mkdir -p .agent/generated/${contract.profile}`,
-        `terraform -chdir=${terraformRoot} output -json > .agent/generated/${contract.profile}/terraform-output.json`,
-        managedProductionPromotionVerificationCommand(productionPromotion, receiptSha256),
-        ...promotedImageDigestVerificationCommands(contract, terraformRoot, promotedDigests!),
-        `terraform -chdir=${terraformRoot} plan -detailed-exitcode -var-file=terraform.tfvars`,
-      );
-    } else {
-      commands.unshift(
-        `terraform -chdir=${terraformRoot} init -backend=false`,
-        `terraform -chdir=${terraformRoot} plan -var-file=terraform.tfvars`,
-        `terraform -chdir=${terraformRoot} apply -var-file=terraform.tfvars`,
-      );
-      commands.push(
-        `mkdir -p .agent/generated/${contract.profile}`,
-        `terraform -chdir=${terraformRoot} output -json > .agent/generated/${contract.profile}/terraform-output.json`,
-        ...imageBuildPushCommands(contract, terraformRoot),
-        imageDigestResolutionCommand(contract, terraformRoot),
-      );
-    }
+    commands.unshift(
+      `terraform -chdir=${terraformRoot} init -backend=false`,
+      `terraform -chdir=${terraformRoot} plan -var-file=terraform.tfvars`,
+      `terraform -chdir=${terraformRoot} apply -var-file=terraform.tfvars`,
+    );
     commands.push(
-      `${runtimeImageEnvPrefix}bun run deployment:runtime-artifacts -- --profile ${contract.profile}${overlayArg} --terraform-output .agent/generated/${contract.profile}/terraform-output.json --out-dir .agent/generated/${contract.profile}`,
+      `mkdir -p .agent/generated/${contract.profile}`,
+      `terraform -chdir=${terraformRoot} output -json > .agent/generated/${contract.profile}/terraform-output.json`,
+      ...(productionPromotion
+        ? promotedImageDigestVerificationCommands(contract, terraformRoot, promotedDigests!)
+        : [
+            ...imageBuildPushCommands(contract, terraformRoot),
+            imageDigestResolutionCommand(contract, terraformRoot),
+          ]),
+      `${runtimeImageEnvPrefix}OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" bun run deployment:runtime-artifacts -- --profile ${contract.profile}${overlayArg} --terraform-output .agent/generated/${contract.profile}/terraform-output.json --out-dir .agent/generated/${contract.profile}`,
       `kubectl -n ${contract.runtime.namespace ?? "opengeni"} create secret generic opengeni-runtime --from-env-file=.agent/generated/${contract.profile}/runtime.env --dry-run=client -o yaml | kubectl apply -f -`,
     );
   }
-  if (!productionPromotion) {
-    for (const dependency of platformDependencies) {
-      commands.push(...dependency.installCommands);
-    }
+  for (const dependency of platformDependencies) {
+    commands.push(...dependency.installCommands);
   }
   const generatedValuesArg = terraformRoot
     ? ` --values .agent/generated/${contract.profile}/helm-values.generated.yaml`
@@ -2269,11 +2072,8 @@ function deployCommands(
   const valuesArg = `${helmValuesFile ? ` --values ${helmValuesFile}` : ""}${generatedValuesArg}`;
   const release = contract.runtime.releaseName;
   const namespace = contract.runtime.namespace ?? "opengeni";
-  const applicationChart = productionPromotion
-    ? `"$${MANAGED_PRODUCTION_CHART_ARCHIVE_ENV}"`
-    : "deploy/helm/opengeni";
   const drainUpgradeCommand =
-    `helm upgrade --install ${release} ${applicationChart} --namespace ${namespace}${valuesArg} ` +
+    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg} ` +
     `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageValuesArg} --wait --timeout 15m`;
   commands.push(
     ...helmApplicationDrainCommands({
@@ -2283,7 +2083,7 @@ function deployCommands(
       drainUpgradeCommand,
       env,
     }),
-    `helm upgrade --install ${release} ${applicationChart} --namespace ${namespace}${valuesArg}${maintenanceImageValuesArg} --wait --timeout 15m`,
+    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg}${maintenanceImageValuesArg} --wait --timeout 15m`,
   );
   return commands;
 }
@@ -2658,7 +2458,7 @@ function planNotes(
   }
   if (productOverlay === "managed-saas-production") {
     notes.push(
-      "Managed production is promotion-only: supply one hash-pinned staging acceptance receipt that binds the exact source tree, API/migration/worker/web digests, and chart archive. The plan verifies that receipt, the current checkout, chart bytes, and destination manifests before requiring a no-change Terraform plan; infrastructure changes are a separate transaction.",
+      "Managed production is promotion-only: pre-promote the staging-proven API, worker, and web manifests into the destination registry, then supply that exact four-digest receipt. The plan verifies and deploys those digests without rebuilding images.",
     );
   }
   return notes;
