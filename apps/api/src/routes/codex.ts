@@ -818,6 +818,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountEmail: id.email ?? null,
       label: id.email ?? id.chatgptAccountId ?? null,
     });
+    await signalCodexCapacityTargets(deps, upserted.wakeTargets);
     const rotation = await getOrganizationCodexRotationSettings(db, {
       organizationId,
       actorSubjectId: human.subjectId,
@@ -835,12 +836,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
     const credentialId = c.req.param("accountId");
-    const activated = await setActiveOrganizationCodexCredential(db, {
+    const activation = await setActiveOrganizationCodexCredential(db, {
       organizationId,
       actorSubjectId: human.subjectId,
       credentialId,
     });
-    if (!activated) throw new HTTPException(404, { message: "codex account not found" });
+    if (!activation.activated) {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+    await signalCodexCapacityTargets(deps, activation.wakeTargets);
     return c.json({ activated: true, accountId: credentialId });
   });
 
@@ -860,6 +864,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       rotationEnabled: parsed.data.rotationEnabled,
     });
     if (!updated) throw new HTTPException(404, { message: "Codex settings not found" });
+    await signalCodexCapacityTargets(deps, updated.wakeTargets);
     return c.json({
       rotationEnabled: updated.rotationEnabled,
       rotationStrategy: "sharded",
@@ -910,6 +915,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+    await signalCodexCapacityTargets(deps, result.wakeTargets);
     return c.json({ disconnected: result.removed, newActiveId: result.newActiveCredentialId });
   });
 

@@ -437,19 +437,56 @@ BEGIN
     SECURITY DEFINER
     SET search_path = pg_catalog, %1$I
     AS $function$
-    DECLARE credential codex_subscription_credentials%%ROWTYPE;
+    DECLARE
+      credential codex_subscription_credentials%%ROWTYPE;
+      workspace_kind text;
+      mode_value text := 'automatic';
+      effective_source text;
     BEGIN
       SELECT * INTO credential
       FROM codex_subscription_credentials candidate
       WHERE candidate.account_id = p_account_id AND candidate.id = p_credential_id;
       IF NOT FOUND THEN RETURN false; END IF;
+      workspace_kind := CASE WHEN EXISTS (
+        SELECT 1 FROM organization_memberships membership
+        WHERE membership.account_id = p_account_id
+          AND membership.personal_workspace_id = p_workspace_id
+      ) THEN 'personal' ELSE 'shared' END;
+      IF workspace_kind = 'personal' THEN
+        effective_source := 'workspace';
+      ELSE
+        SELECT preference.mode INTO mode_value
+        FROM workspace_codex_subscription_preferences preference
+        WHERE preference.account_id = p_account_id
+          AND preference.workspace_id = p_workspace_id;
+        mode_value := coalesce(mode_value, 'automatic');
+        IF mode_value <> 'automatic' THEN
+          effective_source := mode_value;
+        ELSIF EXISTS (
+          SELECT 1 FROM codex_subscription_credentials candidate
+          WHERE candidate.account_id = p_account_id
+            AND candidate.workspace_id = p_workspace_id
+            AND candidate.authority_scope IN ('workspace', 'user')
+        ) THEN
+          effective_source := 'workspace';
+        ELSIF EXISTS (
+          SELECT 1 FROM codex_subscription_credentials candidate
+          WHERE candidate.account_id = p_account_id
+            AND candidate.organization_id = p_account_id
+            AND candidate.authority_scope = 'organization'
+        ) THEN
+          effective_source := 'organization';
+        ELSE
+          effective_source := 'workspace';
+        END IF;
+      END IF;
       IF credential.authority_scope IN ('workspace', 'user') THEN
         RETURN credential.workspace_id = p_workspace_id
-          AND resolve_workspace_codex_subscription_source(p_account_id, p_workspace_id) = 'workspace';
+          AND effective_source = 'workspace';
       END IF;
       RETURN credential.authority_scope = 'organization'
         AND credential.organization_id = p_account_id
-        AND resolve_workspace_codex_subscription_source(p_account_id, p_workspace_id) = 'organization';
+        AND effective_source = 'organization';
     END
     $function$;
 
@@ -467,6 +504,47 @@ BEGIN
           USING ERRCODE = '23514';
       END IF;
       RETURN NEW;
+    END
+    $function$;
+
+    CREATE OR REPLACE FUNCTION opengeni_private.codex_organization_live_lease_count(
+      p_account_id uuid,
+      p_credential_id uuid,
+      p_exclude_turn_id uuid
+    ) RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I
+    AS $function$
+    DECLARE live_count integer;
+    BEGIN
+      IF p_account_id IS NULL
+        OR p_credential_id IS NULL
+        OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+        OR opengeni_private.current_workspace_id() IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM codex_subscription_credentials credential
+          WHERE credential.account_id = p_account_id
+            AND credential.id = p_credential_id
+            AND credential.organization_id = p_account_id
+            AND credential.authority_scope = 'organization'
+        )
+        OR NOT opengeni_private.codex_credential_serves_workspace(
+          p_account_id,
+          opengeni_private.current_workspace_id(),
+          p_credential_id
+        )
+      THEN
+        RAISE EXCEPTION 'organization Codex lease-count authority required'
+          USING ERRCODE = '42501';
+      END IF;
+      SELECT count(*)::integer INTO live_count
+      FROM codex_credential_leases lease
+      WHERE lease.account_id = p_account_id
+        AND lease.credential_id = p_credential_id
+        AND lease.leased_until > now()
+        AND (p_exclude_turn_id IS NULL OR lease.turn_id <> p_exclude_turn_id);
+      RETURN live_count;
     END
     $function$;
 
@@ -604,6 +682,8 @@ DECLARE data_schema text := current_schema();
 BEGIN
   REVOKE ALL ON FUNCTION opengeni_private.codex_organization_scope_visible(uuid) FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.codex_organization_admin_visible(uuid) FROM PUBLIC;
+  REVOKE ALL ON FUNCTION opengeni_private.codex_organization_live_lease_count(uuid,uuid,uuid)
+    FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.enforce_organization_codex_runtime_update() FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.prevent_organization_codex_disconnect_with_live_leases()
     FROM PUBLIC;
@@ -622,6 +702,8 @@ BEGIN
     GRANT EXECUTE ON FUNCTION opengeni_private.codex_organization_scope_visible(uuid)
       TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.codex_organization_admin_visible(uuid)
+      TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.codex_organization_live_lease_count(uuid,uuid,uuid)
       TO opengeni_app;
   END IF;
 END

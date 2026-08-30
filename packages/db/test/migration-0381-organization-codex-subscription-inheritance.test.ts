@@ -88,6 +88,7 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     expect(migration).toContain("codex_credentials_organization_runtime_update_guard");
     expect(migration).toContain("codex_credentials_organization_live_lease_disconnect_guard");
     expect(migration).toContain("prevent_organization_codex_disconnect_with_live_leases");
+    expect(migration).toContain("codex_organization_live_lease_count");
     expect(migration).toContain(
       "organization Codex credential management requires organization administration",
     );
@@ -105,10 +106,16 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       /setActiveOrganizationCodexCredential[\s\S]*?from\(schema\.organizationCodexRotationSettings\)[\s\S]*?\.for\("update"\)[\s\S]*?from\(schema\.codexSubscriptionCredentials\)/u,
     );
     expect(dbIndexSource).toMatch(
-      /setWorkspaceCodexSubscriptionMode[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?codexCredentialLeases\.leasedUntil[\s\S]*?active turns are using it/u,
+      /setWorkspaceCodexSubscriptionMode[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?sessionTurns\.status[\s\S]*?codexCredentialLeases\.leasedUntil[\s\S]*?active turns are using it/u,
     );
     expect(dbIndexSource).toMatch(
       /acquireCodexCredentialLease[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?getWorkspaceCodexSubscriptionSourceScoped/u,
+    );
+    expect(dbIndexSource).toMatch(
+      /input\.source === "organization"[\s\S]*?codex_organization_live_lease_count/u,
+    );
+    expect(dbIndexSource).toMatch(
+      /wakeOrganizationCodexCapacityWaitersInTransaction[\s\S]*?list_organization_workspace_ids[\s\S]*?session-tenancy:/u,
     );
     for (const table of [
       "organization_codex_rotation_settings",
@@ -317,6 +324,32 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         ${account!.id}, ${sharedWorkspace!.id}
       ) as source`;
     expect(sourceAfterRejectedChange?.source).toBe("organization");
+    await app`delete from codex_credential_leases where id is not null`;
+    await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      await transaction`
+        update session_turns set status = 'running' where id = ${sharedTurn.id}`;
+    });
+    await expect(
+      setWorkspaceCodexSubscriptionMode(dbClient.db, {
+        accountId: account!.id,
+        workspaceId: sharedWorkspace!.id,
+        subjectId: null,
+        mode: "disabled",
+      }),
+    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      await transaction`
+        update session_turns set status = 'queued' where id = ${sharedTurn.id}`;
+    });
+    await app`
+      insert into codex_credential_leases (
+        account_id, workspace_id, credential_id, turn_id, holder_id, leased_until
+      ) values (
+        ${account!.id}, ${sharedWorkspace!.id}, ${credential!.id},
+        ${sharedTurn.id}, 'shared-holder-restored', now() + interval '5 minutes'
+      )`;
     let disconnectError: unknown;
     try {
       await disconnectOrganizationCodexAccount(dbClient.db, {

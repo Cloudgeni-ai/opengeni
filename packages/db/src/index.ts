@@ -21054,6 +21054,17 @@ export async function setWorkspaceCodexSubscriptionMode(
       throw new Error("personal workspaces always use workspace Codex subscriptions");
     }
     if (current.mode === input.mode) return current;
+    const [activeCodexTurn] = await scopedDb
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
+          sql`${schema.sessionTurns.model} like 'codex/%'`,
+        ),
+      )
+      .limit(1);
     const [liveLease] = await scopedDb
       .select({ id: schema.codexCredentialLeases.id })
       .from(schema.codexCredentialLeases)
@@ -21064,7 +21075,7 @@ export async function setWorkspaceCodexSubscriptionMode(
         ),
       )
       .limit(1);
-    if (liveLease) {
+    if (activeCodexTurn || liveLease) {
       throw new Error("Codex subscription source cannot change while active turns are using it");
     }
     await scopedDb
@@ -21287,11 +21298,22 @@ export async function upsertOrganizationCodexSubscriptionCredential(
     accountEmail?: string | null;
     label?: string | null;
   },
-): Promise<{ id: string; isNew: boolean }> {
+): Promise<{ id: string; isNew: boolean; wakeTargets: CodexCapacityWakeTarget[] }> {
   return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
     await scopedDb.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-codex-upsert:${input.organizationId}:${input.chatgptAccountId ?? "null"}`}, 0))`,
     );
+    await scopedDb
+      .insert(schema.organizationCodexRotationSettings)
+      .values({ accountId: input.organizationId, leaseRotationEnabled: false })
+      .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
+    const [settings] = await scopedDb
+      .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .for("update")
+      .limit(1);
+    if (!settings) throw new Error("organization Codex rotation settings are unavailable");
     const now = new Date();
     const [row] = await scopedDb
       .insert(schema.codexSubscriptionCredentials)
@@ -21342,10 +21364,6 @@ export async function upsertOrganizationCodexSubscriptionCredential(
       });
     if (!row) throw new Error("organization Codex credential upsert returned no row");
     await scopedDb
-      .insert(schema.organizationCodexRotationSettings)
-      .values({ accountId: input.organizationId, leaseRotationEnabled: false })
-      .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
-    await scopedDb
       .update(schema.organizationCodexRotationSettings)
       .set({ activeCredentialId: row.id, updatedAt: now })
       .where(
@@ -21354,9 +21372,15 @@ export async function upsertOrganizationCodexSubscriptionCredential(
           isNull(schema.organizationCodexRotationSettings.activeCredentialId),
         ),
       );
+    const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
+      accountId: input.organizationId,
+      reason: "organization_codex_credential_connected",
+      restoreWorkspaceId: null,
+    });
     return {
       id: row.id,
       isNew: row.createdAt.getTime() === row.updatedAt.getTime(),
+      wakeTargets,
     };
   });
 }
@@ -21447,15 +21471,18 @@ export async function getOrganizationCodexRotationSettings(
 export async function setActiveOrganizationCodexCredential(
   db: Database,
   input: { organizationId: string; actorSubjectId: string; credentialId: string },
-): Promise<boolean> {
+): Promise<{ activated: boolean; wakeTargets: CodexCapacityWakeTarget[] }> {
   return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
     const [settings] = await scopedDb
-      .select({ id: schema.organizationCodexRotationSettings.id })
+      .select({
+        id: schema.organizationCodexRotationSettings.id,
+        activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
+      })
       .from(schema.organizationCodexRotationSettings)
       .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
       .for("update")
       .limit(1);
-    if (!settings) return false;
+    if (!settings) return { activated: false, wakeTargets: [] };
     const [credential] = await scopedDb
       .select({ id: schema.codexSubscriptionCredentials.id })
       .from(schema.codexSubscriptionCredentials)
@@ -21467,13 +21494,22 @@ export async function setActiveOrganizationCodexCredential(
         ),
       )
       .limit(1);
-    if (!credential) return false;
+    if (!credential) return { activated: false, wakeTargets: [] };
     const updated = await scopedDb
       .update(schema.organizationCodexRotationSettings)
       .set({ activeCredentialId: input.credentialId, updatedAt: new Date() })
       .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
       .returning({ id: schema.organizationCodexRotationSettings.id });
-    return updated.length > 0;
+    if (updated.length === 0) return { activated: false, wakeTargets: [] };
+    const wakeTargets =
+      settings.activeCredentialId === input.credentialId
+        ? []
+        : await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
+            accountId: input.organizationId,
+            reason: "organization_codex_active_credential_changed",
+            restoreWorkspaceId: null,
+          });
+    return { activated: true, wakeTargets };
   });
 }
 
@@ -21484,8 +21520,18 @@ export async function updateOrganizationCodexRotationSettings(
     actorSubjectId: string;
     rotationEnabled: boolean;
   },
-): Promise<CodexRotationSettings | null> {
+): Promise<(CodexRotationSettings & { wakeTargets: CodexCapacityWakeTarget[] }) | null> {
   return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const [current] = await scopedDb
+      .select({
+        rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
+        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
+      })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .for("update")
+      .limit(1);
+    if (!current) return null;
     const [row] = await scopedDb
       .update(schema.organizationCodexRotationSettings)
       .set({
@@ -21500,7 +21546,18 @@ export async function updateOrganizationCodexRotationSettings(
         leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
         rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
       });
-    return row ?? null;
+    if (!row) return null;
+    const changed =
+      current.rotationEnabled !== input.rotationEnabled ||
+      current.leaseRotationEnabled !== input.rotationEnabled;
+    const wakeTargets = changed
+      ? await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
+          accountId: input.organizationId,
+          reason: "organization_codex_rotation_settings_changed",
+          restoreWorkspaceId: null,
+        })
+      : [];
+    return { ...row, wakeTargets };
   });
 }
 
@@ -21532,7 +21589,11 @@ export async function renameOrganizationCodexAccount(
 export async function disconnectOrganizationCodexAccount(
   db: Database,
   input: { organizationId: string; actorSubjectId: string; credentialId: string },
-): Promise<{ removed: boolean; newActiveCredentialId: string | null }> {
+): Promise<{
+  removed: boolean;
+  newActiveCredentialId: string | null;
+  wakeTargets: CodexCapacityWakeTarget[];
+}> {
   return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
     const [settings] = await scopedDb
       .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
@@ -21551,7 +21612,11 @@ export async function disconnectOrganizationCodexAccount(
       )
       .returning({ id: schema.codexSubscriptionCredentials.id });
     if (removed.length === 0) {
-      return { removed: false, newActiveCredentialId: settings?.activeCredentialId ?? null };
+      return {
+        removed: false,
+        newActiveCredentialId: settings?.activeCredentialId ?? null,
+        wakeTargets: [],
+      };
     }
     let newActiveCredentialId = settings?.activeCredentialId ?? null;
     if (newActiveCredentialId === input.credentialId) {
@@ -21572,7 +21637,12 @@ export async function disconnectOrganizationCodexAccount(
         .set({ activeCredentialId: newActiveCredentialId, updatedAt: new Date() })
         .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId));
     }
-    return { removed: true, newActiveCredentialId };
+    const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
+      accountId: input.organizationId,
+      reason: "organization_codex_credential_disconnected",
+      restoreWorkspaceId: null,
+    });
+    return { removed: true, newActiveCredentialId, wakeTargets };
   });
 }
 
@@ -22646,13 +22716,21 @@ async function listCodexLeaseCandidatesInTransaction(
       c.exhausted_until,
       c.selection_count,
       c.last_selected_at,
-      count(l.id) filter (
-        where l.leased_until > now()
-          and (${input.excludeTurnId ?? null}::uuid is null or l.turn_id <> ${input.excludeTurnId ?? null})
-      )::int as active_lease_count
+      ${
+        input.source === "organization"
+          ? sql`opengeni_private.codex_organization_live_lease_count(
+              ${input.accountId}::uuid,
+              c.id,
+              ${input.excludeTurnId ?? null}::uuid
+            )`
+          : sql`count(l.id) filter (
+              where l.leased_until > now()
+                and (${input.excludeTurnId ?? null}::uuid is null or l.turn_id <> ${input.excludeTurnId ?? null})
+            )::int`
+      } as active_lease_count
     from codex_subscription_credentials c
     left join codex_credential_leases l
-      on l.workspace_id = ${input.workspaceId} and l.credential_id = c.id
+      on ${input.source === "organization" ? sql`false` : sql`l.workspace_id = ${input.workspaceId} and l.credential_id = c.id`}
     where c.account_id = ${input.accountId}
       and ${
         input.source === "organization"
@@ -23604,16 +23682,10 @@ type CodexCapacityMutationInput = {
   policyHash?: string | null;
 };
 
-async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
-  tx: TDatabase,
+async function wakeCodexCapacityWaitersInWorkspaceInTransaction(
+  tx: Database,
   input: CodexCapacityMutationInput,
-  mutate: (tx: TDatabase) => Promise<{ result: T; changed: boolean }>,
-): Promise<CodexCapacityMutationResult<T>> {
-  await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
-  const mutation = await mutate(tx);
-  if (!mutation.changed) {
-    return { result: mutation.result, wakeTargets: [] };
-  }
+): Promise<CodexCapacityWakeTarget[]> {
   const rows = await tx
     .update(schema.codexCapacityWaiters)
     .set({
@@ -23655,6 +23727,65 @@ async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
       workflowWakeRevision,
     });
   }
+  return wakeTargets;
+}
+
+async function wakeOrganizationCodexCapacityWaitersInTransaction(
+  tx: Database,
+  input: {
+    accountId: string;
+    reason: string;
+    policyHash?: string | null;
+    restoreWorkspaceId: string | null;
+  },
+): Promise<CodexCapacityWakeTarget[]> {
+  const wakeTargets: CodexCapacityWakeTarget[] = [];
+  await setRlsContext(tx, { accountId: input.accountId, workspaceId: null });
+  const workspaceRows = await tx.execute<{ workspace_id: string }>(sql`
+    select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid)
+    order by workspace_id
+  `);
+  for (const { workspace_id: workspaceId } of workspaceRows) {
+    await setRlsContext(tx, { accountId: input.accountId, workspaceId });
+    await tx.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
+    );
+    const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, workspaceId);
+    if (source.effectiveSource !== "organization") continue;
+    wakeTargets.push(
+      ...(await wakeCodexCapacityWaitersInWorkspaceInTransaction(tx, {
+        workspaceId,
+        reason: input.reason,
+        ...(input.policyHash !== undefined ? { policyHash: input.policyHash } : {}),
+      })),
+    );
+  }
+  await setRlsContext(tx, {
+    accountId: input.accountId,
+    workspaceId: input.restoreWorkspaceId,
+  });
+  return wakeTargets;
+}
+
+async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
+  tx: TDatabase,
+  input: CodexCapacityMutationInput,
+  mutate: (tx: TDatabase) => Promise<{ result: T; changed: boolean }>,
+): Promise<CodexCapacityMutationResult<T>> {
+  const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
+  const mutation = await mutate(tx);
+  if (!mutation.changed) {
+    return { result: mutation.result, wakeTargets: [] };
+  }
+  const wakeTargets =
+    rotation?.source === "organization"
+      ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
+          accountId: rotation.accountId,
+          reason: input.reason,
+          ...(input.policyHash !== undefined ? { policyHash: input.policyHash } : {}),
+          restoreWorkspaceId: input.workspaceId,
+        })
+      : await wakeCodexCapacityWaitersInWorkspaceInTransaction(tx, input);
   return {
     result: mutation.result,
     wakeTargets,
