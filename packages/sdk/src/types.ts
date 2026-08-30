@@ -671,6 +671,7 @@ export type CreateConnectionRequest = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+  operationId?: string | undefined;
 };
 
 export type PersonalGitHubConnectionMetadata = {
@@ -1072,6 +1073,8 @@ export type UpdateConnectionRequest = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+  expectedVersion?: number | undefined;
+  operationId?: string | undefined;
 };
 
 export type ConnectionResponse = {

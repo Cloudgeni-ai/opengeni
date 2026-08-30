@@ -209,11 +209,11 @@ describe("web bundle budget policy", () => {
   });
 
   test("retains the exact model-catalog, Gateway, and OpenRouter envelope", () => {
-    expect(MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_MEASUREMENT).toBe(2_272_681);
+    expect(MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_MEASUREMENT).toBe(2_272_980);
     expect(MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_BUDGET).toBe(2221 * KIB);
     expect(
       MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_BUDGET -
         MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_MEASUREMENT,
-    ).toBe(1_623);
+    ).toBe(1_324);
   });
 });

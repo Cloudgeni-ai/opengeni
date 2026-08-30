@@ -1,5 +1,7 @@
+// opengeni:test-shared-postgres-exclusive
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import {
   createDb,
@@ -8,6 +10,8 @@ import {
   getDeploymentModelCatalog,
   getWorkspaceGatewayCustomModelForExecution,
   listWorkspaceGatewayCustomModels,
+  migrate,
+  provisionRoles,
   type DbClient,
 } from "../src";
 import {
@@ -54,10 +58,19 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
     expect(migration).toContain(
       "ALTER TABLE workspace_gateway_custom_models FORCE ROW LEVEL SECURITY",
     );
-    expect(migration).toContain("GRANT SELECT ON TABLE %I.deployment_model_catalog");
-    expect(migration).toContain(
+    expect(migration).toContain("model_catalog_table_acl_reset");
+    expect(migration).toContain("pg_catalog.aclexplode");
+    expect(migration).toContain("privilege.grantee <> relation.relowner");
+    expect(migration).toContain("REVOKE ALL ON TABLE %I.%I FROM PUBLIC");
+    expect(migration).toContain("REVOKE ALL ON TABLE %I.%I FROM %I");
+    expect(migration).toContain("migration_application_roles list above is drain detection only");
+    expect(migration).not.toContain("DO $grants$");
+    expect(migration).not.toContain("GRANT SELECT ON TABLE %I.deployment_model_catalog");
+    expect(migration).not.toContain(
       "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.workspace_gateway_custom_models",
     );
+    expect(migration).toContain("jsonb_array_elements_text(configured_roles)");
+    expect(migration).not.toContain("TO opengeni_app");
     expect(migration).toContain("octet_length(upstream_model_id) BETWEEN 1 AND 238");
     expect(migration).toContain("upstream_model_id ~ '^[!-~]+$'");
     expect(migration).toContain("upstream_model_id !~ '[|]'");
@@ -82,6 +95,113 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
     expect(FORCE_RLS_TABLES).toContain("workspace_gateway_custom_models");
     expect(RUNTIME_FULL_DML_TABLES).toContain("workspace_gateway_custom_models");
   });
+
+  test("uses the rotation role list only for drain detection", async () => {
+    const rotation = await acquireSharedTestDatabase("migration-0381-role-rotation");
+    if (!rotation) {
+      if (requireRealDatabase) throw new Error("migration 0381 requires real PostgreSQL");
+      return;
+    }
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const oldRole = `og_381_old_${suffix}`;
+    const newRole = `og_381_new_${suffix}`;
+    const newPassword = randomUUID().replaceAll("-", "");
+
+    const privileges = async () => {
+      const [row] = await rotation.admin<
+        Array<{
+          oldCatalogSelect: boolean;
+          oldCustomSelect: boolean;
+          oldCustomInsert: boolean;
+          oldCustomUpdate: boolean;
+          oldCustomDelete: boolean;
+          newCatalogSelect: boolean;
+          newCatalogInsert: boolean;
+          newCustomSelect: boolean;
+          newCustomInsert: boolean;
+          newCustomUpdate: boolean;
+          newCustomDelete: boolean;
+        }>
+      >`select
+          has_table_privilege(${oldRole}, 'deployment_model_catalog', 'SELECT')
+            as "oldCatalogSelect",
+          has_table_privilege(${oldRole}, 'workspace_gateway_custom_models', 'SELECT')
+            as "oldCustomSelect",
+          has_table_privilege(${oldRole}, 'workspace_gateway_custom_models', 'INSERT')
+            as "oldCustomInsert",
+          has_table_privilege(${oldRole}, 'workspace_gateway_custom_models', 'UPDATE')
+            as "oldCustomUpdate",
+          has_table_privilege(${oldRole}, 'workspace_gateway_custom_models', 'DELETE')
+            as "oldCustomDelete",
+          has_table_privilege(${newRole}, 'deployment_model_catalog', 'SELECT')
+            as "newCatalogSelect",
+          has_table_privilege(${newRole}, 'deployment_model_catalog', 'INSERT')
+            as "newCatalogInsert",
+          has_table_privilege(${newRole}, 'workspace_gateway_custom_models', 'SELECT')
+            as "newCustomSelect",
+          has_table_privilege(${newRole}, 'workspace_gateway_custom_models', 'INSERT')
+            as "newCustomInsert",
+          has_table_privilege(${newRole}, 'workspace_gateway_custom_models', 'UPDATE')
+            as "newCustomUpdate",
+          has_table_privilege(${newRole}, 'workspace_gateway_custom_models', 'DELETE')
+            as "newCustomDelete"`;
+      return row!;
+    };
+
+    try {
+      await rotation.admin.unsafe(`
+        CREATE ROLE "${oldRole}" WITH LOGIN;
+        CREATE ROLE "${newRole}" WITH LOGIN;
+        DROP TABLE workspace_gateway_custom_models;
+        DROP TABLE deployment_model_catalog;
+        DROP INDEX session_command_receipts_prompt_actor_operation_idx;
+        DELETE FROM schema_migrations
+        WHERE name = '0381_model_catalog_and_gateway_custom_models.sql';
+      `);
+
+      await migrate(rotation.adminUrl, undefined, {
+        applicationDatabaseRoles: [oldRole, newRole],
+      });
+      expect(await privileges()).toEqual({
+        oldCatalogSelect: false,
+        oldCustomSelect: false,
+        oldCustomInsert: false,
+        oldCustomUpdate: false,
+        oldCustomDelete: false,
+        newCatalogSelect: false,
+        newCatalogInsert: false,
+        newCustomSelect: false,
+        newCustomInsert: false,
+        newCustomUpdate: false,
+        newCustomDelete: false,
+      });
+
+      await provisionRoles(rotation.adminUrl, {
+        appRole: newRole,
+        appPassword: newPassword,
+        rlsStrategy: "force",
+      });
+      expect(await privileges()).toEqual({
+        oldCatalogSelect: false,
+        oldCustomSelect: false,
+        oldCustomInsert: false,
+        oldCustomUpdate: false,
+        oldCustomDelete: false,
+        newCatalogSelect: true,
+        newCatalogInsert: false,
+        newCustomSelect: true,
+        newCustomInsert: true,
+        newCustomUpdate: true,
+        newCustomDelete: true,
+      });
+    } finally {
+      for (const role of [oldRole, newRole]) {
+        await rotation.admin.unsafe(`DROP OWNED BY "${role}"`).catch(() => undefined);
+        await rotation.admin.unsafe(`DROP ROLE IF EXISTS "${role}"`).catch(() => undefined);
+      }
+      await rotation.release();
+    }
+  }, 180_000);
 
   test("reads the singleton and isolates workspace custom slugs", async () => {
     if (!shared || !client) return;

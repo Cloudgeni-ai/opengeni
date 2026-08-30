@@ -1840,7 +1840,11 @@ fleet is unsupported even while every process still uses `code`:
 1. Bind and verify the exact database, schema, new application image, and every
    API/worker database login. Set
    `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` to that complete comma-separated
-   login list (normally `opengeni_app`).
+   login list (normally `opengeni_app`). This list is only the maintenance-drain
+   detector; it is not a runtime grant allow-list. During role rotation it may
+   contain both old and new logins, while the exact
+   `OPENGENI_APP_DATABASE_USER` and password identify the sole target role that
+   `db:provision-roles` grants after migration.
 2. Stop every API, control worker, and turn worker, then prove no configured
    application login remains in `pg_stat_activity`. Do not rely on the normal
    Helm pre-upgrade hook while old pods still serve traffic: after 0383 commits,
@@ -1899,6 +1903,9 @@ fleet is unsupported even while every process still uses `code`:
    and assert runtime posture using the catalog-aware release artifacts. The
    migration repeats the configured-login drain check before and after schema
    installation and aborts with SQLSTATE `55000` if a listed session is live.
+   The migration strips inherited non-owner ACLs from the new tables and grants
+   none of the listed drain identities; the following `db:provision-roles` step
+   grants only the exact current application role.
    After commit, never restart a pre-0383 image or use it as an application
    rollback target; remain on the new schema and fix forward.
 4. Start the catalog-aware API and workers with

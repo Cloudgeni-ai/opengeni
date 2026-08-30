@@ -108,7 +108,7 @@ export const ORGANIZATION_CODEX_INHERITANCE_RAW_BUDGET = wholeKibEnvelope(
 );
 
 /** Exact model-catalog, Gateway, OpenRouter, and current-main Linux/x64 Bun 1.4 measurement. */
-export const MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_MEASUREMENT = 2_272_681;
+export const MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_MEASUREMENT = 2_272_980;
 export const MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_BUDGET = wholeKibEnvelope(
   MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_MEASUREMENT,
 );

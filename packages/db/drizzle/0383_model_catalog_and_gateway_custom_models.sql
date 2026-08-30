@@ -129,21 +129,62 @@ CREATE POLICY workspace_isolation ON workspace_gateway_custom_models
   USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
   WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
 
-DO $grants$
-DECLARE data_schema text := current_schema();
+-- Migration 0040 registers owner default privileges for the historical
+-- opengeni_app role. Rotated-role deployments must not inherit that stale
+-- grant on these new tables, and host defaults may name other obsolete
+-- application roles. Strip every explicit non-owner table grantee. The
+-- migration_application_roles list above is drain detection only; the
+-- post-migration role provisioner grants only the deployment's current target
+-- runtime role.
+DO $model_catalog_table_acl_reset$
+DECLARE
+  data_schema text := pg_catalog.current_schema();
+  relation_name text;
+  role_name text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    EXECUTE format(
-      'GRANT SELECT ON TABLE %I.deployment_model_catalog TO opengeni_app',
-      data_schema
+  FOR relation_name IN
+    SELECT relation.value
+    FROM pg_catalog.unnest(
+      ARRAY[
+        'deployment_model_catalog',
+        'workspace_gateway_custom_models'
+      ]::text[]
+    ) AS relation(value)
+  LOOP
+    EXECUTE pg_catalog.format(
+      'REVOKE ALL ON TABLE %I.%I FROM PUBLIC',
+      data_schema,
+      relation_name
     );
-    EXECUTE format(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.workspace_gateway_custom_models TO opengeni_app',
-      data_schema
-    );
-  END IF;
+    FOR role_name IN
+      SELECT grantee_role.rolname
+      FROM pg_catalog.pg_class relation
+      CROSS JOIN LATERAL pg_catalog.aclexplode(
+        coalesce(
+          relation.relacl,
+          pg_catalog.acldefault('r', relation.relowner)
+        )
+      ) privilege
+      INNER JOIN pg_catalog.pg_roles grantee_role
+        ON grantee_role.oid = privilege.grantee
+      WHERE relation.oid = pg_catalog.to_regclass(
+          pg_catalog.format('%I.%I', data_schema, relation_name)
+        )
+        AND privilege.grantee <> 0
+        AND privilege.grantee <> relation.relowner
+      GROUP BY grantee_role.rolname
+      ORDER BY grantee_role.rolname COLLATE "C"
+    LOOP
+      EXECUTE pg_catalog.format(
+        'REVOKE ALL ON TABLE %I.%I FROM %I',
+        data_schema,
+        relation_name,
+        role_name
+      );
+    END LOOP;
+  END LOOP;
 END
-$grants$;
+$model_catalog_table_acl_reset$;
 
 COMMENT ON TABLE workspace_gateway_custom_models IS
   'Workspace-owned Vercel AI Gateway upstream slugs. Retired rows remain execution evidence; capabilities and billing are never stored here.';

@@ -1,5 +1,8 @@
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
-import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
+import {
+  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH,
+} from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ChevronDownIcon, Loader2Icon, PlusIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type SVGProps } from "react";
@@ -166,9 +169,7 @@ export function AiGatewayConnectionCardWithClient(
   async function save() {
     const value = apiKey.trim();
     if (!value) return;
-    const gatewayVersionsBefore = new Map(
-      connections.filter(isGatewayConnection).map((candidate) => [candidate.id, candidate.version]),
-    );
+    const operationId = crypto.randomUUID();
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
     try {
@@ -182,6 +183,8 @@ export function AiGatewayConnectionCardWithClient(
               status: "active",
               credential: { apiKey: value },
               metadata,
+              expectedVersion: connection.version,
+              operationId,
             })
           : await client.createConnection(props.workspaceId, {
               providerDomain: GATEWAY_DOMAIN,
@@ -190,6 +193,7 @@ export function AiGatewayConnectionCardWithClient(
               credential: { apiKey: value },
               grantedScopes: [],
               metadata,
+              operationId,
             });
       if (!activeRef.current) return;
       connectionRequestGenerationRef.current += 1;
@@ -209,8 +213,8 @@ export function AiGatewayConnectionCardWithClient(
           (candidate) =>
             isGatewayConnection(candidate) &&
             candidate.status === "active" &&
-            (!gatewayVersionsBefore.has(candidate.id) ||
-              candidate.version > gatewayVersionsBefore.get(candidate.id)!),
+            candidate.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY] ===
+              operationId,
         ) === true;
       if (committed) {
         setApiKey("");
@@ -455,7 +459,7 @@ export function AiGatewayConnectionCardWithClient(
                       }
                     }}
                     disabled={modelBusy}
-                    className="h-9 font-mono md:text-base lg:text-xs pointer-coarse:text-base lg:pointer-coarse:text-base"
+                    className="h-9 font-mono text-base md:text-base lg:pointer-fine:text-xs"
                     placeholder="anthropic/claude-sonnet-4.6"
                     aria-label="Vercel AI Gateway model slug"
                     aria-describedby="gateway-model-slug-help"

@@ -10535,6 +10535,9 @@ function compareDescending(left: number | string, right: number | string): numbe
 export const ConnectionCredentialBundle = z.record(z.string(), z.unknown());
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
 
+export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY =
+  "vercelAiGatewayCredentialOperationId" as const;
+
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),
   kind: ConnectionKind,
@@ -10545,6 +10548,7 @@ export const CreateConnectionRequest = z.object({
   grantedScopes: z.array(z.string().min(1)).default([]),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  operationId: z.string().uuid().optional(),
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
 
@@ -10600,6 +10604,8 @@ export const UpdateConnectionRequest = z.object({
   grantedScopes: z.array(z.string().min(1)).optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  expectedVersion: z.number().int().positive().optional(),
+  operationId: z.string().uuid().optional(),
 });
 export type UpdateConnectionRequest = z.infer<typeof UpdateConnectionRequest>;
 

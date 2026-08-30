@@ -75,6 +75,7 @@ import {
   revokeConnection,
   revokeWorkspaceVercelAiGatewayConnections,
   revokeConnectionWithSlackBotSuccessAudit,
+  rotateWorkspaceVercelAiGatewayConnection,
   SlackBotLifecycleSuccessAuditError,
   SlackInstallationBindingConflictError,
   updateConnection,
@@ -200,21 +201,36 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertNotDirectAtlassianOAuth(providerDomain, payload.kind, payload.metadata);
     assertNotDirectPersonalGitHubOAuth(providerDomain, payload.kind, payload.metadata);
     const credentialEncrypted = encryptCredentialBundle(key, payload.credential);
-    const connection = isWorkspaceVercelAiGatewayConnection({
+    const isVercelAiGateway = isWorkspaceVercelAiGatewayConnection({
       subjectId,
       providerDomain,
       kind: payload.kind,
       metadata: payload.metadata,
-    })
-      ? await upsertWorkspaceVercelAiGatewayConnection(db, {
-          accountId: grant.accountId,
-          workspaceId,
-          credentialEncrypted,
-          grantedScopes: payload.grantedScopes,
-          expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
-          metadata: payload.metadata,
-          updatedBySubjectId: grant.subjectId,
-        })
+    });
+    const connection = isVercelAiGateway
+      ? await (async () => {
+          if (!payload.operationId) {
+            throw new HTTPException(400, {
+              message: "connecting Vercel AI Gateway requires an operationId",
+            });
+          }
+          const created = await upsertWorkspaceVercelAiGatewayConnection(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            operationId: payload.operationId,
+            credentialEncrypted,
+            grantedScopes: payload.grantedScopes,
+            expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
+            metadata: payload.metadata,
+            updatedBySubjectId: grant.subjectId,
+          });
+          if (!created) {
+            throw new HTTPException(409, {
+              message: "Vercel AI Gateway is already connected; reload before replacing its key",
+            });
+          }
+          return created;
+        })()
       : await createConnection(db, {
           accountId: grant.accountId,
           workspaceId,
@@ -883,10 +899,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "updating a Vercel AI Gateway connection requires a new credential",
         });
       }
+      if (payload.expectedVersion === undefined || payload.operationId === undefined) {
+        throw new HTTPException(400, {
+          message:
+            "updating a Vercel AI Gateway connection requires expectedVersion and operationId",
+        });
+      }
       const key = requireEnvironmentEncryption(settings);
-      const connection = await upsertWorkspaceVercelAiGatewayConnection(db, {
+      const connection = await rotateWorkspaceVercelAiGatewayConnection(db, {
         accountId: grant.accountId,
         workspaceId,
+        connectionId: existing.id,
+        expectedVersion: payload.expectedVersion,
+        operationId: payload.operationId,
         credentialEncrypted: encryptCredentialBundle(key, payload.credential),
         grantedScopes: payload.grantedScopes ?? existing.grantedScopes,
         expiresAt:
@@ -904,6 +929,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         updatedBySubjectId: grant.subjectId,
       });
+      if (!connection) {
+        throw new HTTPException(409, {
+          message: "Vercel AI Gateway connection changed; reload before replacing its key",
+        });
+      }
       return c.json(ConnectionResponse.parse({ connection }));
     }
     const key = payload.credential === undefined ? null : requireEnvironmentEncryption(settings);

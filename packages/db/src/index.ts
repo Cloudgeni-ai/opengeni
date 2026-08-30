@@ -251,6 +251,7 @@ import {
   HumanInputQuestion as HumanInputQuestionContract,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
+  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
 import {
   environmentsEncryptionKeyBytes,
@@ -5363,6 +5364,20 @@ export type CreateConnectionInput = {
 export type UpsertWorkspaceVercelAiGatewayConnectionInput = {
   accountId: string;
   workspaceId: string;
+  operationId: string;
+  credentialEncrypted: string;
+  grantedScopes?: string[];
+  expiresAt?: Date | null;
+  metadata?: Record<string, unknown>;
+  updatedBySubjectId: string;
+};
+
+export type RotateWorkspaceVercelAiGatewayConnectionInput = {
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  expectedVersion: number;
+  operationId: string;
   credentialEncrypted: string;
   grantedScopes?: string[];
   expiresAt?: Date | null;
@@ -9488,15 +9503,14 @@ async function lockWorkspaceVercelAiGatewayConnection(
 }
 
 /**
- * Converge every workspace-shared Vercel AI Gateway write on one active row.
- * The advisory lock closes the outcome-unknown create race: a retry updates the
- * committed row and revokes any legacy duplicate instead of minting a hidden
- * second credential.
+ * Create one workspace-shared Vercel AI Gateway row, or replay the exact
+ * operation that already created it. A different operation must use PATCH so a
+ * stale create cannot overwrite a newer administrator's credential.
  */
 export async function upsertWorkspaceVercelAiGatewayConnection(
   db: Database,
   input: UpsertWorkspaceVercelAiGatewayConnectionInput,
-): Promise<ConnectionMetadataWithVerification> {
+): Promise<ConnectionMetadataWithVerification | null> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -9528,42 +9542,122 @@ export async function upsertWorkspaceVercelAiGatewayConnection(
         const metadata = {
           ...(input.metadata ?? {}),
           credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+          [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: input.operationId,
         };
         const canonical = rows[0];
-        const saved = canonical
-          ? await updateConnectionInScope(tx, {
-              workspaceId: input.workspaceId,
-              connectionId: canonical.id,
-              visibleToSubjectId: input.updatedBySubjectId,
-              expectedVersion: canonical.version,
-              subjectId: null,
-              providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
-              kind: "api_key",
-              status: "active",
-              credentialEncrypted: input.credentialEncrypted,
-              grantedScopes: input.grantedScopes ?? [],
-              expiresAt: input.expiresAt ?? null,
-              metadata,
-              updatedBySubjectId: input.updatedBySubjectId,
-            })
-          : await createConnectionInScope(tx, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: null,
-              providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
-              kind: "api_key",
-              status: "active",
-              credentialEncrypted: input.credentialEncrypted,
-              grantedScopes: input.grantedScopes ?? [],
-              expiresAt: input.expiresAt ?? null,
-              metadata,
-              createdBySubjectId: input.updatedBySubjectId,
-              updatedBySubjectId: input.updatedBySubjectId,
-            });
-        if (!saved) {
-          throw new Error("Vercel AI Gateway connection changed during convergence");
+        if (canonical) {
+          return canonical.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY] ===
+            input.operationId
+            ? mapConnectionMetadata(canonical)
+            : null;
         }
-        for (const duplicate of rows.slice(1)) {
+        return await createConnectionInScope(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: null,
+          providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+          kind: "api_key",
+          status: "active",
+          credentialEncrypted: input.credentialEncrypted,
+          grantedScopes: input.grantedScopes ?? [],
+          expiresAt: input.expiresAt ?? null,
+          metadata,
+          createdBySubjectId: input.updatedBySubjectId,
+          updatedBySubjectId: input.updatedBySubjectId,
+        });
+      }),
+  );
+}
+
+/**
+ * Rotate one exact non-revoked Gateway generation and revoke legacy active
+ * duplicates under the workspace advisory lock. The operation receipt makes a
+ * lost-response replay idempotent without attributing another administrator's
+ * write to this request.
+ */
+export async function rotateWorkspaceVercelAiGatewayConnection(
+  db: Database,
+  input: RotateWorkspaceVercelAiGatewayConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockWorkspaceVercelAiGatewayConnection(tx, input.workspaceId);
+        const [targetRow] = await tx
+          .select(connectionMetadataColumns)
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              eq(schema.connections.id, input.connectionId),
+              isNull(schema.connections.subjectId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          !targetRow ||
+          targetRow.providerDomain.toLowerCase() !== VERCEL_AI_GATEWAY_CONNECTION_DOMAIN ||
+          targetRow.kind !== "api_key" ||
+          targetRow.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE ||
+          targetRow.status === "revoked"
+        ) {
+          return null;
+        }
+        if (
+          targetRow.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY] ===
+          input.operationId
+        ) {
+          return mapConnectionMetadata(targetRow);
+        }
+        if (targetRow.version !== input.expectedVersion) {
+          return null;
+        }
+        const metadata = {
+          ...(input.metadata ?? {}),
+          credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+          [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: input.operationId,
+        };
+        const saved = await updateConnectionInScope(tx, {
+          workspaceId: input.workspaceId,
+          connectionId: input.connectionId,
+          visibleToSubjectId: input.updatedBySubjectId,
+          expectedVersion: input.expectedVersion,
+          subjectId: null,
+          providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+          kind: "api_key",
+          status: "active",
+          credentialEncrypted: input.credentialEncrypted,
+          grantedScopes: input.grantedScopes ?? [],
+          expiresAt: input.expiresAt ?? null,
+          metadata,
+          updatedBySubjectId: input.updatedBySubjectId,
+        });
+        if (!saved) {
+          throw new Error("Vercel AI Gateway connection changed during rotation");
+        }
+        const duplicates = await tx
+          .select(connectionMetadataColumns)
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              ne(schema.connections.id, input.connectionId),
+              isNull(schema.connections.subjectId),
+              sql`lower(${schema.connections.providerDomain}) = lower(${VERCEL_AI_GATEWAY_CONNECTION_DOMAIN})`,
+              eq(schema.connections.kind, "api_key"),
+              ne(schema.connections.status, "revoked"),
+              sql`${schema.connections.metadata} ->> 'credentialRole' = ${VERCEL_AI_GATEWAY_CONNECTION_ROLE}`,
+            ),
+          )
+          .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+          .for("update");
+        for (const duplicate of duplicates) {
           const revoked = await revokeConnectionInScope(
             tx,
             input.workspaceId,
@@ -9572,7 +9666,7 @@ export async function upsertWorkspaceVercelAiGatewayConnection(
             duplicate.version,
           );
           if (!revoked) {
-            throw new Error("Vercel AI Gateway duplicate changed during convergence");
+            throw new Error("Vercel AI Gateway duplicate changed during rotation");
           }
         }
         return saved;
@@ -9607,7 +9701,6 @@ export async function revokeWorkspaceVercelAiGatewayConnections(
           .limit(1);
         if (
           !targetRow ||
-          targetRow.version !== input.expectedVersion ||
           targetRow.providerDomain.toLowerCase() !== VERCEL_AI_GATEWAY_CONNECTION_DOMAIN ||
           targetRow.kind !== "api_key" ||
           targetRow.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE
@@ -9619,6 +9712,9 @@ export async function revokeWorkspaceVercelAiGatewayConnections(
         // that was established after the original response was lost.
         if (targetRow.status === "revoked") {
           return mapConnectionMetadata(targetRow);
+        }
+        if (targetRow.version !== input.expectedVersion) {
+          return null;
         }
         const gatewayRows = await tx
           .select(connectionMetadataColumns)

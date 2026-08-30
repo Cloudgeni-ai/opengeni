@@ -3,9 +3,11 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type {
   ConnectionMetadata,
   CreateConnectionRequest,
+  UpdateConnectionRequest,
   WorkspaceGatewayCustomModel,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
+import { VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY } from "@opengeni/contracts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -25,8 +27,11 @@ const createConnection = mock(
     gatewayConnection(),
 );
 const updateConnection = mock(
-  async (_workspaceId: string, _connectionId: string): Promise<ConnectionMetadata> =>
-    gatewayConnection(),
+  async (
+    _workspaceId: string,
+    _connectionId: string,
+    _request: UpdateConnectionRequest,
+  ): Promise<ConnectionMetadata> => gatewayConnection(),
 );
 const deleteConnection = mock(
   async (_workspaceId: string, _connectionId: string): Promise<ConnectionMetadata> =>
@@ -406,9 +411,18 @@ describe("AiGatewayConnectionCard custom models", () => {
       | ((value: { models: WorkspaceGatewayCustomModel[] }) => void)
       | undefined;
     let connectionCommitted = false;
+    let committedOperationId: string | null = null;
     let modelReadCount = 0;
     listConnections.mockImplementation(async () =>
-      connectionCommitted ? [gatewayConnection()] : [],
+      connectionCommitted
+        ? [
+            gatewayConnection("active", {
+              metadata: {
+                [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: committedOperationId,
+              },
+            }),
+          ]
+        : [],
     );
     listWorkspaceGatewayCustomModels.mockImplementation(async () => {
       modelReadCount += 1;
@@ -417,7 +431,8 @@ describe("AiGatewayConnectionCard custom models", () => {
         resolveInitialModels = resolve;
       });
     });
-    createConnection.mockImplementation(async () => {
+    createConnection.mockImplementation(async (_workspaceId, request) => {
+      committedOperationId = request.operationId ?? null;
       connectionCommitted = true;
       throw new Error("response lost after commit");
     });
@@ -439,6 +454,9 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(container.textContent).toContain("Disconnect");
       expect(keyInput.value).toBe("");
       expect(createConnection).toHaveBeenCalledTimes(1);
+      expect(createConnection.mock.calls[0]?.[1].operationId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+      );
       expect(modelReadCount).toBe(1);
       expect(onConnectionChange).toHaveBeenCalledTimes(1);
       expect(toastSuccess).toHaveBeenCalledWith("Vercel AI Gateway connected");
@@ -456,12 +474,23 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
-  test("reconciles an outcome-unknown key replacement from a newer connection version", async () => {
+  test("reconciles an outcome-unknown key replacement from its operation receipt", async () => {
     let connectionVersion = 1;
+    let committedOperationId: string | null = null;
     listConnections.mockImplementation(async () => [
-      gatewayConnection("active", { version: connectionVersion }),
+      gatewayConnection("active", {
+        version: connectionVersion,
+        metadata: {
+          ...(committedOperationId
+            ? {
+                [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: committedOperationId,
+              }
+            : {}),
+        },
+      }),
     ]);
-    updateConnection.mockImplementation(async () => {
+    updateConnection.mockImplementation(async (_workspaceId, _connectionId, request) => {
+      committedOperationId = request.operationId ?? null;
       connectionVersion = 2;
       throw new Error("response lost after replacement commit");
     });
@@ -483,9 +512,61 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(container.textContent).toContain("Connected");
       expect(keyInput.value).toBe("");
       expect(updateConnection).toHaveBeenCalledTimes(1);
+      expect(updateConnection.mock.calls[0]?.[2]).toMatchObject({
+        expectedVersion: 1,
+        operationId: committedOperationId,
+      });
       expect(onConnectionChange).toHaveBeenCalledTimes(1);
       expect(toastSuccess).toHaveBeenCalledWith("Vercel AI Gateway connected");
       expect(toastError).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("does not attribute another administrator's replacement to a failed save", async () => {
+    const unrelatedOperationId = crypto.randomUUID();
+    let replacementObserved = false;
+    listConnections.mockImplementation(async () => [
+      gatewayConnection("active", {
+        version: replacementObserved ? 2 : 1,
+        metadata: replacementObserved
+          ? {
+              [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: unrelatedOperationId,
+            }
+          : {},
+      }),
+    ]);
+    updateConnection.mockImplementation(async () => {
+      replacementObserved = true;
+      throw new Error("request failed before commit");
+    });
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderCard(true, onConnectionChange);
+
+    try {
+      const keyInput = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway key"]',
+      )!;
+      await setInputValue(keyInput, "replacement-key");
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Replace"))
+          ?.click();
+        await flush();
+      });
+
+      expect(container.textContent).toContain("Connected");
+      expect(keyInput.value).toBe("replacement-key");
+      expect(updateConnection).toHaveBeenCalledTimes(1);
+      expect(updateConnection.mock.calls[0]?.[2].operationId).not.toBe(unrelatedOperationId);
+      expect(onConnectionChange).not.toHaveBeenCalled();
+      expect(toastSuccess).not.toHaveBeenCalled();
+      expect(toastError).toHaveBeenCalledWith(
+        "Couldn't save Vercel AI Gateway key",
+        expect.any(Object),
+      );
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -939,7 +1020,9 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(document.activeElement).toBe(input);
       expect(input.className).toContain("text-base");
       expect(input.className).toContain("md:text-base");
-      expect(input.className).toContain("lg:text-xs");
+      expect(input.className).toContain("lg:pointer-fine:text-xs");
+      expect(input.className).not.toContain("lg:text-xs");
+      expect(input.className).not.toContain("lg:pointer-coarse:text-base");
       expect(input.className).not.toContain("sm:text-xs");
     } finally {
       await act(async () => root.unmount());
