@@ -9,6 +9,7 @@ import {
 
 import {
   archiveWorkspaceApp,
+  claimAppObjectCleanups,
   claimArchivedAppGc,
   completeAppBuild,
   createAppPreview,
@@ -18,14 +19,17 @@ import {
   listWorkspaceApps,
   prepareAppBuild,
   promoteAppBuild,
+  reapAbandonedAppUploads,
+  settleAppObjectCleanup,
   settleArchivedAppGc,
 } from "../src/apps";
-import { createDb, nestedPostgresSqlState } from "../src";
+import { createDb, deleteWorkspaceIfQuiescent, nestedPostgresSqlState } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import {
   FORCE_RLS_TABLES,
   PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_ONLY_TABLES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
 } from "../src/runtime-posture";
@@ -36,6 +40,7 @@ import {
   appLaunches,
   appLifecycleOperations,
   appObjectTombstones,
+  appObjectCleanupOutbox,
   appPreviews,
   appPublications,
   appReleases,
@@ -65,6 +70,7 @@ const tables = [
   "app_lifecycle_operations",
   "app_gc_claims",
   "app_object_tombstones",
+  "app_object_cleanup_outbox",
 ] as const;
 
 const protectedTables: readonly string[] = [
@@ -72,7 +78,10 @@ const protectedTables: readonly string[] = [
   "app_gc_claims",
   "app_object_tombstones",
 ];
-const readOnlyTables = tables.filter((table) => !protectedTables.includes(table));
+const appendOnlyTables: readonly string[] = ["app_object_cleanup_outbox"];
+const readOnlyTables = tables.filter(
+  (table) => !protectedTables.includes(table) && !appendOnlyTables.includes(table),
+);
 
 describe("migration 0382 governed Apps persistence", () => {
   test("is additive, tenant-composite, FORCE-RLS, and preserves HTML Artifacts", async () => {
@@ -128,11 +137,13 @@ describe("migration 0382 governed Apps persistence", () => {
         appLifecycleOperations,
         appGcClaims,
         appObjectTombstones,
+        appObjectCleanupOutbox,
       ].map((table) => getTableName(table)),
     ).toEqual([...tables]);
     for (const table of readOnlyTables) {
       expect(RUNTIME_READ_ONLY_TABLES as readonly string[]).toContain(table);
     }
+    expect(RUNTIME_READ_INSERT_TABLES as readonly string[]).toContain("app_object_cleanup_outbox");
     expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("app_lifecycle_operations");
     expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("app_gc_claims");
     expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("app_object_tombstones");
@@ -156,6 +167,9 @@ describe("migration 0382 governed Apps persistence", () => {
       "app_tool_call_command(jsonb)",
       "claim_archived_app_gc_command(jsonb)",
       "settle_archived_app_gc_command(jsonb)",
+      "reap_abandoned_app_uploads_command(integer)",
+      "claim_app_object_cleanups(uuid, integer, integer)",
+      "settle_app_object_cleanup(uuid, uuid, text)",
     ]) {
       expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(routine);
     }
@@ -168,6 +182,9 @@ describe("migration 0382 governed Apps persistence", () => {
       createDatabaseAppLaunchResolver,
       claimArchivedAppGc,
       settleArchivedAppGc,
+      reapAbandonedAppUploads,
+      claimAppObjectCleanups,
+      settleAppObjectCleanup,
     ]) {
       expect(typeof helper).toBe("function");
     }
@@ -189,6 +206,23 @@ describe("migration 0382 governed Apps persistence", () => {
       "REVOKE ALL ON FUNCTION opengeni_private.enforce_app_immutable_rows() FROM PUBLIC",
     );
     expect(source).toContain("App GC completion does not cover the exact claim");
+    expect(source).toContain("CREATE TABLE app_object_cleanup_outbox");
+    expect(source).toContain("CREATE TABLE opengeni_private.app_maintenance_capabilities");
+    expect(source).toContain("opengeni_private.app_maintenance_capability_active()");
+    expect(source).toContain("opengeni.app_maintenance_capability");
+    expect(source).toContain(
+      "reason IN ('archive', 'workspace_delete', 'abandoned_source', 'abandoned_build')",
+    );
+    expect(source).toContain("now_value + interval '15 minutes'");
+    expect(source).toContain("created_at <= now_value - interval '24 hours'");
+    expect(source).toContain("app_source_revisions_abandoned_upload_idx");
+    expect(source).toContain("app_builds_abandoned_upload_idx");
+    expect(source).toContain("CREATE FUNCTION claim_app_object_cleanups(");
+    expect(source).toContain("CREATE FUNCTION settle_app_object_cleanup(");
+    expect(source).toContain("FOR UPDATE SKIP LOCKED\n    LIMIT 8");
+    expect(source).toContain(
+      "DELETE FROM opengeni_private.app_host_routes route\n  USING revoked_launches revoked",
+    );
     expect(source).toContain("CREATE TABLE app_build_files");
     expect(source).toContain("staging_object_key text NOT NULL");
     expect(source).toContain("frozen_object_key text NOT NULL");
@@ -444,12 +478,17 @@ describe("migration 0382 live PostgreSQL posture", () => {
       where schemaname = current_schema()
         and tablename = 'app_source_revisions'
         and policyname = 'session_visibility_isolation'`;
-    expect(sourceVisibilityPolicy).toEqual({
+    expect(sourceVisibilityPolicy).toMatchObject({
       permissive: "RESTRICTIVE",
       command: "ALL",
-      usingExpression: "session_reference_visible(account_id, workspace_id, source_session_id)",
-      checkExpression: "session_reference_visible(account_id, workspace_id, source_session_id)",
     });
+    expect(sourceVisibilityPolicy!.usingExpression).toContain(
+      "session_reference_visible(account_id, workspace_id, source_session_id)",
+    );
+    expect(sourceVisibilityPolicy!.usingExpression).toContain(
+      "opengeni_private.app_maintenance_capability_active()",
+    );
+    expect(sourceVisibilityPolicy!.checkExpression).toBe(sourceVisibilityPolicy!.usingExpression);
 
     const [immutableGuardAcl] = await clean.admin<
       Array<{
@@ -527,6 +566,18 @@ describe("migration 0382 live PostgreSQL posture", () => {
 
       expect(
         await capturedSqlState(
+          rawApp`
+            insert into opengeni_private.app_maintenance_capabilities (
+              backend_pid, transaction_id, capability_id
+            ) values (pg_backend_pid(), pg_current_xact_id(), ${crypto.randomUUID()})`,
+        ),
+      ).toBe("42501");
+      const [maintenanceCapability] = await rawApp<Array<{ active: boolean }>>`
+        select opengeni_private.app_maintenance_capability_active() as active`;
+      expect(maintenanceCapability).toEqual({ active: false });
+
+      expect(
+        await capturedSqlState(
           rawApp.begin(async (transaction) => {
             await transaction`select
               set_config('opengeni.account_id', ${cleanAccountId}, true),
@@ -591,6 +642,9 @@ describe("migration 0382 live PostgreSQL posture", () => {
       await transaction`
         insert into workspaces (id, account_id, name)
         values (${workspaceId}, ${accountId}, ${`apps-cascade-${workspaceId}`})`;
+      await transaction`
+        insert into workspaces (account_id, name)
+        values (${accountId}, ${`apps-cascade-sibling-${workspaceId}`})`;
       await transaction`
         insert into workspace_inference_controls (workspace_id, account_id)
         values (${workspaceId}, ${accountId})`;
@@ -685,43 +739,70 @@ describe("migration 0382 live PostgreSQL posture", () => {
       ),
     ).toBe("55000");
 
-    await clean.admin.begin(async (transaction) => {
-      await transaction`delete from workspaces where id = ${workspaceId}`;
-      const [remaining] = await transaction<
-        Array<{
-          apps: number;
-          sources: number;
-          policies: number;
-          builds: number;
-          files: number;
-          releases: number;
-          previews: number;
-          launches: number;
-          routes: number;
-        }>
-      >`
-        select
-          (select count(*)::int from apps where workspace_id = ${workspaceId}) as apps,
-          (select count(*)::int from app_source_revisions where workspace_id = ${workspaceId}) as sources,
-          (select count(*)::int from app_tool_policy_revisions where workspace_id = ${workspaceId}) as policies,
-          (select count(*)::int from app_builds where workspace_id = ${workspaceId}) as builds,
-          (select count(*)::int from app_build_files where workspace_id = ${workspaceId}) as files,
-          (select count(*)::int from app_releases where workspace_id = ${workspaceId}) as releases,
-          (select count(*)::int from app_previews where workspace_id = ${workspaceId}) as previews,
-          (select count(*)::int from app_launches where workspace_id = ${workspaceId}) as launches,
-          (select count(*)::int from opengeni_private.app_host_routes where app_id = ${appId}) as routes`;
-      expect(remaining).toEqual({
-        apps: 0,
-        sources: 0,
-        policies: 0,
-        builds: 0,
-        files: 0,
-        releases: 0,
-        previews: 0,
-        launches: 0,
-        routes: 0,
-      });
+    const client = createDb(runtimeUrl(clean.adminUrl, clean.appPassword), {
+      max: 2,
+      rlsStrategy: "force",
     });
+    try {
+      expect(await deleteWorkspaceIfQuiescent(client.db, { accountId, workspaceId })).toEqual({
+        status: "deleted",
+        temporalScheduleCleanups: [],
+      });
+    } finally {
+      await client.close();
+    }
+
+    const [remaining] = await clean.admin<
+      Array<{
+        apps: number;
+        sources: number;
+        policies: number;
+        builds: number;
+        files: number;
+        releases: number;
+        previews: number;
+        launches: number;
+        routes: number;
+      }>
+    >`
+      select
+        (select count(*)::int from apps where workspace_id = ${workspaceId}) as apps,
+        (select count(*)::int from app_source_revisions where workspace_id = ${workspaceId}) as sources,
+        (select count(*)::int from app_tool_policy_revisions where workspace_id = ${workspaceId}) as policies,
+        (select count(*)::int from app_builds where workspace_id = ${workspaceId}) as builds,
+        (select count(*)::int from app_build_files where workspace_id = ${workspaceId}) as files,
+        (select count(*)::int from app_releases where workspace_id = ${workspaceId}) as releases,
+        (select count(*)::int from app_previews where workspace_id = ${workspaceId}) as previews,
+        (select count(*)::int from app_launches where workspace_id = ${workspaceId}) as launches,
+        (select count(*)::int from opengeni_private.app_host_routes where app_id = ${appId}) as routes`;
+    expect(remaining).toEqual({
+      apps: 0,
+      sources: 0,
+      policies: 0,
+      builds: 0,
+      files: 0,
+      releases: 0,
+      previews: 0,
+      launches: 0,
+      routes: 0,
+    });
+    const cleanupRows = await clean.admin<
+      Array<{ objectKey: string; reason: string; delayed: boolean }>
+    >`
+      select object_key as "objectKey", reason,
+        not_before >= created_at + interval '14 minutes 59 seconds' as delayed
+      from app_object_cleanup_outbox
+      where workspace_id = ${workspaceId}
+      order by object_key`;
+    expect(Array.from(cleanupRows)).toEqual(
+      [
+        `apps/${appId}/builds/${buildId}/frozen/${contentSha256}/index.html`,
+        `apps/${appId}/builds/${buildId}/staging/${buildFileId}`,
+        `apps/${appId}/frozen/${contentSha256}.tar`,
+        `apps/${appId}/frozen/${manifestSha256}/manifest.json`,
+        `apps/${appId}/staging/source.tar`,
+      ].map((objectKey) => ({ objectKey, reason: "workspace_delete", delayed: true })),
+    );
     await clean.admin`delete from managed_accounts where id = ${accountId}`;
   });
 
@@ -732,6 +813,7 @@ describe("migration 0382 live PostgreSQL posture", () => {
     const sourceRevisionId = crypto.randomUUID();
     const toolPolicyRevisionId = crypto.randomUUID();
     const buildId = crypto.randomUUID();
+    const buildFileId = crypto.randomUUID();
     const releaseId = crypto.randomUUID();
     const previewId = crypto.randomUUID();
     const revokedLaunchId = crypto.randomUUID();
@@ -812,6 +894,18 @@ describe("migration 0382 live PostgreSQL posture", () => {
           ${receiptDigest}, ${actorSubjectId}, clock_timestamp()
         )`;
       await transaction`
+        insert into app_build_files (
+          id, account_id, workspace_id, app_id, build_id, path, content_type,
+          content_sha256, size_bytes, staging_object_key, frozen_object_key,
+          frozen_version_token, frozen_at
+        ) values (
+          ${buildFileId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, ${buildId},
+          'index.html', 'text/html', ${sourceSha256}, 1,
+          ${`apps/${appId}/builds/${buildId}/staging/${buildFileId}`},
+          ${`apps/${appId}/builds/${buildId}/frozen/${sourceSha256}/index.html`},
+          'file-version', clock_timestamp()
+        )`;
+      await transaction`
         insert into app_releases (
           id, account_id, workspace_id, app_id, build_id, source_revision_id,
           tool_policy_revision_id, revision, manifest_sha256, entry_path,
@@ -853,6 +947,14 @@ describe("migration 0382 live PostgreSQL posture", () => {
             ${authorityGeneration}, 'revoked', clock_timestamp() + interval '10 minutes',
             clock_timestamp(), ${actorSubjectId}
           )`;
+      await transaction`
+        insert into opengeni_private.app_host_routes (
+          hostname, nonce_sha256, app_id, release_id, preview_id, launch_id,
+          entry_path, spa_fallback, expires_at
+        ) values (
+          ${hostname}, ${expiredLaunchNonceSha256}, ${appId}, ${releaseId}, ${previewId},
+          ${expiredLaunchId}, 'index.html', true, clock_timestamp() - interval '1 second'
+        )`;
       await transaction`
         insert into app_tool_calls (
           account_id, workspace_id, app_id, release_id, launch_id, operation_id,
@@ -1004,6 +1106,17 @@ describe("migration 0382 live PostgreSQL posture", () => {
         where workspace_id = ${cleanWorkspaceId} and app_id = ${appId}
           and hostname = ${hostname} and status = 'active'`;
       expect(activePreviews).toEqual({ count: 3 });
+
+      expect(await launchState(launchCommand(firstPreview.preview.id, "4"), false)).toBeNull();
+      const [expiredProjection] = await clean.admin<
+        Array<{ status: string; revoked: boolean; routes: number }>
+      >`
+        select launch.status, launch.revoked_at is not null as revoked,
+          (select count(*)::int from opengeni_private.app_host_routes route
+            where route.launch_id = launch.id) as routes
+        from app_launches launch
+        where launch.id = ${expiredLaunchId}`;
+      expect(expiredProjection).toEqual({ status: "revoked", revoked: true, routes: 0 });
 
       expect(
         await replayState(beginCommand(revokedLaunchId, launchNonceSha256, revokedOperationId)),
@@ -1177,9 +1290,222 @@ describe("migration 0382 live PostgreSQL posture", () => {
           (select count(*)::int from opengeni_private.app_host_routes
             where app_id = ${appId}) as routes`;
       expect(servingReferences).toEqual({ previews: 0, launches: 0, routes: 0 });
+      const archiveCleanupRows = await rawAdmin<
+        Array<{ objectKey: string; reason: string; delayed: boolean }>
+      >`
+        select object_key as "objectKey", reason,
+          not_before >= created_at + interval '14 minutes 59 seconds' as delayed
+        from app_object_cleanup_outbox
+        where workspace_id = ${cleanWorkspaceId} and app_id = ${appId}
+        order by object_key`;
+      expect(Array.from(archiveCleanupRows)).toEqual(
+        [
+          `apps/${appId}/builds/${buildId}/frozen/${sourceSha256}/index.html`,
+          `apps/${appId}/builds/${buildId}/staging/${buildFileId}`,
+          `apps/${appId}/frozen/${manifestSha256}/manifest.json`,
+          `apps/${appId}/frozen/${sourceSha256}.tar`,
+          `apps/${appId}/staging/source.tar`,
+        ]
+          .sort((left, right) => left.localeCompare(right))
+          .map((objectKey) => ({ objectKey, reason: "archive", delayed: true })),
+      );
     } finally {
       await rawAdmin.end();
       await rawApp.end();
+      await client.close();
+    }
+  }, 900_000);
+
+  test("expires abandoned uploads and exact-claim settles their delayed object cleanup", async () => {
+    if (!clean) return;
+    const actorSubjectId = `human:${crypto.randomUUID()}`;
+    const appId = crypto.randomUUID();
+    const sourceRevisionId = crypto.randomUUID();
+    const toolPolicyRevisionId = crypto.randomUUID();
+    const buildId = crypto.randomUUID();
+    const buildFileId = crypto.randomUUID();
+    const sourceSha256 = "6".repeat(64);
+    const catalogDigest = "7".repeat(64);
+    const manifestSha256 = "8".repeat(64);
+    const fileSha256 = "9".repeat(64);
+    const sourceStagingKey = `apps/${appId}/staging/source.tar`;
+    const sourceFrozenKey = `apps/${appId}/frozen/${sourceSha256}.tar`;
+    const manifestKey = `apps/${appId}/frozen/${manifestSha256}/manifest.json`;
+    const fileStagingKey = `apps/${appId}/builds/${buildId}/staging/${buildFileId}`;
+    const fileFrozenKey = `apps/${appId}/builds/${buildId}/frozen/${fileSha256}/index.html`;
+    const manifest = {
+      version: "opengeni.app-build.v1",
+      entryPath: "index.html",
+      totalBytes: 1,
+      files: [
+        {
+          path: "index.html",
+          contentType: "text/html",
+          contentSha256: fileSha256,
+          sizeBytes: 1,
+          executable: false,
+        },
+      ],
+    };
+
+    await clean.admin.begin(async (transaction) => {
+      await transaction`
+        insert into apps (
+          id, account_id, workspace_id, slug, title, created_by_subject_id
+        ) values (
+          ${appId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${`abandoned-${appId}`},
+          'Abandoned upload fixture', ${actorSubjectId}
+        )`;
+      await transaction`
+        insert into app_source_revisions (
+          id, account_id, workspace_id, app_id, revision, status,
+          staging_object_key, frozen_object_key, content_sha256, size_bytes,
+          created_by_subject_id, created_at
+        ) values (
+          ${sourceRevisionId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, 1,
+          'verifying', ${sourceStagingKey}, ${sourceFrozenKey}, ${sourceSha256}, 1,
+          ${actorSubjectId}, clock_timestamp() - interval '25 hours'
+        )`;
+      await transaction`
+        insert into app_tool_policy_revisions (
+          id, account_id, workspace_id, app_id, revision, catalog_digest,
+          allowed_tools, created_by_subject_id
+        ) values (
+          ${toolPolicyRevisionId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, 1,
+          ${catalogDigest}, '[]'::jsonb, ${actorSubjectId}
+        )`;
+      await transaction`
+        insert into app_builds (
+          id, account_id, workspace_id, app_id, source_revision_id,
+          tool_policy_revision_id, revision, status, manifest_object_key,
+          manifest_sha256, manifest, entry_path, file_count, total_bytes,
+          checks, created_by_subject_id, created_at
+        ) values (
+          ${buildId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, ${sourceRevisionId},
+          ${toolPolicyRevisionId}, 1, 'uploading', ${manifestKey}, ${manifestSha256},
+          ${transaction.json(manifest)}::jsonb, 'index.html', 1, 1,
+          ${transaction.json(["manifest", "files", "receipt"])}::jsonb,
+          ${actorSubjectId}, clock_timestamp() - interval '25 hours'
+        )`;
+      await transaction`
+        insert into app_build_files (
+          id, account_id, workspace_id, app_id, build_id, path, content_type,
+          content_sha256, size_bytes, staging_object_key, frozen_object_key
+        ) values (
+          ${buildFileId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, ${buildId},
+          'index.html', 'text/html', ${fileSha256}, 1, ${fileStagingKey}, ${fileFrozenKey}
+        )`;
+    });
+
+    const client = createDb(runtimeUrl(clean.adminUrl, clean.appPassword), {
+      max: 2,
+      rlsStrategy: "force",
+    });
+    try {
+      expect(await reapAbandonedAppUploads(client.db, { limit: 8 })).toBe(5);
+      const [states] = await clean.admin<
+        Array<{
+          sourceStatus: string;
+          sourceFailure: string;
+          buildStatus: string;
+          buildFailure: string;
+        }>
+      >`
+        select source.status as "sourceStatus", source.failure_code as "sourceFailure",
+          build.status as "buildStatus", build.failure_code as "buildFailure"
+        from app_source_revisions source
+        join app_builds build on build.source_revision_id = source.id
+        where source.id = ${sourceRevisionId}`;
+      expect(states).toEqual({
+        sourceStatus: "expired",
+        sourceFailure: "upload_expired",
+        buildStatus: "failed",
+        buildFailure: "upload_expired",
+      });
+
+      expect(
+        await claimAppObjectCleanups(client.db, {
+          claimId: crypto.randomUUID(),
+          limit: 10,
+        }),
+      ).toEqual([]);
+      await clean.admin`
+        update app_object_cleanup_outbox
+        set not_before = clock_timestamp() - interval '1 second',
+          next_attempt_at = clock_timestamp() - interval '1 second'
+        where workspace_id = ${cleanWorkspaceId} and app_id = ${appId}`;
+      const claimId = crypto.randomUUID();
+      const claims = await claimAppObjectCleanups(client.db, {
+        claimId,
+        limit: 10,
+        claimSeconds: 30,
+      });
+      expect(
+        claims
+          .map((claim) => ({
+            objectKey: claim.objectKey,
+            reason: claim.reason,
+            claimId: claim.claimId,
+            attemptCount: claim.attemptCount,
+          }))
+          .sort((left, right) => left.objectKey.localeCompare(right.objectKey)),
+      ).toEqual(
+        [
+          {
+            objectKey: sourceStagingKey,
+            reason: "abandoned_source" as const,
+            claimId,
+            attemptCount: 1,
+          },
+          {
+            objectKey: sourceFrozenKey,
+            reason: "abandoned_source" as const,
+            claimId,
+            attemptCount: 1,
+          },
+          {
+            objectKey: manifestKey,
+            reason: "abandoned_build" as const,
+            claimId,
+            attemptCount: 1,
+          },
+          {
+            objectKey: fileStagingKey,
+            reason: "abandoned_build" as const,
+            claimId,
+            attemptCount: 1,
+          },
+          {
+            objectKey: fileFrozenKey,
+            reason: "abandoned_build" as const,
+            claimId,
+            attemptCount: 1,
+          },
+        ].sort((left, right) => left.objectKey.localeCompare(right.objectKey)),
+      );
+      expect(
+        await settleAppObjectCleanup(client.db, {
+          id: claims[0]!.id,
+          claimId: crypto.randomUUID(),
+        }),
+      ).toBe(false);
+      for (const claim of claims) {
+        expect(
+          await settleAppObjectCleanup(client.db, {
+            id: claim.id,
+            claimId: claim.claimId,
+          }),
+        ).toBe(true);
+      }
+      const [remaining] = await clean.admin<Array<{ count: number }>>`
+        select count(*)::int as count from app_object_cleanup_outbox
+        where workspace_id = ${cleanWorkspaceId} and app_id = ${appId}`;
+      expect(remaining).toEqual({ count: 0 });
+      const [maintenanceCapabilities] = await clean.admin<Array<{ count: number }>>`
+        select count(*)::int as count
+        from opengeni_private.app_maintenance_capabilities`;
+      expect(maintenanceCapabilities).toEqual({ count: 0 });
+    } finally {
       await client.close();
     }
   }, 900_000);

@@ -552,6 +552,9 @@ const APP_LIFECYCLE_ROUTINES = [
   "archive_workspace_app_command(jsonb)",
   "claim_archived_app_gc_command(jsonb)",
   "settle_archived_app_gc_command(jsonb)",
+  "reap_abandoned_app_uploads_command(integer)",
+  "claim_app_object_cleanups(uuid, integer, integer)",
+  "settle_app_object_cleanup(uuid, uuid, text)",
   "app_launch_command(jsonb)",
   "app_tool_call_command(jsonb)",
 ] as const;
@@ -570,6 +573,11 @@ const APP_LIFECYCLE_AUTHORITY_TABLES = [
   "app_tool_policy_revisions",
   "apps",
 ] as const;
+const APP_OBJECT_CLEANUP_ROUTINE_SET = new Set<string>([
+  "reap_abandoned_app_uploads_command(integer)",
+  "claim_app_object_cleanups(uuid, integer, integer)",
+  "settle_app_object_cleanup(uuid, uuid, text)",
+]);
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...APP_LIFECYCLE_ROUTINES,
@@ -664,6 +672,7 @@ export const FORCE_RLS_TABLES = [
   "app_gc_claims",
   "app_launches",
   "app_lifecycle_operations",
+  "app_object_cleanup_outbox",
   "app_object_tombstones",
   "app_previews",
   "app_publications",
@@ -1241,6 +1250,7 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "app_object_cleanup_outbox",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -2208,6 +2218,18 @@ export function evaluateRuntimeDatabasePosture(
         } else if (routine.owner !== authorityTables[0]!.owner) {
           violations.push(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+      if (APP_OBJECT_CLEANUP_ROUTINE_SET.has(routine.name)) {
+        const cleanupAuthority = tableByName.get("app_object_cleanup_outbox");
+        if (!cleanupAuthority) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} cleanup authority table is missing: app_object_cleanup_outbox`,
+          );
+        } else if (routine.owner !== cleanupAuthority.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match cleanup authority table owner ${cleanupAuthority.owner}`,
           );
         }
       }

@@ -45,7 +45,7 @@ import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasDirectHumanWorkspacePermission } from "@/lib/permissions";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
@@ -724,10 +724,15 @@ function WorkspaceState() {
 
 function useAppsRouteAccess(workspaceId: string) {
   const context = useAppContext();
-  const directHuman =
-    context.managedSelfContext?.identity.subjectId === context.accessContext.subjectId;
+  const appsEnabled = context.clientConfig.apps?.enabled === true;
   const can = (permission: string) =>
-    directHuman && hasWorkspacePermission(context.accessContext, workspaceId, permission);
+    appsEnabled &&
+    hasDirectHumanWorkspacePermission(
+      context.accessContext,
+      context.managedSelfContext?.identity.subjectId,
+      workspaceId,
+      permission,
+    );
   return {
     read: can("apps:read"),
     write: can("apps:write"),

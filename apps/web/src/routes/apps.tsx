@@ -46,10 +46,7 @@ type AppsProductClient = Pick<
 > &
   AppsManagementClient;
 
-export type AppsRouteAccess = AppsManagementAccess & {
-  read: boolean;
-  run: boolean;
-};
+export type AppsRouteAccess = AppsManagementAccess & { read: boolean };
 
 const FULL_APPS_ACCESS: AppsRouteAccess = {
   read: true,

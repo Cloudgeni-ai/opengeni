@@ -65,7 +65,12 @@ describe("OpenGeni App run frame security", () => {
     expect(brokerHtml).toContain(
       "frame.contentWindow.postMessage(next.message,expectedAppOrigin,[next.port])",
     );
+    expect(brokerHtml).toContain("!loaded||!appReady||!pending");
     expect(brokerHtml).toContain("event.source!==parent||event.origin!==expectedParentOrigin");
+    expect(brokerHtml).toContain(
+      "event.source===frame.contentWindow&&event.origin===expectedAppOrigin",
+    );
+    expect(brokerHtml).toContain('message.kind==="app_ready"');
     expect(brokerHtml).toContain('frame.addEventListener("load"');
     const markup = renderToStaticMarkup(
       <AppRunFrame

@@ -15872,6 +15872,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
     }),
+    // Optional product surface. Fail closed when an older deployment omits the
+    // hint so the browser does not advertise routes whose API is disabled.
+    apps: z.object({ enabled: z.boolean() }).default({ enabled: false }),
     // Native voice-input capability. Provider/model/credentials stay server-private;
     // clients only learn whether a deployment can transcribe and the hard ceilings.
     voiceInput: ClientVoiceInputConfig.default({

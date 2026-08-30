@@ -44,6 +44,7 @@ import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-in
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { startAppObjectCleanupPump } from "./app-object-cleanup";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
   EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,
@@ -467,6 +468,13 @@ export async function startApi(
     },
     observability,
   });
+  const stopAppObjectCleanupPump = objectStorage
+    ? startAppObjectCleanupPump({
+        db: dbClient.db,
+        objectStorage,
+        observability,
+      })
+    : undefined;
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
@@ -530,6 +538,7 @@ export async function startApi(
       stopMetricsIngestion?.();
       stopHelloIngestion?.();
       await stopTemporalScheduleCleanupPump();
+      await stopAppObjectCleanupPump?.();
       await Promise.allSettled([
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),

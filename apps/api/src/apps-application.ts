@@ -1,10 +1,11 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import type {
-  AppBuildManifest,
-  AppRuntimeToolCallResponse,
-  PrepareAppBuildResponse,
-  WorkspaceAppDetailResponse,
+import {
+  normalizeWorkspaceAppSlug,
+  type AppBuildManifest,
+  type AppRuntimeToolCallResponse,
+  type PrepareAppBuildResponse,
+  type WorkspaceAppDetailResponse,
 } from "@opengeni/contracts/apps";
 import {
   appBuildManifestObjectKey,
@@ -95,8 +96,7 @@ export function createDatabaseAppsApplication(input: {
 
     async create({ authority, request }) {
       const appId = stableUuid("app", authority.workspaceId, request.idempotencyKey);
-      const slugBase = request.slug ?? "app";
-      const slug = request.slug ?? `${slugBase.slice(0, 87)}-${appId.slice(0, 8)}`;
+      const slug = request.slug ?? derivedWorkspaceAppSlug(request.title, appId);
       return await appPersistence(() =>
         createWorkspaceApp(input.db, {
           accountId: authority.accountId,
@@ -274,7 +274,13 @@ export function createDatabaseAppsApplication(input: {
             expectedContentSha256: source.sourceRevision.contentSha256,
             expectedSizeBytes: source.sourceRevision.sizeBytes,
             failureCode: frozen.failure.code,
-            idempotencyKey: `${request.idempotencyKey}:failed`,
+            idempotencyKey: appFailureIdempotencyKey(
+              "source",
+              authority.workspaceId,
+              appId,
+              sourceRevisionId,
+              request.idempotencyKey,
+            ),
           }),
         );
         throw new HTTPException(422, { message: "App source verification failed" });
@@ -536,7 +542,13 @@ export function createDatabaseAppsApplication(input: {
             buildId,
             expectedManifestSha256: request.expectedManifestSha256,
             failureCode: frozen.failure.code,
-            idempotencyKey: `${request.idempotencyKey}:failed`,
+            idempotencyKey: appFailureIdempotencyKey(
+              "build",
+              authority.workspaceId,
+              appId,
+              buildId,
+              request.idempotencyKey,
+            ),
           }),
         );
         throw new HTTPException(422, { message: "App build verification failed" });
@@ -948,6 +960,28 @@ function stableUuid(namespace: string, ...parts: string[]): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export function derivedWorkspaceAppSlug(title: string, appId: string): string {
+  const normalized = normalizeWorkspaceAppSlug(title) || "app";
+  const base = normalized.slice(0, 87).replace(/-+$/u, "") || "app";
+  return `${base}-${appId.slice(0, 8)}`;
+}
+
+export function appFailureIdempotencyKey(
+  kind: "source" | "build",
+  workspaceId: string,
+  appId: string,
+  resourceId: string,
+  requestIdempotencyKey: string,
+): string {
+  return stableUuid(
+    `app-${kind}-verification-failure`,
+    workspaceId,
+    appId,
+    resourceId,
+    requestIdempotencyKey,
+  );
 }
 
 function encodeOffset(offset: number): string {

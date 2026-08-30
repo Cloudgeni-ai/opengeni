@@ -3536,6 +3536,8 @@ export type ClientConfig = {
       }
     | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
+  /** Whether the deployment exposes the optional governed Apps API. */
+  apps?: { enabled: boolean } | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;

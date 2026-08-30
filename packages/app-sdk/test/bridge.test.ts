@@ -170,7 +170,12 @@ describe("OpenGeni App bridge", () => {
   });
 
   test("accepts a transferred app port only from the exact parent window", async () => {
-    const parent = {} as Window;
+    const parentMessages: Array<{ message: unknown; origin: string }> = [];
+    const parent = {
+      postMessage(message: unknown, origin: string) {
+        parentMessages.push({ message, origin });
+      },
+    } as Window;
     const listeners: Array<(event: MessageEvent<unknown>) => void> = [];
     const appWindow = {
       parent,
@@ -186,6 +191,12 @@ describe("OpenGeni App bridge", () => {
     const readyMessages: unknown[] = [];
     testChannel.port1.addEventListener("message", (event) => readyMessages.push(event.data));
     const connected = connectOgApp({ window: appWindow, timeoutMs: 1_000 });
+    expect(parentMessages).toEqual([
+      {
+        message: { protocol: OG_APP_BRIDGE_PROTOCOL, kind: "app_ready" },
+        origin: "*",
+      },
+    ]);
     const connectMessage = {
       protocol: OG_APP_BRIDGE_PROTOCOL,
       kind: "connect",

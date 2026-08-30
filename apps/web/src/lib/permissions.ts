@@ -329,6 +329,38 @@ export function hasWorkspacePermission(
   );
 }
 
+/**
+ * Browser-side projection of the API's current-human Apps authority boundary.
+ *
+ * Managed mode is proven by the separately authenticated self-context. Local
+ * mode has no managed session, so it uses the exact canonical development
+ * principal and grant provenance emitted by the local access resolver. The API
+ * remains the authority for every request; this prevents the console from
+ * hiding routes that the API intentionally permits or exposing controls to a
+ * delegated/service-shaped grant.
+ */
+export function hasDirectHumanWorkspacePermission(
+  context: AccessContext | null,
+  managedSubjectId: string | null | undefined,
+  workspaceId: string,
+  permission: string,
+): boolean {
+  const grant = context?.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  if (!context || !grant || grant.subjectId !== context.subjectId) return false;
+  const managedHuman =
+    context.mode === "managed" &&
+    managedSubjectId !== null &&
+    managedSubjectId !== undefined &&
+    managedSubjectId === context.subjectId;
+  const localHuman =
+    context.mode === "local" &&
+    context.subjectId === "dev" &&
+    grant.principalKind === "human_session" &&
+    grant.metadata?.delegated !== true &&
+    !grant.serviceInitiator;
+  return (managedHuman || localHuman) && hasWorkspacePermission(context, workspaceId, permission);
+}
+
 export function hasAccountPermission(
   context: AccessContext | null,
   accountId: string,

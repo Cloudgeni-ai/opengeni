@@ -61,7 +61,7 @@
     },
     "apps/api": {
       "name": "@opengeni/api-router",
-      "version": "2.6.0",
+      "version": "2.6.1",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1044.0",
         "@aws-sdk/s3-request-presigner": "^3.1044.0",
@@ -178,7 +178,7 @@
     },
     "apps/worker": {
       "name": "@opengeni/worker-bundle",
-      "version": "0.23.0",
+      "version": "0.23.1",
       "bin": {
         "opengeni-artifact-materializer-worker": "./src/artifact-materializer-entry.ts",
         "opengeni-artifact-outbox-dispatcher": "./src/artifact-outbox-entry.ts",
@@ -217,7 +217,7 @@
     },
     "examples/northstar-support": {
       "name": "@opengeni/example-northstar-support",
-      "version": "0.0.128",
+      "version": "0.0.129",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/react": "workspace:*",
@@ -268,6 +268,9 @@
     "packages/app-sdk": {
       "name": "@opengeni/app-sdk",
       "version": "0.1.0",
+      "dependencies": {
+        "@opengeni/contracts": "workspace:*",
+      },
       "devDependencies": {
         "tsup": "^8.5.0",
         "typescript": "7.0.2",
@@ -275,19 +278,19 @@
     },
     "packages/artifact-kernel-wasm-document": {
       "name": "@opengeni/artifact-kernel-wasm-document",
-      "version": "0.3.12",
+      "version": "0.3.13",
     },
     "packages/artifact-kernel-wasm-presentation": {
       "name": "@opengeni/artifact-kernel-wasm-presentation",
-      "version": "0.3.12",
+      "version": "0.3.13",
     },
     "packages/artifact-kernel-wasm-spreadsheet": {
       "name": "@opengeni/artifact-kernel-wasm-spreadsheet",
-      "version": "0.3.12",
+      "version": "0.3.13",
     },
     "packages/artifact-tool": {
       "name": "@opengeni/artifact-tool",
-      "version": "0.3.12",
+      "version": "0.3.13",
       "bin": {
         "opengeni-artifact-materializer": "./src/materializer-cli-entry.ts",
         "opengeni-artifact-runtime": "./src/runtime-cli-entry.ts",
@@ -309,7 +312,7 @@
     },
     "packages/browserd": {
       "name": "@opengeni/browserd",
-      "version": "0.1.27",
+      "version": "0.1.28",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/interaction": "workspace:*",
@@ -336,7 +339,7 @@
     },
     "packages/codemode": {
       "name": "@opengeni/codemode",
-      "version": "0.4.20",
+      "version": "0.4.21",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/tool-runtime": "workspace:*",
@@ -360,7 +363,7 @@
     },
     "packages/config": {
       "name": "@opengeni/config",
-      "version": "0.22.3",
+      "version": "0.22.4",
       "dependencies": {
         "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -374,7 +377,7 @@
     },
     "packages/contracts": {
       "name": "@opengeni/contracts",
-      "version": "2.9.0",
+      "version": "2.9.1",
       "dependencies": {
         "@noble/hashes": "^1.8.0",
         "zod": "^4.2.1",
@@ -386,7 +389,7 @@
     },
     "packages/core": {
       "name": "@opengeni/core",
-      "version": "2.6.0",
+      "version": "2.6.1",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/codex": "workspace:*",
@@ -410,7 +413,7 @@
     },
     "packages/db": {
       "name": "@opengeni/db",
-      "version": "3.7.0",
+      "version": "3.7.1",
       "dependencies": {
         "@opengeni/codemode": "workspace:*",
         "@opengeni/codex": "workspace:*",
@@ -440,7 +443,7 @@
     },
     "packages/documents": {
       "name": "@opengeni/documents",
-      "version": "0.8.10",
+      "version": "0.8.11",
       "dependencies": {
         "@llamaindex/liteparse": "2.14.2",
         "@opengeni/config": "workspace:*",
@@ -459,7 +462,7 @@
     },
     "packages/events": {
       "name": "@opengeni/events",
-      "version": "0.4.8",
+      "version": "0.4.9",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/db": "workspace:*",
@@ -472,7 +475,7 @@
     },
     "packages/github": {
       "name": "@opengeni/github",
-      "version": "0.6.5",
+      "version": "0.6.6",
       "dependencies": {
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
@@ -485,7 +488,7 @@
     },
     "packages/interaction": {
       "name": "@opengeni/interaction",
-      "version": "0.4.19",
+      "version": "0.4.20",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
       },
@@ -507,7 +510,7 @@
     },
     "packages/observability": {
       "name": "@opengeni/observability",
-      "version": "0.8.12",
+      "version": "0.8.13",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "prom-client": "^15.1.3",
@@ -519,7 +522,7 @@
     },
     "packages/ogtool": {
       "name": "@opengeni/ogtool",
-      "version": "0.3.24",
+      "version": "0.3.25",
       "bin": {
         "ogtool": "./dist/bin/ogtool.cjs",
       },
@@ -533,7 +536,7 @@
     },
     "packages/react": {
       "name": "@opengeni/react",
-      "version": "3.3.0",
+      "version": "3.3.1",
       "dependencies": {
         "@bufbuild/protobuf": "^2.2.0",
         "@dnd-kit/core": "6.3.1",
@@ -626,7 +629,7 @@
     },
     "packages/runtime": {
       "name": "@opengeni/runtime",
-      "version": "1.5.0",
+      "version": "2.0.0",
       "dependencies": {
         "@alibaba-group/opensandbox": "0.1.11",
         "@modelcontextprotocol/sdk": "1.29.0",
@@ -656,7 +659,7 @@
     },
     "packages/sdk": {
       "name": "@opengeni/sdk",
-      "version": "3.3.0",
+      "version": "3.3.1",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
       },
@@ -674,7 +677,7 @@
     },
     "packages/storage": {
       "name": "@opengeni/storage",
-      "version": "0.2.113",
+      "version": "0.2.114",
       "dependencies": {
         "@aws-sdk/client-s3": "^3.1044.0",
         "@aws-sdk/s3-request-presigner": "^3.1044.0",

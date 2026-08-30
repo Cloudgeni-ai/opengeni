@@ -9,6 +9,7 @@ import type {
   CanonicalToolIdentity,
   CanonicalToolResult,
 } from "@opengeni/contracts";
+import { WORKSPACE_APP_RUNTIME_MESSAGE_MAX_BYTES } from "@opengeni/contracts/apps";
 import {
   assertCanonicalToolInput,
   assertCanonicalToolOutput,
@@ -24,8 +25,8 @@ import { AppToolDescriptor as AppToolDescriptorSchema } from "@opengeni/contract
 import { hasPermission } from "../access";
 import type { AppCurrentHumanAuthority } from "./apps";
 
-export const APP_RUNTIME_TOOL_ARGUMENTS_MAX_BYTES = 1024 * 1024;
-export const APP_RUNTIME_TOOL_RESULT_MAX_BYTES = 4 * 1024 * 1024;
+export const APP_RUNTIME_TOOL_ARGUMENTS_MAX_BYTES = WORKSPACE_APP_RUNTIME_MESSAGE_MAX_BYTES;
+export const APP_RUNTIME_TOOL_RESULT_MAX_BYTES = WORKSPACE_APP_RUNTIME_MESSAGE_MAX_BYTES;
 export const APP_RUNTIME_TOOL_TIMEOUT_MS = 60_000;
 
 export type AppRuntimePolicySnapshot = Readonly<{

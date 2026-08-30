@@ -19,7 +19,7 @@ import {
   UploadCloudIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -54,6 +54,7 @@ export type AppsManagementClient = Pick<
 export type AppsManagementAccess = {
   write: boolean;
   publish: boolean;
+  run: boolean;
   delete: boolean;
 };
 
@@ -374,6 +375,7 @@ function AppToolPolicyEditor({
     | { status: "error"; error: Error }
     | null
   >(null);
+  const catalogRef = useRef(catalog);
   const [selected, setSelected] = useState(
     () => new Set((currentPolicy?.allowedTools ?? []).map(toolKey)),
   );
@@ -388,24 +390,41 @@ function AppToolPolicyEditor({
   const navigationBlocker = useUnsavedChanges(changed && !busy);
 
   useEffect(() => {
-    if (!open || catalog !== null) return;
+    if (!open || catalogRef.current !== null) return;
     const abort = new AbortController();
-    setCatalog({ status: "loading" });
+    let settled = false;
+    const loading = { status: "loading" } as const;
+    catalogRef.current = loading;
+    setCatalog(loading);
     void client
       .getAvailableRuntimeCatalog(workspaceId, detail.app.id, {
         signal: abort.signal,
       })
-      .then((data) => setCatalog({ status: "ready", data }))
+      .then((data) => {
+        settled = true;
+        const ready = { status: "ready", data } as const;
+        catalogRef.current = ready;
+        setCatalog(ready);
+      })
       .catch((error) => {
         if (!abort.signal.aborted) {
-          setCatalog({
+          settled = true;
+          const failed = {
             status: "error",
             error: error instanceof Error ? error : new Error(String(error)),
-          });
+          } as const;
+          catalogRef.current = failed;
+          setCatalog(failed);
         }
       });
-    return () => abort.abort();
-  }, [catalog, client, detail.app.id, open, workspaceId]);
+    return () => {
+      abort.abort();
+      if (!settled) {
+        catalogRef.current = null;
+        setCatalog(null);
+      }
+    };
+  }, [client, detail.app.id, open, workspaceId]);
 
   const availableKeys = useMemo(
     () =>
@@ -484,7 +503,10 @@ function AppToolPolicyEditor({
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setCatalog(null)}
+                onClick={() => {
+                  catalogRef.current = null;
+                  setCatalog(null);
+                }}
                 className="pointer-coarse:min-h-11"
               >
                 Retry
@@ -664,6 +686,7 @@ function AppReleaseManager({
   client,
   onRefresh,
   canPublish,
+  canRun,
   canDelete,
 }: {
   workspaceId: string;
@@ -674,6 +697,7 @@ function AppReleaseManager({
   >;
   onRefresh: () => Promise<void>;
   canPublish: boolean;
+  canRun: boolean;
   canDelete: boolean;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -852,7 +876,7 @@ function AppReleaseManager({
                   <p className="mt-1 text-xs text-fg-muted">
                     {formatCount(release.fileCount)} files · {formatDate(release.createdAt)}
                   </p>
-                  {previewUrls[release.id] ? (
+                  {canRun && previewUrls[release.id] ? (
                     <a
                       href={previewUrls[release.id]}
                       target="_blank"
@@ -862,7 +886,7 @@ function AppReleaseManager({
                       Open preview
                     </a>
                   ) : null}
-                  {activePreviews.length > 0 ? (
+                  {canRun && activePreviews.length > 0 ? (
                     <div className="mt-2 grid max-h-28 gap-1 overflow-y-auto overscroll-contain pr-1 text-xs">
                       {activePreviews.map((preview) => (
                         <div
@@ -1004,6 +1028,7 @@ export function AppManagementPanel({
           client={client}
           onRefresh={onRefresh}
           canPublish={access.publish}
+          canRun={access.run}
           canDelete={access.delete}
         />
       ) : (
@@ -1106,6 +1131,7 @@ export function AppManagementPanel({
           client={client}
           onRefresh={onRefresh}
           canPublish={access.publish}
+          canRun={access.run}
           canDelete={access.delete}
         />
       ) : null}

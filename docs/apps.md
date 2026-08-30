@@ -142,6 +142,30 @@ Apps must preserve the launch-token path prefix themselves:
 These rules are release-readiness requirements. A bundle that only works after
 the origin mutates its bytes is not launchable.
 
+## Launch and object lifecycle
+
+The database keeps compact launch rows as audit truth, but the private
+App-host route/file projection is serving state rather than permanent history.
+Each fresh launch transaction revokes and removes up to eight expired route
+mirrors in the same workspace before inserting the new route. Revocation,
+unpublication, archive, and workspace deletion also remove their applicable
+route mirrors synchronously.
+
+Object deletion is asynchronous and idempotent. Archive and workspace deletion
+persist every source, manifest, and build-file key in the Apps cleanup outbox
+before their database inventory can disappear. Source or build uploads that
+remain in `uploading` or `verifying` for 24 hours are terminally expired/failed
+and enqueue the same cleanup ownership. Every row waits at least the 15-minute
+signed-PUT lifetime before it can be claimed, preventing a stale upload URL
+from recreating a staging key after provider deletion.
+
+Any API replica with object storage configured runs the bounded cleanup pump.
+Claims are exact-owner fenced, provider deletes are idempotent, successful
+settlement removes the row, and failures release it with bounded exponential
+backoff. The global maintenance routines use a private, transaction-local
+capability to cross FORCE RLS; the runtime role can execute the narrow routines
+but has no direct access to the capability table and cannot mint that token.
+
 ## Helm deployment
 
 The chart keeps `appHost.enabled=false` by default. A typical dedicated-origin
@@ -160,6 +184,12 @@ appHost:
         hosts:
           - "*.apps.example.com"
 ```
+
+When `appHost.image.repository` is empty (the default), the workload inherits
+the complete `api.image` object, including repository, tag, digest, and pull
+policy. This keeps an API digest pin intact for the matching App-host process.
+Set a non-empty App-host repository only when intentionally deploying a
+separate image identity.
 
 Provision wildcard DNS and TLS separately, then configure the Apps control
 plane with a matching dedicated HTTPS origin template such as

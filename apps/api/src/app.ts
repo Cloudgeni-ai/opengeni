@@ -834,6 +834,7 @@ export function createAppComposition(deps: AppDependencies): {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
+        apps: { enabled: deps.settings.appsEnabled },
         voiceInput: {
           available: (await transcription?.available()) ?? false,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,

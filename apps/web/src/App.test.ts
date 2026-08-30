@@ -12,6 +12,7 @@ import {
   buildApiKeyPermissionGroups,
   buildSessionMcpPermissionGroups,
   delegableApiKeyPermissions,
+  hasDirectHumanWorkspacePermission,
   hasWorkspacePermission,
 } from "./lib/permissions";
 import {
@@ -1076,6 +1077,56 @@ describe("api key permission options", () => {
     expect(hasWorkspacePermission(context, "workspace", "secrets:read")).toBe(false);
     context.workspaceGrants[0]!.permissions.push("secrets:read");
     expect(hasWorkspacePermission(context, "workspace", "secrets:read")).toBe(true);
+  });
+
+  test("Apps current-human checks accept canonical local dev grants and reject delegated shapes", () => {
+    const context: AccessContext = {
+      mode: "local",
+      subjectId: "dev",
+      accountGrants: [],
+      workspaceGrants: [
+        {
+          accountId: "account",
+          workspaceId: "workspace",
+          subjectId: "dev",
+          permissions: ["apps:read"],
+          principalKind: "human_session",
+        },
+      ],
+      defaultAccountId: "account",
+      defaultWorkspaceId: "workspace",
+    };
+    expect(hasDirectHumanWorkspacePermission(context, null, "workspace", "apps:read")).toBe(true);
+    context.workspaceGrants[0]!.metadata = { delegated: true };
+    expect(hasDirectHumanWorkspacePermission(context, null, "workspace", "apps:read")).toBe(false);
+    context.workspaceGrants[0]!.metadata = {};
+    context.workspaceGrants[0]!.serviceInitiator = { kind: "service", subjectId: "test" };
+    expect(hasDirectHumanWorkspacePermission(context, null, "workspace", "apps:read")).toBe(false);
+  });
+
+  test("Apps current-human checks require the authenticated managed subject", () => {
+    const context: AccessContext = {
+      mode: "managed",
+      subjectId: "user:one",
+      accountGrants: [],
+      workspaceGrants: [
+        {
+          accountId: "account",
+          workspaceId: "workspace",
+          subjectId: "user:one",
+          permissions: ["apps:read"],
+          principalKind: "human_session",
+        },
+      ],
+      defaultAccountId: "account",
+      defaultWorkspaceId: "workspace",
+    };
+    expect(hasDirectHumanWorkspacePermission(context, "user:one", "workspace", "apps:read")).toBe(
+      true,
+    );
+    expect(hasDirectHumanWorkspacePermission(context, "user:two", "workspace", "apps:read")).toBe(
+      false,
+    );
   });
 
   test("non-admin grants can only delegate their own permissions", () => {

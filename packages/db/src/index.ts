@@ -3361,6 +3361,33 @@ export async function deleteWorkspaceIfQuiescent(
           });
 
           const externalCleanupStartedAt = performance.now();
+          // Persist every Apps object key before the workspace cascade removes
+          // its inventory. The outbox has no parent FK and delays provider
+          // deletion for one signed-upload TTL, preventing a stale PUT from
+          // recreating a staging key after cleanup.
+          await tx.execute(sql`
+            insert into app_object_cleanup_outbox (
+              account_id, workspace_id, app_id, object_key, reason,
+              not_before, next_attempt_at
+            )
+            select objects.account_id, objects.workspace_id, objects.app_id,
+              objects.object_key, 'workspace_delete',
+              clock_timestamp() + interval '15 minutes',
+              clock_timestamp() + interval '15 minutes'
+            from (
+              select account_id, workspace_id, app_id, staging_object_key as object_key
+                from app_source_revisions where workspace_id = ${input.workspaceId}
+              union select account_id, workspace_id, app_id, frozen_object_key
+                from app_source_revisions where workspace_id = ${input.workspaceId}
+              union select account_id, workspace_id, app_id, manifest_object_key
+                from app_builds where workspace_id = ${input.workspaceId}
+              union select account_id, workspace_id, app_id, staging_object_key
+                from app_build_files where workspace_id = ${input.workspaceId}
+              union select account_id, workspace_id, app_id, frozen_object_key
+                from app_build_files where workspace_id = ${input.workspaceId}
+            ) objects
+            on conflict (object_key) do nothing
+          `);
           const schedules = await tx
             .select({
               temporalScheduleId: schema.scheduledTasks.temporalScheduleId,

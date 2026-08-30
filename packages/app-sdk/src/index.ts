@@ -1,3 +1,5 @@
+import { WORKSPACE_APP_RUNTIME_MESSAGE_MAX_BYTES } from "@opengeni/contracts/apps";
+
 export const OG_APP_BRIDGE_PROTOCOL = "opengeni.app-bridge.v1" as const;
 
 export type OgJsonPrimitive = string | number | boolean | null;
@@ -54,6 +56,11 @@ type OgBridgeConnectMessage = {
   protocol: typeof OG_APP_BRIDGE_PROTOCOL;
   kind: "connect";
   token: string;
+};
+
+type OgBridgeAppReadyMessage = {
+  protocol: typeof OG_APP_BRIDGE_PROTOCOL;
+  kind: "app_ready";
 };
 
 type OgBridgeReadyMessage = {
@@ -131,7 +138,7 @@ export type OgAppHostBridge = {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_PENDING_REQUESTS = 32;
 const MAX_JSON_DEPTH = 64;
-const MAX_BRIDGE_MESSAGE_BYTES = 1024 * 1024;
+const MAX_BRIDGE_MESSAGE_BYTES = WORKSPACE_APP_RUNTIME_MESSAGE_MAX_BYTES;
 const MAX_CAPABILITY_CHARS = 8 * 128 + 7;
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{16,256}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -664,6 +671,13 @@ export async function connectOgApp(
       reject(new OgAppBridgeError("bridge_timeout", "The OpenGeni host did not connect."));
     }, timeoutMs);
     appWindow.addEventListener("message", listener as EventListener);
+    const appReady: OgBridgeAppReadyMessage = {
+      protocol: OG_APP_BRIDGE_PROTOCOL,
+      kind: "app_ready",
+    };
+    // This carries no authority or token. The broker validates the exact child
+    // WindowProxy and origin before using it to release the private port.
+    appWindow.parent.postMessage(appReady, "*");
   });
 }
 

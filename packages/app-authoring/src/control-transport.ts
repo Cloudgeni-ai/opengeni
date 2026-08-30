@@ -102,6 +102,15 @@ function route(
       mutation: true,
     };
   }
+  if (operation === "apps.update") {
+    const value = input as OpenGeniAppsControlOperationMap["apps.update"]["input"];
+    return {
+      method: "PATCH",
+      path: `${appsBase(value.workspaceId)}/${segment(value.appId)}`,
+      body: value.request,
+      mutation: true,
+    };
+  }
   if (operation === "apps.toolPolicy.create") {
     const value = input as OpenGeniAppsControlOperationMap["apps.toolPolicy.create"]["input"];
     return {
@@ -135,6 +144,13 @@ function route(
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/source-revisions/${segment(value.sourceRevisionId)}/complete`,
       body: value.request,
       mutation: true,
+    };
+  }
+  if (operation === "apps.source.download") {
+    const value = input as OpenGeniAppsControlOperationMap["apps.source.download"]["input"];
+    return {
+      method: "GET",
+      path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/source-revisions/${segment(value.sourceRevisionId)}/download`,
     };
   }
   if (operation === "apps.build.prepare") {
@@ -186,6 +202,50 @@ function route(
       method: "POST",
       path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/publish`,
       body: value.request,
+      mutation: true,
+    };
+  }
+  if (
+    operation === "apps.rollback" ||
+    operation === "apps.unpublish" ||
+    operation === "apps.archive"
+  ) {
+    const value = input as { workspaceId: string; appId: string; request: unknown };
+    return {
+      method: "POST",
+      path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/${operation.slice("apps.".length)}`,
+      body: value.request,
+      mutation: true,
+    };
+  }
+  if (operation === "apps.runtime.catalog") {
+    const value = input as OpenGeniAppsControlOperationMap["apps.runtime.catalog"]["input"];
+    return {
+      method: "GET",
+      path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/runtime/catalog${query({ releaseId: value.releaseId })}`,
+    };
+  }
+  if (operation === "apps.launch.create") {
+    const value = input as OpenGeniAppsControlOperationMap["apps.launch.create"]["input"];
+    return {
+      method: "POST",
+      path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/launches`,
+      body: value.request,
+      mutation: true,
+    };
+  }
+  if (operation === "apps.runtime.tool.call") {
+    const value = input as OpenGeniAppsControlOperationMap["apps.runtime.tool.call"]["input"];
+    return {
+      method: "POST",
+      path: `${appsBase(value.workspaceId)}/${segment(value.appId)}/runtime/tool-calls`,
+      body: value.request,
+      headers: {
+        "x-opengeni-app-release-id": value.releaseId,
+        "x-opengeni-app-launch-id": value.launchId,
+        "x-opengeni-app-authority-generation": value.authorityGeneration,
+        "x-opengeni-app-launch-nonce": value.launchNonce,
+      },
       mutation: true,
     };
   }

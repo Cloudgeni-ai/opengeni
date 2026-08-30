@@ -1,13 +1,17 @@
 # `@opengeni/app-sdk`
 
-Typed, dependency-free browser bridge for OpenGeni Apps running in a sandboxed
-iframe.
+Typed browser bridge for OpenGeni Apps running in a sandboxed iframe.
 
 The host creates a `MessageChannel`, transfers exactly one port to the app, and
 binds that channel to an unpredictable run token. The iframe never receives a
 parent DOM handle, browser storage, OpenGeni credentials, or a general-purpose
 `postMessage` listener after connection. Capability calls are rejected locally
 unless the human confirmed that capability for the current run.
+
+The app first emits a non-secret readiness message after installing its
+listener. The stock broker validates the exact child window and App origin,
+then transfers the private port. This keeps late SDK initialization reliable
+without exposing the launch token on ambient window messaging.
 
 Hosts must choose an explicit bridge delivery mode. Exact-origin frames use an
 HTTP(S) origin. Opaque sandbox frames use the dedicated `opaque_sandbox` mode,

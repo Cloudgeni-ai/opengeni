@@ -60,9 +60,10 @@ const expectedAppOrigin=${scriptJson(declaredAppOrigin)};
 const frame=document.getElementById("app");
 let connected=false;
 let loaded=false;
+let appReady=false;
 let pending=null;
 function deliver(){
-  if(!loaded||!pending||!frame.contentWindow)return;
+  if(!loaded||!appReady||!pending||!frame.contentWindow)return;
   const next=pending;
   pending=null;
   frame.contentWindow.postMessage(next.message,expectedAppOrigin,[next.port]);
@@ -70,6 +71,11 @@ function deliver(){
 frame.addEventListener("load",()=>{loaded=true;deliver()},{once:true});
 window.addEventListener("message",event=>{
   const message=event.data;
+  if(event.source===frame.contentWindow&&event.origin===expectedAppOrigin&&message&&message.protocol===protocol&&message.kind==="app_ready"){
+    appReady=true;
+    deliver();
+    return;
+  }
   if(connected||event.source!==parent||event.origin!==expectedParentOrigin||!message||message.protocol!==protocol||message.kind!=="connect"||event.ports.length!==1)return;
   connected=true;
   pending={message,port:event.ports[0]};

@@ -4,6 +4,10 @@
 {{- $credentialsSecret := default (include "opengeni.secretName" .) $appHost.credentialsSecret }}
 {{- $storageBackend := default "s3-compatible" (index .Values.config "OPENGENI_OBJECT_STORAGE_BACKEND") }}
 {{- $resolverUrl := $appHost.resolverUrl }}
+{{- $appHostImage := $appHost.image }}
+{{- if not $appHost.image.repository }}
+{{- $appHostImage = .Values.api.image }}
+{{- end }}
 {{- if and (not $resolverUrl) .Values.api.enabled }}
 {{- $resolverUrl = printf "http://%s-api:%d/internal/apps/resolve-launch" (include "opengeni.fullname" .) (.Values.api.service.port | int) }}
 {{- end }}
@@ -56,8 +60,8 @@ spec:
       {{- end }}
       containers:
         - name: app-host
-          image: {{ include "opengeni.image" (dict "root" . "image" $appHost.image) | quote }}
-          imagePullPolicy: {{ $appHost.image.pullPolicy }}
+          image: {{ include "opengeni.image" (dict "root" . "image" $appHostImage) | quote }}
+          imagePullPolicy: {{ $appHostImage.pullPolicy }}
           command:
             {{- toYaml $appHost.command | nindent 12 }}
           securityContext:

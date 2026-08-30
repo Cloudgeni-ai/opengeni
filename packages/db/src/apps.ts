@@ -1119,6 +1119,73 @@ export async function settleArchivedAppGc(
   );
 }
 
+export type AppObjectCleanupClaim = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  appId: string;
+  objectKey: string;
+  reason: "archive" | "workspace_delete" | "abandoned_source" | "abandoned_build";
+  claimId: string;
+  attemptCount: number;
+};
+
+/** Expire a bounded batch of uploads that never reached a terminal receipt. */
+export async function reapAbandonedAppUploads(
+  db: Database,
+  input: { limit?: number } = {},
+): Promise<number> {
+  const [row] = await rawRows<{ reaped: number }>(
+    db,
+    sql`select reap_abandoned_app_uploads_command(${input.limit ?? 32}) as reaped`,
+  );
+  return row?.reaped ?? 0;
+}
+
+/** Claim a globally bounded batch after delayed/stale claims become due. */
+export async function claimAppObjectCleanups(
+  db: Database,
+  input: { claimId: string; limit?: number; claimSeconds?: number },
+): Promise<AppObjectCleanupClaim[]> {
+  const rows = await rawRows<{
+    id: string;
+    account_id: string;
+    workspace_id: string;
+    app_id: string;
+    object_key: string;
+    reason: AppObjectCleanupClaim["reason"];
+    attempt_count: number;
+  }>(
+    db,
+    sql`select * from claim_app_object_cleanups(
+      ${input.claimId}, ${input.limit ?? 32}, ${input.claimSeconds ?? 15}
+    )`,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    appId: row.app_id,
+    objectKey: row.object_key,
+    reason: row.reason,
+    claimId: input.claimId,
+    attemptCount: row.attempt_count,
+  }));
+}
+
+export async function settleAppObjectCleanup(
+  db: Database,
+  input: { id: string; claimId: string; error?: string | null },
+): Promise<boolean> {
+  const [row] = await rawRows<{ settled: boolean }>(
+    db,
+    sql`select settle_app_object_cleanup(
+      ${input.id}, ${input.claimId}, ${input.error ?? null}
+    ) as settled`,
+  );
+  return row?.settled === true;
+}
+
 export async function createAppLaunch(
   db: Database,
   input: {

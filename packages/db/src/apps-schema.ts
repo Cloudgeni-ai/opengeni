@@ -38,6 +38,11 @@ export type AppPreviewStatus = "active" | "expired" | "revoked";
 export type AppPublicationStatus = "active" | "retired";
 export type AppLaunchStatus = "active" | "revoked";
 export type AppToolCallStatus = "pending" | "succeeded" | "failed";
+export type AppObjectCleanupReason =
+  | "archive"
+  | "workspace_delete"
+  | "abandoned_source"
+  | "abandoned_build";
 
 export const apps = pgTable(
   "apps",
@@ -117,6 +122,9 @@ export const appSourceRevisions = pgTable(
       table.appId,
       table.createdAt,
     ),
+    abandonedUpload: index("app_source_revisions_abandoned_upload_idx")
+      .on(table.createdAt, table.id)
+      .where(sql`${table.status} in ('uploading', 'verifying')`),
   }),
 );
 
@@ -223,6 +231,9 @@ export const appBuilds = pgTable(
       table.appId,
       table.createdAt,
     ),
+    abandonedUpload: index("app_builds_abandoned_upload_idx")
+      .on(table.createdAt, table.id)
+      .where(sql`${table.status} in ('uploading', 'verifying')`),
   }),
 );
 
@@ -601,6 +612,48 @@ export const appObjectTombstones = pgTable(
       table.workspaceId,
       table.claimId,
       table.objectKey,
+    ),
+  }),
+);
+
+/** Survives workspace/App cascades until the provider delete is acknowledged. */
+export const appObjectCleanupOutbox = pgTable(
+  "app_object_cleanup_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    appId: uuid("app_id").notNull(),
+    objectKey: text("object_key").notNull(),
+    reason: text("reason").$type<AppObjectCleanupReason>().notNull(),
+    notBefore: timestamp("not_before", { withTimezone: true }).notNull(),
+    claimId: uuid("claim_id"),
+    claimUntil: timestamp("claim_until", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull(),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    object: uniqueIndex("app_object_cleanup_outbox_object_uq").on(table.objectKey),
+    due: index("app_object_cleanup_outbox_due_idx").on(
+      table.nextAttemptAt,
+      table.notBefore,
+      table.claimUntil,
+      table.id,
+    ),
+    reasonValid: check(
+      "app_object_cleanup_outbox_reason_chk",
+      sql`${table.reason} in ('archive', 'workspace_delete', 'abandoned_source', 'abandoned_build')`,
+    ),
+    valid: check(
+      "app_object_cleanup_outbox_valid_chk",
+      sql`length(${table.objectKey}) between 1 and 2048
+        and ${table.attemptCount} >= 0
+        and ((${table.claimId} is null and ${table.claimUntil} is null)
+          or (${table.claimId} is not null and ${table.claimUntil} is not null))
+        and (${table.lastError} is null or length(${table.lastError}) <= 2000)`,
     ),
   }),
 );

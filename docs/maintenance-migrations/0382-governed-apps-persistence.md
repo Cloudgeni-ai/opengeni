@@ -6,6 +6,14 @@ governed OpenGeni Apps. It is maintenance-only because a pre-0382 API or worker
 rejects the new protected tables during its runtime-posture startup and
 readiness checks.
 
+The same cutover installs durable Apps object-cleanup ownership and the private
+transaction capability used by its global FORCE-RLS maintenance routines.
+Archive and workspace deletion preserve object keys before cascade, abandoned
+uploads become terminal after 24 hours, and provider deletion is delayed for
+one 15-minute signed-upload lifetime. After restart, at least one API replica
+must have the deployment's object-storage configuration so the bounded cleanup
+pump can claim and settle those rows.
+
 Before applying the migration, stop and drain every API, control-plane worker,
 and turn worker connected through any configured application database role.
 Pass the exact role list through

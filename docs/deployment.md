@@ -520,6 +520,14 @@ image or attempt a mixed-version rollback; remain in maintenance and fix
 forward. Existing `workspace_artifacts` rows and published HTML remain
 unchanged.
 
+The matching API generation also owns Apps object cleanup. Archive, workspace
+deletion, and uploads abandoned for 24 hours enqueue exact object keys; claims
+wait one 15-minute signed-PUT lifetime and retry provider failures with bounded
+backoff. Keep object storage configured on at least one API replica after the
+cutover. The private maintenance capability crosses Apps FORCE RLS only inside
+the migration-owned claim/reap/settle routines and is not directly writable by
+the runtime role.
+
 ### Browser login session-set rollout (0362)
 
 `0362_managed_auth_session_sets.sql` is rolling and deliberately activation-free.

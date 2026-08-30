@@ -456,6 +456,94 @@ describe("Apps management product surface", () => {
     }
   });
 
+  test("retries the tool catalog after a disclosure closes during loading", async () => {
+    const firstCatalog = deferred<never>();
+    const getAvailableRuntimeCatalog = mock(async () => {
+      if (getAvailableRuntimeCatalog.mock.calls.length === 1) return firstCatalog.promise;
+      return {
+        appId: APP_ID,
+        catalogDigest: SHA256,
+        tools: [],
+      };
+    });
+    const rendered = await render(
+      <AppsRoute
+        workspaceId={WORKSPACE_ID}
+        appId={APP_ID}
+        client={{ getApp: async () => detail(), getAvailableRuntimeCatalog } as never}
+      />,
+    );
+
+    try {
+      const disclosure = () =>
+        [...rendered.container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) =>
+          candidate.textContent?.includes("Allowed tools"),
+        )!;
+      await act(async () => disclosure().click());
+      await settle();
+      expect(getAvailableRuntimeCatalog).toHaveBeenCalledTimes(1);
+      expect(rendered.container.textContent).toContain("Loading available tools");
+
+      await act(async () => disclosure().click());
+      await settle();
+      await act(async () => disclosure().click());
+      await settle();
+
+      expect(getAvailableRuntimeCatalog).toHaveBeenCalledTimes(2);
+      expect(rendered.container.textContent).toContain("No App-safe tools are available");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("does not expose preview launch links without Apps run permission", async () => {
+    const current = detail();
+    current.previews = [
+      {
+        id: PREVIEW_ID,
+        accountId: ACCOUNT_ID,
+        workspaceId: WORKSPACE_ID,
+        appId: APP_ID,
+        releaseId: RELEASE_1_ID,
+        status: "active",
+        createdBySubjectId: "subject-1",
+        createdAt: NOW,
+        expiresAt: "2099-08-30T13:00:00.000Z",
+        revokedAt: null,
+      },
+    ];
+    const createPreview = mock(async () => ({
+      preview: current.previews[0]!,
+      url: "https://preview.example.test/release-1",
+      replayed: false,
+    }));
+    const rendered = await render(
+      <AppsRoute
+        workspaceId={WORKSPACE_ID}
+        appId={APP_ID}
+        client={{ getApp: async () => current, createPreview } as never}
+        access={{ read: true, write: true, publish: true, run: false, delete: true }}
+      />,
+    );
+
+    try {
+      expect(rendered.container.textContent).not.toContain("Open active preview");
+      await act(async () =>
+        rendered.container
+          .querySelector<HTMLButtonElement>('button[aria-label="Create preview for release 1"]')!
+          .click(),
+      );
+      await settle();
+      expect(createPreview).toHaveBeenCalledTimes(1);
+      expect(rendered.container.textContent).not.toContain("Open preview");
+      expect(
+        rendered.container.querySelector('a[href="https://preview.example.test/release-1"]'),
+      ).toBeNull();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("chooses rollback only for an older release than the active one", () => {
     const current = detail();
     expect(releaseMutationKind(current, current.releases[0]!)).toBe("rollback");

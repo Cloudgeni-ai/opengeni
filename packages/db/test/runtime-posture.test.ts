@@ -327,6 +327,7 @@ function appLifecycleAuthorityTables(): RuntimeTablePosture[] {
     "app_gc_claims",
     "app_launches",
     "app_lifecycle_operations",
+    "app_object_cleanup_outbox",
     "app_object_tombstones",
     "app_previews",
     "app_publications",
@@ -592,26 +593,26 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 322],
+            [FORCE_RLS_TABLES, 323],
             [NON_RLS_RUNTIME_TABLES, 13],
             [RUNTIME_FULL_DML_TABLES, 153],
             [RUNTIME_READ_ONLY_TABLES, 31],
             [readUpdateTables, 1],
-            [RUNTIME_READ_INSERT_TABLES, 46],
+            [RUNTIME_READ_INSERT_TABLES, 47],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
             [PROTECTED_NO_DIRECT_DML_TABLES, 72],
-            [RUNTIME_DML_TABLES, 263],
+            [RUNTIME_DML_TABLES, 264],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 205],
+            [FORCE_RLS_TABLES, 206],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 119],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 0],
-            [RUNTIME_READ_INSERT_TABLES, 38],
+            [RUNTIME_READ_INSERT_TABLES, 39],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 30],
-            [RUNTIME_DML_TABLES, 186],
+            [RUNTIME_DML_TABLES, 187],
           ] as const);
       for (const [tables, length] of contracts) {
         const expectedLength =
@@ -627,7 +628,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 335 : 216;
+      const tableCount = hasCurrentMainActivityLedger ? 336 : 217;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
@@ -1036,6 +1037,13 @@ describe("runtime database posture evaluator", () => {
     )!.owner = "another_owner";
     expect(evaluateRuntimeDatabasePosture(splitRoutine, options)).toContain(
       "target-schema runtime capability create_workspace_app_command(jsonb) owner another_owner does not match authority table owner opengeni_migrator",
+    );
+
+    const splitCleanup = safePosture();
+    splitCleanup.tables.find((table) => table.name === "app_object_cleanup_outbox")!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(splitCleanup, options)).toContain(
+      "target-schema runtime capability reap_abandoned_app_uploads_command(integer) owner opengeni_migrator does not match cleanup authority table owner another_owner",
     );
   });
 

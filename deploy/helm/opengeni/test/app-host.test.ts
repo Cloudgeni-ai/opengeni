@@ -20,8 +20,11 @@ describe("dedicated Apps origin chart contract", () => {
 
     const appHostValues = values.slice(values.indexOf("appHost:"), values.indexOf("\nworker:"));
     expect(values).toContain("appHost:\n  enabled: false");
+    expect(appHostValues).toContain('repository: ""');
     expect(values).toContain("apps/app-host/dist/process/process.js");
     expect(deployment).toContain("app.kubernetes.io/component: app-host");
+    expect(deployment).toContain("$appHostImage = .Values.api.image");
+    expect(deployment).toContain('"image" $appHostImage');
     expect(deployment).toContain("automountServiceAccountToken: false");
     expect(appHostValues).toContain("readOnlyRootFilesystem: true");
     expect(appHostValues).toContain("runAsUser: 10001");

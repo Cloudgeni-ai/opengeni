@@ -263,7 +263,9 @@ appHost:
       maxSurge: 1
       maxUnavailable: 0
   image:
-    repository: opengeni-api
+    # Empty repository inherits the complete api.image repository/tag/digest
+    # pin. Set a repository to opt into a complete App Host-specific override.
+    repository: ""
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent

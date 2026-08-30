@@ -182,6 +182,9 @@ CREATE TABLE app_source_revisions (
 );
 CREATE INDEX app_source_revisions_app_created_idx
   ON app_source_revisions(workspace_id, app_id, created_at DESC, id DESC);
+CREATE INDEX app_source_revisions_abandoned_upload_idx
+  ON app_source_revisions(created_at, id)
+  WHERE status IN ('uploading', 'verifying');
 
 ALTER TABLE app_source_revisions
   ADD CONSTRAINT app_source_revisions_source_session_fk
@@ -292,6 +295,9 @@ CREATE TABLE app_builds (
 );
 CREATE INDEX app_builds_app_created_idx
   ON app_builds(workspace_id, app_id, created_at DESC, id DESC);
+CREATE INDEX app_builds_abandoned_upload_idx
+  ON app_builds(created_at, id)
+  WHERE status IN ('uploading', 'verifying');
 
 CREATE TABLE app_build_files (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -639,6 +645,70 @@ CREATE TABLE app_object_tombstones (
   CONSTRAINT app_object_tombstones_key_chk CHECK (length(object_key) BETWEEN 1 AND 2048)
 );
 
+-- Durable object deletion ownership. Deliberately no account/workspace/App FK:
+-- these rows must survive a workspace cascade. Each key waits at least one
+-- signed-upload TTL before it can be claimed, so a stale PUT cannot recreate a
+-- staging object after successful cleanup.
+CREATE TABLE app_object_cleanup_outbox (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  app_id uuid NOT NULL,
+  object_key text NOT NULL,
+  reason text NOT NULL,
+  not_before timestamptz NOT NULL,
+  claim_id uuid,
+  claim_until timestamptz,
+  attempt_count integer NOT NULL DEFAULT 0,
+  next_attempt_at timestamptz NOT NULL,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT app_object_cleanup_outbox_object_uq UNIQUE (object_key),
+  CONSTRAINT app_object_cleanup_outbox_reason_chk CHECK (
+    reason IN ('archive', 'workspace_delete', 'abandoned_source', 'abandoned_build')
+  ),
+  CONSTRAINT app_object_cleanup_outbox_valid_chk CHECK (
+    length(object_key) BETWEEN 1 AND 2048
+    AND attempt_count >= 0
+    AND ((claim_id IS NULL AND claim_until IS NULL)
+      OR (claim_id IS NOT NULL AND claim_until IS NOT NULL))
+    AND (last_error IS NULL OR length(last_error) <= 2000)
+  )
+);
+CREATE INDEX app_object_cleanup_outbox_due_idx
+  ON app_object_cleanup_outbox(next_attempt_at, not_before, claim_until, id);
+
+-- A non-bypass table owner is still subject to FORCE RLS inside SECURITY
+-- DEFINER routines. Mint a transaction-local, unforgeable maintenance token
+-- only while an exact cleanup routine is scanning or settling Apps rows.
+CREATE TABLE opengeni_private.app_maintenance_capabilities (
+  backend_pid integer NOT NULL,
+  transaction_id xid8 NOT NULL,
+  capability_id uuid NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT app_maintenance_capabilities_pk
+    PRIMARY KEY (backend_pid, transaction_id, capability_id)
+);
+REVOKE ALL ON TABLE opengeni_private.app_maintenance_capabilities FROM PUBLIC;
+
+CREATE FUNCTION opengeni_private.app_maintenance_capability_active()
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog
+AS $body$
+  SELECT EXISTS (
+    SELECT 1
+    FROM opengeni_private.app_maintenance_capabilities capability
+    WHERE capability.backend_pid = pg_backend_pid()
+      AND capability.transaction_id = pg_current_xact_id_if_assigned()
+      AND capability.capability_id::text = nullif(
+        current_setting('opengeni.app_maintenance_capability', true), ''
+      )
+  )
+$body$;
+REVOKE ALL ON FUNCTION opengeni_private.app_maintenance_capability_active() FROM PUBLIC;
+
 -- Deliberately outside the tenant schema's table surface: the byte host gets
 -- one exact host+digest+path resolver and no direct access to this mirror.
 CREATE TABLE opengeni_private.app_host_routes (
@@ -684,14 +754,17 @@ BEGIN
   FOREACH table_name IN ARRAY ARRAY[
     'apps', 'app_source_revisions', 'app_tool_policy_revisions', 'app_builds',
     'app_build_files', 'app_releases', 'app_previews', 'app_publications', 'app_launches',
-    'app_tool_calls', 'app_lifecycle_operations', 'app_gc_claims', 'app_object_tombstones'
+    'app_tool_calls', 'app_lifecycle_operations', 'app_gc_claims', 'app_object_tombstones',
+    'app_object_cleanup_outbox'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', table_name);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', table_name);
     EXECUTE format(
       'CREATE POLICY workspace_isolation ON %I USING '
-      || '(opengeni_private.workspace_rls_visible(account_id, workspace_id)) WITH CHECK '
-      || '(opengeni_private.workspace_rls_visible(account_id, workspace_id))',
+      || '(opengeni_private.workspace_rls_visible(account_id, workspace_id) '
+      || 'OR opengeni_private.app_maintenance_capability_active()) WITH CHECK '
+      || '(opengeni_private.workspace_rls_visible(account_id, workspace_id) '
+      || 'OR opengeni_private.app_maintenance_capability_active())',
       table_name
     );
   END LOOP;
@@ -701,8 +774,14 @@ $apps_force_rls$;
 CREATE POLICY session_visibility_isolation
   ON app_source_revisions AS RESTRICTIVE
   FOR ALL
-  USING (session_reference_visible(account_id, workspace_id, source_session_id))
-  WITH CHECK (session_reference_visible(account_id, workspace_id, source_session_id));
+  USING (
+    session_reference_visible(account_id, workspace_id, source_session_id)
+    OR opengeni_private.app_maintenance_capability_active()
+  )
+  WITH CHECK (
+    session_reference_visible(account_id, workspace_id, source_session_id)
+    OR opengeni_private.app_maintenance_capability_active()
+  );
 
 CREATE FUNCTION opengeni_private.enforce_app_immutable_rows()
 RETURNS trigger
@@ -1341,6 +1420,26 @@ BEGIN
     UPDATE app_launches SET status = 'revoked', revoked_at = now_value
     WHERE workspace_id = workspace_id_value AND app_id = app_id_value AND status = 'active';
     DELETE FROM opengeni_private.app_host_routes WHERE app_id = app_id_value;
+    INSERT INTO app_object_cleanup_outbox (
+      account_id, workspace_id, app_id, object_key, reason,
+      not_before, next_attempt_at
+    )
+    SELECT account_id_value, workspace_id_value, app_id_value,
+      objects.object_key, 'archive', now_value + interval '15 minutes',
+      now_value + interval '15 minutes'
+    FROM (
+      SELECT staging_object_key AS object_key FROM app_source_revisions
+        WHERE workspace_id = workspace_id_value AND app_id = app_id_value
+      UNION SELECT frozen_object_key FROM app_source_revisions
+        WHERE workspace_id = workspace_id_value AND app_id = app_id_value
+      UNION SELECT manifest_object_key FROM app_builds
+        WHERE workspace_id = workspace_id_value AND app_id = app_id_value
+      UNION SELECT staging_object_key FROM app_build_files
+        WHERE workspace_id = workspace_id_value AND app_id = app_id_value
+      UNION SELECT frozen_object_key FROM app_build_files
+        WHERE workspace_id = workspace_id_value AND app_id = app_id_value
+    ) objects
+    ON CONFLICT (object_key) DO NOTHING;
     UPDATE apps SET status = 'archived', active_release_id = NULL,
       version = version + 1, updated_at = now_value
     WHERE workspace_id = workspace_id_value AND id = app_id_value
@@ -1492,6 +1591,29 @@ BEGIN
   WHERE workspace_id = workspace_id_value AND app_id = app_id_value
     AND id = release_row.build_id AND status = 'succeeded';
   IF NOT FOUND THEN RAISE EXCEPTION 'Succeeded App build not found' USING ERRCODE = 'P0002'; END IF;
+
+  -- Keep the heavy host-route mirror bounded without deleting compact launch
+  -- audit rows. Every fresh launch creates one route, while this reaps up to
+  -- eight expired routes in the same workspace under SKIP LOCKED coordination.
+  WITH expired_launches AS (
+    SELECT candidate.id
+    FROM app_launches candidate
+    WHERE candidate.workspace_id = workspace_id_value
+      AND candidate.status = 'active'
+      AND candidate.expires_at <= clock_timestamp()
+    ORDER BY candidate.expires_at, candidate.id
+    FOR UPDATE SKIP LOCKED
+    LIMIT 8
+  ), revoked_launches AS (
+    UPDATE app_launches expired
+    SET status = 'revoked', revoked_at = clock_timestamp()
+    FROM expired_launches candidate
+    WHERE expired.id = candidate.id
+    RETURNING expired.id
+  )
+  DELETE FROM opengeni_private.app_host_routes route
+  USING revoked_launches revoked
+  WHERE route.launch_id = revoked.id;
 
   INSERT INTO app_launches (
     id, account_id, workspace_id, app_id, release_id, preview_id, publication_id,
@@ -1845,6 +1967,226 @@ BEGIN
 END
 $body$;
 
+CREATE FUNCTION reap_abandoned_app_uploads_command(p_limit integer DEFAULT 32)
+RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  limit_value integer := greatest(1, least(coalesce(p_limit, 32), 100));
+  enqueued_count integer := 0;
+  affected_count integer := 0;
+  now_value timestamptz := clock_timestamp();
+  capability_id_value uuid := gen_random_uuid();
+  prior_capability_value text := current_setting('opengeni.app_maintenance_capability', true);
+BEGIN
+  INSERT INTO opengeni_private.app_maintenance_capabilities (
+    backend_pid, transaction_id, capability_id
+  ) VALUES (pg_backend_pid(), pg_current_xact_id(), capability_id_value);
+  PERFORM set_config(
+    'opengeni.app_maintenance_capability', capability_id_value::text, true
+  );
+
+  WITH stale_sources AS (
+    SELECT source.id
+    FROM app_source_revisions source
+    WHERE source.status IN ('uploading', 'verifying')
+      AND source.created_at <= now_value - interval '24 hours'
+    ORDER BY source.created_at, source.id
+    FOR UPDATE SKIP LOCKED
+    LIMIT limit_value
+  ), expired_sources AS (
+    UPDATE app_source_revisions source
+    SET status = 'expired', failure_code = 'upload_expired'
+    FROM stale_sources stale
+    WHERE source.id = stale.id
+    RETURNING source.account_id, source.workspace_id, source.app_id,
+      source.staging_object_key, source.frozen_object_key
+  ), objects AS (
+    SELECT account_id, workspace_id, app_id, staging_object_key AS object_key
+      FROM expired_sources
+    UNION
+    SELECT account_id, workspace_id, app_id, frozen_object_key
+      FROM expired_sources
+  )
+  INSERT INTO app_object_cleanup_outbox (
+    account_id, workspace_id, app_id, object_key, reason,
+    not_before, next_attempt_at
+  )
+  SELECT account_id, workspace_id, app_id, object_key, 'abandoned_source',
+    now_value + interval '15 minutes', now_value + interval '15 minutes'
+  FROM objects
+  ON CONFLICT (object_key) DO NOTHING;
+  GET DIAGNOSTICS affected_count = ROW_COUNT;
+  enqueued_count := enqueued_count + affected_count;
+
+  WITH stale_builds AS (
+    SELECT build.id
+    FROM app_builds build
+    WHERE build.status IN ('uploading', 'verifying')
+      AND build.created_at <= now_value - interval '24 hours'
+    ORDER BY build.created_at, build.id
+    FOR UPDATE SKIP LOCKED
+    LIMIT limit_value
+  ), expired_builds AS (
+    UPDATE app_builds build
+    SET status = 'failed', failure_code = 'upload_expired', verified_at = now_value
+    FROM stale_builds stale
+    WHERE build.id = stale.id
+    RETURNING build.id, build.account_id, build.workspace_id, build.app_id,
+      build.manifest_object_key
+  ), objects AS (
+    SELECT account_id, workspace_id, app_id, manifest_object_key AS object_key
+      FROM expired_builds
+    UNION
+    SELECT expired.account_id, expired.workspace_id, expired.app_id,
+      file.staging_object_key
+    FROM expired_builds expired
+    JOIN app_build_files file ON file.build_id = expired.id
+    UNION
+    SELECT expired.account_id, expired.workspace_id, expired.app_id,
+      file.frozen_object_key
+    FROM expired_builds expired
+    JOIN app_build_files file ON file.build_id = expired.id
+  )
+  INSERT INTO app_object_cleanup_outbox (
+    account_id, workspace_id, app_id, object_key, reason,
+    not_before, next_attempt_at
+  )
+  SELECT account_id, workspace_id, app_id, object_key, 'abandoned_build',
+    now_value + interval '15 minutes', now_value + interval '15 minutes'
+  FROM objects
+  ON CONFLICT (object_key) DO NOTHING;
+  GET DIAGNOSTICS affected_count = ROW_COUNT;
+  DELETE FROM opengeni_private.app_maintenance_capabilities capability
+  WHERE capability.backend_pid = pg_backend_pid()
+    AND capability.transaction_id = pg_current_xact_id()
+    AND capability.capability_id = capability_id_value;
+  PERFORM set_config(
+    'opengeni.app_maintenance_capability', coalesce(prior_capability_value, ''), true
+  );
+  RETURN enqueued_count + affected_count;
+END
+$body$;
+
+CREATE FUNCTION claim_app_object_cleanups(
+  p_claim_id uuid,
+  p_limit integer DEFAULT 32,
+  p_claim_seconds integer DEFAULT 15
+)
+RETURNS TABLE (
+  id uuid,
+  account_id uuid,
+  workspace_id uuid,
+  app_id uuid,
+  object_key text,
+  reason text,
+  attempt_count integer
+)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  capability_id_value uuid := gen_random_uuid();
+  prior_capability_value text := current_setting('opengeni.app_maintenance_capability', true);
+BEGIN
+  IF p_claim_id IS NULL THEN
+    RAISE EXCEPTION 'App object cleanup claim id is required' USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO opengeni_private.app_maintenance_capabilities (
+    backend_pid, transaction_id, capability_id
+  ) VALUES (pg_backend_pid(), pg_current_xact_id(), capability_id_value);
+  PERFORM set_config(
+    'opengeni.app_maintenance_capability', capability_id_value::text, true
+  );
+  RETURN QUERY
+    WITH due AS (
+      SELECT cleanup.id
+      FROM app_object_cleanup_outbox cleanup
+      WHERE cleanup.not_before <= clock_timestamp()
+        AND cleanup.next_attempt_at <= clock_timestamp()
+        AND (cleanup.claim_until IS NULL OR cleanup.claim_until <= clock_timestamp())
+      ORDER BY cleanup.next_attempt_at, cleanup.not_before, cleanup.created_at, cleanup.id
+      FOR UPDATE SKIP LOCKED
+      LIMIT greatest(1, least(coalesce(p_limit, 32), 100))
+    )
+    UPDATE app_object_cleanup_outbox cleanup
+    SET claim_id = p_claim_id,
+      claim_until = clock_timestamp() + make_interval(
+        secs => greatest(5, least(coalesce(p_claim_seconds, 15), 300))
+      ),
+      attempt_count = cleanup.attempt_count + 1,
+      updated_at = clock_timestamp()
+    FROM due
+    WHERE cleanup.id = due.id
+    RETURNING cleanup.id, cleanup.account_id, cleanup.workspace_id, cleanup.app_id,
+      cleanup.object_key, cleanup.reason, cleanup.attempt_count;
+  DELETE FROM opengeni_private.app_maintenance_capabilities capability
+  WHERE capability.backend_pid = pg_backend_pid()
+    AND capability.transaction_id = pg_current_xact_id()
+    AND capability.capability_id = capability_id_value;
+  PERFORM set_config(
+    'opengeni.app_maintenance_capability', coalesce(prior_capability_value, ''), true
+  );
+END
+$body$;
+
+CREATE FUNCTION settle_app_object_cleanup(
+  p_id uuid,
+  p_claim_id uuid,
+  p_error text
+)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  affected_count bigint := 0;
+  settled_value boolean := false;
+  capability_id_value uuid := gen_random_uuid();
+  prior_capability_value text := current_setting('opengeni.app_maintenance_capability', true);
+BEGIN
+  IF p_id IS NULL OR p_claim_id IS NULL THEN
+    RAISE EXCEPTION 'App object cleanup id and claim id are required' USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO opengeni_private.app_maintenance_capabilities (
+    backend_pid, transaction_id, capability_id
+  ) VALUES (pg_backend_pid(), pg_current_xact_id(), capability_id_value);
+  PERFORM set_config(
+    'opengeni.app_maintenance_capability', capability_id_value::text, true
+  );
+  IF p_error IS NULL THEN
+    DELETE FROM app_object_cleanup_outbox cleanup
+    WHERE cleanup.id = p_id AND cleanup.claim_id = p_claim_id;
+    GET DIAGNOSTICS affected_count = ROW_COUNT;
+    settled_value := affected_count = 1;
+  ELSE
+    UPDATE app_object_cleanup_outbox cleanup
+    SET claim_id = NULL,
+      claim_until = NULL,
+      next_attempt_at = clock_timestamp() + make_interval(
+        secs => least(
+          300,
+          greatest(1, power(2, least(cleanup.attempt_count - 1, 8))::integer)
+        )
+      ),
+      last_error = left(p_error, 2000),
+      updated_at = clock_timestamp()
+    WHERE cleanup.id = p_id AND cleanup.claim_id = p_claim_id;
+    GET DIAGNOSTICS affected_count = ROW_COUNT;
+    settled_value := affected_count = 1;
+  END IF;
+  DELETE FROM opengeni_private.app_maintenance_capabilities capability
+  WHERE capability.backend_pid = pg_backend_pid()
+    AND capability.transaction_id = pg_current_xact_id()
+    AND capability.capability_id = capability_id_value;
+  PERFORM set_config(
+    'opengeni.app_maintenance_capability', coalesce(prior_capability_value, ''), true
+  );
+  RETURN settled_value;
+END
+$body$;
+
 CREATE FUNCTION opengeni_private.resolve_app_host_launch(
   p_hostname text,
   p_launch_token_digest text,
@@ -1889,6 +2231,10 @@ REVOKE ALL ON FUNCTION app_launch_command(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app_tool_call_command(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION claim_archived_app_gc_command(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION settle_archived_app_gc_command(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION reap_abandoned_app_uploads_command(integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION claim_app_object_cleanups(uuid, integer, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION settle_app_object_cleanup(uuid, uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.app_maintenance_capability_active() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.resolve_app_host_launch(text, text, text) FROM PUBLIC;
 
 DO $apps_pin_and_grant$
@@ -1907,7 +2253,10 @@ BEGIN
     'publish_app_release_command(jsonb)', 'unpublish_workspace_app_command(jsonb)',
     'archive_workspace_app_command(jsonb)', 'app_launch_command(jsonb)',
     'app_tool_call_command(jsonb)', 'claim_archived_app_gc_command(jsonb)',
-    'settle_archived_app_gc_command(jsonb)'
+    'settle_archived_app_gc_command(jsonb)',
+    'reap_abandoned_app_uploads_command(integer)',
+    'claim_app_object_cleanups(uuid, integer, integer)',
+    'settle_app_object_cleanup(uuid, uuid, text)'
   ] LOOP
     EXECUTE format('ALTER FUNCTION %I.%s SET search_path = pg_catalog, %I, pg_temp', data_schema, routine_signature, data_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', data_schema, routine_signature);
@@ -1929,10 +2278,11 @@ BEGIN
       'REVOKE ALL PRIVILEGES ON TABLE %I.apps, %I.app_source_revisions, '
       || '%I.app_tool_policy_revisions, %I.app_builds, %I.app_build_files, %I.app_releases, '
       || '%I.app_previews, %I.app_publications, %I.app_launches, %I.app_tool_calls, '
-      || '%I.app_lifecycle_operations, %I.app_gc_claims, %I.app_object_tombstones FROM %I',
+      || '%I.app_lifecycle_operations, %I.app_gc_claims, %I.app_object_tombstones, '
+      || '%I.app_object_cleanup_outbox FROM %I',
       data_schema, data_schema, data_schema, data_schema, data_schema, data_schema,
       data_schema, data_schema, data_schema, data_schema, data_schema, data_schema,
-      data_schema, application_role
+      data_schema, data_schema, application_role
     );
     EXECUTE format(
       'GRANT SELECT ON TABLE %I.apps, %I.app_source_revisions, '
@@ -1940,6 +2290,18 @@ BEGIN
       || '%I.app_previews, %I.app_publications, %I.app_launches, %I.app_tool_calls TO %I',
       data_schema, data_schema, data_schema, data_schema, data_schema, data_schema,
       data_schema, data_schema, data_schema, data_schema, application_role
+    );
+    EXECUTE format(
+      'GRANT SELECT, INSERT ON TABLE %I.app_object_cleanup_outbox TO %I',
+      data_schema, application_role
+    );
+    EXECUTE format(
+      'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.app_maintenance_capabilities FROM %I',
+      application_role
+    );
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION opengeni_private.app_maintenance_capability_active() TO %I',
+      application_role
     );
     FOREACH routine_signature IN ARRAY ARRAY[
       'create_workspace_app_command(jsonb)', 'update_workspace_app_command(jsonb)',
@@ -1951,7 +2313,10 @@ BEGIN
       'publish_app_release_command(jsonb)', 'unpublish_workspace_app_command(jsonb)',
       'archive_workspace_app_command(jsonb)', 'app_launch_command(jsonb)',
       'app_tool_call_command(jsonb)', 'claim_archived_app_gc_command(jsonb)',
-      'settle_archived_app_gc_command(jsonb)'
+      'settle_archived_app_gc_command(jsonb)',
+      'reap_abandoned_app_uploads_command(integer)',
+      'claim_app_object_cleanups(uuid, integer, integer)',
+      'settle_app_object_cleanup(uuid, uuid, text)'
     ] LOOP
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', data_schema, routine_signature, application_role);
     END LOOP;
