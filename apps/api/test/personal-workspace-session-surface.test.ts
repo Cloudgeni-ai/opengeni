@@ -218,6 +218,7 @@ async function provisionManagedHuman(): Promise<ManagedHuman> {
 async function expectAllPersonalSessionSurfacesDenied(
   owner: ManagedHuman,
   headers: Record<string, string>,
+  expectedStatus = 403,
 ): Promise<void> {
   const sessionId = await seedSession(owner, owner.personalWorkspaceId);
   const json = { ...headers, "content-type": "application/json" };
@@ -226,13 +227,13 @@ async function expectAllPersonalSessionSurfacesDenied(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions`,
     { headers },
   );
-  expect(list.status).toBe(403);
+  expect(list.status).toBe(expectedStatus);
 
   const pin = await owner.app.request(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/pin`,
     { method: "PUT", headers: json, body: JSON.stringify({ pinned: true }) },
   );
-  expect(pin.status).toBe(403);
+  expect(pin.status).toBe(expectedStatus);
 
   const attention = await owner.app.request(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/attention`,
@@ -242,19 +243,19 @@ async function expectAllPersonalSessionSurfacesDenied(
       body: JSON.stringify({ unread: false, acknowledgedThroughSequence: 0 }),
     },
   );
-  expect(attention.status).toBe(403);
+  expect(attention.status).toBe(expectedStatus);
 
   const archive = await owner.app.request(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/sessions/${sessionId}/archive`,
     { method: "PUT", headers: json, body: JSON.stringify({ archived: true }) },
   );
-  expect(archive.status).toBe(403);
+  expect(archive.status).toBe(expectedStatus);
 
   const draft = await owner.app.request(
     `http://x/v1/workspaces/${owner.personalWorkspaceId}/new-session-draft`,
     { method: "PUT", headers: json, body: JSON.stringify(draftBody) },
   );
-  expect(draft.status).toBe(403);
+  expect(draft.status).toBe(expectedStatus);
 }
 
 /**
@@ -1304,11 +1305,11 @@ describe("the personal-workspace exception stays owner-only", () => {
     expect((await owner.app.request(listUrl, { headers })).status).toBe(200);
   }, 180_000);
 
-  test("an account-admin API key never reaches a personal workspace's session surface", async () => {
+  test("a revoked legacy account-admin API key never reaches a personal workspace's session surface", async () => {
     if (!shared || !client) return;
     const owner = await provisionManagedHuman();
     const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
-    await createApiKey(client.db, {
+    const apiKey = await createApiKey(client.db, {
       accountId: owner.accountId,
       workspaceId: null,
       name: "account admin",
@@ -1316,8 +1317,9 @@ describe("the personal-workspace exception stays owner-only", () => {
       keyHash: await sha256Hex(token),
       permissions: ["account:read", "account:admin"],
     });
+    expect(apiKey.revokedAt).not.toBeNull();
 
-    await expectAllPersonalSessionSurfacesDenied(owner, { authorization: `Bearer ${token}` });
+    await expectAllPersonalSessionSurfacesDenied(owner, { authorization: `Bearer ${token}` }, 401);
   }, 180_000);
 
   test("a delegated service initiator never reaches the personal workspace", async () => {
