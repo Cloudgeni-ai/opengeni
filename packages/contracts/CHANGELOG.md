@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 2.9.1
+
+### Patch Changes
+
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. Preserve the runtime 1.x legacy desktop API as a deprecated, fail-closed compatibility shell while removing its model-bound tools and automatic on-turn recording path. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+- 4bacdd3: Add fixed-scope organization API keys, idempotent external tenant workspace provisioning, Personal-workspace exclusion, and the matching SDK and integration guidance.
+
 ## 2.9.0
 
 ### Minor Changes

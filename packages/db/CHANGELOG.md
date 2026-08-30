@@ -1,5 +1,23 @@
 # @opengeni/db
 
+## 3.7.1
+
+### Patch Changes
+
+- c3b43a5: Expose bounded durable recovery-backlog metrics from every control worker and alert when closed recoverable attempts remain without active ownership or a settled session projection.
+- fab355b: Allocate canonical session event sequences from the locked narrow cursor while retaining the session-row compatibility projection.
+- e41285f: Overlap optional MCP preparation with first inference even when artifact tooling is enabled, keep optional eager integrations off the first-token critical path, reuse immutable large-history projections incrementally, and expose fenced event-append phase latency without changing durable ordering.
+- 1f289a0: Attach machine input that arrived during a structured human-input wait to the resumed logical turn after its open tool-call result, while leaving post-resume arrivals for the next turn.
+- fab355b: Add the rolling, parity-checked narrow session-event cursor foundation for a later sequencer cutover.
+- fab355b: Lock and parity-check each narrow session event cursor in the canonical event and control writer prefix before turn and attempt locks.
+- 4bacdd3: Add fixed-scope organization API keys, idempotent external tenant workspace provisioning, Personal-workspace exclusion, and the matching SDK and integration guidance.
+- 72de39c: Retain low-cardinality workspace deletion phase, inventory, and total transaction metrics with exact workspace identifiers confined to structured logs.
+- Updated dependencies [96624a7]
+- Updated dependencies [4bacdd3]
+  - @opengeni/config@0.22.4
+  - @opengeni/contracts@2.9.1
+  - @opengeni/codemode@0.4.21
+
 ## 3.7.0
 
 ### Minor Changes
