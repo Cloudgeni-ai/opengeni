@@ -1,4 +1,7 @@
-import { AppBuildManifest, type AppBuildManifest as AppBuildManifestType } from "@opengeni/contracts/apps";
+import {
+  AppBuildManifest,
+  type AppBuildManifest as AppBuildManifestType,
+} from "@opengeni/contracts/apps";
 import { createHash } from "node:crypto";
 
 export const APP_BUILD_VERIFICATION_RANGE_BYTES = 4 * 1024 * 1024;
@@ -127,6 +130,7 @@ export function resolveWorkspaceAppOrigin(template: string, appId: string): stri
     throw new Error("OPENGENI_APP_ORIGIN_TEMPLATE must contain {appId} exactly once");
   }
   const origin = new URL(template.replace("{appId}", appId));
+  const appHostLabel = origin.hostname.split(".", 1)[0];
   if (
     origin.protocol !== "https:" ||
     origin.username ||
@@ -134,7 +138,7 @@ export function resolveWorkspaceAppOrigin(template: string, appId: string): stri
     origin.pathname !== "/" ||
     origin.search ||
     origin.hash ||
-    !origin.hostname.includes(appId)
+    appHostLabel !== appId.toLowerCase()
   ) {
     throw new Error(
       "OPENGENI_APP_ORIGIN_TEMPLATE must resolve to a dedicated HTTPS origin with no path, query, fragment, or userinfo",
@@ -156,8 +160,7 @@ async function inspectExactObject(input: {
   sizeBytes: number;
   rangeBytes: number;
 }): Promise<
-  | { ready: true; versionToken: string }
-  | { ready: false; failure: AppBuildVerificationFailure }
+  { ready: true; versionToken: string } | { ready: false; failure: AppBuildVerificationFailure }
 > {
   const head = await input.reader.headObject(input.key);
   if (!head) return { ready: false, failure: { path: input.path, code: "object_missing" } };
@@ -345,9 +348,7 @@ export async function freezeAppSourceArchive(input: {
     sizeBytes: input.sizeBytes,
     rangeBytes,
   });
-  return frozen.ready
-    ? { ready: true, frozenVersionToken: frozen.versionToken }
-    : frozen;
+  return frozen.ready ? { ready: true, frozenVersionToken: frozen.versionToken } : frozen;
 }
 
 /**

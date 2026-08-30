@@ -49,25 +49,33 @@ function memoryReader(objects: Map<string, { bytes: Uint8Array; type: string; ve
 describe("OpenGeni Apps core", () => {
   test("separates signed staging keys from frozen digest identities", () => {
     const sha = "a".repeat(64);
-    expect(appSourceStagingObjectKey({ workspaceId, appId, sourceRevisionId, uploadId: fileId })).toContain(
+    expect(
+      appSourceStagingObjectKey({ workspaceId, appId, sourceRevisionId, uploadId: fileId }),
+    ).toContain("/staging/");
+    expect(
+      appSourceObjectKey({ workspaceId, appId, sourceRevisionId, contentSha256: sha }),
+    ).toContain(`/frozen/${sha}.tar`);
+    expect(appBuildStagingObjectKey({ workspaceId, appId, buildId, fileId })).toContain(
       "/staging/",
     );
-    expect(appSourceObjectKey({ workspaceId, appId, sourceRevisionId, contentSha256: sha })).toContain(
-      `/frozen/${sha}.tar`,
-    );
-    expect(appBuildStagingObjectKey({ workspaceId, appId, buildId, fileId })).toContain("/staging/");
-    expect(appBuildObjectKey({ workspaceId, appId, buildId, fileId, contentSha256: sha })).toContain(
-      `/frozen/${sha}/`,
-    );
-    expect(appBuildManifestObjectKey({ workspaceId, appId, buildId, manifestSha256: sha })).toContain(
-      `/frozen/${sha}/manifest.json`,
-    );
+    expect(
+      appBuildObjectKey({ workspaceId, appId, buildId, fileId, contentSha256: sha }),
+    ).toContain(`/frozen/${sha}/`);
+    expect(
+      appBuildManifestObjectKey({ workspaceId, appId, buildId, manifestSha256: sha }),
+    ).toContain(`/frozen/${sha}/manifest.json`);
   });
 
   test("requires one dedicated HTTPS origin per stable App id", () => {
     expect(resolveWorkspaceAppOrigin("https://{appId}.apps.example.com", appId)).toBe(
       `https://${appId}.apps.example.com`,
     );
+    expect(() =>
+      resolveWorkspaceAppOrigin("https://preview-{appId}.apps.example.com", appId),
+    ).toThrow();
+    expect(() =>
+      resolveWorkspaceAppOrigin("https://preview.{appId}.apps.example.com", appId),
+    ).toThrow();
     expect(() => resolveWorkspaceAppOrigin("https://apps.example.com/{appId}", appId)).toThrow();
     expect(() => resolveWorkspaceAppOrigin("https://apps.example.com", appId)).toThrow();
     expect(() => resolveWorkspaceAppOrigin("http://{appId}.apps.example.com", appId)).toThrow();
@@ -76,7 +84,9 @@ describe("OpenGeni Apps core", () => {
   test("hashes every staging byte through bounded version-fenced ranges", async () => {
     const bytes = new TextEncoder().encode("<!doctype html><h1>OpenGeni App</h1>");
     const key = appBuildStagingObjectKey({ workspaceId, appId, buildId, fileId });
-    const objects = new Map([[key, { bytes, type: "text/html; charset=utf-8", version: "etag-1" }]]);
+    const objects = new Map([
+      [key, { bytes, type: "text/html; charset=utf-8", version: "etag-1" }],
+    ]);
     const result = await verifyAppBuildStagingObjects({
       reader: memoryReader(objects),
       workspaceId,
