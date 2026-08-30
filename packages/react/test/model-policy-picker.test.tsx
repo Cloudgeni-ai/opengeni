@@ -2,8 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { ClientModel } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { ModelPolicyPicker, ModelPolicyPickerMenu } from "../src/components/model-policy-picker";
-import { registerDom } from "./render-hook";
+import {
+  ModelPolicyPicker,
+  ModelPolicyPickerMenu,
+  useModelPolicyPickerState,
+} from "../src/components/model-policy-picker";
+import { actRun, registerDom, renderHook } from "./render-hook";
 
 registerDom();
 
@@ -44,7 +48,7 @@ const MODELS: ClientModel[] = [
       reasoning: {
         upstream: "supported",
         runnable: true,
-        efforts: ["low", "medium", "high"],
+        efforts: ["low", "medium", "high", "xhigh"],
         defaultEffort: "medium",
         required: false,
       },
@@ -192,6 +196,48 @@ describe("ModelPolicyPicker", () => {
     expect(selectedModel).toBe("codex/gpt-5.6-terra");
     expect(selectedEffort).toBe("high");
     expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
+  });
+
+  test("reopens on the active model's Thinking options", async () => {
+    const hook = await renderHook(
+      () =>
+        useModelPolicyPickerState({
+          models: MODELS,
+          model: "codex/gpt-5.6-sol",
+          effort: "high",
+          latencyMode: "standard",
+          onModelChange: () => {},
+          onEffortChange: () => {},
+          onLatencyModeChange: () => {},
+        }),
+      undefined,
+    );
+    try {
+      expect(hook.result.current.nav).toEqual({
+        level: "thinking",
+        rail: "codex_subscription",
+        modelId: "codex/gpt-5.6-sol",
+      });
+
+      await actRun(() =>
+        hook.result.current.setNav({
+          level: "models",
+          rail: "codex_subscription",
+          modelId: null,
+        }),
+      );
+      expect(hook.result.current.nav.level).toBe("models");
+
+      await actRun(() => hook.result.current.setOpen(false));
+      await actRun(() => hook.result.current.setOpen(true));
+      expect(hook.result.current.nav).toEqual({
+        level: "thinking",
+        rail: "codex_subscription",
+        modelId: "codex/gpt-5.6-sol",
+      });
+    } finally {
+      await hook.unmount();
+    }
   });
 
   test("allows hosts to translate the generic picker labels", async () => {

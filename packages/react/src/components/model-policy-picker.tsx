@@ -541,21 +541,30 @@ export function ModelPolicyPickerMenu(
   );
 }
 
-export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
+/** @internal Shared state seam kept outside the Radix portal for deterministic testing. */
+export function useModelPolicyPickerState(props: ModelPolicyPickerProps) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(props.defaultOpen ?? false);
   const open = props.open ?? uncontrolledOpen;
+  const rows = effectiveRows(props);
+  const [nav, setNav] = usePickerNavState(props.sessionKey, rows, props.model);
   const setOpen = (next: boolean) => {
+    if (next) {
+      setNav(defaultNavState(rows, props.model));
+    }
     if (props.open === undefined) setUncontrolledOpen(next);
     props.onOpenChange?.(next);
   };
+  return { open, setOpen, rows, nav, setNav };
+}
+
+export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
   const trigger = usePortalTokenSource<HTMLButtonElement>();
   const portalStyle = usePortalTokenStyle(trigger.source);
   const messages = useMemo(
     () => ({ ...defaultModelPolicyPickerMessages, ...props.messages }),
     [props.messages],
   );
-  const rows = effectiveRows(props);
-  const [nav, setNav] = usePickerNavState(props.sessionKey, rows, props.model);
+  const { open, setOpen, rows, nav, setNav } = useModelPolicyPickerState(props);
   const selected = findPickerRow(rows, props.model);
 
   if (props.loading) {
