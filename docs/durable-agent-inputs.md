@@ -146,11 +146,15 @@ writes nothing.
 Read state is per viewer, so this only ever changes the rail for that one
 human; another member still sees the child unread. It only ever removes noise:
 `unread` is nothing but `sessions.last_sequence > acknowledged_sequence`, so a
-child that emits one more event goes unread again with no special handling, and
-the `failed` and `requires_action` rail indicators are derived from
-`sessions.status`, rank above unread, and are untouched. The fence is monotone:
-a human who has already read further, or a racing claim that observed a later
-sequence, is never regressed.
+child that emits one more event goes unread again with no special handling.
+`requires_action` remains a live lifecycle indicator until the input is
+resolved. A failed lifecycle remains visible inside the session, while the
+rail's red failure-attention marker is viewer-specific and appears only while
+that failed session's latest event is unread. Parent tree projections expose a
+separate `unreadFailedDescendants` count so an acknowledged historical failure
+does not color every ancestor forever. The fence is monotone: a human who has
+already read further, or a racing claim that observed a later sequence, is
+never regressed.
 
 Monotonicity has one consequence worth stating plainly: an explicit mark-unread
 is **not** sticky against a later consumption. Marking a child unread, then

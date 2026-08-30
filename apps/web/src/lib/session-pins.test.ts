@@ -980,6 +980,33 @@ describe("session pin reconciliation", () => {
     expect(applySessionRailProjection(current, refreshed)).toBe(current);
   });
 
+  test("adopts personal descendant attention changes from a fresh list summary", () => {
+    const treeStats = {
+      directChildren: 1,
+      totalDescendants: 1,
+      runningDescendants: 0,
+      queuedDescendants: 0,
+      attentionDescendants: 0,
+      pausedDescendants: 0,
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+      unreadDescendants: 1,
+      activelyWorkingDescendants: 0,
+      truncated: false,
+    };
+    const current = { ...session, treeStats } as Session;
+    const refreshed = {
+      ...current,
+      treeStats: { ...treeStats, unreadFailedDescendants: 0, unreadDescendants: 0 },
+    } as Session;
+
+    expect(applySessionRailProjection(current, refreshed).treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 0,
+      unreadDescendants: 0,
+    });
+  });
+
   test("keeps a newer context pin while adopting detail content", () => {
     const current = {
       ...session,

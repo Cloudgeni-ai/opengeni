@@ -11785,8 +11785,11 @@ export const Session = z.object({
       queuedDescendants: z.number().int().nonnegative(),
       attentionDescendants: z.number().int().nonnegative(),
       pausedDescendants: z.number().int().nonnegative(),
+      /** Historical failed lifecycle states, including already-reviewed failures. */
       failedDescendants: z.number().int().nonnegative(),
       unreadDescendants: z.number().int().nonnegative().optional(),
+      /** Failed descendants whose latest durable event this viewer has not acknowledged. */
+      unreadFailedDescendants: z.number().int().nonnegative().optional(),
       activelyWorkingDescendants: z.number().int().nonnegative().optional(),
       /**
        * Earliest moment one of the counted `attentionDescendants` entered
