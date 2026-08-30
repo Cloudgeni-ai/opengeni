@@ -9,6 +9,29 @@ og-app validate ./status-console
 og-app pack ./status-console --output ./status-console.ogapp.tar
 ```
 
+Deploy a checked build with an exact resumable deployment id:
+
+```bash
+export OPENGENI_BASE_URL=https://app.opengeni.example
+export OPENGENI_WORKSPACE_ID=11111111-1111-4111-8111-111111111111
+export OPENGENI_SESSION_COOKIE='better-auth.session_token=...'
+
+og-app deploy ./status-console \
+  --deployment-id 22222222-2222-4222-8222-222222222222 \
+  --typecheck-command 'bun run typecheck' \
+  --test-command 'bun test' \
+  --build-command 'bun run build' \
+  --preview --publish --reason 'Publish tested status console'
+```
+
+The deploy journal under `.opengeni/deployments/` contains only target ids,
+digests, check receipts, versions, and idempotency state. It never stores the
+session cookie, API key, or signed object-storage URLs. Reusing the same
+deployment id resumes exact completed steps and rejects source or target drift.
+Fresh Apps and tool-policy changes require `OPENGENI_SESSION_COOKIE` so the
+control plane can bind the policy to the currently logged-in human. An API key
+may deploy only through lifecycle paths its grant is authorized to use.
+
 `pack` emits the control-plane `portable_tar_v1` source format. Entries are
 sorted by normalized POSIX path; uid/gid, owner/group names, and mtimes are
 fixed; regular-file modes are reduced to `0644` or `0755`; and the archive ends
@@ -41,5 +64,6 @@ OpenGeni tools should add `@opengeni/app-sdk` to their own browser build and
 bundle `installOgGlobal` or `connectOgApp`; bare npm package imports are not
 served by the isolated App host.
 
-This package does not upload, publish, launch, or choose an HTTP/Code Mode
-transport.
+The optional authoring HTTP transport is explicit and credential-injected. It
+uses either one API key or one managed human session cookie, keeps signed
+uploads credential-free, and never infers ambient product authority.

@@ -38,7 +38,8 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@opengeni/contracts": "workspace:*"
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/sdk": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.5.0",
