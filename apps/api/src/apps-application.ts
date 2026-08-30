@@ -224,7 +224,6 @@ export function createDatabaseAppsApplication(input: {
 
     async completeSourceUpload({ authority, appId, sourceRevisionId, request }, options) {
       const objectStore = storage();
-      const ports = immutablePorts(objectStore);
       const source = await appPersistence(() =>
         getAppSourceStorageRef(input.db, {
           accountId: authority.accountId,
@@ -233,12 +232,14 @@ export function createDatabaseAppsApplication(input: {
           sourceRevisionId,
         }),
       );
+      assertAppSourceCompletionIdentity(source.sourceRevision, request);
+      const ports = immutablePorts(objectStore);
       const frozen = await freezeAppSourceArchive({
         ...ports,
         stagingObjectKey: source.stagingObjectKey,
         frozenObjectKey: source.frozenObjectKey,
-        contentSha256: request.expectedContentSha256,
-        sizeBytes: request.expectedSizeBytes,
+        contentSha256: source.sourceRevision.contentSha256,
+        sizeBytes: source.sourceRevision.sizeBytes,
         ...(options?.signal ? { signal: options.signal } : {}),
       });
       if (!frozen.ready) {
@@ -249,8 +250,8 @@ export function createDatabaseAppsApplication(input: {
             actorSubjectId: authority.subjectId,
             appId,
             sourceRevisionId,
-            expectedContentSha256: request.expectedContentSha256,
-            expectedSizeBytes: request.expectedSizeBytes,
+            expectedContentSha256: source.sourceRevision.contentSha256,
+            expectedSizeBytes: source.sourceRevision.sizeBytes,
             failureCode: frozen.failure.code,
             idempotencyKey: `${request.idempotencyKey}:failed`,
           }),
@@ -264,8 +265,8 @@ export function createDatabaseAppsApplication(input: {
           actorSubjectId: authority.subjectId,
           appId,
           sourceRevisionId,
-          expectedContentSha256: request.expectedContentSha256,
-          expectedSizeBytes: request.expectedSizeBytes,
+          expectedContentSha256: source.sourceRevision.contentSha256,
+          expectedSizeBytes: source.sourceRevision.sizeBytes,
           fileCount: request.fileCount,
           frozenVersionToken: frozen.frozenVersionToken,
           idempotencyKey: request.idempotencyKey,
@@ -976,6 +977,23 @@ export function createAppSourceDownloadSignature(
       "utf8",
     )
     .digest("hex");
+}
+
+export function assertAppSourceCompletionIdentity(
+  sourceRevision: Readonly<{ contentSha256: string; sizeBytes: number }>,
+  request: Readonly<{
+    expectedContentSha256: string;
+    expectedSizeBytes: number;
+  }>,
+): void {
+  if (
+    sourceRevision.contentSha256 !== request.expectedContentSha256 ||
+    sourceRevision.sizeBytes !== request.expectedSizeBytes
+  ) {
+    throw new HTTPException(409, {
+      message: "App source upload identity changed",
+    });
+  }
 }
 
 function equalDigest(actual: string, expected: string): boolean {

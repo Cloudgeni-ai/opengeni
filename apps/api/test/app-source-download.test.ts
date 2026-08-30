@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
+import { HTTPException } from "hono/http-exception";
 
-import { createAppSourceDownloadSignature } from "../src/apps-application";
+import {
+  assertAppSourceCompletionIdentity,
+  createAppSourceDownloadSignature,
+} from "../src/apps-application";
 
 const settings = testSettings({ appHostResolverKey: "k".repeat(64) });
 const input = {
@@ -39,5 +43,41 @@ describe("App source download grants", () => {
     expect(() =>
       createAppSourceDownloadSignature(testSettings({ appHostResolverKey: undefined }), input),
     ).toThrow("Apps download signing is not configured");
+  });
+});
+
+describe("App source completion identity", () => {
+  const sourceRevision = {
+    contentSha256: "a".repeat(64),
+    sizeBytes: 4096,
+  } as const;
+
+  test("accepts only the digest and size persisted when the upload began", () => {
+    expect(() =>
+      assertAppSourceCompletionIdentity(sourceRevision, {
+        expectedContentSha256: sourceRevision.contentSha256,
+        expectedSizeBytes: sourceRevision.sizeBytes,
+      }),
+    ).not.toThrow();
+
+    for (const request of [
+      {
+        expectedContentSha256: "b".repeat(64),
+        expectedSizeBytes: sourceRevision.sizeBytes,
+      },
+      {
+        expectedContentSha256: sourceRevision.contentSha256,
+        expectedSizeBytes: 8192,
+      },
+    ]) {
+      try {
+        assertAppSourceCompletionIdentity(sourceRevision, request);
+        throw new Error("expected App source identity rejection");
+      } catch (error) {
+        expect(error).toBeInstanceOf(HTTPException);
+        expect((error as HTTPException).status).toBe(409);
+        expect((error as Error).message).toBe("App source upload identity changed");
+      }
+    }
   });
 });

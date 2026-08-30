@@ -496,6 +496,29 @@ needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
 `OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
 checked before the invitation row commits and reported as `503`.
 
+### Governed Apps persistence cutover (0381)
+
+`0381_governed_apps_persistence.sql` adds the exact FORCE-RLS table and
+capability contract for governed OpenGeni Apps. The pre-0381 runtime-posture
+evaluator rejects those new protected tables because they are not present in
+its compiled allowlist, so this migration is a maintenance cutover rather than
+a mixed-version rolling migration.
+
+1. Stop every API, control worker, and turn worker using the target database.
+2. Supply the exact runtime login list through
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`.
+3. Prove those roles have zero other sessions in `pg_stat_activity`.
+4. Apply 0381 from the exact new image and require it in `schema_migrations`.
+5. Start only that image generation and require API and worker runtime-posture
+   readiness before reopening admission.
+
+The migration checks the configured role drain before and after taking
+exclusive locks on `managed_accounts` and `workspaces`. A live listed session
+fails the cutover with SQLSTATE `55000`. After commit, never restart a pre-0381
+image or attempt a mixed-version rollback; remain in maintenance and fix
+forward. Existing `workspace_artifacts` rows and published HTML remain
+unchanged.
+
 ### Browser login session-set rollout (0362)
 
 `0362_managed_auth_session_sets.sql` is rolling and deliberately activation-free.

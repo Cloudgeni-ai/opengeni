@@ -1,9 +1,86 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- Governed workspace Apps persistence. Existing workspace_artifacts remain the
 -- independent published-HTML surface and are intentionally untouched.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
+
+DO $governed_apps_writer_drain_before_lock$
+DECLARE
+  configured_roles_text text := nullif(
+    current_setting('opengeni.migration_application_roles', true), ''
+  );
+  configured_roles jsonb;
+BEGIN
+  IF configured_roles_text IS NULL THEN
+    RAISE EXCEPTION
+      '0381 governed Apps persistence requires an explicit application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  BEGIN
+    configured_roles := configured_roles_text::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION
+      '0381 governed Apps persistence received a malformed application database role list'
+      USING ERRCODE = '55000';
+  END;
+  IF jsonb_typeof(configured_roles) <> 'array'
+    OR jsonb_array_length(configured_roles) NOT BETWEEN 1 AND 16
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(configured_roles) AS roles(value)
+      WHERE jsonb_typeof(value) <> 'string'
+        OR btrim(value #>> '{}') = ''
+        OR octet_length(value #>> '{}') > 63
+    )
+    OR (
+      SELECT count(*) FROM jsonb_array_elements_text(configured_roles)
+    ) <> (
+      SELECT count(DISTINCT value)
+      FROM jsonb_array_elements_text(configured_roles) AS roles(value)
+    )
+  THEN
+    RAISE EXCEPTION
+      '0381 governed Apps persistence received an invalid application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0381 governed Apps persistence requires all configured OpenGeni application database sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$governed_apps_writer_drain_before_lock$;
+
+LOCK TABLE managed_accounts IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE workspaces IN ACCESS EXCLUSIVE MODE;
+
+DO $governed_apps_writer_drain_after_lock$
+DECLARE
+  configured_roles jsonb := current_setting(
+    'opengeni.migration_application_roles', false
+  )::jsonb;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0381 governed Apps persistence observed a configured OpenGeni application database session after locking'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$governed_apps_writer_drain_after_lock$;
 
 CREATE TABLE apps (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

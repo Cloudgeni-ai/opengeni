@@ -206,6 +206,11 @@ describe("release schema contract", () => {
     const governedAppsPersistence = completeSourceContract.migrations.some(
       (migration) => migration.path === "0381_governed_apps_persistence.sql",
     );
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0381_governed_apps_persistence.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
     const automaticSessionTitleMigrationPaths = new Set([
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",

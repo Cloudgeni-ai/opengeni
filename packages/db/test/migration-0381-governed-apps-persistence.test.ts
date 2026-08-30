@@ -76,7 +76,16 @@ const readOnlyTables = tables.filter((table) => !protectedTables.includes(table)
 describe("migration 0381 governed Apps persistence", () => {
   test("is additive, tenant-composite, FORCE-RLS, and preserves HTML Artifacts", async () => {
     const source = await Bun.file(migrationUrl).text();
-    expect(source).toStartWith("-- deployment-mode: rolling");
+    expect(source).toStartWith("-- deployment-mode: maintenance");
+    expect(source).toContain("opengeni.migration_application_roles");
+    expect(source).toContain(
+      "0381 governed Apps persistence requires all configured OpenGeni application database sessions to be stopped",
+    );
+    expect(source).toContain("LOCK TABLE managed_accounts IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain("LOCK TABLE workspaces IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain(
+      "0381 governed Apps persistence observed a configured OpenGeni application database session after locking",
+    );
     expect(source).not.toMatch(/\bDROP\s+(?:TABLE|COLUMN)\b/iu);
     expect(source).not.toMatch(/ALTER TABLE\s+"?workspace_artifacts"?/iu);
     expect(source).not.toMatch(/UPDATE\s+"?workspace_artifacts"?/iu);
@@ -313,6 +322,66 @@ afterAll(async () => {
 }, 180_000);
 
 describe("migration 0381 live PostgreSQL posture", () => {
+  test("rejects a live pre-0381 application role and applies after the role is drained", async () => {
+    const guarded = await acquireAppsOwnerDatabase("migration-0381-apps-maintenance-guard");
+    if (!guarded) {
+      if (requireRealDatabase) {
+        throw new Error(
+          "[migration-0381-governed-apps] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        );
+      }
+      return;
+    }
+
+    const owner = postgres(guarded.ownerUrl, {
+      max: 1,
+      prepare: false,
+      onnotice: () => undefined,
+    });
+    let runtime: postgres.Sql | null = null;
+    try {
+      await owner.unsafe(
+        'CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())',
+      );
+      await owner`
+          insert into schema_migrations (name) values (${migrationName}) on conflict do nothing`;
+      await migrate(guarded.ownerUrl);
+      await provisionRoles(guarded.adminUrl, {
+        appPassword: guarded.appPassword,
+        rlsStrategy: "force",
+      });
+      runtime = postgres(runtimeUrl(guarded.adminUrl, guarded.appPassword), {
+        max: 1,
+        prepare: false,
+        onnotice: () => undefined,
+      });
+      await runtime`select 1`;
+      await owner`delete from schema_migrations where name = ${migrationName}`;
+
+      await expect(migrate(guarded.ownerUrl)).rejects.toThrow(
+        "0381 governed Apps persistence requires all configured OpenGeni application database sessions to be stopped",
+      );
+      const [blocked] = await guarded.admin<Array<{ applied: boolean; appsPresent: boolean }>>`
+          select
+            exists(select 1 from schema_migrations where name = ${migrationName}) as applied,
+            to_regclass('public.apps') is not null as "appsPresent"`;
+      expect(blocked).toEqual({ applied: false, appsPresent: false });
+
+      await runtime.end();
+      runtime = null;
+      await migrate(guarded.ownerUrl);
+      const [applied] = await guarded.admin<Array<{ applied: boolean; appsPresent: boolean }>>`
+          select
+            exists(select 1 from schema_migrations where name = ${migrationName}) as applied,
+            to_regclass('public.apps') is not null as "appsPresent"`;
+      expect(applied).toEqual({ applied: true, appsPresent: true });
+    } finally {
+      await runtime?.end().catch(() => undefined);
+      await owner.end().catch(() => undefined);
+      await guarded.release();
+    }
+  }, 900_000);
+
   test("applies cleanly as a NOSUPERUSER NOBYPASSRLS owner with FORCE RLS", async () => {
     if (!clean) return;
     const [owner] = await clean.admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
