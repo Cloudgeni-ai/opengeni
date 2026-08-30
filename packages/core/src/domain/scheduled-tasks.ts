@@ -1,4 +1,8 @@
-import { resolveFirstPartyMcpToolPolicy, type Settings } from "@opengeni/config";
+import {
+  resolveFirstPartyMcpToolPolicy,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  type Settings,
+} from "@opengeni/config";
 import type {
   AccessGrant,
   McpPersonalConnectionDelegation,
@@ -34,6 +38,7 @@ import {
   getSandbox,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
   nestedPostgresSqlState,
   requireWorkspace,
   scopedKnowledgeScopeKey,
@@ -99,6 +104,26 @@ export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
   );
 }
 
+function workspaceGatewayCustomModelCommitGuard(input: {
+  accountId: string;
+  workspaceId: string;
+  modelId: string;
+}): ((tx: Database) => Promise<void>) | undefined {
+  if (!input.modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) return undefined;
+  return async (tx: Database): Promise<void> => {
+    const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      upstreamModelId: input.modelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length),
+    });
+    if (!active) {
+      throw new HTTPException(422, {
+        message: `model is not available: ${input.modelId}`,
+      });
+    }
+  };
+}
+
 export function scheduledConnectionSurfaceEligibility(
   settings: Settings,
   target: Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> | null,
@@ -146,7 +171,7 @@ export async function createValidatedScheduledTask(input: {
       action: knowledgeAction,
     });
   }
-  const agentConfig = knowledgeAction
+  const agentConfig: ScheduledTaskAgentConfig = knowledgeAction
     ? input.payload.agentConfig
     : await validateScheduledTaskAgentConfig({
         ...input,
@@ -235,6 +260,14 @@ export async function createValidatedScheduledTask(input: {
           workspaceId: input.grant.workspaceId,
           subjectId: input.grant.subjectId,
         });
+  const beforeCreateCommit =
+    !knowledgeAction && input.payload.runMode !== "existing_session"
+      ? workspaceGatewayCustomModelCommitGuard({
+          accountId: input.grant.accountId,
+          workspaceId: input.grant.workspaceId,
+          modelId: agentConfig.model ?? input.settings.openaiModel,
+        })
+      : undefined;
   return await withScheduledTaskAuthorityWriteErrors(() =>
     createScheduledTask(input.db, {
       id,
@@ -257,6 +290,7 @@ export async function createValidatedScheduledTask(input: {
       variableSetId: input.payload.variableSetId ?? null,
       rigId: input.payload.rigId ?? null,
       metadata: input.payload.metadata,
+      ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
     }),
   );
 }
@@ -734,6 +768,14 @@ export async function validatedScheduledTaskUpdate(input: {
     (input.payload.metadata !== undefined &&
       !isDeepStrictEqual(input.payload.metadata, input.existing.metadata)) ||
     (input.existing.status === "paused" && input.payload.status === "active");
+  if (materialExecutionChange && nextRunMode !== "existing_session") {
+    const beforeUpdateCommit = workspaceGatewayCustomModelCommitGuard({
+      accountId: input.existing.accountId,
+      workspaceId: input.existing.workspaceId,
+      modelId: nextAgentConfig.model ?? input.settings.openaiModel,
+    });
+    if (beforeUpdateCommit) update.beforeUpdateCommit = beforeUpdateCommit;
+  }
   const existingXaiAuthority = await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
     input.db,
     input.existing.workspaceId,

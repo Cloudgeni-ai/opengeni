@@ -5206,6 +5206,8 @@ export type CreateScheduledTaskInput = {
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
   rigId?: string | null;
   metadata: Record<string, unknown>;
+  /** Trusted database-only admission seam. Throwing rolls the task creation back. */
+  beforeCreateCommit?: (tx: Database) => Promise<void>;
 };
 
 export type UpdateScheduledTaskInput = Partial<{
@@ -5228,6 +5230,8 @@ export type UpdateScheduledTaskInput = Partial<{
   authorityUpdatedBy: TurnInitiator;
   authorityUpdatedByContext: TurnInitiatorContext;
   authorityUpdatedByActor: AgentSessionCreationActor | null;
+  /** Trusted database-only admission seam. Throwing rolls the task update back. */
+  beforeUpdateCommit: (tx: Database) => Promise<void>;
 }>;
 
 export type CreatePackInstallationInput = {
@@ -15831,6 +15835,7 @@ export async function createScheduledTask(
     async (scopedDb) => {
       const frozenCreator = await frozenSessionCreatorForInsert(scopedDb, input);
       await setScheduledTaskAuthorityRlsContext(scopedDb, frozenCreator);
+      await input.beforeCreateCommit?.(scopedDb);
       const [row] = await scopedDb
         .insert(schema.scheduledTasks)
         .values({
@@ -15908,6 +15913,7 @@ export async function updateScheduledTask(
       });
       await setScheduledTaskAuthorityRlsContext(scopedDb, frozenUpdater);
     }
+    await input.beforeUpdateCommit?.(scopedDb);
     const [row] = await scopedDb
       .update(schema.scheduledTasks)
       .set({

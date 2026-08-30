@@ -106,6 +106,9 @@ beforeAll(async () => {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
       requestSessionWorkflowWakeDispatch: async () => undefined,
+      syncScheduledTask: async () => undefined,
+      deleteScheduledTaskSchedule: async () => undefined,
+      triggerScheduledTask: async () => undefined,
     } as never,
     managedAuth: null,
   } satisfies AppDependencies);
@@ -638,6 +641,246 @@ describe("workspace Gateway custom model API", () => {
         and create_idempotency_key = ${idempotencyKey}
     `;
     expect(stored?.count).toBe(0);
+  });
+
+  test("rejects a follow-up switch when custom-model retirement wins before prompt commit", async () => {
+    if (!shared || !publicApp || !grant) return;
+    const upstreamModelId = `race/follow-up-model-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const created = await request("/gateway-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId },
+    });
+    expect(created.status).toBe(201);
+    const customModel = (await created.json()) as { id: string; version: number };
+    const session = await createSession(client!.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Follow-up model retirement fixture",
+      resources: [],
+      metadata: {},
+      model: settings.openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const clientEventId = crypto.randomUUID();
+    let switchPromise: Promise<Response> | null = null;
+
+    await shared.admin.begin(async (barrier) => {
+      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+      if (!backend) throw new Error("database barrier has no backend pid");
+      await barrier`
+        select id
+        from sessions
+        where workspace_id = ${grant.workspaceId}::uuid
+          and id = ${session.id}::uuid
+        for update
+      `;
+      switchPromise = publicApp.request(
+        `http://x/v1/workspaces/${grant.workspaceId}/sessions/${session.id}/events`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(["sessions:control"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            type: "user.message",
+            clientEventId,
+            payload: {
+              text: "Switch to a model that is being retired",
+              resources: [],
+              model: productModelId,
+            },
+          }),
+        },
+      );
+      await waitForBlockedBackend(backend.pid, "follow-up custom-model switch");
+
+      const removed = await request(`/gateway-custom-models/${customModel.id}`, {
+        method: "DELETE",
+        body: {
+          expectedVersion: customModel.version,
+          operationId: crypto.randomUUID(),
+        },
+      });
+      expect(removed.status).toBe(204);
+    });
+
+    if (!switchPromise) throw new Error("follow-up model switch was not started");
+    const response = await switchPromise;
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain(`model is not available: ${productModelId}`);
+    const [stored] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from session_events
+      where workspace_id = ${grant.workspaceId}::uuid
+        and session_id = ${session.id}::uuid
+        and client_event_id = ${clientEventId}
+    `;
+    expect(stored?.count).toBe(0);
+  });
+
+  test("rejects a scheduled-task create when custom-model retirement wins before commit", async () => {
+    if (!shared || !publicApp || !grant) return;
+    const upstreamModelId = `race/scheduled-create-model-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const created = await request("/gateway-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId },
+    });
+    expect(created.status).toBe(201);
+    const customModel = (await created.json()) as { id: string };
+    const name = `Scheduled create retirement race ${crypto.randomUUID()}`;
+    let createPromise: Promise<Response> | null = null;
+
+    await shared.admin.begin(async (barrier) => {
+      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+      if (!backend) throw new Error("database barrier has no backend pid");
+      await barrier`
+        select pg_advisory_xact_lock(
+          hashtextextended(${"workspace-gateway-custom-models:" + grant.workspaceId}, 0)
+        )
+      `;
+      createPromise = request(
+        "/scheduled-tasks",
+        {
+          method: "POST",
+          permissions: ["scheduled_tasks:manage"],
+          body: {
+            name,
+            schedule: { type: "manual" },
+            runMode: "new_session_per_run",
+            overlapPolicy: "allow_concurrent",
+            status: "active",
+            agentConfig: {
+              prompt: "Run only if the selected model remains active",
+              model: productModelId,
+              resources: [],
+              tools: [],
+              metadata: {},
+            },
+            metadata: {},
+          },
+        },
+        publicApp,
+      );
+      await waitForBlockedBackend(backend.pid, "scheduled-task custom-model create");
+      await barrier`
+        update workspace_gateway_custom_models
+        set retired_at = clock_timestamp(), updated_at = clock_timestamp()
+        where id = ${customModel.id}::uuid
+      `;
+    });
+
+    if (!createPromise) throw new Error("scheduled-task create was not started");
+    const response = await createPromise;
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain(`model is not available: ${productModelId}`);
+    const [stored] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from scheduled_tasks
+      where workspace_id = ${grant.workspaceId}::uuid
+        and name = ${name}
+    `;
+    expect(stored?.count).toBe(0);
+  });
+
+  test("rejects a paused scheduled-task resume after retirement but permits a name-only edit", async () => {
+    if (!shared || !publicApp || !grant) return;
+    const upstreamModelId = `race/scheduled-resume-model-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const createdModelResponse = await request("/gateway-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId },
+    });
+    expect(createdModelResponse.status).toBe(201);
+    const customModel = (await createdModelResponse.json()) as { id: string };
+    const createdTaskResponse = await request(
+      "/scheduled-tasks",
+      {
+        method: "POST",
+        permissions: ["scheduled_tasks:manage"],
+        body: {
+          name: "Paused custom-model task",
+          schedule: { type: "manual" },
+          runMode: "new_session_per_run",
+          overlapPolicy: "allow_concurrent",
+          status: "active",
+          agentConfig: {
+            prompt: "Resume only while the selected model is active",
+            model: productModelId,
+            resources: [],
+            tools: [],
+            metadata: {},
+          },
+          metadata: {},
+        },
+      },
+      publicApp,
+    );
+    expect(createdTaskResponse.status).toBe(201);
+    const createdTask = (await createdTaskResponse.json()) as { id: string };
+    const paused = await request(
+      `/scheduled-tasks/${createdTask.id}/pause`,
+      { method: "POST", permissions: ["scheduled_tasks:manage"] },
+      publicApp,
+    );
+    expect(paused.status).toBe(200);
+    let resumePromise: Promise<Response> | null = null;
+
+    await shared.admin.begin(async (barrier) => {
+      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+      if (!backend) throw new Error("database barrier has no backend pid");
+      await barrier`
+        select pg_advisory_xact_lock(
+          hashtextextended(${"workspace-gateway-custom-models:" + grant.workspaceId}, 0)
+        )
+      `;
+      resumePromise = request(
+        `/scheduled-tasks/${createdTask.id}`,
+        {
+          method: "PATCH",
+          permissions: ["scheduled_tasks:manage"],
+          body: { status: "active" },
+        },
+        publicApp,
+      );
+      await waitForBlockedBackend(backend.pid, "scheduled-task custom-model resume");
+      await barrier`
+        update workspace_gateway_custom_models
+        set retired_at = clock_timestamp(), updated_at = clock_timestamp()
+        where id = ${customModel.id}::uuid
+      `;
+    });
+
+    if (!resumePromise) throw new Error("scheduled-task resume was not started");
+    const resumed = await resumePromise;
+    expect(resumed.status).toBe(422);
+    expect(await resumed.text()).toContain(`model is not available: ${productModelId}`);
+    const [stored] = await shared.admin<Array<{ status: string; name: string }>>`
+      select status, name
+      from scheduled_tasks
+      where workspace_id = ${grant.workspaceId}::uuid
+        and id = ${createdTask.id}::uuid
+    `;
+    expect(stored).toMatchObject({ status: "paused", name: "Paused custom-model task" });
+
+    const renamed = await request(
+      `/scheduled-tasks/${createdTask.id}`,
+      {
+        method: "PATCH",
+        permissions: ["scheduled_tasks:manage"],
+        body: { name: "Retired custom-model task renamed" },
+      },
+      publicApp,
+    );
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toMatchObject({
+      name: "Retired custom-model task renamed",
+      status: "paused",
+    });
   });
 
   test("enforces the transactional per-workspace custom-model bound", async () => {

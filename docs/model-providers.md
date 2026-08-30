@@ -143,10 +143,13 @@ not a hard delete. The slug leaves new model selection immediately, while an
 already accepted turn or an existing-session continuation can still resolve
 its retained definition. Re-adding the same slug creates a fresh row identity;
 stale mutations against an older generation cannot affect the replacement.
-Fresh session admission rechecks the active row under the custom-model shared
-transaction lock in the same commit that inserts the session; retirement takes
-the exclusive counterpart, so a successful removal cannot be followed by a new
-session committing from a stale pre-removal catalog snapshot.
+Fresh session admission, an explicit follow-up switch from another model, and a
+new or materially reaccepted scheduled task recheck the active row under the
+custom-model shared transaction lock in the same commit that inserts the
+session, accepts the turn, or writes the task. Retirement takes the exclusive
+counterpart, so a successful removal cannot be followed by new work committing
+from a stale pre-removal catalog snapshot. Existing-session scheduled tasks and
+administrative-only task edits retain their already accepted model definition.
 Each workspace may keep 100 active slugs and 1,000 retained generations.
 Retirement does not reclaim generation capacity because those rows remain the
 execution authority for accepted turns and existing sessions.

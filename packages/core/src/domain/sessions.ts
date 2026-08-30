@@ -1460,6 +1460,11 @@ export async function postUserMessageTurn(
   assertConfiguredModel(settings, requestedModel);
   const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
   const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
+  const freshWorkspaceGatewayModel =
+    requestedModel?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true &&
+    requestedModel !== sessionForModelGate.model
+      ? requestedModel
+      : null;
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, effectiveModelForGate);
   try {
     assertSessionAllowsProductModel(sessionForModelGate, effectiveModelForGate);
@@ -1525,6 +1530,25 @@ export async function postUserMessageTurn(
                   }
                 : {}),
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+              ...(freshWorkspaceGatewayModel
+                ? {
+                    beforeFreshPromptCommit: async (tx: Database): Promise<void> => {
+                      const upstreamModelId = freshWorkspaceGatewayModel.slice(
+                        WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length,
+                      );
+                      const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+                        accountId,
+                        workspaceId,
+                        upstreamModelId,
+                      });
+                      if (!active) {
+                        throw new HTTPException(422, {
+                          message: `model is not available: ${freshWorkspaceGatewayModel}`,
+                        });
+                      }
+                    },
+                  }
+                : {}),
               controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
             }),
         ),
