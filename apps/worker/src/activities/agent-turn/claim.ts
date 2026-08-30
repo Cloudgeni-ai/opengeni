@@ -193,6 +193,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.redispatchesAtDispatch = Number(
     (turn.metadata as { workerDeathRedispatches?: number } | null)?.workerDeathRedispatches ?? 0,
   );
+  const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
   // Establish durable attempt ownership before any later read can fail.
   // Therefore every failure with no turnId came from the one atomic claim
   // transaction and can be classified without conflating ordinary runtime
@@ -238,12 +239,12 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     input.accountId,
     input.workspaceId,
     xaiSettings,
+    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
   const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
     ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
     : null;
   runtime.configure(capabilitySettings);
-  const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
   const policyForAbsent =
     claimedPolicy.kind === "valid"
       ? claimedPolicy.policy

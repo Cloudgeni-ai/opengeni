@@ -2,7 +2,7 @@
 
 Status: implementation specification captured on 2026-08-27.
 
-Implementation correction on 2026-08-28: migration 0369 is maintenance-only.
+Implementation correction on 2026-08-28: migration 0383 is maintenance-only.
 Although its tables are additive, it changes OpenGeni's exact runtime-posture
 table/grant contract, so already-running pre-0369 processes become unready after
 commit. The rolling-migration requirements in the original specification are
@@ -11,7 +11,7 @@ superseded by the drained procedure in `docs/deployment.md`.
 Repository observation at capture time: this checkout already contained
 `0364_workspace_learning_policy_snapshot_lock_order.sql`. The migration was subsequently
 renumbered against the eventual PR base to
-`0369_model_catalog_and_gateway_custom_models.sql` with
+`0383_model_catalog_and_gateway_custom_models.sql` with
 `bun run migration:renumber --next`. The original next-free-ordinal guidance below is retained as
 part of the supplied specification.
 
@@ -90,8 +90,9 @@ These were wrong or missing in earlier drafts and are now decisions.
   worker cannot resolve.
 - `projectClientModel` would label OpenRouter as OpenGeni. Today anything with
   `credentialSource.kind === "deployment"` and `mechanism === "api_key"` becomes
-  `source: "opengeni"` and provider `OpenGeni`. OpenRouter must get `source: "openrouter"` and its
-  own provider label. The picker rail stays External through existing billing
+  `source: "opengeni"` and provider `OpenGeni`. OpenRouter must omit the optional legacy closed
+  `source` field for same-major compatibility while exposing provider `openrouter` and its own
+  provider label. The picker rail stays External through existing billing
   (`metering: external`, `upstreamPayer: deployment`). Extend `ClientModel.source`.
 - `cost: free` is a deployment-defined workspace-facing price, not an OpenRouter property and not
   an inference from `upstreamPayer`, `metering`, provider kind, or upstream price. A deployment may
@@ -135,11 +136,13 @@ Environment variables:
 - `OPENGENI_MODEL_CATALOG_SOURCE=code|database`, default `code`.
 - `OPENGENI_OPENROUTER_API_KEY`, optional.
 
-The deployment document contains the built-in allow-list, registry providers, curated Gateway
-table, curated OpenRouter `:free` slugs, and `modelNotes: { [productId]: string }`. It contains no
-keys, default request headers/query, billing, enabled flags, or band objects. Authenticated
-registry transports inherit their complete request metadata and credentials from the matching
-host declaration after the database provider's kind, base URL, and wire API/profile match.
+The deployment document contains an explicit `defaultModel`, the built-in allow-list, registry
+providers, curated Gateway table, curated OpenRouter `:free` slugs, and
+`modelNotes: { [productId]: string }`. Omission of `defaultModel` retains schema-v1 compatibility by
+using the first built-in model. It contains no keys, default request headers/query, billing,
+enabled flags, or band objects. Authenticated registry transports inherit their complete request
+metadata and credentials from the matching host declaration after the database provider's kind,
+base URL, and wire API/profile match.
 
 The deployment's workspace-facing model-cost policy is a separate billing input. It determines
 which deployment-catalog product IDs render as `free` versus `credits` independently of provider
@@ -317,7 +320,9 @@ Operator flow: `bun run upsert` after Zod validation. Document it in
 ### B. Custom Gateway
 
 Table: `workspace_gateway_custom_models` with account, workspace, `upstream_model_id` unique,
-optional label, actor, and timestamps. FORCE RLS.
+optional label, actor, `retired_at`, and timestamps. FORCE RLS. DELETE retires rather than destroys
+the row: new selection excludes it, accepted/existing execution may retain it, and re-adding the
+same slug restores the original row without rewriting definition identity.
 
 HTTP: `GET`/`POST`/`DELETE /v1/workspaces/:id/gateway-custom-models`.
 
@@ -377,8 +382,9 @@ Do not ship OpenRouter as API-key credits. Do not ship database mode without fai
 - AC10: Unknown `workspace-gateway/*` that is neither curated nor stored returns 422 at the edge.
 - AC11: A custom slug does not throw and receives no curated `only`/`order`. Curated pins remain
   unchanged.
-- AC12: Existing turn-policy freeze remains. Custom IDs have `definitionVersion`; drift still fails
-  closed.
+- AC12: Existing turn-policy freeze remains. Custom IDs have `definitionVersion`; removing a slug
+  retires it from new selection without invalidating accepted/existing execution, and true
+  definition drift still fails closed.
 - AC13: A policy allowlist still makes Send return 422 for blocked models.
 - AC14: `/v1/config/client` never lists workspace-custom models.
 - AC15: No Gateway/OpenRouter keys appear in documents, events, or picker payloads.
@@ -406,8 +412,9 @@ Do not ship OpenRouter as API-key credits. Do not ship database mode without fai
   comes from deployment billing policy, not from the OpenRouter provider ID or settlement kind.
 - AC31: There is no OpenRouter custom HTTP/UI.
 - AC32: The database document contains slugs and notes, never the key.
-- AC33: `projectClientModel` and `ClientModel.source` expose `openrouter`, not `opengeni`, for
-  OpenRouter rows. Provider label is not `OpenGeni`.
+- AC33: `projectClientModel` exposes provider `openrouter`, not `opengeni`, for OpenRouter rows,
+  omits the optional legacy closed `ClientModel.source` field for same-major compatibility, and
+  never uses provider label `OpenGeni`.
 - AC34: `getSettings()` does not query the catalog table. Database mode uses
   `resolveCatalogSettings`.
 - AC35: Cost `free` applies exactly to product IDs the deployment billing policy marks free,

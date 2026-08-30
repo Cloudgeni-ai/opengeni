@@ -49,6 +49,23 @@ mock.module("sonner", () => ({
   toast: { error: toastError, success: toastSuccess },
 }));
 
+mock.module("@/components/ui/confirm-dialog", () => ({
+  ConfirmDialog: ({
+    open,
+    confirmLabel,
+    onConfirm,
+  }: {
+    open: boolean;
+    confirmLabel: string;
+    onConfirm: () => Promise<void | boolean>;
+  }) =>
+    open ? (
+      <button type="button" onClick={() => void onConfirm()}>
+        {confirmLabel}
+      </button>
+    ) : null,
+}));
+
 const { AiGatewayConnectionCard } = await import("./ai-gateway-connection");
 
 function customModel(upstreamModelId: string): WorkspaceGatewayCustomModel {
@@ -451,6 +468,15 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(remove).not.toBeNull();
       await act(async () => {
         remove!.click();
+        await flush();
+      });
+      expect(deleteWorkspaceGatewayCustomModel).not.toHaveBeenCalled();
+      const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Remove model",
+      );
+      expect(confirm).not.toBeUndefined();
+      await act(async () => {
+        confirm!.click();
         await flush();
       });
 

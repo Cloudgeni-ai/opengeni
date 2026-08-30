@@ -1,4 +1,4 @@
-import { and, count, eq, sql } from "drizzle-orm";
+import { and, count, eq, isNull, sql } from "drizzle-orm";
 
 import { withRlsContext, type Database } from "./database";
 import * as schema from "./schema";
@@ -16,6 +16,7 @@ export type WorkspaceGatewayCustomModel = {
   upstreamModelId: string;
   label: string | null;
   createdBySubjectId: string;
+  retiredAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -39,6 +40,7 @@ function mapCustomModel(
     upstreamModelId: row.upstreamModelId,
     label: row.label,
     createdBySubjectId: row.createdBySubjectId,
+    retiredAt: row.retiredAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -72,6 +74,7 @@ export async function listWorkspaceGatewayCustomModels(
         and(
           eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
           eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+          isNull(schema.workspaceGatewayCustomModels.retiredAt),
         ),
       )
       .orderBy(
@@ -107,10 +110,31 @@ export async function createWorkspaceGatewayCustomModel(
         and(
           eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
           eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+          isNull(schema.workspaceGatewayCustomModels.retiredAt),
         ),
       );
     if ((current?.value ?? 0) >= MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS) {
       throw new WorkspaceGatewayCustomModelLimitError();
+    }
+    const [retired] = await scopedDb
+      .select()
+      .from(schema.workspaceGatewayCustomModels)
+      .where(
+        and(
+          eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
+          eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+          eq(schema.workspaceGatewayCustomModels.upstreamModelId, input.upstreamModelId),
+        ),
+      )
+      .limit(1);
+    if (retired?.retiredAt) {
+      const [restored] = await scopedDb
+        .update(schema.workspaceGatewayCustomModels)
+        .set({ retiredAt: null, updatedAt: new Date() })
+        .where(eq(schema.workspaceGatewayCustomModels.id, retired.id))
+        .returning();
+      if (!restored) throw new Error("workspace Gateway custom model restore returned no row");
+      return mapCustomModel(restored);
     }
     const [row] = await scopedDb
       .insert(schema.workspaceGatewayCustomModels)
@@ -133,15 +157,39 @@ export async function deleteWorkspaceGatewayCustomModel(
 ): Promise<boolean> {
   return await withRlsContext(db, input, async (scopedDb) => {
     const removed = await scopedDb
-      .delete(schema.workspaceGatewayCustomModels)
+      .update(schema.workspaceGatewayCustomModels)
+      .set({ retiredAt: new Date(), updatedAt: new Date() })
       .where(
         and(
           eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
           eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
           eq(schema.workspaceGatewayCustomModels.id, input.customModelId),
+          isNull(schema.workspaceGatewayCustomModels.retiredAt),
         ),
       )
       .returning({ id: schema.workspaceGatewayCustomModels.id });
     return removed.length > 0;
+  });
+}
+
+/** Retired rows are invisible to new selection but remain executable for an
+ * already accepted turn or an existing session continuation. */
+export async function getWorkspaceGatewayCustomModelForExecution(
+  db: Database,
+  input: { accountId: string; workspaceId: string; upstreamModelId: string },
+): Promise<WorkspaceGatewayCustomModel | null> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.workspaceGatewayCustomModels)
+      .where(
+        and(
+          eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
+          eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+          eq(schema.workspaceGatewayCustomModels.upstreamModelId, input.upstreamModelId),
+        ),
+      )
+      .limit(1);
+    return row ? mapCustomModel(row) : null;
   });
 }

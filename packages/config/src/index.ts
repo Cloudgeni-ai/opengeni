@@ -2099,6 +2099,10 @@ const DeploymentRegistryProviderSchema = RegistryProviderSchema.safeExtend({
 export const ModelCatalogDocument = z
   .object({
     schemaVersion: z.literal(1),
+    /** Canonical deployment default. Omission preserves the V1 first-built-in
+     * fallback for existing documents; operators should set this explicitly
+     * when cutting over a registry or connected-subscription default. */
+    defaultModel: z.string().min(1).optional(),
     builtInModels: z.array(z.string().min(1)).min(1),
     registryProviders: z.array(DeploymentRegistryProviderSchema).default([]),
     gatewayModels: z.array(GatewayCatalogModel).default([]),
@@ -2167,6 +2171,26 @@ export const ModelCatalogDocument = z
         "upstreamModelId",
       ]),
     );
+    if (document.defaultModel && /[\u000A\u000D|]/u.test(document.defaultModel)) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultModel"],
+        message: "catalog default model must not contain newlines or the | field separator",
+      });
+    }
+    if (
+      document.defaultModel &&
+      !productIds.has(document.defaultModel) &&
+      !document.defaultModel.startsWith(CODEX_MODEL_ID_PREFIX) &&
+      !document.defaultModel.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultModel"],
+        message:
+          "catalog default model must reference deployment catalog membership or a connected-subscription product",
+      });
+    }
     for (const productId of Object.keys(document.modelNotes)) {
       if (!productIds.has(productId)) {
         context.addIssue({
@@ -2228,10 +2252,13 @@ function deploymentRegistryProvidersWithHostCredentials(
 /** Pure secret-free database catalog overlay. getSettings remains env-only. */
 export function applyModelCatalogDocument(settings: Settings, rawDocument: unknown): Settings {
   const document = parseModelCatalogDocument(rawDocument);
-  return {
+  const defaultModel = document.defaultModel ?? document.builtInModels[0]!;
+  const resolved = {
     ...settings,
-    openaiModel: document.builtInModels[0]!,
-    openaiAllowedModels: document.builtInModels.slice(1).join(","),
+    openaiModel: defaultModel,
+    openaiAllowedModels: document.builtInModels
+      .filter((modelId) => modelId !== defaultModel)
+      .join(","),
     modelProvidersJson: JSON.stringify(
       deploymentRegistryProvidersWithHostCredentials(settings, document.registryProviders),
     ),
@@ -2239,6 +2266,7 @@ export function applyModelCatalogDocument(settings: Settings, rawDocument: unkno
     resolvedOpenRouterModelsJson: JSON.stringify(document.openrouterModels),
     modelNotesJson: JSON.stringify(document.modelNotes),
   };
+  return resolved;
 }
 
 export const IntegrationOAuthClientConfigSchema = z.object({
@@ -4546,7 +4574,12 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
     }
   }
   assertUniqueModelIdentities(out);
-  return out;
+  const defaultIndex = out.findIndex(
+    (model) => model.id === settings.openaiModel || model.aliases.includes(settings.openaiModel),
+  );
+  return defaultIndex > 0
+    ? [out[defaultIndex]!, ...out.slice(0, defaultIndex), ...out.slice(defaultIndex + 1)]
+    : out;
 }
 
 /** Resolve a known canonical id or alias. Unknown strings are returned unchanged. */
@@ -6525,7 +6558,22 @@ export function validateModelCatalogSettings(settings: Settings): ConfiguredMode
   // Materialize the normalized catalog at boot so canonical product ids,
   // aliases, definition digests, and capability/pricing normalization are
   // validated even when managed billing is disabled.
-  const models = configuredModels(settings);
+  const models = configuredModels(settings, source);
+  const defaultCatalogSettings = settingsForTurnExecutionPolicy(settings, settings.openaiModel);
+  const defaultCatalogModels =
+    defaultCatalogSettings === settings ? models : configuredModels(defaultCatalogSettings, source);
+  if (models.length === 0 && defaultCatalogModels.length === 0) {
+    throw new Error("The resolved model catalog contains no executable models");
+  }
+  const defaultModelId = canonicalizeConfiguredModelId(
+    defaultCatalogSettings,
+    settings.openaiModel,
+  );
+  if (!defaultCatalogModels.some((model) => model.id === defaultModelId)) {
+    throw new Error(
+      `The default model ${settings.openaiModel} is not executable in the resolved model catalog`,
+    );
+  }
 
   const deploymentProductIds = new Set(
     models.filter((model) => model.credentialSource.kind === "deployment").map((model) => model.id),

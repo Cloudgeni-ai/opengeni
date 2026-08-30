@@ -86,6 +86,7 @@ and optional line-safe notes:
 ```json
 {
   "schemaVersion": 1,
+  "defaultModel": "gpt-5.6-sol",
   "builtInModels": ["gpt-5.6-sol", "gpt-5.6-luna"],
   "registryProviders": [],
   "gatewayModels": [],
@@ -96,11 +97,14 @@ and optional line-safe notes:
 }
 ```
 
+`defaultModel` may name deployment membership or an enabled Codex/SuperGrok
+connected-subscription product. Omission retains schema-v1 compatibility by
+using the first `builtInModels` entry, but operators should set it explicitly.
 The strict document rejects keys, billing, pricing policy, enabled flags,
 bands, unknown note IDs, duplicate product IDs, and reserved provider IDs.
 Notes are at most 500 characters and cannot contain a newline or `|`.
 
-Migration 0369 is a drained maintenance cutover because it changes the exact
+Migration 0383 is a drained maintenance cutover because it changes the exact
 runtime-posture table/grant contract. Stop every API and worker, supply the
 complete application-login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply the migration with the
@@ -133,6 +137,12 @@ a model or changing its executable definition, drain or fence accepted queued
 and active turns that still name the old definition; accepted turns fail closed
 on definition drift rather than silently switching providers. A maintenance
 window that stops all catalog consumers is the simpler alternative.
+
+Workspace-admin removal of a custom Vercel AI Gateway slug is a retirement,
+not a hard delete. The slug leaves new model selection immediately, while an
+already accepted turn or an existing-session continuation can still resolve
+its frozen definition. Re-adding the same slug restores the original row and
+definition identity rather than replacing accepted execution truth.
 
 Database mode permits cost-policy entries for product IDs that are not yet in
 the current singleton so operators can stage cost and pricing before adding

@@ -228,4 +228,46 @@ describe("automation dispatch activity", () => {
       errorCode: "authority_revoked",
     });
   });
+
+  test("terminally settles deterministic model failures after claim", async () => {
+    const settle = mock(async () => undefined);
+    const activity = createAutomationActivities(services(), {
+      claim: async () => ({
+        ...run,
+        acceptedExecution: {
+          ...run.acceptedExecution,
+          sessionTemplate: {
+            ...run.acceptedExecution.sessionTemplate,
+            model: "missing/provider-model",
+          },
+        },
+      }),
+      settle,
+    });
+
+    expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+      action: "failed",
+      reason: "dispatch_failed",
+    });
+    expect(settle).toHaveBeenCalledWith(expect.anything(), {
+      workspaceId,
+      runId,
+      status: "failed",
+      errorCode: "dispatch_failed",
+    });
+  });
+
+  test("replays a durably failed run without reclaiming it", async () => {
+    const settle = mock(async () => undefined);
+    const activity = createAutomationActivities(services(), {
+      claim: async () => ({ ...run, status: "failed", errorCode: "dispatch_failed" }),
+      settle,
+    });
+
+    expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+      action: "failed",
+      reason: "dispatch_failed",
+    });
+    expect(settle).not.toHaveBeenCalled();
+  });
 });

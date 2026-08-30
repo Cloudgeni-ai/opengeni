@@ -209,6 +209,22 @@ function materialize(ctx: GoalFixture) {
       model: "scripted-model",
       reasoningEffort: "low",
       latencyMode: "standard" as const,
+      turnExecutionPolicy: {
+        schemaVersion: 1,
+        productModelId: "scripted-model",
+        requestedModelId: null,
+        modelSource: "continuation",
+        reasoningEffort: "low",
+        reasoningSource: "continuation",
+        latencyMode: "standard",
+        latencyModeSource: "continuation",
+        providerId: "scripted-provider",
+        upstreamModelId: "scripted-model",
+        wireApi: "responses",
+        credentialSource: { kind: "deployment", mechanism: "none" },
+        billing: { upstreamPayer: "deployment", metering: "external" },
+        definitionVersion: `sha256:${"0".repeat(64)}`,
+      },
       tools: [],
       sandboxBackend: "none",
     },
@@ -1381,6 +1397,12 @@ describe("durable active-goal wake", () => {
     expect(claimed.action).toBe("claimed");
     if (claimed.action !== "claimed") throw new Error("goal continuation was not claimed");
     expect(claimed.turn.source).toBe("goal");
+    expect(claimed.turn.metadata).toMatchObject({
+      turnExecutionPolicyV1: {
+        productModelId: "scripted-model",
+        providerId: "scripted-provider",
+      },
+    });
     expect(claimed.turn.initiator).toMatchObject({
       kind: "service",
       subjectId: "goal-continuation",

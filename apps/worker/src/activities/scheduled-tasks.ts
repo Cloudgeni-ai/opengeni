@@ -10,6 +10,7 @@ import {
   normalizeAutomaticSessionTitle,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
+  TurnExecutionPolicyV1,
   type ScheduledTask,
   type ScheduledTaskRun,
 } from "@opengeni/contracts";
@@ -68,7 +69,7 @@ import {
   withSessionActivityRlsContext,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
+import { resolveFirstPartyMcpToolPolicy, resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import {
   assertReusableSessionRevivable,
@@ -243,7 +244,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         return { action: "blocked", reason: "malformed_manual_trigger" };
       }
       const { db, bus, wakeSessionWorkflow } = baseService;
-      const settingsForTask = async (task: ScheduledTask) =>
+      const settingsForTask = async (task: ScheduledTask, retainedProductModelId?: string | null) =>
         (
           await resolveWorkspaceCatalogSettings(
             db,
@@ -251,6 +252,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             {
               accountId: task.accountId,
               workspaceId: task.workspaceId,
+              ...(retainedProductModelId !== undefined ? { retainedProductModelId } : {}),
             },
           )
         ).settings;
@@ -287,7 +289,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           });
         }
         if (priorRun.status === "queued") {
-          const settings = await settingsForTask(acceptedExecution.task);
+          const acceptedPolicy = acceptedExecution.turnExecutionPolicy
+            ? TurnExecutionPolicyV1.parse(acceptedExecution.turnExecutionPolicy)
+            : null;
+          const settings = await settingsForTask(
+            acceptedExecution.task,
+            acceptedPolicy?.productModelId ??
+              acceptedExecution.targetSessionExecution?.model ??
+              acceptedExecution.resolvedModel,
+          );
           try {
             return await recoverBoundScheduledTaskDispatch({
               db,
@@ -753,6 +763,26 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (admissionDenial) {
         return { action: "blocked", reason: admissionDenial };
       }
+      const acceptedModel = targetSessionExecution?.model ?? model;
+      const acceptedReasoningEffort = targetSessionExecution?.reasoningEffort ?? reasoningEffort;
+      const acceptedLatencyMode = targetSessionExecution?.latencyMode ?? "standard";
+      const turnExecutionPolicy: TurnExecutionPolicyV1 = resolveTurnExecutionPolicyV1(settings, {
+        modelId: acceptedModel,
+        requestedModelId: generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
+        modelSource: generatedTarget
+          ? task.agentConfig.model
+            ? "explicit"
+            : "deployment"
+          : "session",
+        reasoningEffort: acceptedReasoningEffort,
+        reasoningSource: generatedTarget
+          ? task.agentConfig.reasoningEffort
+            ? "explicit"
+            : "deployment"
+          : "session",
+        latencyMode: acceptedLatencyMode,
+        latencyModeSource: generatedTarget ? "deployment" : "session",
+      });
       const deferredEvents: Array<{
         sessionId: string;
         events: Awaited<ReturnType<typeof appendSessionEvents>>;
@@ -779,6 +809,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           resolvedModel: model,
           resolvedReasoningEffort: reasoningEffort,
           resolvedLatencyMode: "standard",
+          turnExecutionPolicy,
           resolvedSandboxBackend: sandboxBackend,
           resolvedSandboxOs: sandboxOs,
           resolvedTools: taskTools,

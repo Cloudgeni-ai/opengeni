@@ -466,6 +466,7 @@ export type DispatchAutomationRunResult =
   | { action: "started"; sessionId: string }
   | { action: "already_dispatched"; sessionId: string }
   | { action: "skipped"; reason: string }
+  | { action: "failed"; reason: string }
   | { action: "not_found" };
 
 export type RunKnowledgeSourceSyncBatchResult =

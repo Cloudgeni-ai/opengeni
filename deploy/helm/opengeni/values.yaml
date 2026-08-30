@@ -740,6 +740,8 @@ migrations:
   image:
     repository: opengeni-api
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    # Production and every drained maintenance rollout must also set an exact
+    # sha256 digest; never cross the drain boundary using a mutable tag/cache.
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent

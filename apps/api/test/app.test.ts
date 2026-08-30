@@ -1956,12 +1956,14 @@ describe("GET /v1/config/client", () => {
       id: DEFAULT_OPENROUTER_MODEL_ID,
       provider: "openrouter",
       providerLabel: "OpenRouter",
-      source: "openrouter",
       api: "chat",
       cost: "free",
       billing: { upstreamPayer: "deployment", metering: "external" },
       capabilities: { functionCalling: { runnable: true } },
     });
+    expect(
+      config.models.find((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID),
+    ).not.toHaveProperty("source");
     expect(JSON.stringify(config)).not.toContain("openrouter-client-config-secret");
   });
 });

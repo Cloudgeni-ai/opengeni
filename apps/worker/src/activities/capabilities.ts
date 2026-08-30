@@ -1,6 +1,7 @@
 import {
   environmentsEncryptionKeyBytes,
   type Settings,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   withCodexCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
   withWorkspaceGatewayCredential,
@@ -8,6 +9,7 @@ import {
 } from "@opengeni/config";
 import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
 import {
+  getWorkspaceGatewayCustomModelForExecution,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
   listWorkspaceGatewayCustomModels,
@@ -130,8 +132,28 @@ export async function settingsWithWorkspaceGatewayCredential(
   accountId: string,
   workspaceId: string,
   settings: Settings,
+  retainedProductModelId?: string | null,
 ): Promise<Settings> {
-  const customModels = await listWorkspaceGatewayCustomModels(db, { accountId, workspaceId });
+  const activeCustomModels = await listWorkspaceGatewayCustomModels(db, { accountId, workspaceId });
+  const retainedUpstreamModelId = retainedProductModelId?.startsWith(
+    WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  )
+    ? retainedProductModelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length)
+    : null;
+  const retainedCustomModel = retainedUpstreamModelId
+    ? await getWorkspaceGatewayCustomModelForExecution(db, {
+        accountId,
+        workspaceId,
+        upstreamModelId: retainedUpstreamModelId,
+      })
+    : null;
+  const customModels =
+    retainedCustomModel &&
+    !activeCustomModels.some(
+      (model) => model.upstreamModelId === retainedCustomModel.upstreamModelId,
+    )
+      ? [...activeCustomModels, retainedCustomModel]
+      : activeCustomModels;
   const catalogSettings = withWorkspaceGatewayCatalogProvider(settings, customModels);
   const apiKey = await loadWorkspaceVercelAiGatewayApiKey(db, settings, workspaceId);
   return apiKey

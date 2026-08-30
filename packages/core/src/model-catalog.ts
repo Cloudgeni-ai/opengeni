@@ -18,6 +18,7 @@ import {
 } from "@opengeni/contracts";
 import {
   getDeploymentModelCatalog,
+  getWorkspaceGatewayCustomModelForExecution,
   listWorkspaceGatewayCustomModels,
   type Database,
 } from "@opengeni/db";
@@ -70,12 +71,29 @@ export async function resolveCatalogSettings(
 export async function resolveWorkspaceCatalogSettings(
   db: Database,
   envSettings: Settings,
-  input: { accountId: string; workspaceId: string },
+  input: { accountId: string; workspaceId: string; retainedProductModelId?: string | null },
 ): Promise<ResolvedCatalogSettings> {
-  const [resolved, customModels] = await Promise.all([
+  const retainedUpstreamModelId = input.retainedProductModelId?.startsWith("workspace-gateway/")
+    ? input.retainedProductModelId.slice("workspace-gateway/".length)
+    : null;
+  const [resolved, activeCustomModels, retainedCustomModel] = await Promise.all([
     resolveCatalogSettings(db, envSettings),
     listWorkspaceGatewayCustomModels(db, input),
+    retainedUpstreamModelId
+      ? getWorkspaceGatewayCustomModelForExecution(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          upstreamModelId: retainedUpstreamModelId,
+        })
+      : null,
   ]);
+  const customModels =
+    retainedCustomModel &&
+    !activeCustomModels.some(
+      (model) => model.upstreamModelId === retainedCustomModel.upstreamModelId,
+    )
+      ? [...activeCustomModels, retainedCustomModel]
+      : activeCustomModels;
   return {
     ...resolved,
     settings: withWorkspaceGatewayCatalogProvider(resolved.settings, customModels),

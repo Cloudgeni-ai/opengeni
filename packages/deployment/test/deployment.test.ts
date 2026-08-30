@@ -20,6 +20,12 @@ import {
 } from "../src/index";
 
 const testEnvironmentsEncryptionKey = Buffer.alloc(32, 2).toString("base64");
+const testImageDigests = {
+  OPENGENI_API_IMAGE_DIGEST: `sha256:${"1".repeat(64)}`,
+  OPENGENI_WORKER_IMAGE_DIGEST: `sha256:${"2".repeat(64)}`,
+  OPENGENI_WEB_IMAGE_DIGEST: `sha256:${"3".repeat(64)}`,
+  OPENGENI_MIGRATIONS_IMAGE_DIGEST: `sha256:${"4".repeat(64)}`,
+};
 
 describe("deployment contract", () => {
   test("ships valid built-in profiles", () => {
@@ -630,6 +636,7 @@ describe("deployment contract", () => {
         OPENGENI_DELEGATION_SECRET: "test-delegation-secret",
         OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
         OPENGENI_IMAGE_TAG: "test-sha",
+        ...testImageDigests,
         OPENGENI_MODEL_CATALOG_SOURCE: "database",
         OPENGENI_MODEL_COST_POLICY_JSON:
           '{"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"free"}',
@@ -648,7 +655,9 @@ describe("deployment contract", () => {
     );
     expect(artifacts.helmValuesYaml).toContain('tag: "test-sha"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_DEPLOYMENT_REVISION: "test-sha"');
-    expect(artifacts.helmValuesYaml).toContain('digest: ""');
+    expect(artifacts.helmValuesYaml).toContain(
+      `digest: "${testImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
+    );
     expect(artifacts.helmValuesYaml).toContain(
       'iam.gke.io/gcp-service-account: "opengeni-runtime@opengeni-example.iam.gserviceaccount.com"',
     );
@@ -703,6 +712,7 @@ describe("deployment contract", () => {
         OPENGENI_DELEGATION_SECRET: "test-delegation-secret",
         OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
         OPENGENI_OPENAI_API_KEY: "openai",
+        ...testImageDigests,
       },
     );
 
@@ -793,9 +803,7 @@ describe("deployment contract", () => {
         OPENGENI_AZURE_OPENAI_API_VERSION: "2025-04-01-preview",
         OPENGENI_AZURE_OPENAI_API_KEY: "azure-openai",
         OPENGENI_IMAGE_TAG: "release-1",
-        OPENGENI_API_IMAGE_DIGEST: "sha256:api",
-        OPENGENI_WORKER_IMAGE_DIGEST: "sha256:worker",
-        OPENGENI_WEB_IMAGE_DIGEST: "sha256:web",
+        ...testImageDigests,
         OPENGENI_MODAL_APP_NAME: "opengeni-staging",
         OPENGENI_MODAL_TOKEN_ID: "modal-token-id",
         OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
@@ -832,9 +840,15 @@ describe("deployment contract", () => {
       "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET=github-personal-secret",
     );
     expect(artifacts.helmValuesYaml).toContain('tag: "release-1"');
-    expect(artifacts.helmValuesYaml).toContain('digest: "sha256:api"');
-    expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');
-    expect(artifacts.helmValuesYaml).toContain('digest: "sha256:web"');
+    expect(artifacts.helmValuesYaml).toContain(
+      `digest: "${testImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
+    );
+    expect(artifacts.helmValuesYaml).toContain(
+      `digest: "${testImageDigests.OPENGENI_WORKER_IMAGE_DIGEST}"`,
+    );
+    expect(artifacts.helmValuesYaml).toContain(
+      `digest: "${testImageDigests.OPENGENI_WEB_IMAGE_DIGEST}"`,
+    );
   });
 
   test("renders production managed SaaS posture as digest-pinned promotion without deployment shared key", () => {
@@ -906,9 +920,7 @@ describe("deployment contract", () => {
         OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
         OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
         OPENGENI_IMAGE_TAG: "release-prod",
-        OPENGENI_API_IMAGE_DIGEST: "sha256:api",
-        OPENGENI_WORKER_IMAGE_DIGEST: "sha256:worker",
-        OPENGENI_WEB_IMAGE_DIGEST: "sha256:web",
+        ...testImageDigests,
         OPENGENI_MODAL_APP_NAME: "opengeni-prod",
         OPENGENI_MODAL_TOKEN_ID: "modal-token-id",
         OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
@@ -934,9 +946,15 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_ENABLED: "true"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1"');
     expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
-    expect(artifacts.helmValuesYaml).toContain('digest: "sha256:api"');
-    expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');
-    expect(artifacts.helmValuesYaml).toContain('digest: "sha256:web"');
+    expect(artifacts.helmValuesYaml).toContain(
+      `digest: "${testImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
+    );
+    expect(artifacts.helmValuesYaml).toContain(
+      `digest: "${testImageDigests.OPENGENI_WORKER_IMAGE_DIGEST}"`,
+    );
+    expect(artifacts.helmValuesYaml).toContain(
+      `digest: "${testImageDigests.OPENGENI_WEB_IMAGE_DIGEST}"`,
+    );
   });
 
   test("does not require legacy Azure api-version for Azure OpenAI v1 base URLs", () => {
@@ -996,9 +1014,7 @@ describe("deployment contract", () => {
         OPENGENI_AZURE_OPENAI_API_VERSION: "2025-04-01-preview",
         OPENGENI_AZURE_OPENAI_API_KEY: "azure-openai",
         OPENGENI_IMAGE_TAG: "release-1",
-        OPENGENI_API_IMAGE_DIGEST: "sha256:api",
-        OPENGENI_WORKER_IMAGE_DIGEST: "sha256:worker",
-        OPENGENI_WEB_IMAGE_DIGEST: "sha256:web",
+        ...testImageDigests,
         OPENGENI_MODAL_APP_NAME: "opengeni-staging",
         OPENGENI_MODAL_TOKEN_ID: "modal-token-id",
         OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
@@ -1080,9 +1096,7 @@ describe("deployment contract", () => {
         OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED: "true",
         OPENGENI_STREAM_TOKEN_SECRET: "ogs_preview_stream_secret",
         OPENGENI_IMAGE_TAG: "preview-123",
-        OPENGENI_API_IMAGE_DIGEST: "sha256:api",
-        OPENGENI_WORKER_IMAGE_DIGEST: "sha256:worker",
-        OPENGENI_WEB_IMAGE_DIGEST: "sha256:web",
+        ...testImageDigests,
       },
     );
 
@@ -1114,7 +1128,9 @@ describe("deployment contract", () => {
       'OPENGENI_WEB_ALLOWED_HOSTS: "preview-123.app.opengeni.ai"',
     );
     expect(artifacts.helmValuesYaml).toContain('tag: "preview-123"');
-    expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');
+    expect(artifacts.helmValuesYaml).toContain(
+      `digest: "${testImageDigests.OPENGENI_WORKER_IMAGE_DIGEST}"`,
+    );
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED: "true"');
     expect(artifacts.helmValuesYaml).toContain('existingSecret: "opengeni-migrations"');
     expect(artifacts.helmValuesYaml).toContain('existingSecret: "opengeni-runtime"');

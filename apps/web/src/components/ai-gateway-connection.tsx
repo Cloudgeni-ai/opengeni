@@ -11,6 +11,7 @@ import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 
 const GATEWAY_DOMAIN = "ai-gateway.vercel.sh";
@@ -69,6 +70,8 @@ export function AiGatewayConnectionCardWithClient(
   const [modelSlug, setModelSlug] = useState("");
   const [modelBusy, setModelBusy] = useState(false);
   const [removingModelId, setRemovingModelId] = useState<string | null>(null);
+  const [modelPendingRemoval, setModelPendingRemoval] =
+    useState<WorkspaceGatewayCustomModel | null>(null);
   const [open, setOpen] = useState(false);
   const activeRef = useRef(true);
   const customModelsRequestGenerationRef = useRef(0);
@@ -256,16 +259,16 @@ export function AiGatewayConnectionCardWithClient(
     }
   }
 
-  async function removeCustomModel(model: WorkspaceGatewayCustomModel) {
+  async function removeCustomModel(model: WorkspaceGatewayCustomModel): Promise<boolean> {
     const modelIndex = customModels.findIndex((candidate) => candidate.id === model.id);
     const focusModelId =
       customModels[modelIndex + 1]?.id ?? customModels[modelIndex - 1]?.id ?? null;
     setRemovingModelId(model.id);
     try {
       await client.deleteWorkspaceGatewayCustomModel(props.workspaceId, model.id);
-      if (!activeRef.current) return;
+      if (!activeRef.current) return true;
       await refreshCustomModels();
-      if (!activeRef.current) return;
+      if (!activeRef.current) return true;
       queueMicrotask(() => {
         if (!activeRef.current) return;
         if (focusModelId) removeButtonRefs.current.get(focusModelId)?.focus();
@@ -273,11 +276,13 @@ export function AiGatewayConnectionCardWithClient(
       });
       props.onConnectionChange?.();
       toast.success("Gateway model removed");
+      return true;
     } catch (caught) {
-      if (!activeRef.current) return;
+      if (!activeRef.current) return false;
       toast.error("Couldn't remove Gateway model", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
+      return false;
     } finally {
       if (activeRef.current) setRemovingModelId(null);
     }
@@ -300,191 +305,211 @@ export function AiGatewayConnectionCardWithClient(
   }
 
   return (
-    <details
-      className="group rounded-lg border border-border"
-      open={open}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-    >
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
-        <VercelMark className="size-3.5 shrink-0 text-fg" />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">
-          Bring your own Vercel AI Gateway
-        </span>
-        <span className="text-2xs text-fg-subtle">
-          {!loaded ? "…" : connected ? "Connected" : error ? "Unavailable" : "Off"}
-        </span>
-        <ChevronDownIcon className="size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180" />
-      </summary>
+    <>
+      <details
+        className="group rounded-lg border border-border"
+        open={open}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
+          <VercelMark className="size-3.5 shrink-0 text-fg" />
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">
+            Bring your own Vercel AI Gateway
+          </span>
+          <span className="text-2xs text-fg-subtle">
+            {!loaded ? "…" : connected ? "Connected" : error ? "Unavailable" : "Off"}
+          </span>
+          <ChevronDownIcon className="size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180" />
+        </summary>
 
-      <div className="grid gap-3 border-t border-border/70 px-3 py-3">
-        <p className="text-2xs text-fg-subtle">
-          Use models through this workspace's Vercel account. Vercel bills usage directly instead of
-          using OpenGeni credits.
-        </p>
-        {error ? <p className="text-xs text-destructive">{error}</p> : null}
-        {props.canManageConnection ? (
-          <>
-            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-              <Input
-                type="password"
-                autoComplete="off"
-                value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
-                className="h-9"
-                placeholder={connected ? "Replace Vercel AI Gateway key" : "Vercel AI Gateway key"}
-                aria-label="Vercel AI Gateway key"
-              />
-              <Button type="button" disabled={busy || !apiKey.trim()} onClick={save}>
-                {busy ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : connected ? (
-                  "Replace"
-                ) : (
-                  "Connect"
-                )}
-              </Button>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <p className="text-2xs text-fg-subtle">
-                Stored encrypted. Connecting does not run a model or spend credits.
-              </p>
-              {connected ? (
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="ghost"
-                  disabled={busy}
-                  className="text-destructive hover:text-destructive"
-                  onClick={disconnect}
-                >
-                  <Trash2Icon className="size-3.5" />
-                  Disconnect
-                </Button>
-              ) : null}
-            </div>
-          </>
-        ) : (
-          <p className="text-xs text-fg-subtle">
-            Members with connection-management access manage this Vercel AI Gateway connection.
+        <div className="grid gap-3 border-t border-border/70 px-3 py-3">
+          <p className="text-2xs text-fg-subtle">
+            Use models through this workspace's Vercel account. Vercel bills usage directly instead
+            of using OpenGeni credits.
           </p>
-        )}
-
-        <div className="grid gap-2.5 border-t border-border/70 pt-3">
-          <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-            <div className="grid gap-0.5">
-              <p className="text-xs font-medium text-fg">Models from your Gateway</p>
-              <p className="max-w-xl text-2xs leading-relaxed text-fg-subtle">
-                Add an exact Vercel model slug. OpenGeni uses the Gateway's routing and does not
-                inspect or pin a provider for custom entries.
-              </p>
-            </div>
-            <span className="text-2xs text-fg-subtle" aria-live="polite">
-              {!customModelsLoaded
-                ? "Loading…"
-                : customModelsError
-                  ? "Unavailable"
-                  : `${customModels.length} ${customModels.length === 1 ? "model" : "models"}`}
-            </span>
-          </div>
-
-          {props.canManageCustomModels ? (
-            <div className="grid gap-1.5">
+          {error ? <p className="text-xs text-destructive">{error}</p> : null}
+          {props.canManageConnection ? (
+            <>
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                 <Input
-                  ref={modelInputRef}
-                  value={modelSlug}
-                  onChange={(event) => setModelSlug(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !modelBusy) {
-                      event.preventDefault();
-                      void addCustomModel();
-                    }
-                  }}
-                  disabled={modelBusy}
-                  className="h-9 font-mono text-xs"
-                  placeholder="anthropic/claude-sonnet-4.6"
-                  aria-label="Vercel AI Gateway model slug"
-                  aria-describedby="gateway-model-slug-help"
+                  type="password"
                   autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
+                  value={apiKey}
+                  onChange={(event) => setApiKey(event.target.value)}
+                  className="h-9"
+                  placeholder={
+                    connected ? "Replace Vercel AI Gateway key" : "Vercel AI Gateway key"
+                  }
+                  aria-label="Vercel AI Gateway key"
                 />
-                <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={modelBusy || !modelSlugValid || modelSlugExists}
-                  onClick={addCustomModel}
-                >
-                  {modelBusy ? (
+                <Button type="button" disabled={busy || !apiKey.trim()} onClick={save}>
+                  {busy ? (
                     <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : connected ? (
+                    "Replace"
                   ) : (
-                    <PlusIcon className="size-3.5" />
+                    "Connect"
                   )}
-                  Add model
                 </Button>
               </div>
-              <p id="gateway-model-slug-help" className="text-2xs text-fg-subtle">
-                {modelSlugExists
-                  ? "That slug is already configured for this workspace."
-                  : modelSlug && !modelSlugValid
-                    ? "Use the exact printable slug with no spaces or |."
-                    : connected
-                      ? "The model becomes selectable when workspace policy allows it."
-                      : "You can configure models now; they become selectable after you connect the Gateway."}
-              </p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-2xs text-fg-subtle">
+                  Stored encrypted. Connecting does not run a model or spend credits.
+                </p>
+                {connected ? (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    disabled={busy}
+                    className="text-destructive hover:text-destructive"
+                    onClick={disconnect}
+                  >
+                    <Trash2Icon className="size-3.5" />
+                    Disconnect
+                  </Button>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-fg-subtle">
+              Members with connection-management access manage this Vercel AI Gateway connection.
+            </p>
+          )}
+
+          <div className="grid gap-2.5 border-t border-border/70 pt-3">
+            <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+              <div className="grid gap-0.5">
+                <p className="text-xs font-medium text-fg">Models from your Gateway</p>
+                <p className="max-w-xl text-2xs leading-relaxed text-fg-subtle">
+                  Add an exact Vercel model slug. OpenGeni uses the Gateway's routing and does not
+                  inspect or pin a provider for custom entries.
+                </p>
+              </div>
+              <span className="text-2xs text-fg-subtle" aria-live="polite">
+                {!customModelsLoaded
+                  ? "Loading…"
+                  : customModelsError
+                    ? "Unavailable"
+                    : `${customModels.length} ${customModels.length === 1 ? "model" : "models"}`}
+              </span>
             </div>
-          ) : null}
 
-          {customModelsError ? (
-            <p className="text-xs text-destructive">{customModelsError}</p>
-          ) : null}
+            {props.canManageCustomModels ? (
+              <div className="grid gap-1.5">
+                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <Input
+                    ref={modelInputRef}
+                    value={modelSlug}
+                    onChange={(event) => setModelSlug(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !modelBusy) {
+                        event.preventDefault();
+                        void addCustomModel();
+                      }
+                    }}
+                    disabled={modelBusy}
+                    className="h-9 font-mono text-xs"
+                    placeholder="anthropic/claude-sonnet-4.6"
+                    aria-label="Vercel AI Gateway model slug"
+                    aria-describedby="gateway-model-slug-help"
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={modelBusy || !modelSlugValid || modelSlugExists}
+                    onClick={addCustomModel}
+                  >
+                    {modelBusy ? (
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                    ) : (
+                      <PlusIcon className="size-3.5" />
+                    )}
+                    Add model
+                  </Button>
+                </div>
+                <p id="gateway-model-slug-help" className="text-2xs text-fg-subtle">
+                  {modelSlugExists
+                    ? "That slug is already configured for this workspace."
+                    : modelSlug && !modelSlugValid
+                      ? "Use the exact printable slug with no spaces or |."
+                      : connected
+                        ? "The model becomes selectable when workspace policy allows it."
+                        : "You can configure models now; they become selectable after you connect the Gateway."}
+                </p>
+              </div>
+            ) : null}
 
-          {customModelsLoaded && !customModelsError && customModels.length === 0 ? (
-            <div className="rounded-md bg-surface-2/55 px-3 py-2.5 text-2xs text-fg-subtle">
-              No custom model slugs yet. The curated Gateway models remain available separately.
-            </div>
-          ) : null}
+            {customModelsError ? (
+              <p className="text-xs text-destructive">{customModelsError}</p>
+            ) : null}
 
-          {customModelsLoaded && !customModelsError && customModels.length > 0 ? (
-            <ul className="divide-y divide-border/70 rounded-md bg-surface-2/55 px-3">
-              {customModels.map((model) => (
-                <li key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-mono text-xs text-fg">{model.upstreamModelId}</p>
-                    <p className="mt-0.5 text-2xs text-fg-subtle">
-                      {connected
-                        ? "Ready through Your Gateway"
-                        : "Waiting for a Gateway connection"}
-                    </p>
-                  </div>
-                  {props.canManageCustomModels ? (
-                    <Button
-                      ref={(node) => {
-                        if (node) removeButtonRefs.current.set(model.id, node);
-                        else removeButtonRefs.current.delete(model.id);
-                      }}
-                      type="button"
-                      size="icon-xs"
-                      variant="ghost"
-                      className="shrink-0 text-fg-subtle hover:text-destructive"
-                      disabled={removingModelId !== null}
-                      aria-label={`Remove ${model.upstreamModelId}`}
-                      onClick={() => void removeCustomModel(model)}
-                    >
-                      {removingModelId === model.id ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <Trash2Icon className="size-3.5" />
-                      )}
-                    </Button>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          ) : null}
+            {customModelsLoaded && !customModelsError && customModels.length === 0 ? (
+              <div className="rounded-md bg-surface-2/55 px-3 py-2.5 text-2xs text-fg-subtle">
+                No custom model slugs yet. The curated Gateway models remain available separately.
+              </div>
+            ) : null}
+
+            {customModelsLoaded && !customModelsError && customModels.length > 0 ? (
+              <ul className="divide-y divide-border/70 rounded-md bg-surface-2/55 px-3">
+                {customModels.map((model) => (
+                  <li key={model.id} className="flex min-w-0 items-center gap-3 py-2.5">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-mono text-xs text-fg">{model.upstreamModelId}</p>
+                      <p className="mt-0.5 text-2xs text-fg-subtle">
+                        {connected
+                          ? "Ready through Your Gateway"
+                          : "Waiting for a Gateway connection"}
+                      </p>
+                    </div>
+                    {props.canManageCustomModels ? (
+                      <Button
+                        ref={(node) => {
+                          if (node) removeButtonRefs.current.set(model.id, node);
+                          else removeButtonRefs.current.delete(model.id);
+                        }}
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost"
+                        className="shrink-0 text-fg-subtle hover:text-destructive"
+                        disabled={removingModelId !== null}
+                        aria-label={`Remove ${model.upstreamModelId}`}
+                        onClick={() => setModelPendingRemoval(model)}
+                      >
+                        {removingModelId === model.id ? (
+                          <Loader2Icon className="size-3.5 animate-spin" />
+                        ) : (
+                          <Trash2Icon className="size-3.5" />
+                        )}
+                      </Button>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
         </div>
-      </div>
-    </details>
+      </details>
+      <ConfirmDialog
+        open={modelPendingRemoval !== null}
+        onOpenChange={(next) => {
+          if (!next) setModelPendingRemoval(null);
+        }}
+        title={
+          modelPendingRemoval
+            ? `Remove Gateway model “${modelPendingRemoval.upstreamModelId}”?`
+            : "Remove Gateway model?"
+        }
+        description="The model disappears from new selections. Already accepted turns keep their frozen definition so they can finish safely."
+        confirmLabel="Remove model"
+        onConfirm={async () =>
+          modelPendingRemoval ? await removeCustomModel(modelPendingRemoval) : false
+        }
+      />
+    </>
   );
 }

@@ -696,7 +696,9 @@ export async function claimAutomationRun(
           .for("update")
           .limit(1);
         if (!row) return null;
-        if (row.status === "dispatched" || row.status === "skipped") return mapRunExecution(row);
+        if (row.status === "dispatched" || row.status === "skipped" || row.status === "failed") {
+          return mapRunExecution(row);
+        }
         const [updated] = await tx
           .update(schema.automationRuns)
           .set({

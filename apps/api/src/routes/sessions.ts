@@ -328,15 +328,6 @@ function requireViewerLifecyclePermission(grant: AccessGrant): void {
 
 export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
-  const catalogDeps = async (
-    accountId: string,
-    workspaceId: string,
-  ): Promise<SessionRouteDeps> => ({
-    ...deps,
-    catalogSourceSettings: settings,
-    settings: (await resolveWorkspaceCatalogSettings(db, settings, { accountId, workspaceId }))
-      .settings,
-  });
   const channelAServices = {
     db,
     settings,
@@ -562,13 +553,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     let session: Session;
     try {
       CreateSessionRequest.parse(payload);
-      session = await createSessionForRequest(
-        await catalogDeps(grant.accountId, workspaceId),
-        grant,
-        workspaceId,
-        payload,
-        authorization,
-      );
+      session = await createSessionForRequest(deps, grant, workspaceId, payload, authorization);
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
@@ -2928,12 +2913,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
-    const result = await acceptSessionUserMessage(
-      await catalogDeps(grant.accountId, workspaceId),
-      grant,
-      workspaceId,
-      sessionId,
-      {
+    let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
+    try {
+      result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
         text: payload.text,
         annotations: payload.annotations,
         modelContext: payload.modelContext ?? null,
@@ -2954,8 +2936,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ? { expectedDraftRevision: payload.expectedDraftRevision }
           : {}),
         ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
-      },
-    );
+      });
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
     return c.json(result, 202);
   });
 
@@ -2973,14 +2957,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
     let result: Awaited<ReturnType<typeof submitComposerDraftForRequest>>;
     try {
-      result = await submitComposerDraftForRequest(
-        await catalogDeps(grant.accountId, workspaceId),
-        grant,
-        workspaceId,
-        sessionId,
-        payload,
-        { authorization },
-      );
+      result = await submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
+        authorization,
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -3016,12 +2995,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     if (event.type === "user.message") {
-      const { accepted } = await acceptSessionUserMessage(
-        await catalogDeps(grant.accountId, workspaceId),
-        grant,
-        workspaceId,
-        sessionId,
-        {
+      let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
+      try {
+        result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
           text: event.payload.text,
           annotations: event.payload.annotations,
           modelContext: event.payload.modelContext ?? null,
@@ -3042,9 +3018,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             ? { expectedDraftRevision: event.payload.expectedDraftRevision }
             : {}),
           ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-        },
-      );
-      return c.json(accepted, 202);
+        });
+      } catch (error) {
+        return commandConflictResponse(c, error);
+      }
+      return c.json(result.accepted, 202);
     }
 
     if (event.type === "user.approvalDecision") {

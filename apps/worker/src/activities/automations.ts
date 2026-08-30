@@ -59,76 +59,79 @@ export function createAutomationActivities(
       if (run.status === "skipped") {
         return { action: "skipped", reason: run.errorCode ?? "authority_revoked" };
       }
-
-      const accepted = run.acceptedExecution;
-      if (
-        accepted.accountId !== input.accountId ||
-        accepted.workspaceId !== input.workspaceId ||
-        accepted.sourceId !== run.sourceId ||
-        accepted.triggerId !== run.triggerId ||
-        accepted.triggerRevision !== run.triggerRevision ||
-        accepted.eventId !== run.eventId
-      ) {
-        await settle(service.db, {
-          workspaceId: input.workspaceId,
-          runId: run.id,
-          status: "skipped",
-          errorCode: "accepted_execution_mismatch",
-        });
-        return { action: "skipped", reason: "accepted_execution_mismatch" };
+      if (run.status === "failed") {
+        return { action: "failed", reason: run.errorCode ?? "dispatch_failed" };
       }
-
-      const template = accepted.sessionTemplate;
-      const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
-      const catalogSettings = requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
-        ? (
-            await resolveWorkspaceCatalogSettings(service.db, catalogSourceSettings, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-            })
-          ).settings
-        : deploymentCatalogSettings;
-      const catalogService = { ...service, settings: catalogSettings };
-      const model = canonicalConfiguredModel(catalogSettings, requestedModel);
-      if (!model) throw new Error("automation has no configured model");
-      await assertModelPolicy(service.db, catalogSettings, input.workspaceId, model);
-      const denial = await admit(catalogService, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        model,
-        requestedAgentRuns: 1,
-      });
-      if (denial) {
-        await settle(service.db, {
-          workspaceId: input.workspaceId,
-          runId: run.id,
-          status: "failed",
-          errorCode: denial,
-        });
-        throw new Error(`automation admission denied: ${denial}`);
-      }
-      const reasoningEffort = template.reasoningEffort ?? catalogSettings.openaiReasoningEffort;
-      const sandboxBackend = template.sandboxBackend ?? catalogSettings.sandboxBackend;
-      if (sandboxBackend === "selfhosted") {
-        await settle(service.db, {
-          workspaceId: input.workspaceId,
-          runId: run.id,
-          status: "skipped",
-          errorCode: "interactive_compute_not_allowed",
-        });
-        return { action: "skipped", reason: "interactive_compute_not_allowed" };
-      }
-      const turnExecutionPolicy = resolveTurnExecutionPolicyV1(catalogSettings, {
-        modelId: model,
-        requestedModelId: template.model,
-        modelSource: template.model ? "explicit" : "deployment",
-        reasoningEffort,
-        reasoningSource: template.reasoningEffort ? "explicit" : "deployment",
-        latencyMode: "standard",
-        latencyModeSource: "deployment",
-      });
 
       try {
+        const accepted = run.acceptedExecution;
+        if (
+          accepted.accountId !== input.accountId ||
+          accepted.workspaceId !== input.workspaceId ||
+          accepted.sourceId !== run.sourceId ||
+          accepted.triggerId !== run.triggerId ||
+          accepted.triggerRevision !== run.triggerRevision ||
+          accepted.eventId !== run.eventId
+        ) {
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "skipped",
+            errorCode: "accepted_execution_mismatch",
+          });
+          return { action: "skipped", reason: "accepted_execution_mismatch" };
+        }
+
+        const template = accepted.sessionTemplate;
+        const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
+        const catalogSettings = requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
+          ? (
+              await resolveWorkspaceCatalogSettings(service.db, catalogSourceSettings, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                retainedProductModelId: requestedModel,
+              })
+            ).settings
+          : deploymentCatalogSettings;
+        const catalogService = { ...service, settings: catalogSettings };
+        const model = canonicalConfiguredModel(catalogSettings, requestedModel);
+        if (!model) throw new Error("automation has no configured model");
+        await assertModelPolicy(service.db, catalogSettings, input.workspaceId, model);
+        const denial = await admit(catalogService, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          model,
+          requestedAgentRuns: 1,
+        });
+        if (denial) {
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "failed",
+            errorCode: denial,
+          });
+          return { action: "failed", reason: denial };
+        }
+        const reasoningEffort = template.reasoningEffort ?? catalogSettings.openaiReasoningEffort;
+        const sandboxBackend = template.sandboxBackend ?? catalogSettings.sandboxBackend;
+        if (sandboxBackend === "selfhosted") {
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "skipped",
+            errorCode: "interactive_compute_not_allowed",
+          });
+          return { action: "skipped", reason: "interactive_compute_not_allowed" };
+        }
+        const turnExecutionPolicy = resolveTurnExecutionPolicyV1(catalogSettings, {
+          modelId: model,
+          requestedModelId: template.model,
+          modelSource: template.model ? "explicit" : "deployment",
+          reasoningEffort,
+          reasoningSource: template.reasoningEffort ? "explicit" : "deployment",
+          latencyMode: "standard",
+          latencyModeSource: "deployment",
+        });
         const created = await createSession({
           db: service.db,
           bus: service.bus,
@@ -220,7 +223,7 @@ export function createAutomationActivities(
           status: "failed",
           errorCode: "dispatch_failed",
         });
-        throw error;
+        return { action: "failed", reason: "dispatch_failed" };
       }
     },
   };

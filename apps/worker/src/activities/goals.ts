@@ -3,6 +3,7 @@ import {
   configuredStaticUsageLimits,
   policyProviderIdForModel,
   resolveModelProvider,
+  resolveTurnExecutionPolicyV1,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -92,6 +93,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
         await resolveWorkspaceCatalogSettings(db, catalogSourceSettings, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
+          retainedProductModelId: inheritedContinuationModel,
         })
       ).settings;
     }
@@ -136,6 +138,15 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       input.workspaceId,
       fundedWithoutCredits,
     );
+    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: continuationModel,
+      requestedModelId: null,
+      modelSource: "continuation",
+      reasoningEffort: continuationReasoningEffort,
+      reasoningSource: "continuation",
+      latencyMode: continuationLatencyMode,
+      latencyModeSource: "continuation",
+    });
     const decision = await materializeGoalContinuation(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -156,6 +167,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
         model: continuationModel,
         reasoningEffort: continuationReasoningEffort,
         latencyMode: continuationLatencyMode,
+        turnExecutionPolicy,
         tools: withFirstPartyTools(settings, session.tools),
         sandboxBackend: session.sandboxBackend,
       },

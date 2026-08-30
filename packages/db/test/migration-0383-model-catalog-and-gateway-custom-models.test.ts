@@ -6,6 +6,7 @@ import {
   createWorkspaceGatewayCustomModel,
   deleteWorkspaceGatewayCustomModel,
   getDeploymentModelCatalog,
+  getWorkspaceGatewayCustomModelForExecution,
   listWorkspaceGatewayCustomModels,
   type DbClient,
 } from "../src";
@@ -17,7 +18,7 @@ import {
 } from "../src/runtime-posture";
 
 const migrationUrl = new URL(
-  "../drizzle/0369_model_catalog_and_gateway_custom_models.sql",
+  "../drizzle/0383_model_catalog_and_gateway_custom_models.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -26,9 +27,9 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0369-model-catalog");
+  shared = await acquireSharedTestDatabase("migration-0383-model-catalog");
   if (!shared && requireRealDatabase) {
-    throw new Error("migration 0369 requires real PostgreSQL");
+    throw new Error("migration 0383 requires real PostgreSQL");
   }
   if (shared) client = createDb(shared.appUrl, { max: 8 });
 }, 180_000);
@@ -38,7 +39,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0369 model catalog and Gateway custom models", () => {
+describe("migration 0383 model catalog and Gateway custom models", () => {
   test("pins maintenance posture, runtime drain, least privilege, and secret-free storage", async () => {
     const migration = await readFile(migrationUrl, "utf8");
     expect(migration).toContain("-- deployment-mode: maintenance");
@@ -48,6 +49,8 @@ describe("migration 0369 model catalog and Gateway custom models", () => {
     expect(migration).toContain("pg_stat_activity");
     expect(migration).toContain("CREATE TABLE deployment_model_catalog");
     expect(migration).toContain("CREATE TABLE workspace_gateway_custom_models");
+    expect(migration).toContain("session_command_receipts_prompt_actor_operation_idx");
+    expect(migration).toContain("WHERE action IN ('prompt.send', 'prompt.steer')");
     expect(migration).toContain(
       "ALTER TABLE workspace_gateway_custom_models FORCE ROW LEVEL SECURITY",
     );
@@ -99,11 +102,11 @@ describe("migration 0369 model catalog and Gateway custom models", () => {
     });
 
     const [account] = await shared.admin<Array<{ id: string }>>`
-      insert into managed_accounts (name) values ('migration 0369 account') returning id
+      insert into managed_accounts (name) values ('migration 0383 account') returning id
     `;
     const [firstWorkspace, secondWorkspace] = await shared.admin<Array<{ id: string }>>`
       insert into workspaces (account_id, name)
-      values (${account!.id}, 'migration 0369 first'), (${account!.id}, 'migration 0369 second')
+      values (${account!.id}, 'migration 0383 first'), (${account!.id}, 'migration 0383 second')
       returning id
     `;
     await expect(
@@ -111,14 +114,14 @@ describe("migration 0369 model catalog and Gateway custom models", () => {
         accountId: account!.id,
         workspaceId: firstWorkspace!.id,
         upstreamModelId: "anthropic|claude",
-        createdBySubjectId: "user:migration-0369",
+        createdBySubjectId: "user:migration-0383",
       }),
     ).rejects.toThrow();
     const created = await createWorkspaceGatewayCustomModel(client.db, {
       accountId: account!.id,
       workspaceId: firstWorkspace!.id,
       upstreamModelId: "anthropic/claude-sonnet-4.6",
-      createdBySubjectId: "user:migration-0369",
+      createdBySubjectId: "user:migration-0383",
     });
     expect(created.upstreamModelId).toBe("anthropic/claude-sonnet-4.6");
     expect(
@@ -147,5 +150,26 @@ describe("migration 0369 model catalog and Gateway custom models", () => {
         customModelId: created.id,
       }),
     ).toBe(true);
+    expect(
+      await listWorkspaceGatewayCustomModels(client.db, {
+        accountId: account!.id,
+        workspaceId: firstWorkspace!.id,
+      }),
+    ).toEqual([]);
+    expect(
+      await getWorkspaceGatewayCustomModelForExecution(client.db, {
+        accountId: account!.id,
+        workspaceId: firstWorkspace!.id,
+        upstreamModelId: created.upstreamModelId,
+      }),
+    ).toMatchObject({ id: created.id, retiredAt: expect.any(Date) });
+    const restored = await createWorkspaceGatewayCustomModel(client.db, {
+      accountId: account!.id,
+      workspaceId: firstWorkspace!.id,
+      upstreamModelId: created.upstreamModelId,
+      label: "A replacement label must not rewrite accepted definition identity",
+      createdBySubjectId: "user:replacement",
+    });
+    expect(restored).toMatchObject({ id: created.id, label: null, retiredAt: null });
   });
 });

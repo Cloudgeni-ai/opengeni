@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { Settings } from "@opengeni/config";
 import type { AccessGrant, McpMutationReceiptType } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -42,11 +43,18 @@ async function freshGrant(): Promise<AccessGrant> {
   return access.workspaceGrants[0]!;
 }
 
-function buildServer(grant: AccessGrant, workflow: FakeWorkflowClient): unknown {
+function buildServer(
+  grant: AccessGrant,
+  workflow: FakeWorkflowClient,
+  settings: Settings = testSettings({
+    databaseUrl: shared!.appUrl,
+    sandboxBackend: "none",
+  }),
+): unknown {
   const noop = async () => undefined;
   return buildOpenGeniMcpServer(
     {
-      settings: testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" }),
+      settings,
       db: client.db,
       bus: new MemoryEventBus(),
       workflowClient: {
@@ -77,7 +85,9 @@ async function callMcpTool<T>(
     server as {
       _registeredTools?: Record<
         string,
-        { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+        {
+          handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>;
+        }
       >;
     }
   )._registeredTools?.[name];
@@ -238,7 +248,9 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       facts: { sessionCreateOutcome: "repaired" },
     });
     expect(workflow.wakeups).toHaveLength(2);
-    expect(await durableCounts(grant.workspaceId, seeded.id)).toMatchObject({ wakeRevision: 2 });
+    expect(await durableCounts(grant.workspaceId, seeded.id)).toMatchObject({
+      wakeRevision: 2,
+    });
 
     // Once the initial queued turn has advanced, the same key neither repairs
     // start state nor issues another wake and is therefore a true replay.
@@ -273,6 +285,76 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     expect(workflow.wakeups).toHaveLength(2);
   });
 
+  test("replays a fully initialized keyed create after its deployment model leaves the catalog", async () => {
+    if (!available) return;
+    const grant = await freshGrant();
+    const workflow = new FakeWorkflowClient();
+    const settings = testSettings({
+      databaseUrl: shared!.appUrl,
+      sandboxBackend: "none",
+      modelCatalogSource: "database",
+    });
+    const server = buildServer(grant, workflow, settings);
+    const idempotencyKey = `catalog-replay-${crypto.randomUUID()}`;
+    const args = {
+      initialMessage: `catalog replay fixture ${crypto.randomUUID()}`,
+      model: "catalog-replay-model",
+      sandboxBackend: "none",
+      idempotencyKey,
+    };
+
+    try {
+      await shared!.admin`
+        insert into deployment_model_catalog (singleton, document, version)
+        values (
+          true,
+          ${shared!.admin.json({ schemaVersion: 1, builtInModels: ["catalog-replay-model"] })}::jsonb,
+          1
+        )
+        on conflict (singleton) do update set
+          document = excluded.document,
+          version = excluded.version,
+          updated_at = now()
+      `;
+      const created = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
+      expect(created).toMatchObject({
+        outcome: "created",
+        changed: true,
+        idempotency: { status: "applied" },
+      });
+
+      await shared!.admin`
+        update deployment_model_catalog
+        set
+          document = ${shared!.admin.json({ schemaVersion: 1, builtInModels: ["replacement-model"] })}::jsonb,
+          version = version + 1,
+          updated_at = now()
+        where singleton = true
+      `;
+
+      const wakeRepair = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
+      expect(wakeRepair).toMatchObject({
+        outcome: "repaired",
+        changed: true,
+        resource: { id: created.resource.id },
+        idempotency: { status: "applied" },
+      });
+      expect(workflow.wakeups).toHaveLength(2);
+
+      await claimInitialTurnRunning(grant.workspaceId, created.resource.id);
+      const replayed = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
+      expect(replayed).toMatchObject({
+        outcome: "replayed",
+        changed: false,
+        resource: { id: created.resource.id },
+        idempotency: { status: "replayed" },
+      });
+      expect(workflow.wakeups).toHaveLength(2);
+    } finally {
+      await shared!.admin`delete from deployment_model_catalog`;
+    }
+  });
+
   test("returns a committed non-retryable receipt when keyless usage recording fails", async () => {
     if (!available) return;
     const grant = await freshGrant();
@@ -294,7 +376,10 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
         idempotency: { status: "not_requested" },
         partialFailure: { stage: "usage_recording", retryable: false },
         facts: { sessionCreateOutcome: "created" },
-        nextAction: { tool: "session_get", arguments: { sessionId: receipt.resource.id } },
+        nextAction: {
+          tool: "session_get",
+          arguments: { sessionId: receipt.resource.id },
+        },
       });
       expect(receipt.warnings).toEqual([
         "The session committed, but usage recording failed. Do not retry this keyless request; inspect the returned session.",

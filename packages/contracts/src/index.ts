@@ -8828,6 +8828,10 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
     resolvedModel: z.string().min(1),
     resolvedReasoningEffort: ReasoningEffort,
     resolvedLatencyMode: LatencyMode,
+    /** Secret-safe TurnExecutionPolicyV1 accepted with this occurrence. Kept
+     * structurally open here because the canonical policy schema is declared
+     * later in this package; consumers must parse it with TurnExecutionPolicyV1. */
+    turnExecutionPolicy: z.unknown().optional(),
     resolvedSandboxBackend: SandboxBackend,
     resolvedSandboxOs: SandboxOs,
     resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
@@ -15930,7 +15934,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-model-catalog-cost-policy-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

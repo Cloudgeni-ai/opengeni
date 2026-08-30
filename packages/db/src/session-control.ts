@@ -1884,6 +1884,162 @@ async function findCommandReceipt(
   return rows[0] ?? null;
 }
 
+export type SessionPromptCommandAction = "prompt.send" | "prompt.steer";
+
+async function findPromptCommandReceipts(
+  db: Database,
+  input: {
+    workspaceId: string;
+    actor: SessionCommandActor;
+    operationKey: string;
+    lock?: "none" | "update";
+  },
+): Promise<SessionCommandReceiptRow[]> {
+  const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
+  const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
+  const query = db
+    .select()
+    .from(schema.sessionCommandReceipts)
+    .where(
+      and(
+        eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
+        eq(schema.sessionCommandReceipts.actorType, input.actor.type),
+        sql`${schema.sessionCommandReceipts.actorSubjectId} is not distinct from ${actorSubjectId}`,
+        sql`${schema.sessionCommandReceipts.actorAttemptId} is not distinct from ${actorAttemptId}::uuid`,
+        inArray(schema.sessionCommandReceipts.action, ["prompt.send", "prompt.steer"]),
+        eq(schema.sessionCommandReceipts.operationKey, input.operationKey),
+      ),
+    );
+  const rows = input.lock === "update" ? await query.for("update") : await query;
+  return rows;
+}
+
+function fingerprintedPromptCommandReceipt(
+  receipts: readonly SessionCommandReceiptRow[],
+): SessionCommandReceiptRow | null {
+  const fingerprinted = receipts.filter(
+    (receipt) => typeof receipt.result.boundaryRequestHash === "string",
+  );
+  if (fingerprinted.length > 1) {
+    throw new SessionControlInvariantError(
+      "Prompt operation key resolved to multiple fingerprinted receipts",
+    );
+  }
+  return fingerprinted[0] ?? null;
+}
+
+function assertPromptCommandReceiptIdentity(
+  receipt: SessionCommandReceiptRow,
+  input: {
+    action: SessionPromptCommandAction;
+    targetSessionId: string;
+    boundaryRequestHash: string;
+  },
+): void {
+  if (
+    receipt.action !== input.action ||
+    receipt.targetSessionId !== input.targetSessionId ||
+    receipt.targetTurnId !== null ||
+    (typeof receipt.result.boundaryRequestHash === "string" &&
+      receipt.result.boundaryRequestHash !== input.boundaryRequestHash)
+  ) {
+    throw new SessionCommandIdempotencyError();
+  }
+}
+
+/**
+ * Prompt operation keys are actor-scoped across target sessions and across the
+ * Send/Steer action pair. The advisory lock closes the gap left by the legacy
+ * action/target-specific unique index without changing old receipt identities.
+ */
+export async function reserveSessionPromptCommandReceipt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actor: SessionCommandActor;
+    action: SessionPromptCommandAction;
+    targetSessionId: string;
+    operationKey: string;
+    canonicalRequestHash: string;
+    boundaryRequestHash: string;
+  },
+): Promise<{ receipt: SessionCommandReceiptRow; replay: boolean }> {
+  const actorIdentity =
+    input.actor.type === "agent_attempt"
+      ? `attempt:${input.actor.attemptId}`
+      : `${input.actor.type}:${input.actor.subjectId}`;
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`session-prompt:${input.workspaceId}:${actorIdentity}:${input.operationKey}`}, 0))`,
+  );
+  const existingReceipts = await findPromptCommandReceipts(db, {
+    workspaceId: input.workspaceId,
+    actor: input.actor,
+    operationKey: input.operationKey,
+    lock: "update",
+  });
+  const fingerprinted = fingerprintedPromptCommandReceipt(existingReceipts);
+  if (fingerprinted) {
+    assertPromptCommandReceiptIdentity(fingerprinted, input);
+    return { receipt: fingerprinted, replay: true };
+  }
+  const legacyExact = existingReceipts.find(
+    (receipt) =>
+      receipt.action === input.action &&
+      receipt.targetSessionId === input.targetSessionId &&
+      receipt.targetTurnId === null,
+  );
+  if (legacyExact) {
+    if (legacyExact.canonicalRequestHash !== input.canonicalRequestHash) {
+      throw new SessionCommandIdempotencyError();
+    }
+    return { receipt: legacyExact, replay: true };
+  }
+  return await reserveSessionCommandReceipt(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    actor: input.actor,
+    action: input.action,
+    targetSessionId: input.targetSessionId,
+    targetTurnId: null,
+    operationKey: input.operationKey,
+    canonicalRequestHash: input.canonicalRequestHash,
+    ...(existingReceipts.length === 0
+      ? { initialResult: { boundaryRequestHash: input.boundaryRequestHash } }
+      : {}),
+  });
+}
+
+/** Return only a fully committed exact prompt receipt with the new boundary fingerprint. */
+export async function getCompletedSessionPromptCommandReceipt(
+  db: Database,
+  input: {
+    workspaceId: string;
+    actor: SessionCommandActor;
+    action: SessionPromptCommandAction;
+    targetSessionId: string;
+    operationKey: string;
+    boundaryRequestHash: string;
+  },
+): Promise<SessionCommandReceiptRow | null> {
+  const receipt = fingerprintedPromptCommandReceipt(
+    await findPromptCommandReceipts(db, {
+      workspaceId: input.workspaceId,
+      actor: input.actor,
+      operationKey: input.operationKey,
+    }),
+  );
+  if (!receipt) return null;
+  assertPromptCommandReceiptIdentity(receipt, input);
+  if (
+    typeof receipt.result.boundaryRequestHash !== "string" ||
+    receipt.appliedQueueVersion === null
+  ) {
+    return null;
+  }
+  return receipt;
+}
+
 export async function reserveSessionCommandReceipt(
   db: Database,
   input: {
@@ -1896,6 +2052,7 @@ export async function reserveSessionCommandReceipt(
     operationKey: string;
     canonicalRequestHash: string;
     identityScope?: "actor" | "goal_operation";
+    initialResult?: Record<string, unknown>;
   },
 ): Promise<{ receipt: SessionCommandReceiptRow; replay: boolean }> {
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
@@ -1926,6 +2083,7 @@ export async function reserveSessionCommandReceipt(
       targetTurnId: input.targetTurnId,
       operationKey: input.operationKey,
       canonicalRequestHash: input.canonicalRequestHash,
+      result: input.initialResult ?? {},
     })
     .onConflictDoNothing()
     .returning();

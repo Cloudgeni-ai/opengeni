@@ -1,9 +1,9 @@
 -- deployment-mode: maintenance
--- Migration 0369: deployment-owned model catalog authority plus workspace
--- custom Vercel AI Gateway slugs.
+-- Migration 0383: deployment-owned model catalog authority, workspace custom
+-- Vercel AI Gateway slugs, and indexed pre-catalog prompt receipt replay.
 -- This changes the exact runtime-posture table/grant contract. Stop every API,
 -- control worker, and turn worker before applying it, and never restart a
--- pre-0369 image after commit.
+-- pre-0383 image after commit.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -17,14 +17,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0369 model catalog activation requires an explicit application database role list'
+      '0383 model catalog activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0369 model catalog activation received a malformed application database role list'
+      '0383 model catalog activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -43,7 +43,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0369 model catalog activation received an invalid application database role list'
+      '0383 model catalog activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -55,7 +55,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0369 model catalog activation requires all configured OpenGeni application database sessions to be stopped'
+      '0383 model catalog activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -84,6 +84,7 @@ CREATE TABLE workspace_gateway_custom_models (
   upstream_model_id text NOT NULL,
   label text,
   created_by_subject_id text NOT NULL,
+  retired_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT workspace_gateway_custom_models_workspace_account_fk
@@ -108,6 +109,20 @@ CREATE TABLE workspace_gateway_custom_models (
 CREATE UNIQUE INDEX workspace_gateway_custom_models_workspace_upstream_uq
   ON workspace_gateway_custom_models (workspace_id, upstream_model_id);
 
+-- New Send/Steer receipts persist one parsed boundary-request fingerprint and
+-- replay it before mutable model-catalog resolution. Legacy receipt identity
+-- remains unchanged; this partial index keeps the actor/key compatibility
+-- probe bounded even when the prior action or target session differs.
+CREATE INDEX session_command_receipts_prompt_actor_operation_idx
+  ON session_command_receipts (
+    workspace_id,
+    actor_type,
+    actor_subject_id,
+    actor_attempt_id,
+    operation_key
+  )
+  WHERE action IN ('prompt.send', 'prompt.steer');
+
 ALTER TABLE workspace_gateway_custom_models ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workspace_gateway_custom_models FORCE ROW LEVEL SECURITY;
 CREATE POLICY workspace_isolation ON workspace_gateway_custom_models
@@ -131,7 +146,7 @@ END
 $grants$;
 
 COMMENT ON TABLE workspace_gateway_custom_models IS
-  'Workspace-owned unpinned Vercel AI Gateway upstream slugs. Capabilities and billing are never stored here.';
+  'Workspace-owned Vercel AI Gateway upstream slugs. Retired rows remain execution evidence; capabilities and billing are never stored here.';
 
 DO $model_catalog_runtime_drain_after$
 DECLARE
@@ -148,7 +163,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0369 model catalog activation observed a configured OpenGeni application database session after schema installation'
+      '0383 model catalog activation observed a configured OpenGeni application database session after schema installation'
       USING ERRCODE = '55000';
   END IF;
 END

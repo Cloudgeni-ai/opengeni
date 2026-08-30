@@ -1804,9 +1804,9 @@ Do not commit real secret values.
 ### Deployment database model catalog cutover
 
 The default source remains the reviewed code/env catalog. Database mode is an
-operator-owned singleton, not a boot-time reconciliation loop. Migration 0369
+operator-owned singleton, not a boot-time reconciliation loop. Migration 0383
 changes the exact runtime-posture table/grant contract, so this is a drained
-maintenance cutover rather than a rolling migration. A mixed pre/post-0369
+maintenance cutover rather than a rolling migration. A mixed pre/post-0383
 fleet is unsupported even while every process still uses `code`:
 
 1. Bind and verify the exact database, schema, new application image, and every
@@ -1815,20 +1815,55 @@ fleet is unsupported even while every process still uses `code`:
    login list (normally `opengeni_app`).
 2. Stop every API, control worker, and turn worker, then prove no configured
    application login remains in `pg_stat_activity`. Do not rely on the normal
-   Helm pre-upgrade hook while old pods still serve traffic: after 0369 commits,
+   Helm pre-upgrade hook while old pods still serve traffic: after 0383 commits,
    their repeated runtime-posture readiness check fails.
-3. Apply `0369_model_catalog_and_gateway_custom_models.sql`, provision roles,
+
+   For the bundled Helm chart, perform the drain as a migrations-disabled Helm
+   revision using the same new chart, exact `sha256:` API/worker/web/migrations
+   image digests, and values that the final upgrade will use. Mutable tags and
+   registry cache state are not acceptable evidence across this drain boundary:
+
+   ```bash
+   helm upgrade --install "$RELEASE" deploy/helm/opengeni \
+     --namespace "$NAMESPACE" --values "$VALUES" \
+     --set api.enabled=false \
+     --set worker.enabled=false \
+     --set web.enabled=false \
+     --set relay.enabled=false \
+     --set artifactMaterializer.enabled=false \
+     --set artifactOutboxDispatcher.enabled=false \
+     --set terraformMcp.enabled=false \
+     --set migrations.enabled=false \
+     --wait --timeout 15m
+
+   if kubectl -n "$NAMESPACE" get pods \
+     -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component in (api,worker-control,worker-turns,artifact-materializer,artifact-outbox-dispatcher,relay,web,terraform-mcp)" \
+     -o name | grep -q .; then
+     kubectl -n "$NAMESPACE" wait --for=delete pod \
+       -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component in (api,worker-control,worker-turns,artifact-materializer,artifact-outbox-dispatcher,relay,web,terraform-mcp)" \
+       --timeout=10m
+   fi
+   ```
+
+   Verify the application Deployments are absent and the configured database
+   login has zero sessions. Then run the ordinary upgrade with those disable
+   overrides removed; its pre-upgrade Job applies 0383 before Helm recreates the
+   application. If the second upgrade fails, remain drained and fix forward.
+
+3. Apply `0383_model_catalog_and_gateway_custom_models.sql`, provision roles,
    and assert runtime posture using the catalog-aware release artifacts. The
    migration repeats the configured-login drain check before and after schema
    installation and aborts with SQLSTATE `55000` if a listed session is live.
-   After commit, never restart a pre-0369 image or use it as an application
+   After commit, never restart a pre-0383 image or use it as an application
    rollback target; remain on the new schema and fix forward.
 4. Start the catalog-aware API and workers with
    `OPENGENI_MODEL_CATALOG_SOURCE=code`, then verify startup and readiness.
 5. Prepare a strict, secret-free schema-v1 JSON document that is semantically
-   equivalent to the active code/env catalog. Membership and optional one-line
-   notes belong in the document; keys, enabled flags, billing, cost policy, and
-   pricing do not.
+   equivalent to the active code/env catalog. Set `defaultModel` explicitly to
+   the product ID that new sessions should use; omission retains the schema-v1
+   compatibility behavior of choosing the first `builtInModels` entry.
+   Membership and optional one-line notes belong in the document; keys, enabled
+   flags, billing, cost policy, and pricing do not.
 6. Validate and upsert it with a migration/admin database credential:
 
    ```bash
@@ -1888,7 +1923,10 @@ and become selectable only when the encrypted workspace Gateway connection and
 workspace policy are ready. The table is bounded to 100 rows per workspace. If
 a deployment catalog later claims the same Gateway upstream slug, the reviewed
 deployment entry wins and the colliding custom row is omitted from executable
-membership.
+membership. Removing a custom slug retires its row: it disappears from new
+selection, while already accepted turns and existing-session continuations may
+still resolve the frozen definition. Re-adding the same slug restores that row
+without rewriting its label or definition identity.
 
 ### Optional OpenSandbox Kubernetes provider
 

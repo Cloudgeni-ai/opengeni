@@ -16,9 +16,13 @@ export {
 export function projectClientModel(model: ConfiguredModel): ClientModel {
   const anonymousProvider =
     model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none";
+  // Keep the established closed `source` enum compatible for older same-major
+  // clients. OpenRouter remains truthfully identified by its public provider
+  // id/label and billing metadata; omitting this optional legacy grouping field
+  // lets tolerant older contracts parse the additive provider.
   const source =
     model.providerId === OPENROUTER_PROVIDER_ID
-      ? "openrouter"
+      ? undefined
       : model.credentialSource.kind === "connected_subscription"
         ? model.credentialSource.provider === "xai"
           ? "supergrok"
@@ -30,7 +34,7 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
             : "opengeni";
   const publicProvider = anonymousProvider
     ? { provider: model.providerId, providerLabel: model.providerLabel }
-    : source === "openrouter"
+    : model.providerId === OPENROUTER_PROVIDER_ID
       ? { provider: "openrouter", providerLabel: "OpenRouter" }
       : source === "codex"
         ? { provider: "codex", providerLabel: "Codex" }

@@ -1625,10 +1625,24 @@ export function generateRuntimeArtifacts(
   addRuntimeConfigHelmValues(helmSetValues, contract, env);
   const helmValues = nestedObjectFromHelmSetValues(helmSetValues);
   const runtimeValues = runtimeEnvValues(contract, terraformOutputs, env);
-  const missingEnvVars = runtimeValues
-    .filter((entry) => entry.required && !entry.value)
-    .map((entry) => entry.key);
-  const requiredEnvVars = runtimeValues.filter((entry) => entry.required).map((entry) => entry.key);
+  const immutableImageDigestInputs =
+    contract.runtime.platform === "kubernetes" && contract.runtime.cloud !== "local"
+      ? [
+          "OPENGENI_API_IMAGE_DIGEST",
+          "OPENGENI_WORKER_IMAGE_DIGEST",
+          "OPENGENI_WEB_IMAGE_DIGEST",
+          "OPENGENI_MIGRATIONS_IMAGE_DIGEST",
+        ]
+      : [];
+  const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
+  const missingEnvVars = [
+    ...runtimeValues.filter((entry) => entry.required && !entry.value).map((entry) => entry.key),
+    ...immutableImageDigestInputs.filter((name) => !exactSha256Digest.test(env[name] ?? "")),
+  ];
+  const requiredEnvVars = [
+    ...runtimeValues.filter((entry) => entry.required).map((entry) => entry.key),
+    ...immutableImageDigestInputs,
+  ];
   const emittedRuntimeValues = runtimeValues.filter(
     (entry) => entry.required || entry.value !== undefined,
   );

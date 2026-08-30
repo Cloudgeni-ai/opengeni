@@ -8,6 +8,7 @@ import {
   configuredProviders,
   getSettings,
   parseModelCatalogDocument,
+  resolveTurnExecutionPolicyV1,
   validateModelCatalogSettings,
 } from "../src";
 
@@ -176,7 +177,7 @@ describe("deployment model catalog source", () => {
       modelNotes: { "gpt-5.6-luna": "Use for careful work." },
     });
     const settings = applyModelCatalogDocument(
-      withEnv({}, () => getSettings()),
+      withEnv({ OPENGENI_MODEL_CATALOG_SOURCE: "database" }, () => getSettings()),
       document,
     );
     expect(settings.openaiModel).toBe("gpt-5.6-luna");
@@ -351,6 +352,163 @@ describe("deployment model catalog source", () => {
         ],
       }),
     ).toThrow("duplicate Gateway upstream model id provider/shared");
+    expect(() =>
+      parseModelCatalogDocument({
+        schemaVersion: 1,
+        builtInModels: ["gpt-5.6-luna"],
+        registryProviders: [
+          {
+            kind: "anonymous",
+            id: "database-provider",
+            baseUrl: "https://provider.example.test/v1",
+            models: [
+              {
+                id: "database/priced",
+                pricing: {
+                  inputMicrosPerMillionTokens: 1,
+                  outputMicrosPerMillionTokens: 1,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      parseModelCatalogDocument({
+        schemaVersion: 1,
+        builtInModels: ["gpt-5.6-luna"],
+        gatewayModels: [
+          {
+            productId: "gateway/priced",
+            workspaceProductId: "workspace-gateway/priced",
+            upstreamModelId: "provider/priced",
+            label: "Priced",
+            providers: ["provider"],
+            pricing: {
+              inputMicrosPerMillionTokens: 1,
+              outputMicrosPerMillionTokens: 1,
+            },
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  test("preserves an explicit non-built-in default across database catalog cutover", () => {
+    const settings = applyModelCatalogDocument(
+      withEnv({}, () => getSettings()),
+      {
+        schemaVersion: 1,
+        defaultModel: "database/default-model",
+        builtInModels: ["gpt-5.6-luna"],
+        registryProviders: [
+          {
+            kind: "anonymous",
+            id: "database-provider",
+            baseUrl: "https://provider.example.test/v1",
+            models: [{ id: "database/default-model" }],
+          },
+        ],
+      },
+    );
+
+    expect(settings.openaiModel).toBe("database/default-model");
+    expect(configuredModels(settings)[0]?.id).toBe("database/default-model");
+    expect(() =>
+      validateModelCatalogSettings(
+        applyModelCatalogDocument(
+          withEnv({ OPENGENI_MODEL_CATALOG_SOURCE: "database" }, () => getSettings()),
+          {
+            schemaVersion: 1,
+            defaultModel: "database/missing",
+            builtInModels: ["gpt-5.6-luna"],
+          },
+        ),
+      ),
+    ).toThrow("catalog default model must reference deployment catalog membership");
+  });
+
+  test("allows an enabled connected-subscription default in a database document", () => {
+    const settings = applyModelCatalogDocument(
+      withEnv(
+        {
+          OPENGENI_MODEL_CATALOG_SOURCE: "database",
+          OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true",
+        },
+        () => getSettings(),
+      ),
+      {
+        schemaVersion: 1,
+        defaultModel: "codex/gpt-5.6-sol",
+        builtInModels: ["gpt-5.6-luna"],
+      },
+    );
+
+    expect(validateModelCatalogSettings(settings)[0]?.id).toBe("gpt-5.6-luna");
+    expect(settings.openaiModel).toBe("codex/gpt-5.6-sol");
+    expect(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: settings.openaiModel,
+        requestedModelId: null,
+        modelSource: "deployment",
+        reasoningEffort: "low",
+        reasoningSource: "deployment",
+        latencyMode: "standard",
+        latencyModeSource: "deployment",
+      }),
+    ).toMatchObject({
+      productModelId: "codex/gpt-5.6-sol",
+      providerId: "codex-subscription",
+    });
+  });
+
+  test("rejects a resolved catalog with no executable default model", () => {
+    const settings = applyModelCatalogDocument(
+      getSettings({
+        OPENGENI_OPENAI_API_KEY: "openai-test-key",
+        OPENGENI_MODEL_CATALOG_SOURCE: "database",
+      }),
+      {
+        schemaVersion: 1,
+        builtInModels: ["codex/not-connected"],
+      },
+    );
+    expect(() =>
+      validateModelCatalogSettings(settings, {
+        OPENGENI_OPENAI_API_KEY: "openai-test-key",
+      }),
+    ).toThrow("contains no executable models");
+  });
+
+  test("allows an enabled connected-subscription model as the code-mode default", () => {
+    expect(() =>
+      getSettings({
+        OPENGENI_OPENAI_API_KEY: "openai-test-key",
+        OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true",
+        OPENGENI_OPENAI_MODEL: "codex/gpt-5.6-sol",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "codex/gpt-5.6-sol",
+      }),
+    ).not.toThrow();
+  });
+
+  test("resolves host provider credentials from an explicit environment", () => {
+    const env = {
+      OPENGENI_OPENAI_API_KEY: "openai-test-key",
+      HOST_PROVIDER_KEY: "provider-test-key",
+      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+        {
+          id: "host-provider",
+          baseUrl: "https://provider.example.test/v1",
+          apiKeyEnv: "HOST_PROVIDER_KEY",
+          models: [{ id: "host/model" }],
+        },
+      ]),
+    };
+    const settings = getSettings(env);
+    expect(
+      configuredProviders(settings, env).find((provider) => provider.id === "host-provider"),
+    ).toMatchObject({ apiKey: "provider-test-key" });
   });
 
   test("binds database-owned provider membership only to host-authorized credentials", () => {

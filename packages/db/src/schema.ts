@@ -7080,6 +7080,15 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    promptActorOperation: index("session_command_receipts_prompt_actor_operation_idx")
+      .on(
+        table.workspaceId,
+        table.actorType,
+        table.actorSubjectId,
+        table.actorAttemptId,
+        table.operationKey,
+      )
+      .where(sql`${table.action} in ('prompt.send', 'prompt.steer')`),
     goalUpdateOperation: uniqueIndex("session_command_receipts_goal_update_operation_uq")
       .on(table.workspaceId, table.action, table.targetSessionId, table.operationKey)
       .where(sql`${table.action} = 'goal.update'`),
@@ -12659,6 +12668,7 @@ export const workspaceGatewayCustomModels = pgTable(
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

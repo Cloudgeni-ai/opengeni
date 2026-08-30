@@ -204,11 +204,11 @@ describe("workspace model catalog availability", () => {
     }).models.find((candidate) => candidate.id === DEFAULT_OPENROUTER_MODEL_ID)!;
     expect(model).toMatchObject({
       provider: "openrouter",
-      source: "openrouter",
       cost: "free",
       credentialReadiness: { status: "ready", basis: "configuration" },
       availability: { status: "unknown", selectable: true, reason: null },
     });
+    expect(model).not.toHaveProperty("source");
     expect(JSON.stringify(model)).not.toContain("openrouter-workspace-secret");
   });
 

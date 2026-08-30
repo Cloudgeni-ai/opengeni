@@ -343,6 +343,7 @@ import {
   lockSessionEventWriteRows,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
+  registerSessionWorkflowWakeInTransaction,
   SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS,
   assertSessionAuthoritySnapshot,
   registerSessionTurnAttemptClaim,
@@ -29659,6 +29660,34 @@ async function existingSessionForCreateKey(
   return existing;
 }
 
+type SessionCreateReplayIdentity = {
+  requestedSessionId?: string;
+  visibility?: "user_private" | "workspace_shared";
+  variableSetIds: string[];
+  initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
+};
+
+function assertSessionCreateReplayIdentity(
+  existing: typeof schema.sessions.$inferSelect,
+  input: SessionCreateReplayIdentity,
+): void {
+  if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+    throw new SessionIdConflictError(input.requestedSessionId);
+  }
+  if (
+    stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
+    stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
+  ) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  if (stableJson(existing.variableSetIds ?? []) !== stableJson(input.variableSetIds)) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  if (existing.createRequestedVisibility !== (input.visibility ?? "workspace_shared")) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+}
+
 async function lockSessionCreateIdempotencyKey(
   tx: Database,
   workspaceId: string,
@@ -29794,21 +29823,13 @@ async function createSessionInTransaction(
       // caller-provided identity agrees with the winning request. Check this
       // before any first-turn repair so a retry cannot hide a requested-ID
       // conflict behind an apparently successful replay.
-      if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
-        throw new SessionIdConflictError(input.requestedSessionId);
-      }
-      if (
-        stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
-        stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
-      ) {
-        throw new SessionCreateIdempotencyConflictError();
-      }
-      if (stableJson(existing.variableSetIds ?? []) !== stableJson(variableSetIds)) {
-        throw new SessionCreateIdempotencyConflictError();
-      }
-      if (existing.createRequestedVisibility !== createRequestedVisibility) {
-        throw new SessionCreateIdempotencyConflictError();
-      }
+      assertSessionCreateReplayIdentity(existing, {
+        ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
+        visibility: createRequestedVisibility,
+        variableSetIds,
+        initialPersonalResourceAttachmentIntent:
+          input.initialPersonalResourceAttachmentIntent ?? null,
+      });
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
       ]);
@@ -30007,21 +30028,13 @@ async function createSessionInTransaction(
         createIdempotencyKey,
       );
       if (existing) {
-        if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
-          throw new SessionIdConflictError(input.requestedSessionId);
-        }
-        if (
-          stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
-          stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
-        ) {
-          throw new SessionCreateIdempotencyConflictError();
-        }
-        if (stableJson(existing.variableSetIds ?? []) !== stableJson(variableSetIds)) {
-          throw new SessionCreateIdempotencyConflictError();
-        }
-        if (existing.createRequestedVisibility !== createRequestedVisibility) {
-          throw new SessionCreateIdempotencyConflictError();
-        }
+        assertSessionCreateReplayIdentity(existing, {
+          ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
+          visibility: createRequestedVisibility,
+          variableSetIds,
+          initialPersonalResourceAttachmentIntent:
+            input.initialPersonalResourceAttachmentIntent ?? null,
+        });
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
         ]);
@@ -30173,6 +30186,159 @@ export async function getSessionByCreateIdempotencyKey(
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
   });
+}
+
+/**
+ * Recover a fully initialized keyed create before mutable create dependencies
+ * (notably the current model catalog) are consulted. A fully initialized queued
+ * turn receives a fresh durable wake revision from persisted state only. The
+ * same request-identity checks as transactional create replay run before any
+ * session or committed denial is returned.
+ */
+export type InitializedSessionCreateReplay =
+  | {
+      outcome: "session";
+      session: Session & { initialTurnId: string | null };
+      temporalWorkflowId: string;
+      workflowWakeRevision: number | null;
+      changed: boolean;
+    }
+  | { outcome: "denied"; denial: SessionSpawnDenial };
+
+export async function getInitializedSessionCreateReplay(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    activeManagedHumanSubjectId?: string;
+    createIdempotencyKey: string;
+    requestedSessionId?: string;
+    visibility?: "user_private" | "workspace_shared";
+    variableSetIds: string[];
+    initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
+    deferInitialTurn?: boolean;
+  },
+): Promise<InitializedSessionCreateReplay | null> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      if (input.visibility === "user_private") {
+        await scopedDb.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+        );
+      }
+      await lockWorkspaceForSessionCreate(scopedDb, input.workspaceId, input.accountId);
+      if (input.activeManagedHumanSubjectId) {
+        await setSubjectRlsContext(scopedDb, input.activeManagedHumanSubjectId);
+        await assertActiveManagedHumanOrganizationMembership(scopedDb, {
+          accountId: input.accountId,
+          subjectId: input.activeManagedHumanSubjectId,
+        });
+      }
+      await lockSessionCreateIdempotencyKey(
+        scopedDb,
+        input.workspaceId,
+        input.createIdempotencyKey,
+      );
+
+      const existing = await existingSessionForCreateKey(
+        scopedDb,
+        input.workspaceId,
+        input.createIdempotencyKey,
+      );
+      if (!existing) {
+        const denial = await existingSpawnDenialForKey(
+          scopedDb,
+          input.workspaceId,
+          input.createIdempotencyKey,
+        );
+        return denial ? { outcome: "denied", denial } : null;
+      }
+      assertSessionCreateReplayIdentity(existing, input);
+
+      const startEvents = await scopedDb
+        .select({ id: schema.sessionEvents.id, type: schema.sessionEvents.type })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, existing.id),
+            inArray(schema.sessionEvents.type, ["session.created", "user.message"]),
+          ),
+        )
+        .orderBy(asc(schema.sessionEvents.sequence))
+        .limit(2);
+      const createdEvent = startEvents.find((event) => event.type === "session.created");
+      if (!createdEvent) return null;
+      const initialUserEvent = startEvents.find((event) => event.type === "user.message");
+
+      const grouped = await sessionMcpServerMetadataForSessions(scopedDb, input.workspaceId, [
+        existing.id,
+      ]);
+      const session = await mapSessionWithControl(
+        scopedDb,
+        existing,
+        grouped.get(existing.id) ?? [],
+      );
+      const [initialTurn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          status: schema.sessionTurns.status,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.sessionId, existing.id),
+            initialUserEvent
+              ? eq(schema.sessionTurns.triggerEventId, initialUserEvent.id)
+              : sql`false`,
+          ),
+        )
+        .limit(1);
+
+      const temporalWorkflowId = existing.temporalWorkflowId ?? `session-${existing.id}`;
+      if (existing.status === "cancelled") {
+        return {
+          outcome: "session",
+          session: { ...session, initialTurnId: initialTurn?.id ?? null },
+          temporalWorkflowId,
+          workflowWakeRevision: null,
+          changed: false,
+        };
+      }
+      if (input.deferInitialTurn === true) {
+        return {
+          outcome: "session",
+          session: { ...session, initialTurnId: initialTurn?.id ?? null },
+          temporalWorkflowId,
+          workflowWakeRevision: null,
+          changed: false,
+        };
+      }
+      if (!initialTurn) return null;
+      const workflowWakeRevision =
+        initialTurn.status === "queued" && session.effectiveControl.state === "active"
+          ? await registerSessionWorkflowWakeInTransaction(scopedDb, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: existing.id,
+              temporalWorkflowId,
+              reason: "initial_session",
+            })
+          : null;
+      return {
+        outcome: "session",
+        session: { ...session, initialTurnId: initialTurn.id },
+        temporalWorkflowId,
+        workflowWakeRevision,
+        changed: workflowWakeRevision !== null,
+      };
+    },
+  );
 }
 
 export async function getSession(
@@ -33692,7 +33858,10 @@ async function sessionDiscoveryClaimsForSessions(
   );
   const grouped = new Map<string, { claims: WorkClaimDiscoverySummary[]; truncated: boolean }>();
   for (const row of rows) {
-    const entry = grouped.get(row.sessionId) ?? { claims: [], truncated: false };
+    const entry = grouped.get(row.sessionId) ?? {
+      claims: [],
+      truncated: false,
+    };
     entry.claims.push(
       WorkClaimDiscoverySummarySchema.parse({
         id: row.id,
@@ -34014,7 +34183,10 @@ export async function listSessionDiscoverySummaries(
       const relatedAccess = rootRelatedIds.has(sessionId) ? "root" : "target";
       const goal = goalsBySession.get(sessionId);
       const latest = latestBySession.get(sessionId);
-      const claims = workClaims.get(sessionId) ?? { claims: [], truncated: false };
+      const claims = workClaims.get(sessionId) ?? {
+        claims: [],
+        truncated: false,
+      };
       const match =
         !includeWorkDiscovery ||
         row.matchClass === null ||
@@ -35805,7 +35977,10 @@ export async function acceptSessionHumanInputResponse(
                     turnAssociation: "current",
                     sequence: session.lastSequence + 1,
                     type: "user.humanInputResponse",
-                    payload: { requestId: request.id, response: { outcome: "cancelled" } },
+                    payload: {
+                      requestId: request.id,
+                      response: { outcome: "cancelled" },
+                    },
                     clientEventId: null,
                     occurredAt,
                   },
@@ -35841,7 +36016,10 @@ export async function acceptSessionHumanInputResponse(
             });
             await tx
               .update(schema.sessions)
-              .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
+              .set({
+                lastSequence: session.lastSequence + 1,
+                updatedAt: new Date(),
+              })
               .where(eq(schema.sessions.id, session.id));
             event = mapEvent(inserted);
             repairedEvents = [event];
@@ -39180,7 +39358,10 @@ export type ClaimSandboxSharedPreparationInput = {
 };
 
 export type ClaimSandboxSharedPreparationResult =
-  | { role: "owner" | "joined" | "reused"; preparation: SandboxSharedPreparationSnapshot }
+  | {
+      role: "owner" | "joined" | "reused";
+      preparation: SandboxSharedPreparationSnapshot;
+    }
   | { role: "fenced"; lease: LeaseSnapshot | null };
 
 function validateSandboxSharedPreparationIdentity(input: ClaimSandboxSharedPreparationInput): void {
@@ -39305,7 +39486,10 @@ export async function claimSandboxSharedPreparation(
           Number(row.lease_epoch) !== input.expectedLeaseEpoch ||
           row.instance_id !== input.expectedInstanceId
         ) {
-          return { role: "fenced" as const, lease: row ? mapLeaseRow(row) : null };
+          return {
+            role: "fenced" as const,
+            lease: row ? mapLeaseRow(row) : null,
+          };
         }
         const holderRows = await tx.execute<{ present: boolean }>(sql`
           select exists (
@@ -44724,7 +44908,10 @@ export async function countSessionRecoveryBacklog(
     quiescence_missing: 0,
     projection_stale: 0,
   };
-  const rows = await rawRows<{ state: SessionRecoveryBacklogState; count: number | string }>(
+  const rows = await rawRows<{
+    state: SessionRecoveryBacklogState;
+    count: number | string;
+  }>(
     db,
     sql`
       select state, count
@@ -57696,6 +57883,7 @@ export async function materializeGoalContinuation(
       model: string;
       reasoningEffort: ReasoningEffort;
       latencyMode: LatencyMode;
+      turnExecutionPolicy?: TurnExecutionPolicyV1;
       tools: ToolRef[];
       sandboxBackend: SandboxBackend;
     };
@@ -61407,6 +61595,9 @@ export async function claimSessionWorkForAttempt(
             typeof routingGoalUpdate.payload.policy === "object"
               ? (routingGoalUpdate.payload.policy as Record<string, unknown>)
               : null;
+          let frozenTurnExecutionPolicy = goalPolicy?.turnExecutionPolicy
+            ? TurnExecutionPolicyV1.parse(goalPolicy.turnExecutionPolicy)
+            : null;
           const [latestStarted] = await tx
             .select({
               model: schema.sessionTurns.model,
@@ -61476,6 +61667,9 @@ export async function claimSessionWorkForAttempt(
             const accepted = ScheduledTaskRunAcceptedExecution.parse(
               scheduledRun.acceptedExecutionSnapshot,
             );
+            frozenTurnExecutionPolicy = accepted.turnExecutionPolicy
+              ? TurnExecutionPolicyV1.parse(accepted.turnExecutionPolicy)
+              : null;
             const targetPolicy = accepted.targetSessionExecution;
             if (targetPolicy) {
               scheduledEffectiveMcpServerIds = targetPolicy.effectiveMcpServerIds;
@@ -61697,11 +61891,28 @@ export async function claimSessionWorkForAttempt(
                   sandboxBackend,
                   sandboxOs,
                   metadata: metadataWithTurnDispatchAttempt(
-                    {
-                      internalUpdateCount: delivered.count,
-                      ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
-                      ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
-                    },
+                    frozenTurnExecutionPolicy
+                      ? metadataWithTurnExecutionPolicyV1(
+                          {
+                            internalUpdateCount: delivered.count,
+                            ...(routingGoalUpdate
+                              ? { goalId: routingGoalUpdate.payload.goalId }
+                              : {}),
+                            ...(scheduledEffectiveMcpServerIds
+                              ? { scheduledEffectiveMcpServerIds }
+                              : {}),
+                          },
+                          frozenTurnExecutionPolicy,
+                        )
+                      : {
+                          internalUpdateCount: delivered.count,
+                          ...(routingGoalUpdate
+                            ? { goalId: routingGoalUpdate.payload.goalId }
+                            : {}),
+                          ...(scheduledEffectiveMcpServerIds
+                            ? { scheduledEffectiveMcpServerIds }
+                            : {}),
+                        },
                     { id: input.dispatchId, generation: 1, triggerEventId },
                   ),
                   ...initiatorColumns(internalInitiator),
@@ -64001,7 +64212,10 @@ export async function failSessionWorkBeforeAttemptClaim(
                 sessionId: input.sessionId,
                 sequence: ++sequence,
                 type: "user.humanInputResponse" as const,
-                payload: { requestId: request.id, response: { outcome: "cancelled" as const } },
+                payload: {
+                  requestId: request.id,
+                  response: { outcome: "cancelled" as const },
+                },
                 turnId: turn.id,
                 turnGeneration: request.turnGeneration,
                 turnAttemptId: null,
