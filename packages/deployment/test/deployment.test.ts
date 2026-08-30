@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
   applyProductOverlay,
+  buildManagedProductionPromotionReceipt,
   contractForProfile,
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
@@ -28,6 +29,46 @@ const testImageDigests = {
   OPENGENI_WEB_IMAGE_DIGEST: `sha256:${"3".repeat(64)}`,
   OPENGENI_MIGRATIONS_IMAGE_DIGEST: `sha256:${"4".repeat(64)}`,
 };
+const maintenanceImageDigests = {
+  ...testImageDigests,
+  OPENGENI_MIGRATIONS_IMAGE_DIGEST: testImageDigests.OPENGENI_API_IMAGE_DIGEST,
+};
+const managedProductionSourceSha = "a".repeat(40);
+const managedProductionSourceTreeSha = "b".repeat(40);
+const managedProductionPromotionReceipt = {
+  schemaVersion: 1,
+  sourceSha: managedProductionSourceSha,
+  sourceTreeSha: managedProductionSourceTreeSha,
+  imageDigests: {
+    api: maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST,
+    migration: maintenanceImageDigests.OPENGENI_MIGRATIONS_IMAGE_DIGEST,
+    worker: maintenanceImageDigests.OPENGENI_WORKER_IMAGE_DIGEST,
+    web: maintenanceImageDigests.OPENGENI_WEB_IMAGE_DIGEST,
+  },
+  chart: {
+    version: "1.2.3",
+    artifact: "opengeni-1.2.3.tgz",
+    bytesSha256: "c".repeat(64),
+  },
+  stagingAcceptance: {
+    deploymentRevision: managedProductionSourceSha,
+    acceptedAt: "2026-08-30T12:00:00.000Z",
+    evidenceUrl: "https://evidence.example.test/staging/acceptance.json",
+    evidenceArtifact: "staging-acceptance.json",
+    evidenceSha256: "d".repeat(64),
+  },
+};
+
+function managedProductionPromotionEnv(
+  receipt: typeof managedProductionPromotionReceipt = managedProductionPromotionReceipt,
+): Record<string, string> {
+  const built = buildManagedProductionPromotionReceipt(receipt);
+  return {
+    OPENGENI_MANAGED_PRODUCTION_PROMOTION_RECEIPT_JSON: built.json,
+    OPENGENI_MANAGED_PRODUCTION_PROMOTION_RECEIPT_SHA256: built.sha256,
+    OPENGENI_MANAGED_PRODUCTION_CHART_ARCHIVE: `.release/${built.receipt.chart.artifact}`,
+  };
+}
 
 describe("deployment contract", () => {
   test("ships valid built-in profiles", () => {
@@ -976,10 +1017,10 @@ describe("deployment contract", () => {
     const contract = contractForProfile("azure-managed", "managed-saas-production");
     const vars = requiredRuntimeEnvVars(contract);
     expect(() => stackPlanFor(contract, "managed-saas-production")).toThrow(
-      "OPENGENI_API_IMAGE_DIGEST must be an exact sha256 digest for managed production promotion",
+      "OPENGENI_MANAGED_PRODUCTION_PROMOTION_RECEIPT_JSON is required for managed production promotion",
     );
     const plan = stackPlanFor(contract, "managed-saas-production", {
-      ...maintenanceImageDigests,
+      ...managedProductionPromotionEnv(),
     });
     const deployCommands = plan.deployCommands.join("\n");
 
@@ -1000,6 +1041,26 @@ describe("deployment contract", () => {
     for (const [name, digest] of Object.entries(maintenanceImageDigests)) {
       expect(deployCommands).toContain(`${name}=${digest}`);
     }
+    expect(deployCommands).toContain(`OPENGENI_DEPLOYMENT_REVISION=${managedProductionSourceSha}`);
+    expect(deployCommands).toContain(
+      'test "$(git rev-parse HEAD)" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+    );
+    expect(deployCommands).toContain(
+      'test "$(git rev-parse \'HEAD^{tree}\')" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"',
+    );
+    expect(deployCommands).toContain(
+      'test "$(sha256sum "$OPENGENI_MANAGED_PRODUCTION_CHART_ARCHIVE"',
+    );
+    expect(deployCommands).toContain(
+      'helm upgrade --install opengeni "$OPENGENI_MANAGED_PRODUCTION_CHART_ARCHIVE"',
+    );
+    expect(deployCommands).toContain("plan -detailed-exitcode");
+    expect(deployCommands).not.toContain("terraform apply");
+    expect(deployCommands).not.toContain("helm upgrade --install opengeni-nats");
+    expect(deployCommands).not.toContain("helm upgrade --install opengeni-temporal");
+    expect(deployCommands.indexOf("az acr repository show")).toBeLessThan(
+      deployCommands.indexOf("plan -detailed-exitcode"),
+    );
     expect(plan.notes.join("\n")).toContain("promotion-only");
     expect(
       plan.deployCommands.some((command) =>
@@ -1054,8 +1115,7 @@ describe("deployment contract", () => {
         OPENGENI_ANALYTICS_ENABLED: "true",
         OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
         OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
-        OPENGENI_IMAGE_TAG: "release-prod",
-        ...maintenanceImageDigests,
+        ...managedProductionPromotionEnv(),
         OPENGENI_MODAL_APP_NAME: "opengeni-prod",
         OPENGENI_MODAL_TOKEN_ID: "modal-token-id",
         OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
@@ -1080,7 +1140,10 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_WEB_ALLOWED_HOSTS: "app.opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_ENABLED: "true"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1"');
-    expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
+    expect(artifacts.helmValuesYaml).toContain(`tag: "${managedProductionSourceSha}"`);
+    expect(artifacts.helmValuesYaml).toContain(
+      `OPENGENI_DEPLOYMENT_REVISION: "${managedProductionSourceSha}"`,
+    );
     expect(artifacts.helmValuesYaml).toContain(
       `digest: "${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
     );
@@ -1096,11 +1159,68 @@ describe("deployment contract", () => {
   });
 
   test("rejects a mismatched production promotion receipt at the runtime artifact boundary", () => {
+    const mismatched = {
+      ...managedProductionPromotionReceipt,
+      imageDigests: {
+        ...managedProductionPromotionReceipt.imageDigests,
+        migration: `sha256:${"4".repeat(64)}`,
+      },
+    };
     for (const profile of ["azure-managed", "aws-managed", "gcp-managed"] as const) {
       const contract = contractForProfile(profile, "managed-saas-production");
-      expect(() => generateRuntimeArtifacts(contract, {}, testImageDigests)).toThrow(
-        "OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST because migrations run from the API image",
+      expect(() =>
+        generateRuntimeArtifacts(contract, {}, managedProductionPromotionEnv(mismatched)),
+      ).toThrow("managed production migration digest must equal the API digest");
+    }
+  });
+
+  test("rejects promotion receipt byte or staging-revision drift", () => {
+    const contract = contractForProfile("azure-managed", "managed-saas-production");
+    expect(() =>
+      stackPlanFor(contract, "managed-saas-production", {
+        ...managedProductionPromotionEnv(),
+        OPENGENI_MANAGED_PRODUCTION_PROMOTION_RECEIPT_SHA256: "d".repeat(64),
+      }),
+    ).toThrow("managed production promotion receipt SHA-256 does not match its JSON bytes");
+
+    const wrongRevision = {
+      ...managedProductionPromotionReceipt,
+      stagingAcceptance: {
+        ...managedProductionPromotionReceipt.stagingAcceptance,
+        deploymentRevision: "d".repeat(40),
+      },
+    };
+    expect(() =>
+      stackPlanFor(
+        contract,
+        "managed-saas-production",
+        managedProductionPromotionEnv(wrongRevision),
+      ),
+    ).toThrow("staging acceptance deployment revision must equal sourceSha");
+  });
+
+  test("keeps managed production promotion application-only across cloud profiles", () => {
+    const registryProbe = {
+      "azure-managed": "az acr repository show",
+      "aws-managed": "aws ecr describe-images",
+      "gcp-managed": "gcloud artifacts docker images describe",
+    } as const;
+    for (const profile of Object.keys(registryProbe) as Array<keyof typeof registryProbe>) {
+      const plan = stackPlanFor(
+        contractForProfile(profile, "managed-saas-production"),
+        "managed-saas-production",
+        managedProductionPromotionEnv(),
       );
+      const commands = plan.deployCommands.join("\n");
+      const outputIndex = commands.indexOf("output -json");
+      const registryIndex = commands.indexOf(registryProbe[profile]);
+      const planIndex = commands.indexOf("plan -detailed-exitcode");
+      expect(outputIndex).toBeGreaterThanOrEqual(0);
+      expect(registryIndex).toBeGreaterThan(outputIndex);
+      expect(planIndex).toBeGreaterThan(registryIndex);
+      expect(commands).not.toContain("terraform apply");
+      expect(commands).not.toContain("helm upgrade --install opengeni-nats");
+      expect(commands).not.toContain("helm upgrade --install opengeni-temporal");
     }
   });
 

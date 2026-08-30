@@ -1810,19 +1810,36 @@ Do not commit real secret values.
 
 ### Managed production image promotion
 
-The managed staging plan builds and resolves the candidate API, worker, web,
-and migration image digests. Treat those four exact values as the staging
-acceptance receipt. Before running the `managed-saas-production` plan, promote
-the same manifests by digest into the production registry and export the
-receipt as `OPENGENI_API_IMAGE_DIGEST`, `OPENGENI_WORKER_IMAGE_DIGEST`,
-`OPENGENI_WEB_IMAGE_DIGEST`, and `OPENGENI_MIGRATIONS_IMAGE_DIGEST` (the
-migration digest must equal the API digest).
+The managed staging acceptance step must emit one immutable promotion receipt
+with schema version `1`. It binds the exact source commit and tree, API,
+migration, worker, and web image digests, the accepted chart artifact/version
+and byte SHA-256, plus the staging deployment revision, timestamp, and evidence
+artifact name, byte SHA-256, and unsigned HTTPS URL. The migration digest must
+equal the API digest, and the accepted staging deployment revision must equal
+the source commit. Use `buildManagedProductionPromotionReceipt` from
+`@opengeni/deployment` to normalize the receipt and produce its exact JSON bytes
+and SHA-256, then provide them through
+`OPENGENI_MANAGED_PRODUCTION_PROMOTION_RECEIPT_JSON` and
+`OPENGENI_MANAGED_PRODUCTION_PROMOTION_RECEIPT_SHA256`; provide the matching
+chart archive path through `OPENGENI_MANAGED_PRODUCTION_CHART_ARCHIVE`.
 
-The production plan fails closed without exact lowercase `sha256:` values,
-verifies that each manifest already exists in the destination registry, skips
-all image builds, and generates Helm values from the supplied digests. A source
-tag, a rebuild from the same commit, or a newly resolved digest is not staging
-evidence and must not be substituted for this promotion receipt.
+Before running the `managed-saas-production` plan, promote the receipt's same
+manifests by digest into the existing production registry. The production plan
+fails closed unless the receipt hash, current checkout commit/tree, chart file
+name and bytes, and every destination manifest match. It derives image digests,
+the image tag, and `OPENGENI_DEPLOYMENT_REVISION` from that one receipt, skips
+all image builds, and deploys the accepted chart archive rather than the
+operator checkout's chart directory. A source tag, a rebuild from the same
+commit, a newly resolved digest, or independently copied role values are not
+staging evidence and must not be substituted for the receipt.
+
+Managed production application promotion never mutates cloud infrastructure.
+It reads the existing Terraform outputs needed to locate the registry, verifies
+the accepted artifacts, then runs `terraform plan -detailed-exitcode` and
+continues only when the plan reports no changes. Provision, replace, or update
+managed infrastructure and shared platform dependencies such as NATS or
+Temporal in a separate reviewed transaction before promoting the application
+release; the production promotion plan does not install or upgrade them.
 
 This promotion path is supported only by the `azure-managed`, `aws-managed`,
 and `gcp-managed` profiles, whose plans own and can verify the destination
