@@ -944,6 +944,19 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // today's evaluator strict for every table that existed at that boundary,
     // while explicitly removing tables introduced by later migrations.
     const post0353RuntimeTables = new Set([
+      "app_build_files",
+      "app_builds",
+      "app_gc_claims",
+      "app_launches",
+      "app_lifecycle_operations",
+      "app_object_tombstones",
+      "app_previews",
+      "app_publications",
+      "app_releases",
+      "app_source_revisions",
+      "app_tool_calls",
+      "app_tool_policy_revisions",
+      "apps",
       "company_profile_agent_automatic_activation_receipts",
       "organization_company_profile_agent_policies",
       "organization_company_profile_agent_policy_events",
@@ -967,10 +980,11 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     ]);
     // The current runtime evaluator intentionally requires every capability in
     // today's schema. A database frozen immediately after 0353 predates the
-    // 0361 Memory materialization table/function and the 0380 company-profile
-    // autonomy policy tables/functions. Preserve those exact expected boundary
-    // gaps while continuing to reject every other posture violation in this
-    // rolling-compatibility test.
+    // 0361 Memory materialization table/function, the 0380 company-profile
+    // autonomy policy tables/functions, and the wholly new 0381 Apps surface.
+    // Remove the new Apps contract from the modeled old binary, while preserving
+    // the exact evaluator gaps where pre-0353 capabilities gained later
+    // authority dependencies.
     const expectedPost0353EvaluatorGaps = [
       "target-schema runtime capability propose_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, text) authority tables are missing: company_profile_agent_automatic_activation_receipts, organization_company_profile_agent_policies, organization_company_profile_agent_policy_events",
       "target-schema runtime capability propose_company_profile_for_attempt_v2(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, text, text, text) is missing or ambiguous",
@@ -1017,7 +1031,26 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     ]);
     const post0353CapabilityRoutines = new Set([
       ...sessionSetRoutines,
+      "app_launch_command(jsonb)",
+      "app_tool_call_command(jsonb)",
+      "archive_workspace_app_command(jsonb)",
+      "begin_app_source_upload_command(jsonb)",
+      "claim_archived_app_gc_command(jsonb)",
+      "complete_app_build_command(jsonb)",
+      "complete_app_source_upload_command(jsonb)",
+      "create_app_preview_command(jsonb)",
+      "create_app_tool_policy_command(jsonb)",
+      "create_workspace_app_command(jsonb)",
+      "fail_app_build_command(jsonb)",
+      "fail_app_source_upload_command(jsonb)",
       "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
+      "prepare_app_build_command(jsonb)",
+      "promote_app_build_command(jsonb)",
+      "publish_app_release_command(jsonb)",
+      "revoke_app_preview_command(jsonb)",
+      "settle_archived_app_gc_command(jsonb)",
+      "unpublish_workspace_app_command(jsonb)",
+      "update_workspace_app_command(jsonb)",
     ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(
