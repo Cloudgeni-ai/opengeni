@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
+  appendSessionEvents,
   createDb,
   createSession,
   decodeSessionListCursor,
@@ -1607,9 +1608,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
     expect(cleared).toMatchObject({ unread: false, attentionVersion: 2 });
 
-    await executeSessionActivity(
+    await appendSessionEvents(
+      db,
       workspace.workspaceId,
-      sql`update sessions set last_sequence = 5 where id = ${target.id}`,
+      target.id,
+      Array.from({ length: 5 }, (_, index) => ({
+        type: "session.title_set" as const,
+        payload: { title: `Attention event ${index + 1}` },
+      })),
     );
 
     expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
@@ -1652,10 +1658,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
     expect(active).toMatchObject({ unread: false, activelyWorking: true, attentionVersion: 5 });
 
-    await executeSessionActivity(
-      workspace.workspaceId,
-      sql`update sessions set last_sequence = 6 where id = ${target.id}`,
-    );
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      { type: "session.title_set", payload: { title: "Attention event 6" } },
+    ]);
     expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
       { unread: true, activelyWorking: true, attentionVersion: 5 },
     );

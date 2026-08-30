@@ -4,6 +4,7 @@ import {
   SessionAuthorizationDeniedError,
   steerAgentSession,
 } from "@opengeni/core";
+import { SESSION_EVENT_RAW_DELTA_TYPES } from "@opengeni/contracts";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
   acquireSharedTestDatabase,
@@ -45,6 +46,7 @@ import {
 } from "../src/index";
 
 const BARRIER_CLASS = 630_063;
+const RAW_SESSION_EVENT_TYPES = new Set<string>(SESSION_EVENT_RAW_DELTA_TYPES);
 const externalAdminUrl = process.env.OPENGENI_EVENT_ORDER_POSTGRES_ADMIN_URL?.trim();
 const externalAppUrl = process.env.OPENGENI_EVENT_ORDER_POSTGRES_APP_URL?.trim();
 
@@ -720,10 +722,22 @@ async function assertCommittedSequence(
   expect(rows).toHaveLength(expectedCount);
   expect(new Set(sequences).size).toBe(sequences.length);
   expect(sequences).toEqual(Array.from({ length: expectedCount }, (_, index) => index + 1));
-  const [session] = await admin<{ last_sequence: number }[]>`
-    select last_sequence from sessions where id = ${fixture.sessionId}
+  const [sequenceState] = await admin<Array<{ cursor_sequence: number; session_sequence: number }>>`
+    select cursor.last_sequence as cursor_sequence,
+      session.last_sequence as session_sequence
+    from sessions session
+    join session_event_cursors cursor
+      on cursor.workspace_id = session.workspace_id
+      and cursor.session_id = session.id
+    where session.id = ${fixture.sessionId}
   `;
-  expect(session?.last_sequence).toBe(sequences.at(-1) ?? 0);
+  const committedSequence = sequences.at(-1) ?? 0;
+  expect(sequenceState?.cursor_sequence).toBe(committedSequence);
+  if (rows.at(-1) && RAW_SESSION_EVENT_TYPES.has(rows.at(-1)!.type)) {
+    expect(sequenceState?.session_sequence).toBeLessThanOrEqual(committedSequence);
+  } else {
+    expect(sequenceState?.session_sequence).toBe(committedSequence);
+  }
   return rows;
 }
 

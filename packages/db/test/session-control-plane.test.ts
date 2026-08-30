@@ -1519,24 +1519,67 @@ describe("clean session control plane", () => {
     expect(turn).not.toBeNull();
     await setBaseline(attempt.grant.workspaceId!, attempt.session.id);
     const attemptBefore = await activity(attempt.grant.workspaceId!, attempt.session.id);
-    expect(
-      (
-        await appendSessionEventsForTurnAttempt(
-          client.db,
-          attempt.grant.workspaceId!,
-          attempt.session.id,
-          turn!.id,
-          turn!.executionGeneration,
-          attemptId,
-          rawDeltas(),
-        )
-      ).accepted,
-    ).toBeTrue();
+    const [cursorBefore] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${attempt.grant.workspaceId!}
+        and session_id = ${attempt.session.id}`;
+    expect(cursorBefore?.lastSequence).toBe(attemptBefore.lastSequence);
+
+    let releaseSessionRow!: () => void;
+    let sessionRowLocked!: () => void;
+    const sessionRowLockReleased = new Promise<void>((resolve) => {
+      releaseSessionRow = resolve;
+    });
+    const sessionRowLockAcquired = new Promise<void>((resolve) => {
+      sessionRowLocked = resolve;
+    });
+    const sessionRowHolder = shared.admin.begin(async (tx) => {
+      await tx`
+        select id from sessions
+        where workspace_id = ${attempt.grant.workspaceId!}
+          and id = ${attempt.session.id}
+        for no key update`;
+      sessionRowLocked();
+      await sessionRowLockReleased;
+    });
+    await sessionRowLockAcquired;
+    const rawAppend = appendSessionEventsForTurnAttempt(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      turn!.id,
+      turn!.executionGeneration,
+      attemptId,
+      rawDeltas(),
+    );
+    let rawResult: Awaited<typeof rawAppend> | null = null;
+    try {
+      rawResult = await Promise.race([rawAppend, Bun.sleep(1_500).then(() => null)]);
+      expect(rawResult).not.toBeNull();
+    } finally {
+      releaseSessionRow();
+      await sessionRowHolder;
+      await rawAppend;
+    }
+    if (!rawResult) throw new Error("raw append waited on sessions FOR NO KEY UPDATE");
+    expect(rawResult.accepted).toBeTrue();
     expect(await activity(attempt.grant.workspaceId!, attempt.session.id)).toEqual({
-      lastSequence: attemptBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      lastSequence: attemptBefore.lastSequence,
       updatedAt: baseline,
       activityRevision: attemptBefore.activityRevision,
     });
+    const [cursorAfterRaw] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${attempt.grant.workspaceId!}
+        and session_id = ${attempt.session.id}`;
+    expect(cursorAfterRaw?.lastSequence).toBe(
+      attemptBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+    );
+    expect(
+      (await getSession(client.db, attempt.grant.workspaceId!, attempt.session.id))?.lastSequence,
+    ).toBe(cursorAfterRaw?.lastSequence);
     await appendSessionEventsForTurnAttempt(
       client.db,
       attempt.grant.workspaceId!,
@@ -1547,9 +1590,73 @@ describe("clean session control plane", () => {
       [{ type: "agent.message.completed", payload: { text: "semantic" } }],
     );
     const attemptSemantic = await activity(attempt.grant.workspaceId!, attempt.session.id);
+    expect(attemptSemantic.lastSequence).toBe((cursorAfterRaw?.lastSequence ?? 0) + 1);
     expect(attemptSemantic.updatedAt).not.toBe(baseline);
     expect(BigInt(attemptSemantic.activityRevision)).toBeGreaterThan(
       BigInt(attemptBefore.activityRevision),
+    );
+    const rawAfterSemantic = await appendSessionEventsForTurnAttempt(
+      client.db,
+      attempt.grant.workspaceId!,
+      attempt.session.id,
+      turn!.id,
+      turn!.executionGeneration,
+      attemptId,
+      [rawDeltas()[0]!],
+    );
+    expect(rawAfterSemantic.accepted).toBeTrue();
+    expect((await activity(attempt.grant.workspaceId!, attempt.session.id)).lastSequence).toBe(
+      attemptSemantic.lastSequence,
+    );
+    expect(
+      (await getSession(client.db, attempt.grant.workspaceId!, attempt.session.id))?.lastSequence,
+    ).toBe(attemptSemantic.lastSequence + 1);
+
+    const rollback = await fixture();
+    await send(rollback.grant, rollback.session.id, "rollback activity");
+    const rollbackAttemptId = crypto.randomUUID();
+    const rollbackTurn = await claimTestSessionWork(
+      client.db,
+      rollback.grant.workspaceId!,
+      rollback.session.id,
+      `session-${rollback.session.id}`,
+      { attemptId: rollbackAttemptId },
+    );
+    expect(rollbackTurn).not.toBeNull();
+    await setBaseline(rollback.grant.workspaceId!, rollback.session.id);
+    const rollbackBefore = await activity(rollback.grant.workspaceId!, rollback.session.id);
+    const previousRawLaneSetting = process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED;
+    process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED = "false";
+    try {
+      const rollbackResult = await appendSessionEventsForTurnAttempt(
+        client.db,
+        rollback.grant.workspaceId!,
+        rollback.session.id,
+        rollbackTurn!.id,
+        rollbackTurn!.executionGeneration,
+        rollbackAttemptId,
+        rawDeltas(),
+      );
+      expect(rollbackResult.accepted).toBeTrue();
+    } finally {
+      if (previousRawLaneSetting === undefined) {
+        delete process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED;
+      } else {
+        process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED = previousRawLaneSetting;
+      }
+    }
+    expect(await activity(rollback.grant.workspaceId!, rollback.session.id)).toEqual({
+      lastSequence: rollbackBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      updatedAt: baseline,
+      activityRevision: rollbackBefore.activityRevision,
+    });
+    const [rollbackCursor] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${rollback.grant.workspaceId!}
+        and session_id = ${rollback.session.id}`;
+    expect(rollbackCursor?.lastSequence).toBe(
+      rollbackBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
     );
 
     const grouped = await fixture();
@@ -1566,6 +1673,23 @@ describe("clean session control plane", () => {
       updatedAt: baseline,
       activityRevision: groupedBefore.activityRevision,
     });
+    await appendSessionEventToSandboxGroup(
+      client.db,
+      grouped.grant.workspaceId!,
+      grouped.session.sandboxGroupId,
+      { type: "session.title_set", payload: { title: "semantic group event" } },
+    );
+    const groupedSemantic = await activity(grouped.grant.workspaceId!, grouped.session.id);
+    const [groupedCursor] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${grouped.grant.workspaceId!}
+        and session_id = ${grouped.session.id}`;
+    expect(groupedSemantic.lastSequence).toBe(groupedBefore.lastSequence + 2);
+    expect(groupedCursor?.lastSequence).toBe(groupedSemantic.lastSequence);
+    expect(
+      (await getSession(client.db, grouped.grant.workspaceId!, grouped.session.id))?.lastSequence,
+    ).toBe(groupedSemantic.lastSequence);
 
     const updated = await fixture();
     await setBaseline(updated.grant.workspaceId!, updated.session.id);

@@ -256,7 +256,8 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         insert into schema_migrations(name)
         values
           ('0345_tenant_scoped_session_tenancy_fence.sql'),
-          ('0374_session_event_cursors.sql')
+          ('0374_session_event_cursors.sql'),
+          ('0379_session_event_raw_lane_activation.sql')
       `);
       await migrate(driftOwned.ownerUrl);
       const migration = await readFile(migrationUrl, "utf8");
