@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
-  applyProductOverlay,
   contractForProfile,
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
@@ -976,19 +975,12 @@ describe("deployment contract", () => {
     );
   });
 
-  test("renders production managed SaaS posture as digest-pinned promotion without deployment shared key", () => {
+  test("renders production managed SaaS posture without deployment shared key", () => {
     const contract = contractForProfile("azure-managed", "managed-saas-production");
     const vars = requiredRuntimeEnvVars(contract);
-    expect(() => stackPlanFor(contract, "managed-saas-production")).toThrow(
-      "OPENGENI_API_IMAGE_DIGEST must be an exact sha256 digest for managed production promotion",
-    );
-    const plan = stackPlanFor(contract, "managed-saas-production", {
-      ...maintenanceImageDigests,
-    });
-    const deployCommands = plan.deployCommands.join("\n");
+    const plan = stackPlanFor(contract, "managed-saas-production");
 
     expect(contract.product.publicBaseUrl).toBe("https://app.opengeni.ai");
-    expect(contract.productOverlay).toBe("managed-saas-production");
     expect(contract.access.mode).toBe("externalGateway");
     expect(contract.product.accessMode).toBe("managed");
     expect(contract.product.billingMode).toBe("stripe");
@@ -998,13 +990,6 @@ describe("deployment contract", () => {
     expect(vars).not.toContain("OPENGENI_ACCESS_KEY");
     expect(vars).toContain("OPENGENI_BETTER_AUTH_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_WEBHOOK_SECRET");
-    expect(deployCommands).not.toContain("docker build");
-    expect(deployCommands).not.toContain("image-digests.env");
-    expect(deployCommands).toContain("az acr repository show");
-    for (const [name, digest] of Object.entries(maintenanceImageDigests)) {
-      expect(deployCommands).toContain(`${name}=${digest}`);
-    }
-    expect(plan.notes.join("\n")).toContain("promotion-only");
     expect(
       plan.deployCommands.some((command) =>
         command.includes("--product-overlay managed-saas-production"),
@@ -1097,37 +1082,6 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain(
       `digest: "${maintenanceImageDigests.OPENGENI_MIGRATIONS_IMAGE_DIGEST}"`,
     );
-  });
-
-  test("rejects a mismatched production promotion receipt at the runtime artifact boundary", () => {
-    for (const profile of ["azure-managed", "aws-managed", "gcp-managed"] as const) {
-      const contract = contractForProfile(profile, "managed-saas-production");
-      expect(() => generateRuntimeArtifacts(contract, {}, testImageDigests)).toThrow(
-        "OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST because migrations run from the API image",
-      );
-    }
-  });
-
-  test("rejects managed production overlays for profiles without registry promotion support", () => {
-    for (const profile of [
-      "azure-existing-services",
-      "aws-existing-services",
-      "gcp-existing-services",
-      "single-node-kubernetes",
-    ] as const) {
-      expect(() => contractForProfile(profile, "managed-saas-production")).toThrow(
-        "managed-saas-production is supported only for azure-managed, aws-managed, and gcp-managed profiles",
-      );
-    }
-  });
-
-  test("does not relabel or reapply an already-derived managed SaaS contract", () => {
-    const production = contractForProfile("azure-managed", "managed-saas-production");
-    for (const overlay of ["none", "managed-saas-staging", "managed-saas-production"] as const) {
-      expect(() => applyProductOverlay(production, overlay)).toThrow(
-        `cannot apply product overlay ${overlay} to a contract already derived with managed-saas-production`,
-      );
-    }
   });
 
   test("does not require legacy Azure api-version for Azure OpenAI v1 base URLs", () => {

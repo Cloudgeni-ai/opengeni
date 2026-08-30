@@ -17,16 +17,6 @@ export const DeploymentProfileId = z.enum([
 ]);
 export type DeploymentProfileId = z.infer<typeof DeploymentProfileId>;
 
-const MANAGED_SAAS_PRODUCTION_PROFILES = [
-  "azure-managed",
-  "aws-managed",
-  "gcp-managed",
-] as const satisfies readonly DeploymentProfileId[];
-
-function supportsManagedSaasProduction(profile: DeploymentProfileId): boolean {
-  return MANAGED_SAAS_PRODUCTION_PROFILES.some((candidate) => candidate === profile);
-}
-
 export const ProductOverlayId = z.enum(["none", "managed-saas-staging", "managed-saas-production"]);
 export type ProductOverlayId = z.infer<typeof ProductOverlayId>;
 
@@ -413,7 +403,6 @@ export type BackupSpec = z.infer<typeof BackupSpec>;
 export const DeploymentContract = z
   .object({
     profile: DeploymentProfileId,
-    productOverlay: ProductOverlayId.default("none"),
     runtime: RuntimeSpec,
     database: DatabaseSpec,
     temporal: TemporalSpec,
@@ -472,17 +461,6 @@ export const DeploymentContract = z
         code: "custom",
         path: ["runtime", "platform"],
         message: "Preview profiles require Kubernetes runtime",
-      });
-    }
-    if (
-      contract.productOverlay === "managed-saas-production" &&
-      !supportsManagedSaasProduction(contract.profile)
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["productOverlay"],
-        message:
-          "managed-saas-production is supported only for azure-managed, aws-managed, and gcp-managed profiles",
       });
     }
     if (contract.ingress.enabled && contract.access.mode === "disabled") {
@@ -581,16 +559,6 @@ export function applyProductOverlay(
   overlay: ProductOverlayId,
   env: Record<string, string | undefined> = process.env,
 ): DeploymentContract {
-  if (contract.productOverlay !== "none") {
-    throw new Error(
-      `cannot apply product overlay ${overlay} to a contract already derived with ${contract.productOverlay}`,
-    );
-  }
-  if (overlay === "managed-saas-production" && !supportsManagedSaasProduction(contract.profile)) {
-    throw new Error(
-      "managed-saas-production is supported only for azure-managed, aws-managed, and gcp-managed profiles",
-    );
-  }
   if (overlay === "none") {
     return parseDeploymentContract(contract);
   }
@@ -605,7 +573,6 @@ export function applyProductOverlay(
         "https://app.opengeni.ai");
   return parseDeploymentContract({
     ...contract,
-    productOverlay: overlay,
     access: {
       mode: "externalGateway",
       allowUnauthenticatedHealth: true,
@@ -1619,11 +1586,6 @@ export function stackPlanFor(
   productOverlay: ProductOverlayId = "none",
   env: Record<string, string | undefined> = process.env,
 ): DeploymentStackPlan {
-  if (contract.productOverlay !== productOverlay) {
-    throw new Error(
-      `deployment contract overlay ${contract.productOverlay} does not match requested overlay ${productOverlay}`,
-    );
-  }
   const terraformRoot = terraformRootFor(contract);
   const helmValuesFile = helmValuesFileFor(contract);
   const platformDependencies = platformDependencyPlans(contract);
@@ -1650,7 +1612,7 @@ export function stackPlanFor(
     ),
     verifyCommands: verifyCommands(contract, platformDependencies, productOverlay),
     destroyCommands: destroyCommands(contract, terraformRoot, platformDependencies),
-    notes: planNotes(contract, env, productOverlay),
+    notes: planNotes(contract, env),
   };
 }
 
@@ -1659,9 +1621,6 @@ export function generateRuntimeArtifacts(
   terraformOutputs: TerraformOutputs,
   env: Record<string, string | undefined> = process.env,
 ): DeploymentRuntimeArtifacts {
-  if (contract.productOverlay === "managed-saas-production") {
-    validatedImageDigests(env, "managed production promotion");
-  }
   const helmSetValues = terraformOutputObject(terraformOutputs, "helm_set_values");
   addGeneratedImageValues(helmSetValues, env.OPENGENI_IMAGE_TAG ?? "latest", env);
   addRuntimeConfigHelmValues(helmSetValues, contract, env);
@@ -2033,18 +1992,7 @@ function deployCommands(
   ];
   if (terraformRoot) {
     const overlayArg = productOverlay === "none" ? "" : ` --product-overlay ${productOverlay}`;
-    const productionPromotion = productOverlay === "managed-saas-production";
-    const promotedDigests = productionPromotion
-      ? validatedImageDigests(env, "managed production promotion")
-      : null;
-    const runtimeImageEnvPrefix = promotedDigests
-      ? Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV)
-          .map(
-            ([component, name]) =>
-              `${name}=${promotedDigests[component as keyof typeof promotedDigests]}`,
-          )
-          .join(" ") + " "
-      : `set -a && . .agent/generated/${contract.profile}/image-digests.env && set +a && `;
+    const runtimeImageEnvPrefix = `set -a && . .agent/generated/${contract.profile}/image-digests.env && set +a && `;
     commands.unshift(
       `terraform -chdir=${terraformRoot} init -backend=false`,
       `terraform -chdir=${terraformRoot} plan -var-file=terraform.tfvars`,
@@ -2053,12 +2001,8 @@ function deployCommands(
     commands.push(
       `mkdir -p .agent/generated/${contract.profile}`,
       `terraform -chdir=${terraformRoot} output -json > .agent/generated/${contract.profile}/terraform-output.json`,
-      ...(productionPromotion
-        ? promotedImageDigestVerificationCommands(contract, terraformRoot, promotedDigests!)
-        : [
-            ...imageBuildPushCommands(contract, terraformRoot),
-            imageDigestResolutionCommand(contract, terraformRoot),
-          ]),
+      ...imageBuildPushCommands(contract, terraformRoot),
+      imageDigestResolutionCommand(contract, terraformRoot),
       `${runtimeImageEnvPrefix}OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" bun run deployment:runtime-artifacts -- --profile ${contract.profile}${overlayArg} --terraform-output .agent/generated/${contract.profile}/terraform-output.json --out-dir .agent/generated/${contract.profile}`,
       `kubectl -n ${contract.runtime.namespace ?? "opengeni"} create secret generic opengeni-runtime --from-env-file=.agent/generated/${contract.profile}/runtime.env --dry-run=client -o yaml | kubectl apply -f -`,
     );
@@ -2175,35 +2119,6 @@ function imageDigestResolutionCommand(contract: DeploymentContract, terraformRoo
     );
   }
   throw new Error(`immutable image digest resolution is unsupported for ${contract.runtime.cloud}`);
-}
-
-function promotedImageDigestVerificationCommands(
-  contract: DeploymentContract,
-  terraformRoot: string,
-  digests: Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string>,
-): string[] {
-  const components = ["api", "worker", "web"] as const;
-  if (contract.runtime.cloud === "azure") {
-    return components.map(
-      (component) =>
-        `ACR_LOGIN_SERVER="$(terraform -chdir=${terraformRoot} output -raw acr_login_server)" && ACR_NAME="\${ACR_LOGIN_SERVER%%.*}" && test "$(az acr repository show --name "$ACR_NAME" --image "opengeni-${component}@${digests[component]}" --query digest -o tsv)" = "${digests[component]}"`,
-    );
-  }
-  if (contract.runtime.cloud === "aws") {
-    return components.map(
-      (component) =>
-        `AWS_REGION="$(terraform -chdir=${terraformRoot} output -raw region)" && IMAGE="$(terraform -chdir=${terraformRoot} output -json ecr_repository_urls | jq -r .${component})" && test "$(aws ecr describe-images --region "$AWS_REGION" --repository-name "\${IMAGE#*/}" --image-ids imageDigest="${digests[component]}" --query 'imageDetails[0].imageDigest' --output text)" = "${digests[component]}"`,
-    );
-  }
-  if (contract.runtime.cloud === "gcp") {
-    return components.map(
-      (component) =>
-        `GCP_IMAGE_REGISTRY="$(terraform -chdir=${terraformRoot} output -json helm_set_values | jq -r '."global.imageRegistry"')" && test "$(gcloud artifacts docker images describe "$GCP_IMAGE_REGISTRY/opengeni-${component}@${digests[component]}" --format='value(image_summary.digest)')" = "${digests[component]}"`,
-    );
-  }
-  throw new Error(
-    `managed production image promotion is unsupported for ${contract.runtime.cloud}`,
-  );
 }
 
 function destroyCommands(
@@ -2418,7 +2333,6 @@ function usesOfficialPlatformChart(
 function planNotes(
   contract: DeploymentContract,
   env: Record<string, string | undefined>,
-  productOverlay: ProductOverlayId,
 ): string[] {
   const notes = [
     "Keep provider resource names, generated credentials, kubeconfigs, Terraform state, and filled tfvars in private operator-controlled storage outside the repository.",
@@ -2454,11 +2368,6 @@ function planNotes(
   if (requestedMaintenanceCutover(env)) {
     notes.push(
       `This plan includes the explicit ${MODEL_CATALOG_MAINTENANCE_CUTOVER} application drain; keep the application stopped until migration 0383 and the final exact-digest upgrade succeed.`,
-    );
-  }
-  if (productOverlay === "managed-saas-production") {
-    notes.push(
-      "Managed production is promotion-only: pre-promote the staging-proven API, worker, and web manifests into the destination registry, then supply that exact four-digest receipt. The plan verifies and deploys those digests without rebuilding images.",
     );
   }
   return notes;

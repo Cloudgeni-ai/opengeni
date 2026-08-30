@@ -1808,27 +1808,6 @@ The runtime secret must provide values such as:
 
 Do not commit real secret values.
 
-### Managed production image promotion
-
-The managed staging plan builds and resolves the candidate API, worker, web,
-and migration image digests. Treat those four exact values as the staging
-acceptance receipt. Before running the `managed-saas-production` plan, promote
-the same manifests by digest into the production registry and export the
-receipt as `OPENGENI_API_IMAGE_DIGEST`, `OPENGENI_WORKER_IMAGE_DIGEST`,
-`OPENGENI_WEB_IMAGE_DIGEST`, and `OPENGENI_MIGRATIONS_IMAGE_DIGEST` (the
-migration digest must equal the API digest).
-
-The production plan fails closed without exact lowercase `sha256:` values,
-verifies that each manifest already exists in the destination registry, skips
-all image builds, and generates Helm values from the supplied digests. A source
-tag, a rebuild from the same commit, or a newly resolved digest is not staging
-evidence and must not be substituted for this promotion receipt.
-
-This promotion path is supported only by the `azure-managed`, `aws-managed`,
-and `gcp-managed` profiles, whose plans own and can verify the destination
-registry. The production overlay rejects existing-services and local profiles
-instead of emitting a plan that cannot prove or inject the accepted digests.
-
 ### Deployment database model catalog cutover
 
 The default source remains the reviewed code/env catalog. Database mode is an
