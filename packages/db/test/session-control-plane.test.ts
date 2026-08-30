@@ -1612,6 +1612,53 @@ describe("clean session control plane", () => {
       (await getSession(client.db, attempt.grant.workspaceId!, attempt.session.id))?.lastSequence,
     ).toBe(attemptSemantic.lastSequence + 1);
 
+    const rollback = await fixture();
+    await send(rollback.grant, rollback.session.id, "rollback activity");
+    const rollbackAttemptId = crypto.randomUUID();
+    const rollbackTurn = await claimTestSessionWork(
+      client.db,
+      rollback.grant.workspaceId!,
+      rollback.session.id,
+      `session-${rollback.session.id}`,
+      { attemptId: rollbackAttemptId },
+    );
+    expect(rollbackTurn).not.toBeNull();
+    await setBaseline(rollback.grant.workspaceId!, rollback.session.id);
+    const rollbackBefore = await activity(rollback.grant.workspaceId!, rollback.session.id);
+    const previousRawLaneSetting = process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED;
+    process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED = "false";
+    try {
+      const rollbackResult = await appendSessionEventsForTurnAttempt(
+        client.db,
+        rollback.grant.workspaceId!,
+        rollback.session.id,
+        rollbackTurn!.id,
+        rollbackTurn!.executionGeneration,
+        rollbackAttemptId,
+        rawDeltas(),
+      );
+      expect(rollbackResult.accepted).toBeTrue();
+    } finally {
+      if (previousRawLaneSetting === undefined) {
+        delete process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED;
+      } else {
+        process.env.OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED = previousRawLaneSetting;
+      }
+    }
+    expect(await activity(rollback.grant.workspaceId!, rollback.session.id)).toEqual({
+      lastSequence: rollbackBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+      updatedAt: baseline,
+      activityRevision: rollbackBefore.activityRevision,
+    });
+    const [rollbackCursor] = await shared.admin<Array<{ lastSequence: number }>>`
+      select last_sequence as "lastSequence"
+      from session_event_cursors
+      where workspace_id = ${rollback.grant.workspaceId!}
+        and session_id = ${rollback.session.id}`;
+    expect(rollbackCursor?.lastSequence).toBe(
+      rollbackBefore.lastSequence + SESSION_EVENT_RAW_DELTA_TYPES.length,
+    );
+
     const grouped = await fixture();
     await setBaseline(grouped.grant.workspaceId!, grouped.session.id);
     const groupedBefore = await activity(grouped.grant.workspaceId!, grouped.session.id);

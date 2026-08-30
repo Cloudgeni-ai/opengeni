@@ -68867,7 +68867,10 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                   advancesActivity || !rawLaneIsolated
                     ? await tx
                         .update(schema.sessions)
-                        .set({ lastSequence: sequence, updatedAt: now })
+                        .set({
+                          lastSequence: sequence,
+                          ...(advancesActivity ? { updatedAt: now } : {}),
+                        })
                         .where(
                           and(
                             eq(schema.sessions.workspaceId, workspaceId),
