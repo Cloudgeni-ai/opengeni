@@ -360,6 +360,7 @@ try {
       "packages/agent-proto",
       "packages/capabilities",
       "packages/codemode",
+      "packages/tool-runtime",
       "packages/codex",
       "packages/config",
       "packages/contracts",
@@ -370,9 +371,13 @@ try {
   const runtimeLocalDependencyFiles = Object.fromEntries(
     runtimeLocalDependencies.map(({ manifest, tarball }) => [manifest.name, `file:${tarball}`]),
   );
-  const expectedRuntimeWorkspaceDependencies = Object.keys(runtime.manifest.dependencies ?? {})
-    .filter((name) => versions.has(name))
-    .sort();
+  const expectedRuntimeWorkspaceDependencies = [
+    ...new Set(
+      [runtime, sdk, ...runtimeLocalDependencies].flatMap(({ manifest }) =>
+        Object.keys(manifest.dependencies ?? {}).filter((name) => versions.has(name)),
+      ),
+    ),
+  ].sort();
   const stagedRuntimeWorkspaceDependencies = [
     sdk.manifest.name,
     ...runtimeLocalDependencies.map(({ manifest }) => manifest.name),
@@ -393,6 +398,12 @@ try {
     ({ manifest }) => manifest.name === "@opengeni/codemode",
   );
   if (!codemode) throw new Error("runtime package closure did not stage @opengeni/codemode");
+  const toolRuntime = runtimeLocalDependencies.find(
+    ({ manifest }) => manifest.name === "@opengeni/tool-runtime",
+  );
+  if (!toolRuntime) {
+    throw new Error("runtime package closure did not stage @opengeni/tool-runtime");
+  }
   if (sdk.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`) {
     throw new Error("SDK tarball does not declare the staged canonical contracts version");
   }
@@ -401,10 +412,26 @@ try {
   ) {
     throw new Error("Codemode tarball does not declare the staged canonical contracts version");
   }
+  if (
+    codemode.manifest.dependencies?.["@opengeni/tool-runtime"] !==
+    `^${toolRuntime.manifest.version}`
+  ) {
+    throw new Error("Codemode tarball does not declare the staged Tool Runtime version");
+  }
   const codemodeTarballContents = await run(["tar", "-tzf", codemode.tarball], consumerRoot, true);
   for (const artifact of ["package/dist/index.js", "package/dist/index.d.ts"]) {
     if (!codemodeTarballContents.split("\n").includes(artifact)) {
       throw new Error(`Codemode tarball is missing ${artifact}`);
+    }
+  }
+  const toolRuntimeTarballContents = await run(
+    ["tar", "-tzf", toolRuntime.tarball],
+    consumerRoot,
+    true,
+  );
+  for (const artifact of ["package/dist/index.js", "package/dist/index.d.ts"]) {
+    if (!toolRuntimeTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`Tool Runtime tarball is missing ${artifact}`);
     }
   }
   const contractsTarballContents = await run(
