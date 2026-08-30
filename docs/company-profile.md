@@ -32,7 +32,7 @@ Canonical implementation:
   `packages/core/src/domain/company-profile-agent-admin.ts`,
   `apps/api/src/mcp/company-profile-agent-admin.ts`, and migration
   `0324_human_confirmed_company_profile_agent_admin.sql` plus
-  `0379_autonomous_company_profile_agent_policy.sql`;
+  `0380_autonomous_company_profile_agent_policy.sql`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
   resolved by `apps/worker/src/activities/agent-turn/governance-model.ts`;
 - admin presentation: Organization settings → Knowledge in
@@ -204,7 +204,7 @@ mutation mechanism. Migration
 `0324_human_confirmed_company_profile_agent_admin.sql` routes a confirmed
 operation through the same `company_profile_apply_activation` lifecycle and
 attributes that event to the confirming human. Migration
-`0379_autonomous_company_profile_agent_policy.sql` adds the organization policy
+`0380_autonomous_company_profile_agent_policy.sql` adds the organization policy
 and routes `automatic` through that same lifecycle under the dedicated service
 actor while retaining the initiating owner as causal evidence. All policy and
 receipt tables are FORCE-RLS, immutable or lifecycle-fenced, and have no direct

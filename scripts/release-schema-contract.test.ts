@@ -198,7 +198,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0378_scoped_rig_health_audit_timestamp.sql",
     );
     const autonomousCompanyProfileAgentPolicy = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0379_autonomous_company_profile_agent_policy.sql",
+      (migration) => migration.path === "0380_autonomous_company_profile_agent_policy.sql",
     );
     const automaticSessionTitleMigrationPaths = new Set([
       "0353_automatic_session_title_policy_fence.sql",
@@ -227,7 +227,7 @@ describe("release schema contract", () => {
       "0376_organization_workspace_inventory.sql",
       "0377_scoped_rig_health_projection.sql",
       "0378_scoped_rig_health_audit_timestamp.sql",
-      "0379_autonomous_company_profile_agent_policy.sql",
+      "0380_autonomous_company_profile_agent_policy.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -264,7 +264,7 @@ describe("release schema contract", () => {
         (scopedRigHealthAuditTimestamp ? 1 : 0) +
         (autonomousCompanyProfileAgentPolicy ? 1 : 0),
       latestMigration: autonomousCompanyProfileAgentPolicy
-        ? "0379_autonomous_company_profile_agent_policy.sql"
+        ? "0380_autonomous_company_profile_agent_policy.sql"
         : scopedRigHealthAuditTimestamp
           ? "0378_scoped_rig_health_audit_timestamp.sql"
           : scopedRigHealthProjection
@@ -438,7 +438,7 @@ describe("release schema contract", () => {
       "0376_organization_workspace_inventory.sql",
       "0377_scoped_rig_health_projection.sql",
       "0378_scoped_rig_health_audit_timestamp.sql",
-      "0379_autonomous_company_profile_agent_policy.sql",
+      "0380_autonomous_company_profile_agent_policy.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -560,7 +560,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0378_scoped_rig_health_audit_timestamp.sql",
     );
     const autonomousCompanyProfileAgentPolicy = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0379_autonomous_company_profile_agent_policy.sql",
+      (migration) => migration.path === "0380_autonomous_company_profile_agent_policy.sql",
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
@@ -598,7 +598,7 @@ describe("release schema contract", () => {
         (scopedRigHealthAuditTimestamp ? 1 : 0) +
         (autonomousCompanyProfileAgentPolicy ? 1 : 0),
       latestMigration: autonomousCompanyProfileAgentPolicy
-        ? "0379_autonomous_company_profile_agent_policy.sql"
+        ? "0380_autonomous_company_profile_agent_policy.sql"
         : scopedRigHealthAuditTimestamp
           ? "0378_scoped_rig_health_audit_timestamp.sql"
           : scopedRigHealthProjection

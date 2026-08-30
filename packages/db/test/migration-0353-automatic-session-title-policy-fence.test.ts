@@ -967,7 +967,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     ]);
     // The current runtime evaluator intentionally requires every capability in
     // today's schema. A database frozen immediately after 0353 predates the
-    // 0361 Memory materialization table/function and the 0379 company-profile
+    // 0361 Memory materialization table/function and the 0380 company-profile
     // autonomy policy tables/functions. Preserve those exact expected boundary
     // gaps while continuing to reject every other posture violation in this
     // rolling-compatibility test.
