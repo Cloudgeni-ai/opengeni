@@ -27,6 +27,7 @@ import {
   createWorkspace,
   deleteWorkspaceIfQuiescent,
   ensureWorkspaceByExternalIdentity,
+  findWorkspaceByExternalIdentity,
   getManagedUserProfilesByIds,
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
@@ -162,6 +163,26 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = EnsureWorkspaceRequest.parse(await c.req.json());
     requireAccountPermission(context, payload.accountId, "workspace:create");
     try {
+      const existing = await findWorkspaceByExternalIdentity(deps.db, {
+        externalSource: payload.externalSource,
+        externalId: payload.externalId,
+      });
+      if (existing) {
+        if (existing.accountId !== payload.accountId || existing.kind !== "shared") {
+          throw new WorkspaceExternalIdentityConflictError();
+        }
+        return c.json(
+          EnsureWorkspaceResponse.parse({
+            workspace: existing,
+            created: false,
+          }),
+        );
+      }
+      await requireLimit(deps, {
+        accountId: payload.accountId,
+        action: "workspace:create",
+        quantity: 1,
+      });
       const result = await ensureWorkspaceByExternalIdentity(deps.db, {
         accountId: payload.accountId,
         externalSource: payload.externalSource,
