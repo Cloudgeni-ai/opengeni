@@ -9,6 +9,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import postgres from "postgres";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const DELEGATION_SECRET = "model-catalog-prompt-replay-secret";
@@ -119,8 +120,47 @@ async function durablePromptFacts(workspaceId: string, sessionId: string) {
   return row;
 }
 
+async function waitForBlockedBackend(blockerPid: number, description: string): Promise<number> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const [row] = await shared!.admin<Array<{ pid: number }>>`
+      select activity.pid
+      from pg_stat_activity activity
+      where activity.datname = current_database()
+        and activity.state = 'active'
+        and activity.wait_event_type = 'Lock'
+        and ${blockerPid} = any(pg_blocking_pids(activity.pid))
+      order by activity.pid
+      limit 1
+    `;
+    if (row) return row.pid;
+    await Bun.sleep(10);
+  }
+  throw new Error(`${description} did not block behind backend ${blockerPid}`);
+}
+
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) {
+    return await acquireSharedTestDatabase("model-catalog-session-prompt-replay");
+  }
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("model-catalog-session-prompt-replay");
+  shared = await acquireDatabase();
   if (!shared) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
       throw new Error("PostgreSQL test database unavailable");
@@ -328,6 +368,151 @@ describe("model catalog prompt receipt replay (real PostgreSQL)", () => {
       expect(otherBody).not.toContain(acceptedSend.id);
       expect(otherBody).not.toContain(acceptedSteer.turn.id);
       expect(await durablePromptFacts(owner.workspaceId, target.id)).toEqual(beforeRemovalReplay);
+    } finally {
+      await shared!.admin`delete from deployment_model_catalog`;
+    }
+  });
+
+  test("an overlapping same-key retry replays after mutable model admission fails", async () => {
+    if (!available) return;
+    const fixture = crypto.randomUUID();
+    const owner = await provisionActor({
+      accountExternalId: `overlap-account-${fixture}`,
+      workspaceExternalId: `overlap-workspace-${fixture}`,
+      subjectId: `user:overlap-owner-${fixture}`,
+    });
+    const workflow = new FakeWorkflowClient();
+    const app = buildApp(workflow);
+    const headers = {
+      authorization: await bearer(owner),
+      "content-type": "application/json",
+    };
+
+    try {
+      await installCatalog(
+        {
+          schemaVersion: 1,
+          defaultModel: "scripted-model",
+          builtInModels: ["scripted-model", "switch-model"],
+        },
+        1,
+      );
+      const createResponse = await app.request(
+        `http://x/v1/workspaces/${owner.workspaceId}/sessions`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            initialMessage: "overlapping prompt replay fixture",
+            model: "scripted-model",
+            sandboxBackend: "none",
+            idempotencyKey: `create-${fixture}`,
+          }),
+        },
+      );
+      expect(createResponse.status).toBe(202);
+      const session = (await createResponse.json()) as { id: string };
+      const clientEventId = crypto.randomUUID();
+      const body = JSON.stringify({
+        text: "switch exactly once",
+        model: "switch-model",
+        clientEventId,
+      });
+      const before = await durablePromptFacts(owner.workspaceId!, session.id);
+      let originalPromise: Promise<Response> | null = null;
+      let retryPromise: Promise<Response> | null = null;
+
+      await shared!.admin.begin(async (barrier) => {
+        const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+        if (!backend) throw new Error("database barrier has no backend pid");
+        await barrier`lock table audit_events in access exclusive mode`;
+
+        originalPromise = app.request(
+          `http://x/v1/workspaces/${owner.workspaceId}/sessions/${session.id}/steer`,
+          { method: "POST", headers, body },
+        );
+        const originalBackendPid = await waitForBlockedBackend(
+          backend.pid,
+          "original prompt transaction",
+        );
+
+        await installCatalog(
+          {
+            schemaVersion: 1,
+            defaultModel: "scripted-model",
+            builtInModels: ["scripted-model"],
+          },
+          2,
+        );
+        retryPromise = app.request(
+          `http://x/v1/workspaces/${owner.workspaceId}/sessions/${session.id}/steer`,
+          { method: "POST", headers, body },
+        );
+        await waitForBlockedBackend(originalBackendPid, "serialized same-key retry");
+      });
+
+      if (!originalPromise || !retryPromise) {
+        throw new Error("overlapping prompt requests were not started");
+      }
+      const [originalResponse, retryResponse] = await Promise.all([originalPromise, retryPromise]);
+      expect(originalResponse.status).toBe(202);
+      expect(retryResponse.status).toBe(202);
+      const original = (await originalResponse.json()) as {
+        accepted: { id: string };
+        turn: { id: string };
+        receipt: { id: string };
+        replay: boolean;
+      };
+      const retry = (await retryResponse.json()) as typeof original;
+      expect(original.replay).toBeFalse();
+      expect(retry).toMatchObject({
+        accepted: { id: original.accepted.id },
+        turn: { id: original.turn.id },
+        receipt: { id: original.receipt.id },
+        replay: true,
+      });
+
+      const afterOverlap = await durablePromptFacts(owner.workspaceId!, session.id);
+      expect(afterOverlap).toEqual({
+        events: before.events + 2,
+        turns: before.turns + 1,
+        receipts: before.receipts + 1,
+        usageEvents: before.usageEvents + 1,
+        wakeRevision: before.wakeRevision + 1,
+      });
+      const [operationRows] = await shared!.admin<
+        Array<{ events: number; turns: number; receipts: number; usageEvents: number }>
+      >`
+        select
+          (select count(*)::int from session_events
+            where workspace_id = ${owner.workspaceId}
+              and session_id = ${session.id}
+              and client_event_id = ${clientEventId}) as events,
+          (select count(*)::int from session_turns
+            where workspace_id = ${owner.workspaceId}
+              and id = ${original.turn.id}) as turns,
+          (select count(*)::int from session_command_receipts
+            where workspace_id = ${owner.workspaceId}
+              and operation_key = ${clientEventId}) as receipts,
+          (select count(*)::int from usage_events
+            where workspace_id = ${owner.workspaceId}
+              and source_resource_type = 'session_turn'
+              and source_resource_id = ${original.turn.id}) as "usageEvents"
+      `;
+      expect(operationRows).toEqual({ events: 1, turns: 1, receipts: 1, usageEvents: 1 });
+
+      const replayResponse = await app.request(
+        `http://x/v1/workspaces/${owner.workspaceId}/sessions/${session.id}/steer`,
+        { method: "POST", headers, body },
+      );
+      expect(replayResponse.status).toBe(202);
+      expect(await replayResponse.json()).toMatchObject({
+        accepted: { id: original.accepted.id },
+        turn: { id: original.turn.id },
+        receipt: { id: original.receipt.id },
+        replay: true,
+      });
+      expect(await durablePromptFacts(owner.workspaceId!, session.id)).toEqual(afterOverlap);
     } finally {
       await shared!.admin`delete from deployment_model_catalog`;
     }

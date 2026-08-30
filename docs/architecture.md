@@ -634,7 +634,11 @@ when it changes direct blocker/override truth or repairs an uncovered lifecycle
 effect. Effective state alone is insufficient: a later ancestor Pause must
 invalidate newer descendant Resume overrides, and a narrower child Pause under
 an inherited blocker remains a real change. Exact idempotency retries stay
-`replayed`; represented intent with no repair stays `unchanged`.
+`replayed`; represented intent with no repair stays `unchanged`. Human prompt
+boundary retries also preserve committed truth across mutable prechecks: before
+surfacing a pre-reservation model, limit, resource, or attachment failure, the
+retry takes the actor/key prompt-operation fence and rechecks the completed
+receipt so an overlapping committed Send or Steer is replayed exactly once.
 
 Failed sessions can be revived by new accepted work. Cancellation remains the
 terminal boundary.
@@ -788,7 +792,10 @@ Canonical: [`knowledge-retrieval.md`](knowledge-retrieval.md),
 Usage is normalized at the provider boundary and recorded per authoritative
 model call. Admission limits and entitlements are domain policy; provider
 telemetry, comparison pricing, and dashboards do not independently debit or
-grant capacity.
+grant capacity. The durable `agent.model.usage` event carries the accepted
+billing path so the additive Insights fact can be repaired after a soft writer
+failure; repair prefers that authority over legacy inference from
+`usage_events.model.tokens` and `usage_events.model.cost` rows.
 
 Managed billing is an API concern over the shared usage and entitlement
 boundaries. Provider subscription pools such as Codex or SuperGrok add their

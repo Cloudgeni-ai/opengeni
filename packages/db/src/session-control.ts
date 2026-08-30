@@ -1965,13 +1965,7 @@ export async function reserveSessionPromptCommandReceipt(
     boundaryRequestHash: string;
   },
 ): Promise<{ receipt: SessionCommandReceiptRow; replay: boolean }> {
-  const actorIdentity =
-    input.actor.type === "agent_attempt"
-      ? `attempt:${input.actor.attemptId}`
-      : `${input.actor.type}:${input.actor.subjectId}`;
-  await db.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`session-prompt:${input.workspaceId}:${actorIdentity}:${input.operationKey}`}, 0))`,
-  );
+  await lockSessionPromptCommandOperation(db, input);
   const existingReceipts = await findPromptCommandReceipts(db, {
     workspaceId: input.workspaceId,
     actor: input.actor,
@@ -2008,6 +2002,24 @@ export async function reserveSessionPromptCommandReceipt(
       ? { initialResult: { boundaryRequestHash: input.boundaryRequestHash } }
       : {}),
   });
+}
+
+/** Serialize one actor-scoped prompt operation before replay or reservation. */
+export async function lockSessionPromptCommandOperation(
+  db: Database,
+  input: {
+    workspaceId: string;
+    actor: SessionCommandActor;
+    operationKey: string;
+  },
+): Promise<void> {
+  const actorIdentity =
+    input.actor.type === "agent_attempt"
+      ? `attempt:${input.actor.attemptId}`
+      : `${input.actor.type}:${input.actor.subjectId}`;
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`session-prompt:${input.workspaceId}:${actorIdentity}:${input.operationKey}`}, 0))`,
+  );
 }
 
 /** Return only a fully committed exact prompt receipt with the new boundary fingerprint. */

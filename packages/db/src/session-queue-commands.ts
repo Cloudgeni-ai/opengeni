@@ -44,6 +44,7 @@ import {
   canonicalSessionCommandHash,
   evaluateSessionControl,
   lockSessionEventWriteRows,
+  lockSessionPromptCommandOperation,
   lockWorkspaceInferenceControl,
   lockWorkspaceInferenceControlForAdmission,
   getCompletedSessionPromptCommandReceipt,
@@ -309,8 +310,13 @@ export async function replaySubmittedHumanPromptFromBoundaryReceipt(
     delivery: "send" | "steer";
     boundaryRequestHash: string;
     expectedDraftRevision?: number | null;
+    /** Wait for an overlapping same-key transaction before checking committed replay truth. */
+    serializeOperation?: boolean;
   },
 ): Promise<SubmitHumanPromptResult | null> {
+  if (input.serializeOperation) {
+    await lockSessionPromptCommandOperation(db, input);
+  }
   const receipt = await getCompletedSessionPromptCommandReceipt(db, {
     workspaceId: input.workspaceId,
     actor: input.actor,

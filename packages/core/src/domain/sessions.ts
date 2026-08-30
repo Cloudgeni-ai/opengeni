@@ -2942,186 +2942,226 @@ export async function acceptSessionUserMessageWithOutcome(
       );
     }
   }
-  await requireAtomicPersonalResourceAttachment(
-    deps,
-    input.authorization,
-    workspaceId,
-    input.personalResourceAttachment,
-    true,
-  );
-  // Hoisted above requireLimit so the codex-billed predicate can resolve the
-  // turn's effective model (a follow-up turn inherits the session's model). A
-  // pure read with no side effects.
-  const existingSession = await requireSession(db, workspaceId, sessionId);
-  const settings = await resolveWorkspaceModelBoundarySettings(
-    deps,
-    grant,
-    workspaceId,
-    [input.model ?? existingSession.model],
-    existingSession.model,
-  );
-  if (settings !== deps.settings) {
-    deps = {
-      ...deps,
-      catalogSourceSettings: deps.catalogSourceSettings ?? deps.settings,
-      settings,
-    };
-  }
-  const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
-  const effectiveModel =
-    canonicalConfiguredModel(settings, requestedModel ?? existingSession.model) ?? null;
-  if (effectiveModel === null) {
-    throw new Error("effective follow-up model unexpectedly resolved to null");
-  }
-  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
   try {
-    assertSessionAllowsProductModel(existingSession, effectiveModel);
+    await requireAtomicPersonalResourceAttachment(
+      deps,
+      input.authorization,
+      workspaceId,
+      input.personalResourceAttachment,
+      true,
+    );
+    // Hoisted above requireLimit so the codex-billed predicate can resolve the
+    // turn's effective model (a follow-up turn inherits the session's model). A
+    // pure read with no side effects.
+    const existingSession = await requireSession(db, workspaceId, sessionId);
+    const settings = await resolveWorkspaceModelBoundarySettings(
+      deps,
+      grant,
+      workspaceId,
+      [input.model ?? existingSession.model],
+      existingSession.model,
+    );
+    if (settings !== deps.settings) {
+      deps = {
+        ...deps,
+        catalogSourceSettings: deps.catalogSourceSettings ?? deps.settings,
+        settings,
+      };
+    }
+    const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
+    const effectiveModel =
+      canonicalConfiguredModel(settings, requestedModel ?? existingSession.model) ?? null;
+    if (effectiveModel === null) {
+      throw new Error("effective follow-up model unexpectedly resolved to null");
+    }
+    await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
+    try {
+      assertSessionAllowsProductModel(existingSession, effectiveModel);
+    } catch (error) {
+      if (error instanceof CodexCompactionV2ProviderLockedError) {
+        throw new HTTPException(422, { message: error.message, cause: error });
+      }
+      throw error;
+    }
+    const sessionReasoningEffort = existingSession.reasoningEffort;
+    const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
+    const sessionLatencyMode = existingSession.latencyMode;
+    const effectiveLatencyMode = input.latencyMode ?? sessionLatencyMode;
+    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: effectiveModel,
+      requestedModelId: input.model ?? null,
+      modelSource: input.model == null ? "session" : "explicit",
+      reasoningEffort: effectiveReasoningEffort,
+      reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+      latencyMode: effectiveLatencyMode,
+      latencyModeSource: input.latencyMode == null ? "session" : "explicit",
+    });
+    if (composerDraftResources) {
+      const acceptedResources = new Set(requestedResources.map((resource) => stableJson(resource)));
+      const unacceptedDraftResource = composerDraftResources.find(
+        (resource) => !acceptedResources.has(stableJson(resource)),
+      );
+      if (unacceptedDraftResource) {
+        throw new HTTPException(422, {
+          message: "composer draft resources must be included in the accepted resource set",
+        });
+      }
+    }
+    const annotations = await validateSubmittedTimelineAnnotations(
+      db,
+      workspaceId,
+      sessionId,
+      input.annotations ?? [],
+    );
+    await requireLimit(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      action: "agent_run:create",
+      quantity: 1,
+      model: effectiveModel,
+    });
+    if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
+      throw new HTTPException(503, {
+        message: "object storage is not configured",
+      });
+    }
+    await validateFileResources(
+      db,
+      grant.accountId,
+      workspaceId,
+      grant.subjectId,
+      requestedResources,
+    );
+    await validateGitHubRepositorySelection(db, workspaceId, [
+      ...existingSession.resources,
+      ...requestedResources,
+    ]);
+    const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
+      settings,
+      grant,
+      session: existingSession,
+      updates: input.mcpCredentialUpdates ?? [],
+    });
+    const connectionDelegationSource = personalConnectionDelegationSourceForGrant(grant);
+    const inheritedPersonalConnectionDelegations =
+      connectionDelegationSource.kind === "turn"
+        ? await getSessionTurnPersonalConnectionDelegations(
+            db,
+            workspaceId,
+            connectionDelegationSource.sessionId,
+            connectionDelegationSource.turnId,
+          )
+        : null;
+    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
+      db,
+      workspaceId,
+      settings,
+      inheritedPersonalConnectionDelegations
+        ? {
+            personalConnectionDelegations: inheritedPersonalConnectionDelegations,
+          }
+        : { subjectId: grant.subjectId },
+    );
+    const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+      db,
+      workspaceId,
+      settings: runtimeSettings,
+      tools: existingSession.tools,
+      resources: [...existingSession.resources, ...requestedResources],
+      source: connectionDelegationSource,
+      targetSessionId: sessionId,
+      googleDrivePublicationEnabled:
+        existingSession.firstPartyMcpTools.includes("editable_artifact_export") &&
+        existingSession.firstPartyMcpTools.includes("editable_artifact_export_status") &&
+        (!existingSession.firstPartyMcpPermissions?.length ||
+          (existingSession.firstPartyMcpPermissions.includes("artifacts:read") &&
+            existingSession.firstPartyMcpPermissions.includes("artifacts:publish"))),
+      atlassianEnabled:
+        existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
+        (!existingSession.firstPartyMcpPermissions?.length ||
+          existingSession.firstPartyMcpPermissions.includes("connections:read")),
+      ...(input.connectionAuthorities ? { authoritySelections: input.connectionAuthorities } : {}),
+    });
+    const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
+      await postUserMessageTurn({
+        db,
+        bus,
+        workflowClient,
+        settings,
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        text: input.text,
+        annotations,
+        modelContext: input.modelContext ?? null,
+        resources: requestedResources,
+        ...(composerDraftResources ? { composerDraftResources } : {}),
+        model: input.model ?? null,
+        reasoningEffort: input.reasoningEffort ?? null,
+        latencyMode: input.latencyMode ?? null,
+        reasoningEffortFallback: sessionReasoningEffort,
+        turnExecutionPolicy,
+        mcpCredentialUpdates,
+        personalConnectionDelegations,
+        ...(input.personalResourceAttachment
+          ? { personalResourceAttachment: input.personalResourceAttachment }
+          : {}),
+        delivery,
+        origin: source === "api" ? "operator" : "human",
+        actor: grant.subjectId,
+        ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
+        commandActor,
+        ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
+        ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
+        ...(input.expectedDraftRevision !== undefined
+          ? { expectedDraftRevision: input.expectedDraftRevision }
+          : {}),
+        ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+        recordAgentRunUsage: true,
+        ...(deps.schedulePromptPostCommit
+          ? { schedulePostCommit: deps.schedulePromptPostCommit }
+          : {}),
+      });
+    return { accepted, turn, draft, receipt, routing, interruptionCount, replay };
   } catch (error) {
-    if (error instanceof CodexCompactionV2ProviderLockedError) {
-      throw new HTTPException(422, { message: error.message, cause: error });
+    if (input.clientEventId && boundaryRequestHash) {
+      const replay = await withWorkspaceSubjectSessionActivityRls(
+        db,
+        workspaceId,
+        grant.subjectId,
+        async (scopedDb) =>
+          await replaySubmittedHumanPromptFromBoundaryReceipt(scopedDb, {
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+            actor: commandActor,
+            operationKey: input.clientEventId!,
+            delivery,
+            boundaryRequestHash,
+            expectedDraftRevision: input.expectedDraftRevision ?? null,
+            serializeOperation: true,
+          }),
+      );
+      if (replay) {
+        return finalizePostUserMessageTurn(
+          {
+            db,
+            bus,
+            workflowClient,
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            delivery,
+            ...(deps.schedulePromptPostCommit
+              ? { schedulePostCommit: deps.schedulePromptPostCommit }
+              : {}),
+          },
+          replay,
+        );
+      }
     }
     throw error;
   }
-  const sessionReasoningEffort = existingSession.reasoningEffort;
-  const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
-  const sessionLatencyMode = existingSession.latencyMode;
-  const effectiveLatencyMode = input.latencyMode ?? sessionLatencyMode;
-  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
-    modelId: effectiveModel,
-    requestedModelId: input.model ?? null,
-    modelSource: input.model == null ? "session" : "explicit",
-    reasoningEffort: effectiveReasoningEffort,
-    reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
-    latencyMode: effectiveLatencyMode,
-    latencyModeSource: input.latencyMode == null ? "session" : "explicit",
-  });
-  if (composerDraftResources) {
-    const acceptedResources = new Set(requestedResources.map((resource) => stableJson(resource)));
-    const unacceptedDraftResource = composerDraftResources.find(
-      (resource) => !acceptedResources.has(stableJson(resource)),
-    );
-    if (unacceptedDraftResource) {
-      throw new HTTPException(422, {
-        message: "composer draft resources must be included in the accepted resource set",
-      });
-    }
-  }
-  const annotations = await validateSubmittedTimelineAnnotations(
-    db,
-    workspaceId,
-    sessionId,
-    input.annotations ?? [],
-  );
-  await requireLimit(deps, {
-    accountId: grant.accountId,
-    workspaceId,
-    action: "agent_run:create",
-    quantity: 1,
-    model: effectiveModel,
-  });
-  if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
-    throw new HTTPException(503, {
-      message: "object storage is not configured",
-    });
-  }
-  await validateFileResources(
-    db,
-    grant.accountId,
-    workspaceId,
-    grant.subjectId,
-    requestedResources,
-  );
-  await validateGitHubRepositorySelection(db, workspaceId, [
-    ...existingSession.resources,
-    ...requestedResources,
-  ]);
-  const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
-    settings,
-    grant,
-    session: existingSession,
-    updates: input.mcpCredentialUpdates ?? [],
-  });
-  const connectionDelegationSource = personalConnectionDelegationSourceForGrant(grant);
-  const inheritedPersonalConnectionDelegations =
-    connectionDelegationSource.kind === "turn"
-      ? await getSessionTurnPersonalConnectionDelegations(
-          db,
-          workspaceId,
-          connectionDelegationSource.sessionId,
-          connectionDelegationSource.turnId,
-        )
-      : null;
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
-    db,
-    workspaceId,
-    settings,
-    inheritedPersonalConnectionDelegations
-      ? {
-          personalConnectionDelegations: inheritedPersonalConnectionDelegations,
-        }
-      : { subjectId: grant.subjectId },
-  );
-  const personalConnectionDelegations = await freezePersonalConnectionDelegations({
-    db,
-    workspaceId,
-    settings: runtimeSettings,
-    tools: existingSession.tools,
-    resources: [...existingSession.resources, ...requestedResources],
-    source: connectionDelegationSource,
-    targetSessionId: sessionId,
-    googleDrivePublicationEnabled:
-      existingSession.firstPartyMcpTools.includes("editable_artifact_export") &&
-      existingSession.firstPartyMcpTools.includes("editable_artifact_export_status") &&
-      (!existingSession.firstPartyMcpPermissions?.length ||
-        (existingSession.firstPartyMcpPermissions.includes("artifacts:read") &&
-          existingSession.firstPartyMcpPermissions.includes("artifacts:publish"))),
-    atlassianEnabled:
-      existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-      (!existingSession.firstPartyMcpPermissions?.length ||
-        existingSession.firstPartyMcpPermissions.includes("connections:read")),
-    ...(input.connectionAuthorities ? { authoritySelections: input.connectionAuthorities } : {}),
-  });
-  const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
-    await postUserMessageTurn({
-      db,
-      bus,
-      workflowClient,
-      settings,
-      accountId: grant.accountId,
-      workspaceId,
-      sessionId,
-      text: input.text,
-      annotations,
-      modelContext: input.modelContext ?? null,
-      resources: requestedResources,
-      ...(composerDraftResources ? { composerDraftResources } : {}),
-      model: input.model ?? null,
-      reasoningEffort: input.reasoningEffort ?? null,
-      latencyMode: input.latencyMode ?? null,
-      reasoningEffortFallback: sessionReasoningEffort,
-      turnExecutionPolicy,
-      mcpCredentialUpdates,
-      personalConnectionDelegations,
-      ...(input.personalResourceAttachment
-        ? { personalResourceAttachment: input.personalResourceAttachment }
-        : {}),
-      delivery,
-      origin: source === "api" ? "operator" : "human",
-      actor: grant.subjectId,
-      ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
-      commandActor,
-      ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
-      ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
-      ...(input.expectedDraftRevision !== undefined
-        ? { expectedDraftRevision: input.expectedDraftRevision }
-        : {}),
-      ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-      recordAgentRunUsage: true,
-      ...(deps.schedulePromptPostCommit
-        ? { schedulePostCommit: deps.schedulePromptPostCommit }
-        : {}),
-    });
-  return { accepted, turn, draft, receipt, routing, interruptionCount, replay };
 }
 
 /** Backward-compatible entity-returning path used by existing REST callers. */
