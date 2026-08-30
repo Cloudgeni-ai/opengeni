@@ -126,7 +126,7 @@ function Fixture() {
           onClick={() => {
             setEpoch((current) => current + 1);
             resetDecision(
-              "Session authority changed. Personal resources were reloaded; review and confirm them again before retrying.",
+              "Session authority changed. Personal resources were reloaded before retrying.",
             );
           }}
         >
