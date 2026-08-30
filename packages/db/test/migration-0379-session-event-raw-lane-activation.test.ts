@@ -40,6 +40,9 @@ describe("migration 0379 session event raw lane activation", () => {
     expect(source).toContain("DEFERRABLE INITIALLY DEFERRED");
     expect(source).toContain("session event compatibility projection is ahead of its cursor");
     expect(source.match(/SET search_path = pg_catalog, %I, pg_temp/gu)).toHaveLength(4);
+    expect(
+      source.match(/'opengeni\.session_variable_set_attachments_v1'/gu),
+    ).toHaveLength(4);
     for (const functionName of [
       "prevent_session_event_projection_regression",
       "assert_session_event_projection_not_ahead",

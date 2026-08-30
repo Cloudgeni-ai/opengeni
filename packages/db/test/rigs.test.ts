@@ -28,6 +28,7 @@ import {
   getRigChange,
   getRigVersion,
   getRigVersionById,
+  getRigVersionHealth,
   listRigChanges,
   listRigVersions,
   listRigs,
@@ -970,6 +971,50 @@ describe("rig change lifecycle", () => {
     expect(
       (await getRig(db, ws.workspaceId, verifiedRig.id))?.activeVersionHealth?.checkHealth,
     ).toBe("passing");
+  });
+
+  test("ordinary reads use the trusted audit occurrence time for rig health", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "health-audit-occurrence",
+    });
+    const versionId = rig.activeVersion!.id;
+    const occurredAt = "2026-08-29T18:16:47.181Z";
+    await shared!.admin`
+      insert into audit_events (
+        account_id, workspace_id, subject_id, action, target_type, target_id,
+        metadata, occurred_at
+      ) values (
+        ${ws.accountId}, ${ws.workspaceId}, 'system:rig-verification',
+        'rig.verification.passed', 'rig', ${rig.id},
+        ${shared!.admin.json({
+          rigId: rig.id,
+          versionId,
+          finishedAt: "malformed-untrusted-audit-metadata",
+          passed: true,
+        })}::jsonb,
+        ${occurredAt}::timestamptz
+      )
+    `;
+
+    const expectedHealth = {
+      checkHealth: "passing" as const,
+      lastVerifiedAt: occurredAt,
+    };
+    expect(
+      (await listRigs(db, ws.workspaceId)).find((listedRig) => listedRig.id === rig.id)
+        ?.activeVersionHealth,
+    ).toEqual(expectedHealth);
+    expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersionHealth).toEqual(expectedHealth);
+    expect((await getRigByName(db, ws.workspaceId, rig.name))?.activeVersionHealth).toEqual(
+      expectedHealth,
+    );
+    expect(await getRigVersionHealth(db, ws.workspaceId, rig.id, versionId)).toEqual(
+      expectedHealth,
+    );
   });
 });
 
