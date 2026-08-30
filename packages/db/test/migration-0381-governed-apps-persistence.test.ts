@@ -227,6 +227,22 @@ describe("migration 0381 governed Apps persistence", () => {
     expect(source).not.toContain("app_previews_active_host_uq");
     expect(source).toContain("app_previews_host_status_expiry_idx");
 
+    const createPreview = source.slice(
+      source.indexOf("ELSIF action_value = 'create_preview'"),
+      source.indexOf("ELSIF action_value = 'revoke_preview'"),
+    );
+    const revokePreview = source.slice(
+      source.indexOf("ELSIF action_value = 'revoke_preview'"),
+      source.indexOf("ELSIF action_value = 'publish_release'"),
+    );
+    const createLaunch = source.slice(
+      source.indexOf("CREATE FUNCTION app_launch_command"),
+      source.indexOf("CREATE FUNCTION app_tool_call_command"),
+    );
+    expect(createPreview).toContain("status = 'active'\n    FOR UPDATE;");
+    expect(revokePreview).toContain("id = app_id_value FOR UPDATE;");
+    expect(createLaunch).toContain("status = 'active'\n  FOR UPDATE;");
+
     const resolver = source.slice(
       source.indexOf("CREATE FUNCTION opengeni_private.resolve_app_host_launch"),
     );
@@ -682,6 +698,11 @@ describe("migration 0381 live PostgreSQL posture", () => {
     const appUrl = runtimeUrl(clean.adminUrl, clean.appPassword);
     const client = createDb(appUrl, { max: 2, rlsStrategy: "force" });
     const rawApp = postgres(appUrl, { max: 1, prepare: false, onnotice: () => undefined });
+    const rawAdmin = postgres(clean.adminUrl, {
+      max: 1,
+      prepare: false,
+      onnotice: () => undefined,
+    });
     const beginCommand = (launchId: string, launchDigest: string, operationId: string) => ({
       action: "begin",
       accountId: cleanAccountId,
@@ -708,6 +729,55 @@ describe("migration 0381 live PostgreSQL posture", () => {
             set_config('opengeni.subject_id', ${actorSubjectId}, true)`;
           await transaction`
             select app_tool_call_command(${transaction.json(command)}::jsonb)`;
+        }),
+      );
+    const launchCommand = (targetPreviewId: string, nonceDigit: string) => ({
+      accountId: cleanAccountId,
+      workspaceId: cleanWorkspaceId,
+      actorSubjectId,
+      appId,
+      releaseId,
+      previewId: targetPreviewId,
+      launchId: crypto.randomUUID(),
+      nonceSha256: `sha256:${nonceDigit.repeat(64)}`,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1_000).toISOString(),
+      authorityHash: null,
+      authorityEpoch: null,
+      authorityGeneration,
+    });
+    const previewCommand = () => ({
+      accountId: cleanAccountId,
+      workspaceId: cleanWorkspaceId,
+      actorSubjectId,
+      appId,
+      releaseId,
+      hostname,
+      expiresAt: new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+      spaFallback: true,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const launchState = async (command: ReturnType<typeof launchCommand>, lockTimeout: boolean) =>
+      await capturedSqlState(
+        rawApp.begin(async (transaction) => {
+          await transaction`select
+            set_config('opengeni.account_id', ${cleanAccountId}, true),
+            set_config('opengeni.workspace_id', ${cleanWorkspaceId}, true),
+            set_config('opengeni.subject_id', ${actorSubjectId}, true),
+            set_config('lock_timeout', ${lockTimeout ? "100ms" : "0"}, true)`;
+          await transaction`
+            select app_launch_command(${transaction.json(command)}::jsonb)`;
+        }),
+      );
+    const previewState = async (command: ReturnType<typeof previewCommand>, lockTimeout: boolean) =>
+      await capturedSqlState(
+        rawApp.begin(async (transaction) => {
+          await transaction`select
+            set_config('opengeni.account_id', ${cleanAccountId}, true),
+            set_config('opengeni.workspace_id', ${cleanWorkspaceId}, true),
+            set_config('opengeni.subject_id', ${actorSubjectId}, true),
+            set_config('lock_timeout', ${lockTimeout ? "100ms" : "0"}, true)`;
+          await transaction`
+            select create_app_preview_command(${transaction.json(command)}::jsonb)`;
         }),
       );
 
@@ -764,7 +834,113 @@ describe("migration 0381 live PostgreSQL posture", () => {
         replayed: true,
         toolCall: { status: "succeeded" },
       });
+
+      const revokeLaunch = launchCommand(previewId, "1");
+      let releaseRevoke!: () => void;
+      let markRevokeReady!: () => void;
+      const revokeGate = new Promise<void>((resolve) => {
+        releaseRevoke = resolve;
+      });
+      const revokeReady = new Promise<void>((resolve) => {
+        markRevokeReady = resolve;
+      });
+      const revokeBlocker = rawAdmin.begin(async (transaction) => {
+        await transaction`select
+          set_config('opengeni.account_id', ${cleanAccountId}, true),
+          set_config('opengeni.workspace_id', ${cleanWorkspaceId}, true),
+          set_config('opengeni.subject_id', ${actorSubjectId}, true)`;
+        await transaction`
+          select revoke_app_preview_command(${transaction.json({
+            accountId: cleanAccountId,
+            workspaceId: cleanWorkspaceId,
+            actorSubjectId,
+            appId,
+            previewId,
+            reason: "concurrent launch regression",
+            idempotencyKey: crypto.randomUUID(),
+          })}::jsonb)`;
+        markRevokeReady();
+        await revokeGate;
+      });
+      await revokeReady;
+      let revokeLaunchState: string | null;
+      try {
+        revokeLaunchState = await launchState(revokeLaunch, true);
+      } finally {
+        releaseRevoke();
+        await revokeBlocker;
+      }
+      expect(revokeLaunchState).toBe("55P03");
+      expect(await launchState(revokeLaunch, false)).toBe("P0002");
+
+      const archivePreview = await createAppPreview(client.db, {
+        accountId: cleanAccountId,
+        workspaceId: cleanWorkspaceId,
+        actorSubjectId,
+        appId,
+        releaseId,
+        hostname,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1_000),
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const archiveLaunch = launchCommand(archivePreview.preview.id, "2");
+      const concurrentPreview = previewCommand();
+      let releaseArchive!: () => void;
+      let markArchiveReady!: () => void;
+      const archiveGate = new Promise<void>((resolve) => {
+        releaseArchive = resolve;
+      });
+      const archiveReady = new Promise<void>((resolve) => {
+        markArchiveReady = resolve;
+      });
+      const archiveBlocker = rawAdmin.begin(async (transaction) => {
+        await transaction`select
+          set_config('opengeni.account_id', ${cleanAccountId}, true),
+          set_config('opengeni.workspace_id', ${cleanWorkspaceId}, true),
+          set_config('opengeni.subject_id', ${actorSubjectId}, true)`;
+        await transaction`
+          select archive_workspace_app_command(${transaction.json({
+            accountId: cleanAccountId,
+            workspaceId: cleanWorkspaceId,
+            actorSubjectId,
+            appId,
+            expectedAppVersion: 1,
+            reason: "concurrent creation regression",
+            idempotencyKey: crypto.randomUUID(),
+          })}::jsonb)`;
+        markArchiveReady();
+        await archiveGate;
+      });
+      await archiveReady;
+      let archivePreviewState: string | null;
+      let archiveLaunchState: string | null;
+      try {
+        archivePreviewState = await previewState(concurrentPreview, true);
+        archiveLaunchState = await launchState(archiveLaunch, true);
+      } finally {
+        releaseArchive();
+        await archiveBlocker;
+      }
+      expect(archivePreviewState).toBe("55P03");
+      expect(archiveLaunchState).toBe("55P03");
+      expect(await previewState(concurrentPreview, false)).toBe("P0002");
+      expect(await launchState(archiveLaunch, false)).toBe("P0002");
+
+      const [servingReferences] = await rawAdmin<
+        Array<{ previews: number; launches: number; routes: number }>
+      >`
+        select
+          (select count(*)::int from app_previews
+            where workspace_id = ${cleanWorkspaceId} and app_id = ${appId}
+              and status = 'active') as previews,
+          (select count(*)::int from app_launches
+            where workspace_id = ${cleanWorkspaceId} and app_id = ${appId}
+              and status = 'active') as launches,
+          (select count(*)::int from opengeni_private.app_host_routes
+            where app_id = ${appId}) as routes`;
+      expect(servingReferences).toEqual({ previews: 0, launches: 0, routes: 0 });
     } finally {
+      await rawAdmin.end();
       await rawApp.end();
       await client.close();
     }

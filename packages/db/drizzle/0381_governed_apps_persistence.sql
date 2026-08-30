@@ -1191,7 +1191,8 @@ BEGIN
 
   ELSIF action_value = 'create_preview' THEN
     SELECT * INTO app_row FROM apps
-    WHERE workspace_id = workspace_id_value AND id = app_id_value AND status = 'active';
+    WHERE workspace_id = workspace_id_value AND id = app_id_value AND status = 'active'
+    FOR UPDATE;
     IF NOT FOUND THEN RAISE EXCEPTION 'Active App not found' USING ERRCODE = 'P0002'; END IF;
     DELETE FROM opengeni_private.app_host_routes route WHERE route.preview_id IN (
       SELECT id FROM app_previews
@@ -1227,6 +1228,9 @@ BEGIN
     );
 
   ELSIF action_value = 'revoke_preview' THEN
+    SELECT * INTO app_row FROM apps
+    WHERE workspace_id = workspace_id_value AND id = app_id_value FOR UPDATE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'App not found' USING ERRCODE = 'P0002'; END IF;
     UPDATE app_previews SET status = 'revoked', revoked_at = now_value
     WHERE workspace_id = workspace_id_value AND app_id = app_id_value
       AND id = NULLIF(p_input->>'previewId', '')::uuid AND status = 'active'
@@ -1447,7 +1451,8 @@ BEGIN
     RETURN jsonb_build_object('replayed', true, 'launch', to_jsonb(launch_row));
   END IF;
   SELECT * INTO app_row FROM apps
-  WHERE workspace_id = workspace_id_value AND id = app_id_value AND status = 'active';
+  WHERE workspace_id = workspace_id_value AND id = app_id_value AND status = 'active'
+  FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Active App not found' USING ERRCODE = 'P0002'; END IF;
 
   IF NULLIF(p_input->>'previewId', '') IS NOT NULL THEN
