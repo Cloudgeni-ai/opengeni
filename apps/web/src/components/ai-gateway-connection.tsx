@@ -459,7 +459,7 @@ export function AiGatewayConnectionCardWithClient(
                       }
                     }}
                     disabled={modelBusy}
-                    className="h-9 font-mono text-base md:text-base lg:pointer-fine:text-xs"
+                    className="h-9 font-mono text-base md:text-base lg:pointer-fine:text-xs [@media(any-pointer:coarse)]:text-base!"
                     placeholder="anthropic/claude-sonnet-4.6"
                     aria-label="Vercel AI Gateway model slug"
                     aria-describedby="gateway-model-slug-help"

@@ -1021,6 +1021,7 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(input.className).toContain("text-base");
       expect(input.className).toContain("md:text-base");
       expect(input.className).toContain("lg:pointer-fine:text-xs");
+      expect(input.className).toContain("[@media(any-pointer:coarse)]:text-base!");
       expect(input.className).not.toContain("lg:text-xs");
       expect(input.className).not.toContain("lg:pointer-coarse:text-base");
       expect(input.className).not.toContain("sm:text-xs");
