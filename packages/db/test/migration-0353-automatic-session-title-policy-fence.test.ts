@@ -488,7 +488,10 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
         payload: { title: unsafeTitle, source: "agent" },
       },
     ]);
-    expect(unsafeEvent?.payload).toEqual({ title: unsafeTitle, source: "agent" });
+    expect(unsafeEvent?.payload).toEqual({
+      title: unsafeTitle,
+      source: "agent",
+    });
 
     expect(await drainQuarantine(database, await quarantineStatement())).toBe(1);
     const quarantined = await getSession(client.db, grant.workspaceId!, legacy.id);
