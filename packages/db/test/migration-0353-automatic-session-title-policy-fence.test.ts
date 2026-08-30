@@ -960,6 +960,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "company_profile_agent_automatic_activation_receipts",
       "organization_company_profile_agent_policies",
       "organization_company_profile_agent_policy_events",
+      "organization_codex_rotation_settings",
       "organization_recovery_approvals",
       "organization_recovery_command_receipts",
       "organization_recovery_custodian_acceptances",
@@ -977,11 +978,13 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "session_work_claim_revisions",
       "session_work_claim_write_capabilities",
       "session_work_claims",
+      "workspace_codex_subscription_preferences",
     ]);
     // The current runtime evaluator intentionally requires every capability in
     // today's schema. A database frozen immediately after 0353 predates the
     // 0361 Memory materialization table/function, the 0380 company-profile
-    // autonomy policy tables/functions, and the wholly new 0381 Apps surface.
+    // autonomy policy tables/functions, the 0381 organization Codex authority,
+    // and the wholly new 0382 Apps surface.
     // Remove the new Apps contract from the modeled old binary, while preserving
     // the exact evaluator gaps where pre-0353 capabilities gained later
     // authority dependencies.
@@ -1048,6 +1051,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "promote_app_build_command(jsonb)",
       "publish_app_release_command(jsonb)",
       "revoke_app_preview_command(jsonb)",
+      "resolve_workspace_codex_subscription_source(uuid, uuid)",
       "settle_archived_app_gc_command(jsonb)",
       "unpublish_workspace_app_command(jsonb)",
       "update_workspace_app_command(jsonb)",

@@ -13,6 +13,7 @@ import type {
   CodexUsage,
   CodexUsageMap,
   CodexUsageWindow,
+  WorkspaceCodexSubscriptionMode,
 } from "@opengeni/sdk";
 import {
   CheckIcon,
@@ -1191,9 +1192,25 @@ export function CodexSubscriptionsCard({
     [client, workspaceId, refreshAccounts],
   );
 
+  const setSourceMode = async (mode: WorkspaceCodexSubscriptionMode): Promise<void> => {
+    setBusy(true);
+    try {
+      await client.requestJson("PATCH", `/v1/workspaces/${workspaceId}/codex/source`, { mode });
+      usageRefreshedRef.current = false;
+      await refreshAccounts();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update Codex source");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const accounts = data?.accounts ?? [];
   const activeAccountId = data?.activeAccountId ?? null;
   const rotationEnabled = data?.settings?.rotationEnabled ?? false;
+  const source = data?.source;
+  const workspaceManaged = source?.effectiveSource !== "organization";
+  const sourceDisabled = source?.effectiveSource === "disabled";
 
   useEffect(() => {
     autoExpandedReloginRef.current = false;
@@ -1226,7 +1243,7 @@ export function CodexSubscriptionsCard({
             ChatGPT plans for Codex models — subscription usage, not API credits.
           </p>
         </div>
-        {canManage && accounts.length > 0 && !pending ? (
+        {canManage && workspaceManaged && !sourceDisabled && accounts.length > 0 && !pending ? (
           <Button
             type="button"
             size="sm"
@@ -1239,7 +1256,26 @@ export function CodexSubscriptionsCard({
         ) : null}
       </div>
 
-      {accounts.length > 1 && canManage ? (
+      {canManage && source?.workspaceKind === "shared" ? (
+        <label className="grid gap-1 rounded-md border border-border/70 px-3 py-2">
+          <span className="text-xs font-medium">Subscription source</span>
+          <select
+            className="h-8 rounded-md border border-border bg-surface px-2 text-xs"
+            value={source.mode}
+            disabled={busy}
+            onChange={(event) =>
+              void setSourceMode(event.target.value as WorkspaceCodexSubscriptionMode)
+            }
+          >
+            <option value="automatic">Automatic</option>
+            <option value="organization">Organization</option>
+            <option value="workspace">Workspace</option>
+            <option value="disabled">Disabled</option>
+          </select>
+        </label>
+      ) : null}
+
+      {accounts.length > 1 && canManage && workspaceManaged ? (
         <label
           className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 px-3 py-2"
           title="Each session sticks to one plan for prompt-cache reuse; a capped plan hands sessions to others, never mid-turn."
@@ -1267,10 +1303,13 @@ export function CodexSubscriptionsCard({
       ) : accounts.length === 0 ? (
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs text-fg-subtle">
-            Not connected. Connecting requires connection-management access and a ChatGPT
-            Plus/Pro/Team plan.
+            {sourceDisabled
+              ? "Codex is disabled for this workspace."
+              : source?.effectiveSource === "organization"
+                ? "No organization Codex subscription is connected yet."
+                : "Not connected. Connecting requires connection-management access and a ChatGPT Plus/Pro/Team plan."}
           </p>
-          {canManage ? (
+          {canManage && workspaceManaged && !sourceDisabled ? (
             <Button type="button" size="sm" disabled={busy} onClick={() => void connect()}>
               {busy ? (
                 <Loader2Icon className="size-3.5 animate-spin" />
@@ -1317,7 +1356,7 @@ export function CodexSubscriptionsCard({
                         name="codex-active"
                         className="size-3.5 accent-brand"
                         checked={isActive}
-                        disabled={!canManage || busy}
+                        disabled={!canManage || !workspaceManaged || busy}
                         aria-label={`Use ${accountDisplay(account)} as active subscription`}
                         onChange={() => {
                           if (!isActive) void activate(account.id);
@@ -1351,7 +1390,7 @@ export function CodexSubscriptionsCard({
                               <span className="font-normal text-fg-subtle"> · {account.email}</span>
                             ) : null}
                           </span>
-                          {canManage ? (
+                          {canManage && workspaceManaged ? (
                             <Button
                               type="button"
                               variant="ghost"
@@ -1475,7 +1514,7 @@ export function CodexSubscriptionsCard({
                           type="checkbox"
                           className="size-4 accent-brand"
                           checked={account.allocatorEnabled}
-                          disabled={!canManage || busy}
+                          disabled={!canManage || !workspaceManaged || busy}
                           aria-label={`Use ${accountDisplay(account)} for new automatic turns`}
                           onChange={(event) => void setAllocator(account, event.target.checked)}
                         />
@@ -1522,20 +1561,22 @@ export function CodexSubscriptionsCard({
                         now={now}
                       />
                     )}
-                    <ResetCreditInventory
-                      overview={overviewMap[account.id]}
-                      now={now}
-                      busy={busy || preparingReset != null}
-                      recoveryAttempts={redemptionAttemptViews(
-                        workspaceId,
-                        account.id,
-                        overviewMap[account.id],
-                      )}
-                      onRedeem={(credit, recovery) =>
-                        void beginRedemption(account.id, credit, recovery)
-                      }
-                      onReconnectSameAccount={() => void connect()}
-                    />
+                    {account.source !== "organization" ? (
+                      <ResetCreditInventory
+                        overview={overviewMap[account.id]}
+                        now={now}
+                        busy={busy || preparingReset != null}
+                        recoveryAttempts={redemptionAttemptViews(
+                          workspaceId,
+                          account.id,
+                          overviewMap[account.id],
+                        )}
+                        onRedeem={(credit, recovery) =>
+                          void beginRedemption(account.id, credit, recovery)
+                        }
+                        onReconnectSameAccount={() => void connect()}
+                      />
+                    ) : null}
                     {canManage ? (
                       <div className="flex flex-wrap items-center gap-2">
                         <Button
@@ -1552,15 +1593,17 @@ export function CodexSubscriptionsCard({
                           )}{" "}
                           Refresh
                         </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          disabled={busy}
-                          onClick={() => void disconnect(account.id)}
-                        >
-                          <Trash2Icon className="size-3.5" /> Disconnect
-                        </Button>
+                        {workspaceManaged ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() => void disconnect(account.id)}
+                          >
+                            <Trash2Icon className="size-3.5" /> Disconnect
+                          </Button>
+                        ) : null}
                       </div>
                     ) : null}
                   </CollapsibleContent>

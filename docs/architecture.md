@@ -725,6 +725,8 @@ grant capacity.
 Managed billing is an API concern over the shared usage and entitlement
 boundaries. Provider subscription pools such as Codex or SuperGrok add their
 own credential and capacity authority without changing the logical-turn model.
+Codex may resolve to a workspace pool or an organization pool inherited by a
+shared workspace; the resolved pool remains one complete allocator boundary.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),
@@ -905,8 +907,12 @@ services. Browser and computer control use attempt-scoped managed
 `ComputerSession` tools from `@opengeni/interaction` and `@opengeni/browserd`,
 with the selected sandbox or machine providing placement. Agents do not receive
 the retired model-bound shared-desktop capability; human viewer control remains
-a separate consented surface. The browser extension is an attachment client,
-not an authorization service.
+a separate consented surface. Computer screenshot bytes and their bounded frame
+metadata remain one evidence unit: the placement runtime verifies their digest
+and controller/session/target binding, the API repeats that validation against
+its durable `ComputerSession` binding before forwarding the exact bytes, and the
+SDK retains its independent verification. The browser extension is an attachment
+client, not an authorization service.
 
 New capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes

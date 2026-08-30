@@ -45,8 +45,8 @@ import {
   apps,
 } from "../src/schema";
 
-const migrationUrl = new URL("../drizzle/0381_governed_apps_persistence.sql", import.meta.url);
-const migrationName = "0381_governed_apps_persistence.sql";
+const migrationUrl = new URL("../drizzle/0382_governed_apps_persistence.sql", import.meta.url);
+const migrationName = "0382_governed_apps_persistence.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const externalAdminUrl = process.env.OPENGENI_TEST_THROWAWAY_DATABASE_ADMIN_URL?.trim();
 const externalAppPassword = "apps-postgres-test-password";
@@ -74,18 +74,18 @@ const protectedTables: readonly string[] = [
 ];
 const readOnlyTables = tables.filter((table) => !protectedTables.includes(table));
 
-describe("migration 0381 governed Apps persistence", () => {
+describe("migration 0382 governed Apps persistence", () => {
   test("is additive, tenant-composite, FORCE-RLS, and preserves HTML Artifacts", async () => {
     const source = await Bun.file(migrationUrl).text();
     expect(source).toStartWith("-- deployment-mode: maintenance");
     expect(source).toContain("opengeni.migration_application_roles");
     expect(source).toContain(
-      "0381 governed Apps persistence requires all configured OpenGeni application database sessions to be stopped",
+      "0382 governed Apps persistence requires all configured OpenGeni application database sessions to be stopped",
     );
     expect(source).toContain("LOCK TABLE managed_accounts IN ACCESS EXCLUSIVE MODE");
     expect(source).toContain("LOCK TABLE workspaces IN ACCESS EXCLUSIVE MODE");
     expect(source).toContain(
-      "0381 governed Apps persistence observed a configured OpenGeni application database session after locking",
+      "0382 governed Apps persistence observed a configured OpenGeni application database session after locking",
     );
     expect(source).not.toMatch(/\bDROP\s+(?:TABLE|COLUMN)\b/iu);
     expect(source).not.toMatch(/ALTER TABLE\s+"?workspace_artifacts"?/iu);
@@ -271,12 +271,12 @@ let otherWorkspaceId = "";
 let upgradedArtifactId = "";
 
 beforeAll(async () => {
-  clean = await acquireAppsOwnerDatabase("migration-0381-apps-clean");
-  upgrade = await acquireAppsOwnerDatabase("migration-0381-apps-upgrade");
+  clean = await acquireAppsOwnerDatabase("migration-0382-apps-clean");
+  upgrade = await acquireAppsOwnerDatabase("migration-0382-apps-upgrade");
   if (!clean || !upgrade) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0381-governed-apps] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        "[migration-0382-governed-apps] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
       );
     }
     return;
@@ -347,13 +347,13 @@ afterAll(async () => {
   await upgrade?.release();
 }, 180_000);
 
-describe("migration 0381 live PostgreSQL posture", () => {
-  test("rejects a live pre-0381 application role and applies after the role is drained", async () => {
-    const guarded = await acquireAppsOwnerDatabase("migration-0381-apps-maintenance-guard");
+describe("migration 0382 live PostgreSQL posture", () => {
+  test("rejects a live pre-0382 application role and applies after the role is drained", async () => {
+    const guarded = await acquireAppsOwnerDatabase("migration-0382-apps-maintenance-guard");
     if (!guarded) {
       if (requireRealDatabase) {
         throw new Error(
-          "[migration-0381-governed-apps] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+          "[migration-0382-governed-apps] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
         );
       }
       return;
@@ -385,7 +385,7 @@ describe("migration 0381 live PostgreSQL posture", () => {
       await owner`delete from schema_migrations where name = ${migrationName}`;
 
       await expect(migrate(guarded.ownerUrl)).rejects.toThrow(
-        "0381 governed Apps persistence requires all configured OpenGeni application database sessions to be stopped",
+        "0382 governed Apps persistence requires all configured OpenGeni application database sessions to be stopped",
       );
       const [blocked] = await guarded.admin<Array<{ applied: boolean; appsPresent: boolean }>>`
           select
@@ -946,7 +946,7 @@ describe("migration 0381 live PostgreSQL posture", () => {
     }
   }, 900_000);
 
-  test("upgrades a pre-0381 database without changing existing HTML Artifacts", async () => {
+  test("upgrades a pre-0382 database without changing existing HTML Artifacts", async () => {
     if (!upgrade) return;
     const [artifact] = await upgrade.admin<
       Array<{ id: string; slug: string; title: string; status: string }>

@@ -204,7 +204,8 @@ kubectl -n opengeni create secret generic opengeni-migrations \
 ```
 
 This bootstrap does not require a model-provider API key. A workspace admin can
-connect a ChatGPT/Codex subscription from workspace settings after the
+connect a ChatGPT/Codex subscription from workspace settings, or connect it once
+from Organization settings → Models for inheritance by shared workspaces, after the
 application starts. If the deployment instead uses API-billed models, add the
 selected provider's credential to `opengeni-runtime` separately. Keep the
 generated directory as a private recovery artifact or move the values into a
@@ -496,10 +497,10 @@ needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
 `OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
 checked before the invitation row commits and reported as `503`.
 
-### Governed Apps persistence cutover (0381)
+### Governed Apps persistence cutover (0382)
 
-`0381_governed_apps_persistence.sql` adds the exact FORCE-RLS table and
-capability contract for governed OpenGeni Apps. The pre-0381 runtime-posture
+`0382_governed_apps_persistence.sql` adds the exact FORCE-RLS table and
+capability contract for governed OpenGeni Apps. The pre-0382 runtime-posture
 evaluator rejects those new protected tables because they are not present in
 its compiled allowlist, so this migration is a maintenance cutover rather than
 a mixed-version rolling migration.
@@ -508,13 +509,13 @@ a mixed-version rolling migration.
 2. Supply the exact runtime login list through
    `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`.
 3. Prove those roles have zero other sessions in `pg_stat_activity`.
-4. Apply 0381 from the exact new image and require it in `schema_migrations`.
+4. Apply 0382 from the exact new image and require it in `schema_migrations`.
 5. Start only that image generation and require API and worker runtime-posture
    readiness before reopening admission.
 
 The migration checks the configured role drain before and after taking
 exclusive locks on `managed_accounts` and `workspaces`. A live listed session
-fails the cutover with SQLSTATE `55000`. After commit, never restart a pre-0381
+fails the cutover with SQLSTATE `55000`. After commit, never restart a pre-0382
 image or attempt a mixed-version rollback; remain in maintenance and fix
 forward. Existing `workspace_artifacts` rows and published HTML remain
 unchanged.

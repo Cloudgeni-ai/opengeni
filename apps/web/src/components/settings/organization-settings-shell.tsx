@@ -5,6 +5,7 @@ import {
   Building2Icon,
   Code2Icon,
   CreditCardIcon,
+  CpuIcon,
   DatabaseIcon,
   LayoutDashboardIcon,
   ShieldCheckIcon,
@@ -25,6 +26,7 @@ type OrganizationSettingsItem = {
 const ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboardIcon },
   { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon },
+  { id: "models", label: "Models", icon: CpuIcon },
   { id: "people", label: "People & invitations", icon: UsersIcon },
   { id: "recovery", label: "Recovery", icon: ShieldCheckIcon },
   { id: "retention", label: "Retention", icon: DatabaseIcon },
@@ -41,6 +43,10 @@ const COPY: Record<OrganizationAdminSection, { title: string; description: strin
     title: "Knowledge",
     description:
       "Set the small identity agents always know and explore company knowledge they retrieve when relevant.",
+  },
+  models: {
+    title: "Models",
+    description: "Connect organization-funded model subscriptions inherited by shared workspaces.",
   },
   people: {
     title: "People & invitations",
@@ -68,11 +74,13 @@ export function OrganizationSettingsShell({
   workspaceId,
   organizationLabel,
   section,
+  showModels,
   children,
 }: {
   workspaceId: string;
   organizationLabel: string;
   section: OrganizationAdminSection;
+  showModels: boolean;
   children: ReactNode;
 }) {
   const copy = COPY[section];
@@ -132,7 +140,7 @@ export function OrganizationSettingsShell({
             aria-label="Organization settings"
             className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-4 lg:flex lg:flex-col"
           >
-            {ITEMS.map((item) => {
+            {ITEMS.filter((item) => item.id !== "models" || showModels).map((item) => {
               const Icon = item.icon;
               const selected = item.id === section;
               return (

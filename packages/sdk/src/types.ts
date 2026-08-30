@@ -3167,6 +3167,23 @@ export type CodexConnectionStatus = {
   } | null;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
+  source?: WorkspaceCodexSubscriptionSource;
+};
+
+export type WorkspaceCodexSubscriptionMode =
+  | "automatic"
+  | "workspace"
+  | "organization"
+  | "disabled";
+
+export type WorkspaceCodexSubscriptionSource = {
+  accountId: string;
+  workspaceId: string;
+  workspaceKind: "personal" | "shared";
+  mode: WorkspaceCodexSubscriptionMode;
+  effectiveSource: "workspace" | "organization" | "disabled";
+  workspaceAvailable: boolean;
+  organizationAvailable: boolean;
 };
 
 /**
@@ -3216,6 +3233,7 @@ export type CodexUsagePayload = {
 /** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
 export type CodexAccount = {
   id: string;
+  source?: "workspace" | "organization";
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -3328,6 +3346,7 @@ export type CodexRotationSettings = {
 export type CodexAccountsResponse = {
   accounts: CodexAccount[];
   activeAccountId: string | null;
+  source?: WorkspaceCodexSubscriptionSource;
   /** Added by Apps-aware servers; absent on older same-major deployments. */
   apps?: {
     available: boolean;
@@ -3338,6 +3357,8 @@ export type CodexAccountsResponse = {
   };
   settings: CodexRotationSettings;
 };
+
+export type OrganizationCodexAccountsResponse = Omit<CodexAccountsResponse, "apps" | "source">;
 
 export type CodexAppsUpdate = {
   credentialId: string | null;

@@ -19,6 +19,7 @@ import {
   OrganizationPrivateSessionsSection,
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
+import { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { Button } from "@/components/ui/button";
@@ -368,6 +369,9 @@ export function OrgSettingsRoute({
     accountGrant?.role === "member"
       ? accountGrant.role
       : null;
+  const canManageOrganizationCodex =
+    context.clientConfig.auth.mode === "managedSession" &&
+    (actorRole === "owner" || actorRole === "admin");
   const adminIdentity = useMemo<OrganizationAdminIdentity>(
     () => ({
       principalGeneration: context.accessKeyVersion,
@@ -558,6 +562,7 @@ export function OrgSettingsRoute({
       workspaceId={workspaceId}
       organizationLabel={organizationLabel}
       section={section}
+      showModels={canManageOrganizationCodex}
     >
       <section className="grid gap-5 text-left">
         {section === "overview" ? (
@@ -596,6 +601,20 @@ export function OrgSettingsRoute({
             managedSession={context.clientConfig.auth.mode === "managedSession"}
             onAuthorityChanged={context.revalidatePrincipalAccess}
           />
+        ) : null}
+
+        {section === "models" && canManageOrganizationCodex ? (
+          <OrganizationCodexSubscriptions
+            key={`${identityKey}:organization-codex`}
+            organizationId={accountId}
+          />
+        ) : null}
+
+        {section === "models" && !canManageOrganizationCodex ? (
+          <p className="text-xs leading-5 text-fg-muted">
+            Organization model subscriptions can be managed only by organization owners and admins
+            using a managed session.
+          </p>
         ) : null}
 
         {section === "knowledge" ? (

@@ -14,14 +14,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0381 governed Apps persistence requires an explicit application database role list'
+      '0382 governed Apps persistence requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0381 governed Apps persistence received a malformed application database role list'
+      '0382 governed Apps persistence received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -40,7 +40,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0381 governed Apps persistence received an invalid application database role list'
+      '0382 governed Apps persistence received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -52,7 +52,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0381 governed Apps persistence requires all configured OpenGeni application database sessions to be stopped'
+      '0382 governed Apps persistence requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -76,7 +76,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0381 governed Apps persistence observed a configured OpenGeni application database session after locking'
+      '0382 governed Apps persistence observed a configured OpenGeni application database session after locking'
       USING ERRCODE = '55000';
   END IF;
 END
