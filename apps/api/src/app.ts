@@ -1474,6 +1474,22 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/codex/status",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/codex\/source$/,
+    label: "/v1/workspaces/:workspaceId/codex/source",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/(accounts|settings)$/,
+    label: (match) => `/v1/organizations/:organizationId/codex/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/connect\/(start|poll)$/,
+    label: (match) => `/v1/organizations/:organizationId/codex/connect/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/accounts\/[^/]+(?:\/activate)?$/,
+    label: "/v1/organizations/:organizationId/codex/accounts/:accountId",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/connect\/(start|poll)$/,
     label: (match) => `/v1/workspaces/:workspaceId/supergrok/connect/${match[1]}`,
   },
