@@ -20932,7 +20932,20 @@ export type WorkspaceCodexSubscriptionSource = {
   organizationAvailable: boolean;
 };
 
-async function getWorkspaceCodexSubscriptionSourceScoped(
+const workspaceCodexOrganizationInheritanceAvailable = new Map<string, boolean>();
+
+function rememberWorkspaceCodexOrganizationInheritance(
+  workspaceId: string,
+  available: boolean,
+): void {
+  workspaceCodexOrganizationInheritanceAvailable.set(workspaceId, available);
+  if (workspaceCodexOrganizationInheritanceAvailable.size > 10_000) {
+    const oldest = workspaceCodexOrganizationInheritanceAvailable.keys().next().value;
+    if (oldest) workspaceCodexOrganizationInheritanceAvailable.delete(oldest);
+  }
+}
+
+async function queryWorkspaceCodexSubscriptionSource(
   scopedDb: Database,
   workspaceId: string,
 ): Promise<WorkspaceCodexSubscriptionSource> {
@@ -20944,30 +20957,30 @@ async function getWorkspaceCodexSubscriptionSourceScoped(
     workspace_available: boolean;
     organization_available: boolean;
   }>(sql`
-    select workspace.account_id,
-      get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
-      coalesce(preference.mode, 'automatic') as mode,
-      resolve_workspace_codex_subscription_source(workspace.account_id, workspace.id)
-        as effective_source,
-      exists (
-        select 1 from codex_subscription_credentials credential
-        where credential.account_id = workspace.account_id
-          and credential.workspace_id = workspace.id
-          and credential.authority_scope in ('workspace', 'user')
-      ) as workspace_available,
-      exists (
-        select 1 from codex_subscription_credentials credential
-        where credential.account_id = workspace.account_id
-          and credential.organization_id = workspace.account_id
-          and credential.authority_scope = 'organization'
-      ) as organization_available
-    from workspaces workspace
-    left join workspace_codex_subscription_preferences preference
-      on preference.account_id = workspace.account_id
-     and preference.workspace_id = workspace.id
-    where workspace.id = ${workspaceId}
-    limit 1
-  `);
+      select workspace.account_id,
+        get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
+        coalesce(preference.mode, 'automatic') as mode,
+        resolve_workspace_codex_subscription_source(workspace.account_id, workspace.id)
+          as effective_source,
+        exists (
+          select 1 from codex_subscription_credentials credential
+          where credential.account_id = workspace.account_id
+            and credential.workspace_id = workspace.id
+            and credential.authority_scope in ('workspace', 'user')
+        ) as workspace_available,
+        exists (
+          select 1 from codex_subscription_credentials credential
+          where credential.account_id = workspace.account_id
+            and credential.organization_id = workspace.account_id
+            and credential.authority_scope = 'organization'
+        ) as organization_available
+      from workspaces workspace
+      left join workspace_codex_subscription_preferences preference
+        on preference.account_id = workspace.account_id
+       and preference.workspace_id = workspace.id
+      where workspace.id = ${workspaceId}
+      limit 1
+    `);
   const row = rows[0];
   if (!row) throw new Error(`workspace not found for Codex source: ${workspaceId}`);
   return {
@@ -20979,6 +20992,62 @@ async function getWorkspaceCodexSubscriptionSourceScoped(
     workspaceAvailable: row.workspace_available,
     organizationAvailable: row.organization_available,
   };
+}
+
+async function queryLegacyWorkspaceCodexSubscriptionSource(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<WorkspaceCodexSubscriptionSource> {
+  const rows = await scopedDb.execute<{
+    account_id: string;
+    workspace_available: boolean;
+  }>(sql`
+    select workspace.account_id,
+      exists (
+        select 1 from codex_subscription_credentials credential
+        where credential.account_id = workspace.account_id
+          and credential.workspace_id = workspace.id
+      ) as workspace_available
+    from workspaces workspace
+    where workspace.id = ${workspaceId}
+    limit 1
+  `);
+  const row = rows[0];
+  if (!row) throw new Error(`workspace not found for Codex source: ${workspaceId}`);
+  return {
+    accountId: row.account_id,
+    workspaceId,
+    workspaceKind: "shared",
+    mode: "automatic",
+    effectiveSource: "workspace",
+    workspaceAvailable: row.workspace_available,
+    organizationAvailable: false,
+  };
+}
+
+async function getWorkspaceCodexSubscriptionSourceScoped(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<WorkspaceCodexSubscriptionSource> {
+  const known = workspaceCodexOrganizationInheritanceAvailable.get(workspaceId);
+  if (known === false) {
+    return await queryLegacyWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
+  }
+  if (known === true) {
+    return await queryWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
+  }
+  try {
+    const source = await scopedDb.transaction(async (savepoint) =>
+      queryWorkspaceCodexSubscriptionSource(savepoint as unknown as Database, workspaceId),
+    );
+    rememberWorkspaceCodexOrganizationInheritance(workspaceId, true);
+    return source;
+  } catch (error) {
+    const state = nestedPostgresSqlState(error);
+    if (state !== "42P01" && state !== "42703" && state !== "42883") throw error;
+    rememberWorkspaceCodexOrganizationInheritance(workspaceId, false);
+    return await queryLegacyWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
+  }
 }
 
 export async function getWorkspaceCodexSubscriptionSource(
@@ -21035,6 +21104,67 @@ async function effectiveCodexCredentialPoolCondition(
   };
 }
 
+export async function setWorkspaceCodexSubscriptionModeInTransaction(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    mode: WorkspaceCodexSubscriptionMode;
+  },
+): Promise<WorkspaceCodexSubscriptionSource> {
+  await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
+  const current = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+  if (current.accountId !== input.accountId) {
+    throw new Error("Codex source account does not match the workspace account");
+  }
+  if (current.workspaceKind === "personal" && input.mode !== "automatic") {
+    throw new Error("personal workspaces always use workspace Codex subscriptions");
+  }
+  if (current.mode === input.mode) return current;
+  const [activeCodexTurn] = await scopedDb
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
+        sql`${schema.sessionTurns.model} like 'codex/%'`,
+      ),
+    )
+    .limit(1);
+  const [liveLease] = await scopedDb
+    .select({ id: schema.codexCredentialLeases.id })
+    .from(schema.codexCredentialLeases)
+    .where(
+      and(
+        eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
+        gt(schema.codexCredentialLeases.leasedUntil, new Date()),
+      ),
+    )
+    .limit(1);
+  if (activeCodexTurn || liveLease) {
+    throw new Error("Codex subscription source cannot change while active turns are using it");
+  }
+  await scopedDb
+    .insert(schema.workspaceCodexSubscriptionPreferences)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      mode: input.mode,
+      updatedBySubjectId: input.subjectId,
+    })
+    .onConflictDoUpdate({
+      target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
+      set: {
+        mode: input.mode,
+        updatedBySubjectId: input.subjectId,
+        updatedAt: new Date(),
+      },
+    });
+  return await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+}
+
 export async function setWorkspaceCodexSubscriptionMode(
   db: Database,
   input: {
@@ -21044,58 +21174,9 @@ export async function setWorkspaceCodexSubscriptionMode(
     mode: WorkspaceCodexSubscriptionMode;
   },
 ): Promise<WorkspaceCodexSubscriptionSource> {
-  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
-    await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
-    const current = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
-    if (current.accountId !== input.accountId) {
-      throw new Error("Codex source account does not match the workspace account");
-    }
-    if (current.workspaceKind === "personal" && input.mode !== "automatic") {
-      throw new Error("personal workspaces always use workspace Codex subscriptions");
-    }
-    if (current.mode === input.mode) return current;
-    const [activeCodexTurn] = await scopedDb
-      .select({ id: schema.sessionTurns.id })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
-          sql`${schema.sessionTurns.model} like 'codex/%'`,
-        ),
-      )
-      .limit(1);
-    const [liveLease] = await scopedDb
-      .select({ id: schema.codexCredentialLeases.id })
-      .from(schema.codexCredentialLeases)
-      .where(
-        and(
-          eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
-          gt(schema.codexCredentialLeases.leasedUntil, new Date()),
-        ),
-      )
-      .limit(1);
-    if (activeCodexTurn || liveLease) {
-      throw new Error("Codex subscription source cannot change while active turns are using it");
-    }
-    await scopedDb
-      .insert(schema.workspaceCodexSubscriptionPreferences)
-      .values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        mode: input.mode,
-        updatedBySubjectId: input.subjectId,
-      })
-      .onConflictDoUpdate({
-        target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
-        set: {
-          mode: input.mode,
-          updatedBySubjectId: input.subjectId,
-          updatedAt: new Date(),
-        },
-      });
-    return await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
-  });
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, (scopedDb) =>
+    setWorkspaceCodexSubscriptionModeInTransaction(scopedDb, input),
+  );
 }
 
 /**
@@ -22696,6 +22777,9 @@ async function listCodexLeaseCandidatesInTransaction(
     excludeTurnId?: string | null;
   },
 ): Promise<CodexLeaseAccountStatus[]> {
+  const legacyWorkspaceOnly =
+    input.source === "workspace" &&
+    workspaceCodexOrganizationInheritanceAvailable.get(input.workspaceId) === false;
   const rows = await tx.execute(sql<CodexLeaseCandidateRow>`
     select
       c.id,
@@ -22735,7 +22819,9 @@ async function listCodexLeaseCandidatesInTransaction(
       and ${
         input.source === "organization"
           ? sql`c.authority_scope = 'organization' and c.organization_id = ${input.accountId}`
-          : sql`c.authority_scope in ('workspace', 'user') and c.workspace_id = ${input.workspaceId}`
+          : legacyWorkspaceOnly
+            ? sql`c.workspace_id = ${input.workspaceId}`
+            : sql`c.authority_scope in ('workspace', 'user') and c.workspace_id = ${input.workspaceId}`
       }
     group by c.id
     order by c.created_at asc, c.id asc
@@ -23772,13 +23858,15 @@ async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
   input: CodexCapacityMutationInput,
   mutate: (tx: TDatabase) => Promise<{ result: T; changed: boolean }>,
 ): Promise<CodexCapacityMutationResult<T>> {
+  await lockWorkspaceCodexSubscriptionSource(tx, input.workspaceId);
   const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
   const mutation = await mutate(tx);
   if (!mutation.changed) {
     return { result: mutation.result, wakeTargets: [] };
   }
+  const sourceAfter = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
   const wakeTargets =
-    rotation?.source === "organization"
+    rotation?.source === "organization" && sourceAfter.effectiveSource === "organization"
       ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
           accountId: rotation.accountId,
           reason: input.reason,

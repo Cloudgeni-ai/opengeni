@@ -19,10 +19,15 @@ const migrationPath = join(
   "../drizzle/0381_organization_codex_subscription_inheritance.sql",
 );
 const dbIndexPath = join(dirname(fileURLToPath(import.meta.url)), "../src/index.ts");
+const apiCodexRoutePath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../apps/api/src/routes/codex.ts",
+);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let migration = "";
 let dbIndexSource = "";
+let apiCodexRouteSource = "";
 let shared: SharedTestDatabase | null = null;
 let app: ReturnType<typeof postgres> | null = null;
 let client: DbClient | null = null;
@@ -49,9 +54,10 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
 }
 
 beforeAll(async () => {
-  [migration, dbIndexSource] = await Promise.all([
+  [migration, dbIndexSource, apiCodexRouteSource] = await Promise.all([
     readFile(migrationPath, "utf8"),
     readFile(dbIndexPath, "utf8"),
+    readFile(apiCodexRoutePath, "utf8"),
   ]);
   if (!requireRealDatabase) return;
   shared = await acquireSharedTestDatabase("migration-0381-organization-codex-inheritance");
@@ -116,6 +122,9 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     );
     expect(dbIndexSource).toMatch(
       /wakeOrganizationCodexCapacityWaitersInTransaction[\s\S]*?list_organization_workspace_ids[\s\S]*?session-tenancy:/u,
+    );
+    expect(apiCodexRouteSource).toMatch(
+      /withSessionCodexCapacityMutation[\s\S]*?upsertCodexSubscriptionCredential[\s\S]*?ensureCodexRotationSettings[\s\S]*?setInitialActiveCodexCredential[\s\S]*?setWorkspaceCodexSubscriptionModeInTransaction/u,
     );
     for (const table of [
       "organization_codex_rotation_settings",

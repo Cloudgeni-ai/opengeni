@@ -66,11 +66,13 @@ import {
   setActiveOrganizationCodexCredential,
   setInitialActiveCodexCredential,
   setWorkspaceCodexSubscriptionMode,
+  setWorkspaceCodexSubscriptionModeInTransaction,
   updateOrganizationCodexRotationSettings,
   updateCodexRotationSettings,
   upsertOrganizationCodexSubscriptionCredential,
   upsertCodexSubscriptionCredential,
   withCodexCapacityMutation,
+  withSessionCodexCapacityMutation,
   type CodexAccountStatus,
   type CodexCapacityWakeTarget,
 } from "@opengeni/db";
@@ -1010,62 +1012,59 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
       });
     }
-    const currentSource = await getWorkspaceCodexSubscriptionSource(db, workspaceId);
-    await setWorkspaceCodexSubscriptionMode(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      mode: currentSource.workspaceKind === "personal" ? "automatic" : "workspace",
+    const mutation = await withSessionCodexCapacityMutation<{
+      upserted: Awaited<ReturnType<typeof upsertCodexSubscriptionCredential>>;
+      isActive: boolean;
+    }>(db, { workspaceId, reason: "codex_credential_connected" }, async (tx) => {
+      const upserted = await upsertCodexSubscriptionCredential(tx, {
+        accountId: grant.accountId,
+        workspaceId,
+        credentialEncrypted: encryptEnvironmentValue(
+          key,
+          JSON.stringify({
+            access_token: tokens.accessToken,
+            refresh_token: tokens.refreshToken,
+            id_token: tokens.idToken,
+          }),
+        ),
+        chatgptAccountId: id.chatgptAccountId,
+        scopes: null, // device grant scopes are discovered at runtime, not asserted here
+        planType: id.planType,
+        isFedramp: id.isFedramp,
+        expiresAt: accessTokenExpiry(tokens.accessToken),
+        lastRefreshAt: new Date(),
+        accountEmail: id.email ?? null,
+        label: id.email ?? id.chatgptAccountId ?? null,
+        connectedBySubjectId:
+          connectingHuman?.subjectId === grant.subjectId ? connectingHuman.subjectId : null,
+      });
+      if (upserted.kind === "unresolved_redemption") {
+        return { result: { upserted, isActive: false }, changed: false };
+      }
+      await ensureCodexRotationSettings(tx, grant.accountId, workspaceId);
+      await setInitialActiveCodexCredential(tx, workspaceId, upserted.id);
+      const source = await getWorkspaceCodexSubscriptionSource(tx, workspaceId);
+      await setWorkspaceCodexSubscriptionModeInTransaction(tx, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        mode: source.workspaceKind === "personal" ? "automatic" : "workspace",
+      });
+      const rotation = await getCodexRotationSettings(tx, workspaceId);
+      return {
+        result: {
+          upserted,
+          isActive: rotation?.activeCredentialId === upserted.id,
+        },
+        changed: true,
+      };
     });
-    await ensureCodexRotationSettings(db, grant.accountId, workspaceId);
-    const mutation = await withCodexCapacityMutation(
-      db,
-      { workspaceId, reason: "codex_credential_connected" },
-      async (tx) => {
-        const upserted = await upsertCodexSubscriptionCredential(tx, {
-          accountId: grant.accountId,
-          workspaceId,
-          credentialEncrypted: encryptEnvironmentValue(
-            key,
-            JSON.stringify({
-              access_token: tokens.accessToken,
-              refresh_token: tokens.refreshToken,
-              id_token: tokens.idToken,
-            }),
-          ),
-          chatgptAccountId: id.chatgptAccountId,
-          scopes: null, // device grant scopes are discovered at runtime, not asserted here
-          planType: id.planType,
-          isFedramp: id.isFedramp,
-          expiresAt: accessTokenExpiry(tokens.accessToken),
-          lastRefreshAt: new Date(),
-          accountEmail: id.email ?? null,
-          label: id.email ?? id.chatgptAccountId ?? null,
-          connectedBySubjectId:
-            connectingHuman?.subjectId === grant.subjectId ? connectingHuman.subjectId : null,
-        });
-        return { result: upserted, changed: upserted.kind === "upserted" };
-      },
-    );
-    const upserted = mutation.result;
+    const { upserted, isActive } = mutation.result;
     if (upserted.kind === "unresolved_redemption") {
       throw new HTTPException(409, {
         message:
           "this subscription has an unresolved reset redemption; recover it before changing ownership",
       });
-    }
-    // Ensure the per-workspace rotation-settings row exists, then auto-activate
-    // the FIRST account only. Additional new accounts do NOT auto-activate — a
-    // manual switch is required (no auto-rotation in P1). A re-connect of the
-    // already-active account is a no-op for the pointer.
-    // Keep both rotation bits false on first connect. The deployment flag makes
-    // the compatible allocator available, but the workspace-local cutover bit
-    // is enabled only by an explicit settings write after every worker replica
-    // understands leasing.
-    const rotation = await getCodexRotationSettings(db, workspaceId);
-    let isActive = rotation?.activeCredentialId === upserted.id;
-    if (!isActive && rotation?.activeCredentialId == null) {
-      isActive = await setInitialActiveCodexCredential(db, workspaceId, upserted.id);
     }
     await signalCodexCapacityTargets(deps, mutation.wakeTargets);
     return c.json({ status: "connected", plan: id.planType, accountId: upserted.id, isActive });
