@@ -132,6 +132,32 @@ export async function listWorkspaceGatewayCustomModels(
   });
 }
 
+/**
+ * Lock and re-read one active custom model at a fresh-selection commit boundary.
+ * When `db` is an existing transaction handle, the shared advisory lock acquired
+ * by the nested RLS savepoint remains held until that outer transaction commits.
+ */
+export async function lockActiveWorkspaceGatewayCustomModelForAdmission(
+  db: Database,
+  input: { accountId: string; workspaceId: string; upstreamModelId: string },
+): Promise<WorkspaceGatewayCustomModel | null> {
+  return await withWorkspaceGatewayCustomModelReadLock(db, input, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.workspaceGatewayCustomModels)
+      .where(
+        and(
+          eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
+          eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+          eq(schema.workspaceGatewayCustomModels.upstreamModelId, input.upstreamModelId),
+          isNull(schema.workspaceGatewayCustomModels.retiredAt),
+        ),
+      )
+      .limit(1);
+    return row ? mapCustomModel(row) : null;
+  });
+}
+
 export async function replayWorkspaceGatewayCustomModelCreate(
   db: Database,
   input: {

@@ -397,9 +397,19 @@ export function AiGatewayConnectionCardWithClient(
       if (!activeRef.current) return false;
       const reconciled = await refreshCustomModels();
       if (!activeRef.current) return false;
-      if (reconciled !== null && !reconciled.some((candidate) => candidate.id === model.id)) {
-        confirmRemoved();
-        return true;
+      if (reconciled !== null) {
+        const originalStillPresent = reconciled.some((candidate) => candidate.id === model.id);
+        if (!originalStillPresent) {
+          const replacement = reconciled.find(
+            (candidate) => candidate.upstreamModelId === model.upstreamModelId,
+          );
+          if (!replacement) {
+            confirmRemoved();
+            return true;
+          }
+          pendingModelDeleteOperationsRef.current.delete(model.id);
+          setModelPendingRemoval(replacement);
+        }
       }
       toast.error("Couldn't confirm Gateway model removal", {
         description: caught instanceof Error ? caught.message : String(caught),

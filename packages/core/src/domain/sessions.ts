@@ -90,6 +90,7 @@ import {
   initializeSessionStartAtomically,
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
   requireSession,
   replaySubmittedHumanPromptFromBoundaryReceipt,
   submitHumanPromptInTransaction,
@@ -660,6 +661,9 @@ export async function createAndStartSessionWithOutcome(input: {
   /** Internal database-only composition seam. The exact session shell and this
    * linkage commit together before its first event/turn can be initialized. */
   beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
+  /** The custom workspace model was frozen by an earlier accepted boundary or
+   * inherited from an existing session, so retirement must not invalidate it. */
+  retainWorkspaceGatewayModel?: boolean;
   accountId: string;
   workspaceId: string;
   visibility?: "user_private" | "workspace_shared";
@@ -792,6 +796,31 @@ export async function createAndStartSessionWithOutcome(input: {
     input.createdByContext,
     input.initialAutomaticTitle,
   );
+  const requiresActiveWorkspaceGatewayModel =
+    input.model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) &&
+    input.retainWorkspaceGatewayModel !== true;
+  const beforeCreateCommit =
+    requiresActiveWorkspaceGatewayModel || input.beforeCreateCommit
+      ? async (tx: Database, sessionId: string, context?: { created: boolean }): Promise<void> => {
+          // A committed keyed replay already crossed this fence when its shell
+          // was first accepted. Revalidate only the transaction inserting a new
+          // session, while still running caller linkage on every replay.
+          if (requiresActiveWorkspaceGatewayModel && context?.created !== false) {
+            const upstreamModelId = input.model.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length);
+            const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              upstreamModelId,
+            });
+            if (!active) {
+              throw new HTTPException(422, {
+                message: `model is not available: ${input.model}`,
+              });
+            }
+          }
+          await input.beforeCreateCommit?.(tx, sessionId);
+        }
+      : undefined;
   // Keyed creation is intentionally handled only by the database admission
   // transaction below. Its workspace/key lock replays either the successful
   // session or the committed denial atomically; an application-side lookup
@@ -841,7 +870,7 @@ export async function createAndStartSessionWithOutcome(input: {
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
-      ...(input.beforeCreateCommit ? { beforeCreateCommit: input.beforeCreateCommit } : {}),
+      ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
     });
     if (keyedResult.denied) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(keyedResult.denial));
@@ -926,7 +955,7 @@ export async function createAndStartSessionWithOutcome(input: {
       maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
       allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
       subjectId: input.subjectId ?? null,
-      ...(input.beforeCreateCommit ? { beforeCreateCommit: input.beforeCreateCommit } : {}),
+      ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
     });
   } catch (error) {
     if (error instanceof SessionSpawnDeniedDbError) {
@@ -2600,6 +2629,7 @@ export async function createSessionForRequestWithOutcome(
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
+      retainWorkspaceGatewayModel: parentSession !== null && model === inheritedModel,
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,

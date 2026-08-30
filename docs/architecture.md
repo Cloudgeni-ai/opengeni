@@ -708,6 +708,12 @@ billing attribution, governance context, initiating authority, and relevant
 tool/connection delegations. Recovery reuses that accepted truth rather than
 sampling mutable workspace defaults again.
 
+A fresh session selecting a workspace Gateway custom model rechecks that exact
+active slug under the model catalog's shared transaction lock before its new
+session row can commit. Custom-model retirement holds the exclusive counterpart;
+already accepted work and existing-session inheritance use retained definitions
+instead of reopening fresh-selection authority.
+
 Human preference snapshots require an exact causal human. Service-only turns
 with no causal human skip that human-bound capability; service continuations
 and legacy subject turns use only their already-frozen causal human.

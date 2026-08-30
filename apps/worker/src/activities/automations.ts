@@ -207,6 +207,7 @@ export function createAutomationActivities(
           policyRole: template.policyRole,
           firstPartyMcpPermissions: template.firstPartyMcpPermissions,
           firstPartyMcpTools: template.firstPartyMcpTools,
+          retainWorkspaceGatewayModel: model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX),
           createIdempotencyKey: `automation-run:${run.id}`,
           subjectId: accepted.serviceSubjectId,
         });

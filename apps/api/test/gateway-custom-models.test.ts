@@ -147,6 +147,26 @@ async function request(
   });
 }
 
+async function waitForBlockedBackend(blockerPid: number, description: string): Promise<void> {
+  if (!shared) throw new Error("Gateway custom model fixture is unavailable");
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const [row] = await shared.admin<Array<{ waiting: boolean }>>`
+      select exists (
+        select 1
+        from pg_stat_activity activity
+        where activity.datname = current_database()
+          and activity.state = 'active'
+          and activity.wait_event_type = 'Lock'
+          and ${blockerPid} = any(pg_blocking_pids(activity.pid))
+      ) as waiting
+    `;
+    if (row?.waiting) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`${description} did not block behind backend ${blockerPid}`);
+}
+
 async function callMcpTool(
   deps: ApiRouteDeps,
   accessGrant: NonNullable<typeof grant>,
@@ -556,6 +576,68 @@ describe("workspace Gateway custom model API", () => {
     expect(await (await request("/gateway-custom-models")).json()).toMatchObject({
       models: [{ id: replacement.id, version: 1 }],
     });
+  });
+
+  test("rejects a fresh session when custom-model retirement wins before create commit", async () => {
+    if (!shared || !publicApp || !grant) return;
+    const upstreamModelId = `race/provider-model-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const created = await request("/gateway-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId },
+    });
+    expect(created.status).toBe(201);
+    const customModel = (await created.json()) as { id: string; version: number };
+    const idempotencyKey = crypto.randomUUID();
+    let createPromise: Promise<Response> | null = null;
+
+    await shared.admin.begin(async (barrier) => {
+      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+      if (!backend) throw new Error("database barrier has no backend pid");
+      await barrier`
+        select singleton
+        from nested_agent_depth_configuration
+        where singleton
+        for update
+      `;
+      createPromise = request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Custom model retirement race",
+            resources: [],
+            model: productModelId,
+            sandboxBackend: "none",
+            idempotencyKey,
+          },
+        },
+        publicApp,
+      );
+      await waitForBlockedBackend(backend.pid, "fresh custom-model session create");
+
+      const removed = await request(`/gateway-custom-models/${customModel.id}`, {
+        method: "DELETE",
+        body: {
+          expectedVersion: customModel.version,
+          operationId: crypto.randomUUID(),
+        },
+      });
+      expect(removed.status).toBe(204);
+    });
+
+    if (!createPromise) throw new Error("session create was not started");
+    const response = await createPromise;
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain(`model is not available: ${productModelId}`);
+    const [stored] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${grant.workspaceId}::uuid
+        and create_idempotency_key = ${idempotencyKey}
+    `;
+    expect(stored?.count).toBe(0);
   });
 
   test("enforces the transactional per-workspace custom-model bound", async () => {

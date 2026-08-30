@@ -29679,7 +29679,11 @@ export type SessionCreateInput = {
   /** Trusted, transaction-local linkage run after the exact session row and
    * MCP metadata exist but before either can commit. It must perform database
    * work only; throwing rolls the complete create/replay transaction back. */
-  beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
+  beforeCreateCommit?: (
+    tx: Database,
+    sessionId: string,
+    context?: { created: boolean },
+  ) => Promise<void>;
 };
 
 type SessionDepthDecision =
@@ -30124,7 +30128,7 @@ async function createSessionInTransaction(
       if (!canonicalExisting) {
         throw new Error(`Session event cursor missing for session ${existing.id}`);
       }
-      await input.beforeCreateCommit?.(tx, existing.id);
+      await input.beforeCreateCommit?.(tx, existing.id, { created: false });
       return {
         session: await mapSessionWithControl(tx, canonicalExisting, grouped.get(existing.id) ?? []),
         created: false,
@@ -30329,7 +30333,7 @@ async function createSessionInTransaction(
         if (!canonicalExisting) {
           throw new Error(`Session event cursor missing for session ${existing.id}`);
         }
-        await input.beforeCreateCommit?.(tx, existing.id);
+        await input.beforeCreateCommit?.(tx, existing.id, { created: false });
         return {
           session: await mapSessionWithControl(
             tx,
@@ -30366,7 +30370,7 @@ async function createSessionInTransaction(
     sessionId: inserted.id,
     servers: input.mcpServers ?? [],
   });
-  await input.beforeCreateCommit?.(tx, inserted.id);
+  await input.beforeCreateCommit?.(tx, inserted.id, { created: true });
   return {
     session: await mapSessionWithControl(tx, inserted, mcpServers),
     created: true,

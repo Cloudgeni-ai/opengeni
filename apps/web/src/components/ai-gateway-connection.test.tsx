@@ -1050,6 +1050,72 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
+  test("does not report removal when the same slug was recreated during reconciliation", async () => {
+    const model = customModel("xai/grok-4.1-fast");
+    const replacement = customModel(model.upstreamModelId);
+    let reads = 0;
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => {
+      reads += 1;
+      return { models: reads === 1 ? [model] : [replacement] };
+    });
+    deleteWorkspaceGatewayCustomModel.mockImplementation(async (_workspaceId, customModelId) => {
+      if (customModelId === model.id) {
+        throw new Error("response lost after delete commit");
+      }
+    });
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderCard(true, onConnectionChange);
+
+    try {
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(`button[aria-label="Remove ${model.upstreamModelId}"]`)!
+          .click();
+        await flush();
+      });
+      const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Remove model",
+      )!;
+      await act(async () => {
+        confirm.click();
+        await flush();
+      });
+
+      expect(deleteWorkspaceGatewayCustomModel).toHaveBeenCalledTimes(2);
+      expect(deleteWorkspaceGatewayCustomModel.mock.calls[0]?.[1]).toBe(model.id);
+      expect(deleteWorkspaceGatewayCustomModel.mock.calls[1]?.[1]).toBe(model.id);
+      expect(container.textContent).toContain(replacement.upstreamModelId);
+      expect(onConnectionChange).not.toHaveBeenCalled();
+      expect(toastSuccess).not.toHaveBeenCalled();
+      expect(toastError).toHaveBeenCalledWith("Couldn't confirm Gateway model removal", {
+        description: "response lost after delete commit",
+      });
+      expect(
+        [...document.querySelectorAll<HTMLButtonElement>("button")].some(
+          (button) => button.textContent?.trim() === "Remove model",
+        ),
+      ).toBe(true);
+
+      const retry = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Remove model",
+      )!;
+      await act(async () => {
+        retry.click();
+        await flush();
+      });
+
+      expect(deleteWorkspaceGatewayCustomModel).toHaveBeenCalledTimes(3);
+      expect(deleteWorkspaceGatewayCustomModel.mock.calls[2]?.[1]).toBe(replacement.id);
+      expect(container.textContent).not.toContain(replacement.upstreamModelId);
+      expect(container.textContent).toContain("No custom model slugs yet");
+      expect(onConnectionChange).toHaveBeenCalledTimes(1);
+      expect(toastSuccess).toHaveBeenCalledWith("Gateway model removed");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("does not present a failed custom-model read as empty and offers an in-page retry", async () => {
     const recovered = customModel("recovered/provider-model");
     let reads = 0;
