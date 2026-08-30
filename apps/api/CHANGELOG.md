@@ -1,5 +1,38 @@
 # @opengeni/api-router
 
+## 2.6.1
+
+### Patch Changes
+
+- b471a90: Add an organization-owner Off, Review first, or Autonomous policy for agent-managed organization identity, including owner-only API and SDK controls, exact-attempt automatic activation, immutable receipts, and the organization settings control.
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. The legacy runtime desktop API remains exported only as a deprecated, fail-closed migration shell; because direct sandbox desktop control and model-bound tools are no longer functional, release `@opengeni/runtime` as the next major. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+- 4bacdd3: Add fixed-scope organization API keys, idempotent external tenant workspace provisioning, Personal-workspace exclusion, and the matching SDK and integration guidance.
+- 72de39c: Retain low-cardinality workspace deletion phase, inventory, and total transaction metrics with exact workspace identifiers confined to structured logs.
+- Updated dependencies [c3b43a5]
+- Updated dependencies [fab355b]
+- Updated dependencies [b471a90]
+- Updated dependencies [973b1dd]
+- Updated dependencies [e41285f]
+- Updated dependencies [1f289a0]
+- Updated dependencies [c9ac869]
+- Updated dependencies [96624a7]
+- Updated dependencies [fab355b]
+- Updated dependencies [fab355b]
+- Updated dependencies [4bacdd3]
+- Updated dependencies [72de39c]
+  - @opengeni/db@3.7.1
+  - @opengeni/contracts@2.9.1
+  - @opengeni/runtime@2.0.0
+  - @opengeni/events@0.4.9
+  - @opengeni/config@0.22.4
+  - @opengeni/core@2.6.1
+  - @opengeni/documents@0.8.11
+  - @opengeni/artifact-tool@0.3.13
+  - @opengeni/codemode@0.4.21
+  - @opengeni/github@0.6.6
+  - @opengeni/observability@0.8.13
+  - @opengeni/storage@0.2.114
+
 ## 2.6.0
 
 ### Minor Changes

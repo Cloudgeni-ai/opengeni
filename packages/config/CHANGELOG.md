@@ -1,5 +1,15 @@
 # @opengeni/config
 
+## 0.22.4
+
+### Patch Changes
+
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. The legacy runtime desktop API remains exported only as a deprecated, fail-closed migration shell; because direct sandbox desktop control and model-bound tools are no longer functional, release `@opengeni/runtime` as the next major. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+- Updated dependencies [b471a90]
+- Updated dependencies [96624a7]
+- Updated dependencies [4bacdd3]
+  - @opengeni/contracts@2.9.1
+
 ## 0.22.3
 
 ### Patch Changes
