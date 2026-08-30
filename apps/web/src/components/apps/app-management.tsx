@@ -6,6 +6,7 @@ import type {
   WorkspaceApp,
   WorkspaceAppDetailResponse,
 } from "@opengeni/sdk/apps";
+import { Link, useBlocker } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   DownloadIcon,
@@ -50,29 +51,54 @@ export type AppsManagementClient = Pick<
   | "archive"
 >;
 
+export type AppsManagementAccess = {
+  write: boolean;
+  publish: boolean;
+  delete: boolean;
+};
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 function formatDate(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+  return Number.isNaN(date.getTime())
+    ? "Unknown"
+    : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
 function formatCount(value: number): string {
   return NUMBER_FORMAT.format(value);
 }
 
-function useUnsavedChanges(dirty: boolean): void {
-  useEffect(() => {
-    if (!dirty) return;
-    const beforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [dirty]);
+function useUnsavedChanges(dirty: boolean) {
+  return useBlocker({
+    shouldBlockFn: () => dirty,
+    enableBeforeUnload: dirty,
+    disabled: !dirty,
+    withResolver: true,
+  });
+}
+
+function UnsavedChangesDialog({ blocker }: { blocker: ReturnType<typeof useUnsavedChanges> }) {
+  return (
+    <ConfirmDialog
+      open={blocker.status === "blocked"}
+      onOpenChange={(open) => {
+        if (!open && blocker.status === "blocked") blocker.reset();
+      }}
+      title="Discard unsaved changes?"
+      description="Your edits will be lost if you leave this page."
+      confirmLabel="Discard changes"
+      cancelAutoFocus
+      onConfirm={() => {
+        if (blocker.status !== "blocked") return false;
+        blocker.proceed();
+        return false;
+      }}
+    />
+  );
 }
 
 function latestToolPolicy(detail: WorkspaceAppDetailResponse): AppToolPolicyRevision | null {
@@ -111,7 +137,9 @@ export function AppCreatePanel({
   const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  useUnsavedChanges(!busy && Boolean(title || slug || description));
+  const [discarding, setDiscarding] = useState(false);
+  const dirty = Boolean(title || slug || description);
+  const navigationBlocker = useUnsavedChanges(!busy && dirty);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -158,6 +186,7 @@ export function AppCreatePanel({
               maxLength={120}
               autoComplete="off"
               required
+              autoFocus
               onChange={(event) => setTitle(event.target.value)}
             />
           </FormField>
@@ -196,7 +225,7 @@ export function AppCreatePanel({
             type="button"
             variant="ghost"
             disabled={busy}
-            onClick={onCancel}
+            onClick={() => (dirty ? setDiscarding(true) : onCancel())}
             className="pointer-coarse:min-h-11"
           >
             Cancel
@@ -215,6 +244,16 @@ export function AppCreatePanel({
           </Button>
         </div>
       </form>
+      <ConfirmDialog
+        open={discarding}
+        onOpenChange={setDiscarding}
+        title="Discard this new app?"
+        description="The name, slug, and description you entered will be lost."
+        confirmLabel="Discard new app"
+        cancelAutoFocus
+        onConfirm={onCancel}
+      />
+      <UnsavedChangesDialog blocker={navigationBlocker} />
     </ContentSurface>
   );
 }
@@ -236,7 +275,7 @@ function AppMetadataEditor({
   const [formError, setFormError] = useState<string | null>(null);
   const changed =
     title.trim() !== detail.app.title || description !== (detail.app.description ?? "");
-  useUnsavedChanges(changed && !busy);
+  const navigationBlocker = useUnsavedChanges(changed && !busy);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -311,6 +350,7 @@ function AppMetadataEditor({
           </Button>
         </div>
       </form>
+      <UnsavedChangesDialog blocker={navigationBlocker} />
     </ContentSurface>
   );
 }
@@ -339,6 +379,13 @@ function AppToolPolicyEditor({
   );
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const currentKeys = useMemo(
+    () => new Set((currentPolicy?.allowedTools ?? []).map(toolKey)),
+    [currentPolicy],
+  );
+  const changed =
+    selected.size !== currentKeys.size || [...selected].some((key) => !currentKeys.has(key));
+  const navigationBlocker = useUnsavedChanges(changed && !busy);
 
   useEffect(() => {
     if (!open || catalog !== null) return;
@@ -516,6 +563,7 @@ function AppToolPolicyEditor({
           </div>
         </FormDisclosure>
       </div>
+      <UnsavedChangesDialog blocker={navigationBlocker} />
     </ContentSurface>
   );
 }
@@ -615,6 +663,8 @@ function AppReleaseManager({
   detail,
   client,
   onRefresh,
+  canPublish,
+  canDelete,
 }: {
   workspaceId: string;
   detail: WorkspaceAppDetailResponse;
@@ -623,17 +673,23 @@ function AppReleaseManager({
     "createPreview" | "publish" | "rollback" | "unpublish" | "archive"
   >;
   onRefresh: () => Promise<void>;
+  canPublish: boolean;
+  canDelete: boolean;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<"unpublish" | "archive" | null>(null);
+  const [releaseTarget, setReleaseTarget] = useState<AppRelease | null>(null);
   const releases = [...detail.releases].sort((left, right) => right.revision - left.revision);
   const activeRelease =
     releases.find((release) => release.id === detail.app.activeReleaseId) ?? null;
+  const hasActiveRelease = detail.app.activeReleaseId !== null;
   const mutable = detail.app.status === "active";
+  const canManageReleases = mutable && canPublish;
+  const canArchive = mutable && canDelete;
 
-  const preview = async (release: AppRelease) => {
+  const createPreviewLink = async (release: AppRelease) => {
     const action = `preview:${release.id}`;
     setBusy(action);
     setActionError(null);
@@ -657,7 +713,7 @@ function AppReleaseManager({
     }
   };
 
-  const activate = async (release: AppRelease) => {
+  const activate = async (release: AppRelease): Promise<boolean> => {
     const kind = releaseMutationKind(detail, release);
     const action = `${kind}:${release.id}`;
     setBusy(action);
@@ -678,12 +734,14 @@ function AppReleaseManager({
         description: `Release ${release.revision} is now live.`,
       });
       await onRefresh();
+      return true;
     } catch (error) {
       const message = errorMessage(error);
       setActionError(message);
       toast.error(kind === "rollback" ? "Couldn't roll back app" : "Couldn't publish app", {
         description: message,
       });
+      return false;
     } finally {
       setBusy(null);
     }
@@ -728,33 +786,37 @@ function AppReleaseManager({
     <ContentSurface className="sm:col-span-2">
       <ContentSurfaceHeader
         title="Releases"
-        description="Preview a frozen release, make it live, or restore a prior verified version."
+        description="Preview a frozen release, make it live, or restore a prior verified version. Active preview links remain available here until expiry."
         actions={
-          <div className="flex flex-wrap gap-2">
-            {activeRelease ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={busy !== null || !mutable}
-                onClick={() => setConfirmation("unpublish")}
-                className="pointer-coarse:min-h-11"
-              >
-                Unpublish
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="destructive"
-              size="sm"
-              disabled={busy !== null || !mutable}
-              onClick={() => setConfirmation("archive")}
-              className="pointer-coarse:min-h-11"
-            >
-              <ArchiveIcon aria-hidden="true" />
-              Archive app
-            </Button>
-          </div>
+          (canManageReleases && hasActiveRelease) || canArchive ? (
+            <div className="flex flex-wrap gap-2">
+              {canManageReleases && hasActiveRelease ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busy !== null || !mutable}
+                  onClick={() => setConfirmation("unpublish")}
+                  className="pointer-coarse:min-h-11"
+                >
+                  Unpublish
+                </Button>
+              ) : null}
+              {canArchive ? (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  disabled={busy !== null || !mutable}
+                  onClick={() => setConfirmation("archive")}
+                  className="pointer-coarse:min-h-11"
+                >
+                  <ArchiveIcon aria-hidden="true" />
+                  Archive app
+                </Button>
+              ) : null}
+            </div>
+          ) : undefined
         }
       />
       {actionError ? (
@@ -771,6 +833,12 @@ function AppReleaseManager({
           {releases.map((release) => {
             const active = release.id === detail.app.activeReleaseId;
             const kind = releaseMutationKind(detail, release);
+            const activePreviews = detail.previews.filter(
+              (preview) =>
+                preview.releaseId === release.id &&
+                preview.status === "active" &&
+                new Date(preview.expiresAt).getTime() > Date.now(),
+            );
             return (
               <div
                 key={release.id}
@@ -794,47 +862,65 @@ function AppReleaseManager({
                       Open preview
                     </a>
                   ) : null}
+                  {activePreviews.length > 0 ? (
+                    <div className="mt-2 grid max-h-28 gap-1 overflow-y-auto overscroll-contain pr-1 text-xs">
+                      {activePreviews.map((preview) => (
+                        <div
+                          key={preview.id}
+                          className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"
+                        >
+                          <Link
+                            to="/workspaces/$workspaceId/apps/$appId/run"
+                            params={{ workspaceId, appId: detail.app.id }}
+                            search={{ previewId: preview.id }}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-medium text-brand hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                          >
+                            Open active preview
+                          </Link>
+                          <span className="text-fg-subtle">
+                            Expires {formatDate(preview.expiresAt)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex flex-wrap gap-2 sm:justify-end">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    aria-label={`Create preview for release ${release.revision}`}
-                    disabled={busy !== null || !mutable}
-                    onClick={() => void preview(release)}
-                    className="pointer-coarse:min-h-11"
-                  >
-                    {busy === `preview:${release.id}` ? (
-                      <Loader2Icon aria-hidden="true" className="animate-spin" />
-                    ) : (
-                      <EyeIcon aria-hidden="true" />
-                    )}
-                    {busy === `preview:${release.id}` ? "Creating…" : "Preview"}
-                  </Button>
-                  {!active ? (
+                  {canManageReleases ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      aria-label={`Create preview for release ${release.revision}`}
+                      disabled={busy !== null || !mutable}
+                      onClick={() => void createPreviewLink(release)}
+                      className="pointer-coarse:min-h-11"
+                    >
+                      {busy === `preview:${release.id}` ? (
+                        <Loader2Icon aria-hidden="true" className="animate-spin" />
+                      ) : (
+                        <EyeIcon aria-hidden="true" />
+                      )}
+                      {busy === `preview:${release.id}` ? "Creating…" : "Preview"}
+                    </Button>
+                  ) : null}
+                  {canManageReleases && !active ? (
                     <Button
                       type="button"
                       size="sm"
                       aria-label={`${kind === "rollback" ? "Roll back to" : "Publish"} release ${release.revision}`}
                       disabled={busy !== null || !mutable}
-                      onClick={() => void activate(release)}
+                      onClick={() => setReleaseTarget(release)}
                       className="pointer-coarse:min-h-11"
                     >
-                      {busy === `${kind}:${release.id}` ? (
-                        <Loader2Icon aria-hidden="true" className="animate-spin" />
-                      ) : kind === "rollback" ? (
+                      {kind === "rollback" ? (
                         <RotateCcwIcon aria-hidden="true" />
                       ) : (
                         <UploadCloudIcon aria-hidden="true" />
                       )}
-                      {busy === `${kind}:${release.id}`
-                        ? kind === "rollback"
-                          ? "Rolling back…"
-                          : "Publishing…"
-                        : kind === "rollback"
-                          ? "Roll back"
-                          : "Publish"}
+                      {kind === "rollback" ? "Roll back" : "Publish"}
                     </Button>
                   ) : null}
                 </div>
@@ -860,6 +946,35 @@ function AppReleaseManager({
         cancelAutoFocus
         onConfirm={destructive}
       />
+      <ConfirmDialog
+        open={releaseTarget !== null}
+        onOpenChange={(open) => (open ? undefined : setReleaseTarget(null))}
+        title={
+          releaseTarget
+            ? releaseMutationKind(detail, releaseTarget) === "rollback"
+              ? `Roll back ${detail.app.title} to release ${releaseTarget.revision}?`
+              : `Publish release ${releaseTarget.revision} of ${detail.app.title}?`
+            : "Change the live release?"
+        }
+        description={
+          activeRelease && releaseTarget
+            ? `Release ${activeRelease.revision} is live now. This will immediately replace it with release ${releaseTarget.revision} for new launches.`
+            : hasActiveRelease && releaseTarget
+              ? `A published release is live now. This will immediately replace it with release ${releaseTarget.revision} for new launches.`
+              : releaseTarget
+                ? `This will make release ${releaseTarget.revision} live for new launches.`
+                : "This will immediately change the release used for new launches."
+        }
+        confirmLabel={
+          releaseTarget
+            ? releaseMutationKind(detail, releaseTarget) === "rollback"
+              ? `Roll back to release ${releaseTarget.revision}`
+              : `Publish release ${releaseTarget.revision}`
+            : "Change live release"
+        }
+        cancelAutoFocus
+        onConfirm={() => (releaseTarget ? activate(releaseTarget) : false)}
+      />
     </ContentSurface>
   );
 }
@@ -870,16 +985,31 @@ export function AppManagementPanel({
   client,
   onDetailChange,
   onRefresh,
+  access,
 }: {
   workspaceId: string;
   detail: WorkspaceAppDetailResponse;
   client: AppsManagementClient;
   onDetailChange: (detail: WorkspaceAppDetailResponse) => void;
   onRefresh: () => Promise<void>;
+  access: AppsManagementAccess;
 }) {
+  const currentPolicy = latestToolPolicy(detail);
   return (
     <div className="mt-4 grid gap-4 sm:grid-cols-2">
-      {detail.app.status === "active" ? (
+      {detail.releases.length > 0 ? (
+        <AppReleaseManager
+          workspaceId={workspaceId}
+          detail={detail}
+          client={client}
+          onRefresh={onRefresh}
+          canPublish={access.publish}
+          canDelete={access.delete}
+        />
+      ) : (
+        <AppAuthoringStatus workspaceId={workspaceId} detail={detail} client={client} />
+      )}
+      {detail.app.status === "active" && access.write ? (
         <AppMetadataEditor
           key={`metadata:${detail.app.version}`}
           workspaceId={workspaceId}
@@ -905,7 +1035,7 @@ export function AppManagementPanel({
           </dl>
         </ContentSurface>
       )}
-      {detail.app.status === "active" ? (
+      {detail.app.status === "active" && access.write ? (
         <AppToolPolicyEditor
           key={`policy:${detail.app.version}`}
           workspaceId={workspaceId}
@@ -920,43 +1050,65 @@ export function AppManagementPanel({
             Tool access
           </h2>
           <p className="mt-2 text-sm leading-5 text-fg-muted">
-            This app is archived. Its last tool-policy revision remains in the audit history and
-            cannot be changed.
+            {detail.app.status === "archived"
+              ? "This app is archived. Its last tool-policy revision remains in the audit history and cannot be changed."
+              : currentPolicy
+                ? `Policy revision ${formatCount(currentPolicy.revision)} allows ${formatCount(currentPolicy.allowedTools.length)} read-only ${currentPolicy.allowedTools.length === 1 ? "tool" : "tools"}. You don't have permission to change it.`
+                : "No tool policy exists yet. You don't have permission to create one."}
           </p>
         </ContentSurface>
       )}
-      <AppAuthoringStatus workspaceId={workspaceId} detail={detail} client={client} />
+      {detail.releases.length > 0 ? (
+        <AppAuthoringStatus workspaceId={workspaceId} detail={detail} client={client} />
+      ) : null}
       <ContentSurface>
         <h2 className="text-sm font-semibold text-fg">Lifecycle summary</h2>
+        {detail.historyTruncated ? (
+          <p className="mt-1 text-xs leading-5 text-fg-muted">
+            Showing up to 100 recent records in each history category.
+          </p>
+        ) : null}
         <dl className="mt-3 grid gap-2 text-sm">
           <div className="flex justify-between gap-3">
             <dt className="text-fg-subtle">Status</dt>
             <dd className="text-right capitalize text-fg">{detail.app.status}</dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="text-fg-subtle">Sources</dt>
+            <dt className="text-fg-subtle">
+              {detail.historyTruncated ? "Recent sources" : "Sources"}
+            </dt>
             <dd className="text-right text-fg">{formatCount(detail.sourceRevisions.length)}</dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="text-fg-subtle">Builds</dt>
+            <dt className="text-fg-subtle">
+              {detail.historyTruncated ? "Recent builds" : "Builds"}
+            </dt>
             <dd className="text-right text-fg">{formatCount(detail.builds.length)}</dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="text-fg-subtle">Releases</dt>
+            <dt className="text-fg-subtle">
+              {detail.historyTruncated ? "Recent releases" : "Releases"}
+            </dt>
             <dd className="text-right text-fg">{formatCount(detail.releases.length)}</dd>
           </div>
           <div className="flex justify-between gap-3">
-            <dt className="text-fg-subtle">Previews</dt>
+            <dt className="text-fg-subtle">
+              {detail.historyTruncated ? "Recent previews" : "Previews"}
+            </dt>
             <dd className="text-right text-fg">{formatCount(detail.previews.length)}</dd>
           </div>
         </dl>
       </ContentSurface>
-      <AppReleaseManager
-        workspaceId={workspaceId}
-        detail={detail}
-        client={client}
-        onRefresh={onRefresh}
-      />
+      {detail.releases.length === 0 ? (
+        <AppReleaseManager
+          workspaceId={workspaceId}
+          detail={detail}
+          client={client}
+          onRefresh={onRefresh}
+          canPublish={access.publish}
+          canDelete={access.delete}
+        />
+      ) : null}
     </div>
   );
 }

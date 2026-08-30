@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
   RouterProvider,
   createMemoryHistory,
+  createRoute,
   createRootRoute,
   createRouter,
 } from "@tanstack/react-router";
@@ -124,8 +125,23 @@ async function render(node: ReactNode) {
     return current;
   }
   const route = createRootRoute({ component: Harness });
+  const appsRoute = createRoute({
+    getParentRoute: () => route,
+    path: "workspaces/$workspaceId/apps",
+    component: () => null,
+  });
+  const appDetailRoute = createRoute({
+    getParentRoute: () => route,
+    path: "workspaces/$workspaceId/apps/$appId",
+    component: () => null,
+  });
+  const appRunRoute = createRoute({
+    getParentRoute: () => route,
+    path: "workspaces/$workspaceId/apps/$appId/run",
+    component: () => null,
+  });
   const router = createRouter({
-    routeTree: route,
+    routeTree: route.addChildren([appsRoute, appDetailRoute, appRunRoute]),
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
   await router.load();
@@ -133,6 +149,7 @@ async function render(node: ReactNode) {
   await settle();
   return {
     container,
+    router,
     rerender: async (next: ReactNode) => {
       await act(async () => updateNode?.(next));
       await settle();
@@ -184,6 +201,26 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
 }
 
 describe("Apps management product surface", () => {
+  test("does not call the Apps transport when the user lacks Apps access", async () => {
+    const listApps = mock(async () => ({ apps: [], nextCursor: null, truncated: false }));
+    const rendered = await render(
+      <AppsRoute
+        workspaceId={WORKSPACE_ID}
+        client={{ listApps } as never}
+        access={{ read: false, write: false, publish: false, run: false, delete: false }}
+      />,
+    );
+
+    try {
+      expect(rendered.container.textContent).toContain(
+        "You don't have permission to view apps for this workspace.",
+      );
+      expect(listApps).not.toHaveBeenCalled();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("ignores a superseded workspace inventory response", async () => {
     const otherWorkspaceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const first = deferred<{
@@ -275,7 +312,40 @@ describe("Apps management product surface", () => {
     }
   });
 
-  test("loads current-human tool choices and previews or rolls back frozen releases", async () => {
+  test("opens a newly created app directly when the inventory could not be loaded", async () => {
+    const created = app("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "New status app");
+    const rendered = await render(
+      <AppsRoute
+        workspaceId={WORKSPACE_ID}
+        client={
+          {
+            listApps: async () => {
+              throw new Error("Inventory unavailable");
+            },
+            createApp: async () => ({ app: created, replayed: false }),
+          } as never
+        }
+      />,
+    );
+
+    try {
+      expect(rendered.container.textContent).toContain("Couldn't load apps");
+      await act(async () => button(rendered.container, "New app").click());
+      const title = rendered.container.querySelector<HTMLInputElement>('input[name="app-title"]')!;
+      await setInputValue(title, created.title);
+      await act(async () => button(rendered.container, "Create app").click());
+      await settle();
+
+      expect(rendered.router.state.location.pathname).toBe(
+        `/workspaces/${WORKSPACE_ID}/apps/${created.id}`,
+      );
+      expect(rendered.container.textContent).toContain("Couldn't load apps");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("loads current-human tool choices, previews releases, and gates rollback", async () => {
     const current = detail();
     const getApp = mock(async () => current);
     const getAvailableRuntimeCatalog = mock(async () => ({
@@ -380,12 +450,7 @@ describe("Apps management product surface", () => {
           .click(),
       );
       await settle();
-      expect(rollback).toHaveBeenCalledTimes(1);
-      expect(rollback.mock.calls[0]?.[2]).toMatchObject({
-        releaseId: RELEASE_1_ID,
-        expectedAppVersion: 7,
-      });
-      expect(rollback.mock.calls[0]?.[2].reason).toContain("Roll back to release 1");
+      expect(rollback).not.toHaveBeenCalled();
     } finally {
       await rendered.unmount();
     }
@@ -408,7 +473,51 @@ describe("Apps management product surface", () => {
     try {
       expect(rendered.container.textContent).not.toContain("Run app");
       expect(rendered.container.querySelector('form[aria-label="Edit Status console"]')).toBeNull();
+      expect(rendered.container.querySelector('button[aria-label^="Create preview"]')).toBeNull();
+      expect(rendered.container.textContent).not.toContain("Roll back");
+      expect(rendered.container.textContent).not.toContain("Archive app");
       expect(rendered.container.textContent).toContain("This app is archived");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("renders app details without launch or mutation controls for read-only access", async () => {
+    const rendered = await render(
+      <AppsRoute
+        workspaceId={WORKSPACE_ID}
+        appId={APP_ID}
+        client={{ getApp: async () => detail() } as never}
+        access={{ read: true, write: false, publish: false, run: false, delete: false }}
+      />,
+    );
+
+    try {
+      expect(rendered.container.textContent).toContain("Status console");
+      expect(rendered.container.textContent).toContain("You don't have permission to change it.");
+      expect(rendered.container.textContent).not.toContain("Run app");
+      expect(rendered.container.querySelector('form[aria-label="Edit Status console"]')).toBeNull();
+      expect(rendered.container.querySelector('button[aria-label^="Create preview"]')).toBeNull();
+      expect(rendered.container.textContent).not.toContain("Archive app");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("keeps unpublish available when the live release is outside recent history", async () => {
+    const current = detail();
+    current.releases = [current.releases[0]!];
+    const rendered = await render(
+      <AppsRoute
+        workspaceId={WORKSPACE_ID}
+        appId={APP_ID}
+        client={{ getApp: async () => current } as never}
+      />,
+    );
+
+    try {
+      expect(rendered.container.textContent).toContain("Published");
+      expect(button(rendered.container, "Unpublish").disabled).toBeFalse();
     } finally {
       await rendered.unmount();
     }
@@ -436,7 +545,23 @@ describe("Apps management product surface", () => {
         releaseId: RELEASE_1_ID,
         toolPolicyRevisionId: POLICY_ID,
         catalogDigest: SHA256,
-        tools: [],
+        tools: [
+          {
+            identity: { serverId: "status", toolName: "read" },
+            modelName: "status_read",
+            programmaticPath: ["status", "read"],
+            title: "Read status",
+            description: "Read the current service status.",
+            inputSchema: { type: "object" },
+            source: "opengeni",
+            effect: "read",
+            replaySafety: "safe",
+            openWorld: false,
+            approval: "none",
+            supportedSurfaces: ["app"],
+            requiredPermissions: [],
+          },
+        ],
       }),
     );
     const createLaunch = mock(
@@ -474,10 +599,43 @@ describe("Apps management product surface", () => {
     try {
       expect(getRuntimeCatalog).toHaveBeenCalledTimes(1);
       expect(getRuntimeCatalog.mock.calls[0]?.[2]).toBe(RELEASE_1_ID);
+      expect(rendered.container.textContent).toContain("Back to Status console");
+      expect(rendered.container.textContent).toContain("Private preview of release 1");
+      expect(rendered.container.textContent).toContain("Preview · Release 1");
+      await act(async () =>
+        rendered.container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(),
+      );
       await act(async () => button(rendered.container, "Start app").click());
       await settle();
       expect(createLaunch).toHaveBeenCalledTimes(1);
       expect(createLaunch.mock.calls[0]?.[2]).toEqual({ previewId: PREVIEW_ID });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("never falls back to the published release when preview intent is invalid", async () => {
+    const getRuntimeCatalog = mock(async () => ({}) as never);
+    const rendered = await render(
+      <AppsRoute
+        workspaceId={WORKSPACE_ID}
+        appId={APP_ID}
+        previewRequested
+        run
+        client={
+          {
+            getApp: async () => detail(),
+            getRuntimeCatalog,
+          } as never
+        }
+      />,
+    );
+
+    try {
+      expect(rendered.container.textContent).toContain(
+        "This app preview is unavailable, expired, or no longer active.",
+      );
+      expect(getRuntimeCatalog).not.toHaveBeenCalled();
     } finally {
       await rendered.unmount();
     }

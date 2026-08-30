@@ -116,9 +116,9 @@ export function PageHeader(props: {
   return (
     <div className="flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-center lg:justify-between">
       <div className="min-w-0">
-        <h1 className="flex items-center gap-2 text-base font-semibold">
-          <span className="text-brand">{props.icon}</span>
-          {props.title}
+        <h1 className="flex min-w-0 items-start gap-2 text-base font-semibold">
+          <span className="mt-0.5 shrink-0 text-brand">{props.icon}</span>
+          <span className="min-w-0 break-words [overflow-wrap:anywhere]">{props.title}</span>
         </h1>
         <p className="mt-1 text-sm leading-5 text-fg-muted">{props.description}</p>
       </div>

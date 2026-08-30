@@ -53,9 +53,12 @@ describe("OpenGeni App run frame security", () => {
       "https://apps.example.test/launch/1",
       "https://apps.example.test",
       "https://app.opengeni.ai",
+      "Status",
     );
     expect(brokerHtml).not.toBeNull();
     expect(brokerHtml).toContain('src="https://apps.example.test/launch/1"');
+    expect(brokerHtml).toContain("<title>Status</title>");
+    expect(brokerHtml).toContain('title="Status content"');
     expect(brokerHtml).toContain(`sandbox="${APP_RUN_INNER_IFRAME_SANDBOX}"`);
     expect(brokerHtml).toContain('const expectedParentOrigin="https://app.opengeni.ai"');
     expect(brokerHtml).toContain('const expectedAppOrigin="https://apps.example.test"');
@@ -111,7 +114,7 @@ describe("OpenGeni App run frame security", () => {
     expect(iframeMarkup).not.toContain(' allow="');
     expect(APP_RUN_IFRAME_ALLOW).toContain("clipboard-read 'none'");
     expect(markup).toContain('referrerPolicy="no-referrer"');
-    expect(markup).toContain('aria-label="Stop app"');
+    expect(markup).toContain('aria-label="Close app"');
     expect(markup).toContain('aria-label="Reload app"');
   });
 
@@ -121,6 +124,7 @@ describe("OpenGeni App run frame security", () => {
         "https://attacker.example.test/launch/1",
         "https://apps.example.test",
         "https://app.opengeni.ai",
+        "Status",
       ),
     ).toBeNull();
   });

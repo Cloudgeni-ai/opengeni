@@ -7,11 +7,12 @@ import type {
   WorkspaceAppListResponse,
   CreateAppLaunchResponse,
 } from "@opengeni/sdk/apps";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BoxesIcon,
   Clock3Icon,
+  LockIcon,
   Loader2Icon,
   PlayIcon,
   PlusIcon,
@@ -20,7 +21,7 @@ import {
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import { AppCapabilityConfirmation } from "@/components/apps/app-capability-confirmation";
-import type { AppsManagementClient } from "@/components/apps/app-management";
+import type { AppsManagementAccess, AppsManagementClient } from "@/components/apps/app-management";
 import { useAppsControlClient } from "@/components/apps/apps-control-context";
 import { AppRunFrame } from "@/components/apps/app-run-frame";
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
@@ -45,6 +46,19 @@ type AppsProductClient = Pick<
 > &
   AppsManagementClient;
 
+export type AppsRouteAccess = AppsManagementAccess & {
+  read: boolean;
+  run: boolean;
+};
+
+const FULL_APPS_ACCESS: AppsRouteAccess = {
+  read: true,
+  write: true,
+  publish: true,
+  run: true,
+  delete: true,
+};
+
 type LoadState<T> =
   | { status: "loading" }
   | { status: "ready"; data: T }
@@ -56,7 +70,9 @@ function asError(error: unknown): Error {
 
 function formatDate(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+  return Number.isNaN(date.getTime())
+    ? "Unknown"
+    : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
 function formatCount(value: number): string {
@@ -83,29 +99,66 @@ function AppsUnavailable() {
   );
 }
 
+function AppsPermissionDenied({ run = false }: { run?: boolean }) {
+  return (
+    <ContentPage width="standard">
+      <PageHeader
+        icon={<LockIcon aria-hidden="true" className="size-4" />}
+        title={run ? "Run app" : "Apps"}
+        description={
+          run
+            ? "Running workspace apps requires explicit Apps run access."
+            : "Workspace apps are available only to members with Apps access."
+        }
+      />
+      <div className="mt-4">
+        <EmptyState>
+          You don&apos;t have permission to {run ? "run apps in" : "view apps for"} this workspace.
+        </EmptyState>
+      </div>
+    </ContentPage>
+  );
+}
+
 export function AppsRoute({
   workspaceId,
   appId,
   previewId,
+  previewRequested = false,
   run = false,
   client: clientOverride,
+  access = FULL_APPS_ACCESS,
 }: {
   workspaceId: string;
   appId?: string;
   previewId?: string;
+  previewRequested?: boolean;
   run?: boolean;
   client?: AppsProductClient;
+  access?: AppsRouteAccess;
 }) {
   const injectedClient = useAppsControlClient();
   const client = clientOverride ?? injectedClient;
+  if (!access.read) return <AppsPermissionDenied />;
+  if (run && !access.run) return <AppsPermissionDenied run />;
   if (!client) return <AppsUnavailable />;
-  if (!appId) return <AppsListRoute key={workspaceId} workspaceId={workspaceId} client={client} />;
+  if (!appId) {
+    return (
+      <AppsListRoute
+        key={workspaceId}
+        workspaceId={workspaceId}
+        client={client}
+        canCreate={access.write}
+      />
+    );
+  }
   return run ? (
     <AppRunRoute
-      key={`${workspaceId}:${appId}:${previewId ?? "published"}`}
+      key={`${workspaceId}:${appId}:${previewRequested ? (previewId ?? "invalid-preview") : "published"}`}
       workspaceId={workspaceId}
       appId={appId}
       previewId={previewId}
+      previewRequested={previewRequested || Boolean(previewId)}
       client={client}
     />
   ) : (
@@ -114,6 +167,7 @@ export function AppsRoute({
       workspaceId={workspaceId}
       appId={appId}
       client={client}
+      access={access}
     />
   );
 }
@@ -121,9 +175,11 @@ export function AppsRoute({
 function AppsListRoute({
   workspaceId,
   client,
+  canCreate,
 }: {
   workspaceId: string;
   client: AppsProductClient;
+  canCreate: boolean;
 }) {
   const [state, setState] = useState<LoadState<WorkspaceAppListResponse>>({
     status: "loading",
@@ -132,6 +188,9 @@ function AppsListRoute({
   const [paginationError, setPaginationError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const loadGeneration = useRef(0);
+  const newAppButtonRef = useRef<HTMLButtonElement>(null);
+  const inventoryRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
   const load = useCallback(
     async (signal?: AbortSignal, cursor?: string) => {
       const generation = ++loadGeneration.current;
@@ -186,10 +245,11 @@ function AppsListRoute({
       <PageHeader
         icon={<BoxesIcon aria-hidden="true" className="size-4" />}
         title="Apps"
-        description="Governed workspace applications with immutable checked releases, separate from generated HTML Artifacts."
+        description="Create, publish, and run workspace apps with explicit tool access for every launch."
         actions={
-          !creating ? (
+          canCreate && !creating ? (
             <Button
+              ref={newAppButtonRef}
               type="button"
               onClick={() => setCreating(true)}
               className="pointer-coarse:min-h-11"
@@ -205,8 +265,19 @@ function AppsListRoute({
           <LazyAppCreatePanel
             workspaceId={workspaceId}
             client={client}
-            onCancel={() => setCreating(false)}
+            onCancel={() => {
+              setCreating(false);
+              requestAnimationFrame(() => newAppButtonRef.current?.focus());
+            }}
             onCreated={(app) => {
+              if (state.status !== "ready") {
+                setCreating(false);
+                void navigate({
+                  to: "/workspaces/$workspaceId/apps/$appId",
+                  params: { workspaceId, appId: app.id },
+                });
+                return;
+              }
               setState((current) =>
                 current.status === "ready"
                   ? {
@@ -219,12 +290,14 @@ function AppsListRoute({
                         ],
                       },
                     }
-                  : {
-                      status: "ready",
-                      data: { apps: [app], nextCursor: null, truncated: false },
-                    },
+                  : current,
               );
               setCreating(false);
+              requestAnimationFrame(() => {
+                inventoryRef.current
+                  ?.querySelector<HTMLElement>(`[data-app-id="${app.id}"]`)
+                  ?.focus();
+              });
             }}
           />
         </Suspense>
@@ -247,12 +320,14 @@ function AppsListRoute({
       {state.status === "ready" && state.data.apps.length === 0 ? (
         <div className="mt-4">
           <EmptyState>
-            No Apps exist in this workspace yet. Create one, then deploy a checked build.
+            {canCreate
+              ? "No Apps exist in this workspace yet. Create one, then deploy a checked build."
+              : "No Apps exist in this workspace yet."}
           </EmptyState>
         </div>
       ) : null}
       {state.status === "ready" && state.data.apps.length > 0 ? (
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <div ref={inventoryRef} className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {state.data.apps.map((app) => (
             <AppListItem key={app.id} workspaceId={workspaceId} app={app} />
           ))}
@@ -282,17 +357,20 @@ function AppsListRoute({
 }
 
 function AppListItem({ workspaceId, app }: { workspaceId: string; app: WorkspaceApp }) {
+  const status =
+    app.status === "archived" ? "Archived" : app.activeReleaseId ? "Published" : "Draft";
   return (
     <Link
       to="/workspaces/$workspaceId/apps/$appId"
       params={{ workspaceId, appId: app.id }}
+      data-app-id={app.id}
       className="rounded-xl border border-border bg-surface p-4 outline-none transition-colors hover:bg-surface-2/40 focus-visible:ring-2 focus-visible:ring-ring/50"
     >
       <div className="flex items-start justify-between gap-3">
         <span className="rounded-md bg-brand/10 p-2 text-brand">
           <BoxesIcon aria-hidden="true" className="size-4" />
         </span>
-        <MetaChip>{app.activeReleaseId ? "Published" : "Draft"}</MetaChip>
+        <MetaChip>{status}</MetaChip>
       </div>
       <h2 className="mt-4 break-words text-sm font-semibold text-fg">{app.title}</h2>
       <p className="mt-1 line-clamp-2 text-sm text-fg-muted">
@@ -355,20 +433,50 @@ function BackToApps({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+function BackToApp({
+  workspaceId,
+  appId,
+  title,
+}: {
+  workspaceId: string;
+  appId: string;
+  title: string;
+}) {
+  return (
+    <Link
+      to="/workspaces/$workspaceId/apps/$appId"
+      params={{ workspaceId, appId }}
+      className="mb-4 inline-flex max-w-full items-center gap-1.5 rounded text-xs font-medium text-fg-muted outline-none hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50"
+    >
+      <ArrowLeftIcon aria-hidden="true" className="size-3.5 shrink-0" />
+      <span className="truncate">Back to {title}</span>
+    </Link>
+  );
+}
+
 function AppDetailRoute({
   workspaceId,
   appId,
   client,
+  access,
 }: {
   workspaceId: string;
   appId: string;
   client: AppsProductClient;
+  access: AppsRouteAccess;
 }) {
   const { state, load, setData } = useAppDetail(workspaceId, appId, client);
   if (state.status === "loading") {
     return (
       <ContentPage width="standard">
-        <Skeleton className="h-48" />
+        <PageHeader
+          icon={<BoxesIcon aria-hidden="true" className="size-4" />}
+          title="App"
+          description="Loading app details…"
+        />
+        <div role="status" aria-label="Loading app details" className="mt-4">
+          <Skeleton aria-hidden="true" className="h-48" />
+        </div>
       </ContentPage>
     );
   }
@@ -376,12 +484,24 @@ function AppDetailRoute({
     return (
       <ContentPage width="standard">
         <BackToApps workspaceId={workspaceId} />
-        <LoadErrorState title="Couldn't load app" error={state.error} onRetry={() => void load()} />
+        <PageHeader
+          icon={<BoxesIcon aria-hidden="true" className="size-4" />}
+          title="App"
+          description="View app details, releases, and runtime access."
+        />
+        <div className="mt-4">
+          <LoadErrorState
+            title="Couldn't load app"
+            error={state.error}
+            onRetry={() => void load()}
+          />
+        </div>
       </ContentPage>
     );
   }
   const detail = state.data;
   const release = detail.app.status === "active" ? publishedRelease(detail) : null;
+  const published = detail.app.status === "active" && detail.app.activeReleaseId !== null;
   return (
     <ContentPage width="standard">
       <BackToApps workspaceId={workspaceId} />
@@ -390,7 +510,7 @@ function AppDetailRoute({
         title={detail.app.title}
         description={detail.app.description || "A workspace application."}
         actions={
-          release ? (
+          published && access.run ? (
             <Button asChild className="pointer-coarse:min-h-11">
               <Link to="/workspaces/$workspaceId/apps/$appId/run" params={{ workspaceId, appId }}>
                 <PlayIcon aria-hidden="true" className="mr-2 size-4" />
@@ -406,7 +526,7 @@ function AppDetailRoute({
           <dl className="mt-3 grid gap-2 text-sm">
             <div className="flex justify-between gap-3">
               <dt className="text-fg-subtle">Status</dt>
-              <dd className="text-right text-fg">{release ? "Published" : "Not published"}</dd>
+              <dd className="text-right text-fg">{published ? "Published" : "Not published"}</dd>
             </div>
             <div className="flex justify-between gap-3">
               <dt className="text-fg-subtle">App revision</dt>
@@ -431,7 +551,7 @@ function AppDetailRoute({
           </p>
         </ContentSurface>
       </div>
-      {!release ? (
+      {!published ? (
         <div className="mt-4">
           <EmptyState>This app needs a ready published release before it can run.</EmptyState>
         </div>
@@ -448,6 +568,7 @@ function AppDetailRoute({
           workspaceId={workspaceId}
           detail={detail}
           client={client}
+          access={access}
           onDetailChange={setData}
           onRefresh={() => load()}
         />
@@ -460,11 +581,13 @@ function AppRunRoute({
   workspaceId,
   appId,
   previewId,
+  previewRequested,
   client,
 }: {
   workspaceId: string;
   appId: string;
   previewId?: string;
+  previewRequested: boolean;
   client: AppsProductClient;
 }) {
   const { state, load } = useAppDetail(workspaceId, appId, client);
@@ -478,8 +601,10 @@ function AppRunRoute({
   const [catalogRevision, setCatalogRevision] = useState(0);
   const catalogGeneration = useRef(0);
   const launchGeneration = useRef(0);
+  const runContentRef = useRef<HTMLDivElement>(null);
+  const restoreConfirmationFocus = useRef(false);
   const preview =
-    state.status === "ready" && previewId
+    state.status === "ready" && previewRequested && previewId
       ? (state.data.previews.find(
           (candidate) =>
             candidate.id === previewId &&
@@ -487,13 +612,16 @@ function AppRunRoute({
             new Date(candidate.expiresAt).getTime() > Date.now(),
         ) ?? null)
       : null;
-  const release =
+  const releaseId =
     state.status === "ready" && state.data.app.status === "active"
-      ? previewId
-        ? (state.data.releases.find((candidate) => candidate.id === preview?.releaseId) ?? null)
-        : publishedRelease(state.data)
+      ? previewRequested
+        ? (preview?.releaseId ?? null)
+        : state.data.app.activeReleaseId
       : null;
-  const releaseId = release?.id ?? null;
+  const release =
+    state.status === "ready" && releaseId
+      ? (state.data.releases.find((candidate) => candidate.id === releaseId) ?? null)
+      : null;
   const launchTargetId = preview?.id ?? releaseId;
 
   useEffect(() => {
@@ -529,8 +657,18 @@ function AppRunRoute({
     setBusy(false);
   }, [launchTargetId]);
 
+  useEffect(() => {
+    if (launch || !restoreConfirmationFocus.current) return;
+    restoreConfirmationFocus.current = false;
+    requestAnimationFrame(() => {
+      runContentRef.current
+        ?.querySelector<HTMLInputElement | HTMLButtonElement>('input[type="checkbox"], button')
+        ?.focus();
+    });
+  }, [launch]);
+
   const start = async () => {
-    if (!release || catalogState?.status !== "ready") return;
+    if (!releaseId || catalogState?.status !== "ready") return;
     if (catalogState.data.tools.length > 0 && !confirmed) return;
     const generation = launchGeneration.current;
     setBusy(true);
@@ -539,7 +677,7 @@ function AppRunRoute({
       const created = await client.createLaunch(
         workspaceId,
         appId,
-        preview ? { previewId: preview.id } : { releaseId: release.id },
+        preview ? { previewId: preview.id } : { releaseId },
       );
       if (generation === launchGeneration.current) setLaunch(created);
     } catch (error) {
@@ -551,8 +689,16 @@ function AppRunRoute({
 
   if (state.status === "loading") {
     return (
-      <ContentPage width="wide">
-        <Skeleton className="h-[32rem]" />
+      <ContentPage width="wide" className="min-h-full">
+        <BackToApps workspaceId={workspaceId} />
+        <PageHeader
+          icon={<PlayIcon aria-hidden="true" className="size-4" />}
+          title="Run app"
+          description="Loading the app and its runtime access…"
+        />
+        <div role="status" aria-label="Loading app runtime" className="mt-4 flex min-h-0 flex-1">
+          <Skeleton aria-hidden="true" className="min-h-64 flex-1" />
+        </div>
       </ContentPage>
     );
   }
@@ -560,66 +706,104 @@ function AppRunRoute({
     return (
       <ContentPage width="standard">
         <BackToApps workspaceId={workspaceId} />
-        <LoadErrorState title="Couldn't load app" error={state.error} onRetry={() => void load()} />
+        <PageHeader
+          icon={<PlayIcon aria-hidden="true" className="size-4" />}
+          title="Run app"
+          description="Confirm runtime access, then start the app in its isolated frame."
+        />
+        <div className="mt-4">
+          <LoadErrorState
+            title="Couldn't load app"
+            error={state.error}
+            onRetry={() => void load()}
+          />
+        </div>
       </ContentPage>
     );
   }
-  if (!release) {
+  if (!releaseId) {
     return (
       <ContentPage width="standard">
-        <BackToApps workspaceId={workspaceId} />
-        <EmptyState>
-          {previewId
-            ? "This App preview is unavailable, expired, or no longer active."
-            : "This app has no published release to run."}
-        </EmptyState>
+        <BackToApp workspaceId={workspaceId} appId={appId} title={state.data.app.title} />
+        <PageHeader
+          icon={<PlayIcon aria-hidden="true" className="size-4" />}
+          title={`Run ${state.data.app.title}`}
+          description="Confirm runtime access, then start the app in its isolated frame."
+        />
+        <div className="mt-4">
+          <EmptyState>
+            {previewRequested
+              ? "This app preview is unavailable, expired, or no longer active."
+              : "This app has no published release to run."}
+          </EmptyState>
+        </div>
       </ContentPage>
     );
   }
 
   return (
     <ContentPage width="wide" className="min-h-full">
-      <BackToApps workspaceId={workspaceId} />
+      <BackToApp workspaceId={workspaceId} appId={appId} title={state.data.app.title} />
       <PageHeader
         icon={<PlayIcon aria-hidden="true" className="size-4" />}
         title={`Run ${state.data.app.title}`}
-        description="Apps run in an isolated frame and receive only the tools confirmed below."
+        description={
+          preview
+            ? `Private preview${release ? ` of release ${release.revision}` : ""}, available until ${formatDate(preview.expiresAt)}. It runs in an isolated frame with only the tools confirmed below.`
+            : "Apps run in an isolated frame and receive only the tools confirmed below."
+        }
+        actions={
+          preview ? (
+            <MetaChip dot="waiting">
+              Preview{release ? ` · Release ${release.revision}` : ""}
+            </MetaChip>
+          ) : undefined
+        }
       />
-      {catalogState?.status === "loading" || catalogState === null ? (
-        <Skeleton className="h-48" />
-      ) : null}
-      {catalogState?.status === "error" ? (
-        <LoadErrorState
-          title="Couldn't load app access"
-          error={catalogState.error}
-          onRetry={() => setCatalogRevision((value) => value + 1)}
-        />
-      ) : null}
-      {launchError ? (
-        <div role="alert" className="rounded-lg border border-status-failed/40 p-3 text-sm text-fg">
-          {launchError.message}
-        </div>
-      ) : null}
-      {catalogState?.status === "ready" && !launch ? (
-        <AppCapabilityConfirmation
-          tools={catalogState.data.tools}
-          confirmed={confirmed}
-          busy={busy}
-          onConfirmedChange={setConfirmed}
-          onStart={() => void start()}
-        />
-      ) : null}
-      {catalogState?.status === "ready" && launch ? (
-        <AppRunFrame
-          workspaceId={workspaceId}
-          app={state.data.app}
-          catalog={catalogState.data}
-          launch={launch}
-          client={client}
-          productOrigin={window.location.origin}
-          onStop={() => setLaunch(null)}
-        />
-      ) : null}
+      <div ref={runContentRef} className="mt-4 flex min-h-0 flex-1 flex-col gap-3">
+        {catalogState?.status === "loading" || catalogState === null ? (
+          <Skeleton className="h-48" />
+        ) : null}
+        {catalogState?.status === "error" ? (
+          <LoadErrorState
+            title="Couldn't load app access"
+            error={catalogState.error}
+            onRetry={() => setCatalogRevision((value) => value + 1)}
+          />
+        ) : null}
+        {launchError ? (
+          <div
+            role="alert"
+            className="rounded-lg border border-status-failed/40 p-3 text-sm text-fg"
+          >
+            {launchError.message}
+          </div>
+        ) : null}
+        {catalogState?.status === "ready" && !launch ? (
+          <AppCapabilityConfirmation
+            tools={catalogState.data.tools}
+            confirmed={confirmed}
+            busy={busy}
+            onConfirmedChange={setConfirmed}
+            onStart={() => void start()}
+          />
+        ) : null}
+        {catalogState?.status === "ready" && launch ? (
+          <AppRunFrame
+            workspaceId={workspaceId}
+            app={state.data.app}
+            catalog={catalogState.data}
+            launch={launch}
+            client={client}
+            productOrigin={window.location.origin}
+            onStop={() => {
+              restoreConfirmationFocus.current = true;
+              setConfirmed(false);
+              setLaunch(null);
+            }}
+          />
+        ) : null}
+      </div>
     </ContentPage>
   );
 }

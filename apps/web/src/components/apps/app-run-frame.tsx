@@ -10,10 +10,11 @@ import type {
   OpenGeniAppsClient,
   WorkspaceApp,
 } from "@opengeni/sdk/apps";
-import { RefreshCwIcon, SquareIcon } from "lucide-react";
+import { RefreshCwIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { MetaChip } from "@/components/ui/meta-chip";
 
 export const APP_RUN_BROKER_IFRAME_SANDBOX = "allow-scripts allow-same-origin";
 export const APP_RUN_INNER_IFRAME_SANDBOX = "allow-scripts allow-same-origin";
@@ -40,6 +41,7 @@ export function appRunBrokerDocument(
   launchUrl: string,
   appOrigin: string,
   productOrigin: string,
+  appTitle: string,
 ): string | null {
   const safeUrl = safeAppLaunchUrl(launchUrl, appOrigin, productOrigin);
   if (!safeUrl) return null;
@@ -47,9 +49,10 @@ export function appRunBrokerDocument(
   const declaredProductOrigin = new URL(productOrigin).origin;
   const html = `<!doctype html>
 <meta charset="utf-8">
+<title>${htmlAttribute(appTitle)}</title>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src ${htmlAttribute(declaredAppOrigin)}; base-uri 'none'; form-action 'none'">
 <style>html,body,iframe{border:0;height:100%;margin:0;padding:0;width:100%}</style>
-<iframe id="app" src="${htmlAttribute(safeUrl)}" sandbox="${APP_RUN_INNER_IFRAME_SANDBOX}" allow="${htmlAttribute(APP_RUN_IFRAME_ALLOW)}" referrerpolicy="no-referrer" credentialless></iframe>
+<iframe id="app" title="${htmlAttribute(appTitle)} content" src="${htmlAttribute(safeUrl)}" sandbox="${APP_RUN_INNER_IFRAME_SANDBOX}" allow="${htmlAttribute(APP_RUN_IFRAME_ALLOW)}" referrerpolicy="no-referrer" credentialless></iframe>
 <script>
 const protocol=${scriptJson(OG_APP_BRIDGE_PROTOCOL)};
 const expectedParentOrigin=${scriptJson(declaredProductOrigin)};
@@ -127,8 +130,8 @@ export function AppRunFrame({
     [launch.appOrigin, launch.launchUrl, productOrigin],
   );
   const brokerDocument = useMemo(
-    () => appRunBrokerDocument(launch.launchUrl, launch.appOrigin, productOrigin),
-    [launch.appOrigin, launch.launchUrl, productOrigin],
+    () => appRunBrokerDocument(launch.launchUrl, launch.appOrigin, productOrigin, app.title),
+    [app.title, launch.appOrigin, launch.launchUrl, productOrigin],
   );
   const toolByCapability = useMemo(
     () => new Map(catalog.tools.map((tool) => [tool.programmaticPath.join("."), tool] as const)),
@@ -251,31 +254,42 @@ export function AppRunFrame({
   return (
     <section
       aria-label={`${app.title} app run`}
-      className="flex min-h-[32rem] min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface"
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface"
     >
-      <div className="flex min-h-11 items-center gap-2 border-b border-border px-3">
+      <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-border px-3">
         <div className="min-w-0 flex-1 truncate text-sm font-medium text-fg">{app.title}</div>
-        <span aria-live="polite" className="text-2xs text-fg-subtle">
-          {bridgeState === "ready"
-            ? "Connected"
-            : bridgeState === "error"
-              ? "Bridge unavailable"
-              : "Connecting…"}
+        <span aria-live="polite" className="shrink-0">
+          {bridgeState === "error" ? (
+            <MetaChip dot="failed">Bridge unavailable</MetaChip>
+          ) : (
+            <span className="text-2xs text-fg-subtle">
+              {bridgeState === "ready" ? "Connected" : "Connecting…"}
+            </span>
+          )}
         </span>
         <Button
           type="button"
-          size="icon-sm"
+          size={bridgeState === "error" ? "sm" : "icon-sm"}
           variant="ghost"
-          aria-label="Reload app"
+          aria-label={bridgeState === "error" ? "Reconnect app" : "Reload app"}
           onClick={() => {
             bridgeRef.current?.close();
             setReloadKey((value) => value + 1);
           }}
+          className="pointer-coarse:min-h-11 pointer-coarse:min-w-11"
         >
-          <RefreshCwIcon className="size-4" />
+          <RefreshCwIcon aria-hidden="true" className="size-4" />
+          {bridgeState === "error" ? "Reconnect" : null}
         </Button>
-        <Button type="button" size="icon-sm" variant="ghost" aria-label="Stop app" onClick={onStop}>
-          <SquareIcon className="size-3.5" />
+        <Button
+          type="button"
+          size="icon-sm"
+          variant="ghost"
+          aria-label="Close app"
+          onClick={onStop}
+          className="pointer-coarse:size-11"
+        >
+          <XIcon aria-hidden="true" className="size-4" />
         </Button>
       </div>
       <iframe
@@ -288,7 +302,6 @@ export function AppRunFrame({
         className="min-h-0 flex-1 border-0 bg-white"
         onLoad={() => {
           connect();
-          iframeRef.current?.focus();
         }}
       />
     </section>

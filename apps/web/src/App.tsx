@@ -45,6 +45,7 @@ import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
@@ -415,10 +416,12 @@ const workspaceAppDetailRoute = createRoute({
 const workspaceAppRunRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "apps/$appId/run",
-  validateSearch: (search: Record<string, unknown>): { previewId?: string } =>
-    typeof search.previewId === "string" && SCHEDULES_SEARCH_UUID.test(search.previewId)
+  validateSearch: (search: Record<string, unknown>): { previewId?: string | null } => {
+    if (!Object.hasOwn(search, "previewId")) return {};
+    return typeof search.previewId === "string" && SCHEDULES_SEARCH_UUID.test(search.previewId)
       ? { previewId: search.previewId }
-      : {},
+      : { previewId: null };
+  },
   component: AppRun,
 });
 const workspaceArtifactsRoute = createRoute({
@@ -719,17 +722,43 @@ function WorkspaceState() {
   return <LazyWorkspaceStateRoute workspaceId={workspaceId} view={view} />;
 }
 
+function useAppsRouteAccess(workspaceId: string) {
+  const context = useAppContext();
+  const directHuman =
+    context.managedSelfContext?.identity.subjectId === context.accessContext.subjectId;
+  const can = (permission: string) =>
+    directHuman && hasWorkspacePermission(context.accessContext, workspaceId, permission);
+  return {
+    read: can("apps:read"),
+    write: can("apps:write"),
+    publish: can("apps:publish"),
+    run: can("apps:run"),
+    delete: can("apps:delete"),
+  };
+}
+
 function Apps() {
-  return <LazyAppsRoute {...workspaceAppsRoute.useParams()} />;
+  const params = workspaceAppsRoute.useParams();
+  return <LazyAppsRoute {...params} access={useAppsRouteAccess(params.workspaceId)} />;
 }
 
 function AppDetail() {
-  return <LazyAppsRoute {...workspaceAppDetailRoute.useParams()} />;
+  const params = workspaceAppDetailRoute.useParams();
+  return <LazyAppsRoute {...params} access={useAppsRouteAccess(params.workspaceId)} />;
 }
 
 function AppRun() {
+  const params = workspaceAppRunRoute.useParams();
   const { previewId } = workspaceAppRunRoute.useSearch();
-  return <LazyAppsRoute {...workspaceAppRunRoute.useParams()} previewId={previewId} run />;
+  return (
+    <LazyAppsRoute
+      {...params}
+      previewId={previewId ?? undefined}
+      previewRequested={previewId !== undefined}
+      run
+      access={useAppsRouteAccess(params.workspaceId)}
+    />
+  );
 }
 
 function Artifacts() {

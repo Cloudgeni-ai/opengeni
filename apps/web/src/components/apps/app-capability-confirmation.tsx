@@ -44,17 +44,25 @@ export function AppCapabilityConfirmation({
       ) : (
         <>
           <p id={descriptionId} className="text-sm leading-5 text-fg-muted">
-            Confirm the read-only tools this app may use. The grant lasts only for this browser run
-            and is enforced before a request reaches the control transport.
+            Review the {tools.length.toLocaleString()} read-only{" "}
+            {tools.length === 1 ? "tool" : "tools"} this app may use. The grant lasts only for this
+            browser run and is enforced before a request reaches the control transport.
           </p>
-          <ul className="mt-3 grid gap-2" aria-label="Requested read-only tools">
+          <ul
+            tabIndex={0}
+            className="mt-3 grid max-h-80 gap-2 overflow-y-auto overscroll-contain pr-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            aria-label="Requested read-only tools"
+          >
             {tools.map((tool) => (
               <li
                 key={`${tool.identity.serverId}\u0000${tool.identity.toolName}`}
                 className="rounded-lg bg-surface-2/55 px-3 py-2"
               >
                 <div className="flex items-start gap-2">
-                  <ShieldCheckIcon className="mt-0.5 size-4 shrink-0 text-brand" />
+                  <ShieldCheckIcon
+                    aria-hidden="true"
+                    className="mt-0.5 size-4 shrink-0 text-brand"
+                  />
                   <div className="min-w-0">
                     <div className="break-words text-sm font-medium text-fg">
                       {tool.title ?? tool.programmaticPath.join(".")}
