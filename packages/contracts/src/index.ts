@@ -7933,12 +7933,12 @@ export const RigProviderImage = z
       .string()
       .regex(/^sha256:[0-9a-f]{64}$/u)
       .nullable(),
-    // Added after provider-image v1 shipped. Absence is retained for rolling
-    // compatibility but means runtime must use logical-image + setup fallback
-    // until an explicit verification cold-boots this exact image.
+    // Added after provider-image v1 shipped. Older proof versions remain
+    // readable for rolling compatibility, but runtime selection requires the
+    // current version so a stronger validation protocol always rebuilds.
     coldBootValidation: z
       .object({
-        version: z.literal(1),
+        version: z.union([z.literal(1), z.literal(2)]),
         checkedAt: z.string().datetime(),
       })
       .optional(),

@@ -14,10 +14,20 @@ describe("migration 0381 fail-closed Rig activation", () => {
     expect(source).not.toMatch(/UPDATE\s+rig_versions[\s\S]*status["']?\s*:\s*["']passed/iu);
   });
 
-  test("scoped creation accepts an explicit inactive pending initial version", () => {
+  test("requires a drained maintenance cutover before the writer protocol changes", () => {
+    expect(source.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
     expect(source).toContain("p_initial_version -> 'verification'");
     expect(source).toContain("(p_initial_version ->> 'active')::boolean");
     expect(source).toContain("coalesce((p_initial_version ->> 'active')::boolean, true)");
+    expect(source).toContain("opengeni.migration_application_roles");
+    expect(source).toContain("rig_version_writer_drain_before_lock");
+    expect(source).toContain("rig_version_writer_drain_after_lock");
+    expect(source).toContain("LOCK TABLE rigs IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain("LOCK TABLE rig_versions IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain("LOCK TABLE rig_changes IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain(
+      "requires all configured OpenGeni application database sessions to be stopped",
+    );
   });
 
   test("retains the scoped creation security boundary", () => {

@@ -29,9 +29,11 @@ type FailureMode =
   | "browser_unsupported"
   | "browser_empty_targets"
   | "browser_generation_mismatch"
+  | "browser_target_mismatch"
   | "browser_cleanup"
   | "computer_unsupported"
   | "computer_empty_targets"
+  | "computer_target_mismatch"
   | "computer_empty_image"
   | "computer_invalid_image"
   | "computer_cleanup"
@@ -68,9 +70,9 @@ function lease(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
   } as LeaseSnapshot;
 }
 
-function browserTarget(controllerGeneration: string): BrowserTarget {
+function browserTarget(controllerGeneration: string, id = "page-1"): BrowserTarget {
   return {
-    id: "page-1",
+    id,
     browserSessionId: BROWSER_SESSION_ID,
     controllerGeneration,
     targetGeneration: "target-1",
@@ -84,8 +86,8 @@ function browserTarget(controllerGeneration: string): BrowserTarget {
   };
 }
 
-function browserObservation(controllerGeneration: string): BrowserObservation {
-  const target = browserTarget(controllerGeneration);
+function browserObservation(controllerGeneration: string, targetId = "page-1"): BrowserObservation {
+  const target = browserTarget(controllerGeneration, targetId);
   return {
     protocolVersion: 1,
     observationId: "browser-observation-1",
@@ -107,9 +109,9 @@ function browserObservation(controllerGeneration: string): BrowserObservation {
   };
 }
 
-function computerTarget(controllerGeneration: string): ComputerTarget {
+function computerTarget(controllerGeneration: string, id = "screen-1"): ComputerTarget {
   return {
-    id: "screen-1",
+    id,
     computerSessionId: COMPUTER_SESSION_ID,
     controllerGeneration,
     targetGeneration: "screen-generation-1",
@@ -122,12 +124,15 @@ function computerTarget(controllerGeneration: string): ComputerTarget {
   };
 }
 
-function computerObservation(controllerGeneration: string): ComputerObservation {
+function computerObservation(
+  controllerGeneration: string,
+  targetId = "screen-1",
+): ComputerObservation {
   return {
     protocolVersion: 1,
     observationId: "computer-observation-1",
     computerSessionId: COMPUTER_SESSION_ID,
-    target: computerTarget(controllerGeneration),
+    target: computerTarget(controllerGeneration, targetId),
     frameId: "computer-frame-1",
     semantic: null,
     screenshot: null,
@@ -202,7 +207,10 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       },
       observe: async () => {
         events.push("browser:observe");
-        return browserObservation(generation);
+        return browserObservation(
+          generation,
+          mode === "browser_target_mismatch" ? "page-other" : "page-1",
+        );
       },
     }),
     endSession: async () => {
@@ -248,7 +256,10 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       },
       observe: async () => {
         events.push("computer:observe");
-        return computerObservation(generation);
+        return computerObservation(
+          generation,
+          mode === "computer_target_mismatch" ? "screen-other" : "screen-1",
+        );
       },
       capture: async () => {
         events.push("computer:capture");
@@ -403,9 +414,11 @@ describe("mandatory Rig platform surface validation", () => {
     ["browser_unsupported", "unsupported"],
     ["browser_empty_targets", "no real targets"],
     ["browser_generation_mismatch", "another session/controller binding"],
+    ["browser_target_mismatch", "another target binding"],
     ["browser_cleanup", "browser cleanup failed"],
     ["computer_unsupported", "computer unsupported"],
     ["computer_empty_targets", "no real screen target"],
+    ["computer_target_mismatch", "another target binding"],
     ["computer_empty_image", "image is empty"],
     ["computer_invalid_image", "does not match its request"],
     ["computer_cleanup", "computer cleanup failed"],

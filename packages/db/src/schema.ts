@@ -73,17 +73,23 @@ export type RigVersionVerificationState =
   | { status: "unverified" }
   | {
       status: "pending";
+      attempt?: number;
       expectedActiveVersionId: string | null;
       requestedAt: string;
     }
   | {
       status: "passed";
+      attempt?: number;
       expectedActiveVersionId: string | null;
       verifiedAt: string;
       receipt: RigPlatformSurfaceValidationReceipt;
+      source?:
+        | { kind: "version"; versionId: string }
+        | { kind: "change"; changeId: string; baseVersionId: string };
     }
   | {
       status: "failed";
+      attempt?: number;
       expectedActiveVersionId: string | null;
       verifiedAt: string;
       error: string;

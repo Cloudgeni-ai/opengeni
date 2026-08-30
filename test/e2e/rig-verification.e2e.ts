@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import {
+  beginRigVersionVerificationAttempt,
   bootstrapWorkspace,
   createDb,
   createRig,
@@ -193,7 +194,16 @@ describe("real Docker rig verification e2e", () => {
     expect(verified.status).toBe("proposed");
     expect(storedSerialized).toContain(secret);
 
-    await verifier().verifyRigVersion({ workspaceId, versionId: rig.activeVersion!.id });
+    const attempt = await beginRigVersionVerificationAttempt(db.db, {
+      workspaceId,
+      versionId: rig.activeVersion!.id,
+      requestedAt: new Date().toISOString(),
+    });
+    await verifier().verifyRigVersion({
+      workspaceId,
+      versionId: rig.activeVersion!.id,
+      versionAttempt: attempt.attempt,
+    });
     const [audit] = await db.db.transaction(async (tx) => {
       await setRlsContext(tx as never, { accountId, workspaceId });
       return await tx.execute<{ metadata: unknown }>(dbSql`

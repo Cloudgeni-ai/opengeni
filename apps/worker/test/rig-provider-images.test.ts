@@ -85,7 +85,7 @@ function readyImage(settings: Settings, definition: RigVersion): RigProviderImag
     artifactId: "44444444-4444-4444-8444-444444444444",
     providerBindingKeyHash: rigProviderImageProviderBindingKeyHash(PROVIDER_BINDING_KEY),
     coldBootValidation: {
-      version: 1,
+      version: 2,
       checkedAt: "2026-08-10T00:00:00.500Z",
     },
     provenance: {
@@ -299,6 +299,27 @@ describe("build-once rig provider image runtime", () => {
 
     expect(selected.reason).toBe("not_cold_boot_validated");
     expect(selected.settings.modalImageId).toBeUndefined();
+    expect(selected.imageId).toBeNull();
+  });
+
+  test("a v1 cold-boot record is not selected without the current native-surface proof", () => {
+    const settings = platformSettings();
+    const base = version();
+    const legacyImage = {
+      ...readyImage(settings, base),
+      coldBootValidation: {
+        version: 1 as const,
+        checkedAt: "2026-08-10T00:00:00.500Z",
+      },
+    };
+    const selected = resolveRigProviderImageSelection(
+      settings,
+      { ...base, providerImages: { modal: legacyImage } },
+      "modal",
+      legacyImage.providerBindingKeyHash,
+    );
+
+    expect(selected.reason).toBe("not_cold_boot_validated");
     expect(selected.imageId).toBeNull();
   });
 

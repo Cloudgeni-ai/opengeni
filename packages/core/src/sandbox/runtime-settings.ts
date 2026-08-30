@@ -166,7 +166,7 @@ export function resolveRigProviderImageSelection(
       imageId: image.imageId,
     };
   }
-  if (image.coldBootValidation?.version !== 1) {
+  if (image.coldBootValidation?.version !== 2) {
     return {
       settings,
       reason: "not_cold_boot_validated",

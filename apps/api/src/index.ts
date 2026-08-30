@@ -255,7 +255,13 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
-    startRigVerification: async ({ workspaceId, changeId, versionId, workflowId }) => {
+    startRigVerification: async ({
+      workspaceId,
+      changeId,
+      versionId,
+      versionAttempt,
+      workflowId,
+    }) => {
       const targetId = changeId ?? versionId;
       if (!targetId) {
         throw new Error("rig verification requires changeId or versionId");
@@ -269,7 +275,7 @@ export async function createTemporalWorkflowClient(
             {
               workspaceId,
               ...(changeId ? { changeId } : {}),
-              ...(versionId ? { versionId } : {}),
+              ...(versionId ? { versionId, versionAttempt } : {}),
             },
           ],
         });

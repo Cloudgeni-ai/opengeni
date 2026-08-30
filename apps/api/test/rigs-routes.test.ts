@@ -391,7 +391,7 @@ describe("rig route permission matrix", () => {
     const change = await proposed.json();
     expect(calls).toHaveLength(2);
     expect((calls[0] as { workflowId: string }).workflowId).toBe(
-      `rig-verification-version-${initialVersion.id}-initial`,
+      `rig-verification-version-${initialVersion.id}-attempt-1`,
     );
     expect((calls[1] as { workflowId: string }).workflowId).toBe(
       `rig-verification-change-${change.id}-attempt-1`,
@@ -423,6 +423,46 @@ describe("rig route permission matrix", () => {
     expect((calls[3] as { workflowId: string }).workflowId).toBe(
       `rig-verification-change-${change.id}-attempt-2`,
     );
+  });
+
+  test("repeated version verification requests reuse one in-flight attempt", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; versionAttempt: number }> = [];
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: { workflowId: string; versionAttempt: number }) => {
+          calls.push(input);
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "version-single-flight" }),
+    });
+    const rig = await created.json();
+    const [version] = await listRigVersions(client.db, ws.workspaceId, rig.id);
+    expect(version).toBeDefined();
+
+    const endpoint = `${base}/${rig.id}/versions/${version!.id}/verify`;
+    const first = await http.request(endpoint, { method: "POST", headers: manage });
+    const second = await http.request(endpoint, { method: "POST", headers: manage });
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect((await first.json()).attempt).toBe(1);
+    expect((await second.json()).attempt).toBe(1);
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls.map((call) => call.workflowId))).toEqual(
+      new Set([`rig-verification-version-${version!.id}-attempt-1`]),
+    );
+    expect(calls.every((call) => call.versionAttempt === 1)).toBe(true);
   });
 
   test("a committed rig create survives an unavailable initial verification dispatcher", async () => {

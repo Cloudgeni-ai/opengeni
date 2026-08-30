@@ -5,6 +5,7 @@ import {
   UpdateRigRequest,
 } from "@opengeni/contracts";
 import {
+  beginRigVersionVerificationAttempt,
   beginRigChangeVerificationAttempt,
   listRigs,
   RigChangeTransitionError,
@@ -139,12 +140,13 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   async function startVersionVerification(
     workspaceId: string,
     versionId: string,
-    workflowId = `rig-verification-version-${versionId}-${crypto.randomUUID()}`,
+    attempt: number,
   ): Promise<void> {
     await workflowClient.startRigVerification({
       workspaceId,
       versionId,
-      workflowId,
+      versionAttempt: attempt,
+      workflowId: `rig-verification-version-${versionId}-attempt-${attempt}`,
     });
   }
 
@@ -153,11 +155,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     versionId: string,
   ): Promise<boolean> {
     try {
-      await startVersionVerification(
-        workspaceId,
-        versionId,
-        `rig-verification-version-${versionId}-initial`,
-      );
+      await startVersionVerification(workspaceId, versionId, 1);
       return true;
     } catch (error) {
       // Creation already committed, but the version remains inactive. Preserve
@@ -268,8 +266,13 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!versions.some((version) => version.id === versionId)) {
       throw new HTTPException(404, { message: "rig version not found" });
     }
-    await startVersionVerification(rig.workspaceId, versionId);
-    return c.json({ ok: true, versionId }, 202);
+    const verification = await beginRigVersionVerificationAttempt(db, {
+      workspaceId: rig.workspaceId,
+      versionId,
+      requestedAt: new Date().toISOString(),
+    });
+    await startVersionVerification(rig.workspaceId, versionId, verification.attempt);
+    return c.json({ ok: true, versionId, attempt: verification.attempt }, 202);
   });
 
   // Rollback / promote-activate: flips which existing version is active.
@@ -349,7 +352,15 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!rig.activeVersion) {
       return c.json({ error: "rig has no active version" }, 422);
     }
-    await startVersionVerification(rig.workspaceId, rig.activeVersion.id);
-    return c.json({ ok: true, versionId: rig.activeVersion.id }, 202);
+    const verification = await beginRigVersionVerificationAttempt(db, {
+      workspaceId: rig.workspaceId,
+      versionId: rig.activeVersion.id,
+      requestedAt: new Date().toISOString(),
+    });
+    await startVersionVerification(rig.workspaceId, rig.activeVersion.id, verification.attempt);
+    return c.json(
+      { ok: true, versionId: rig.activeVersion.id, attempt: verification.attempt },
+      202,
+    );
   });
 }

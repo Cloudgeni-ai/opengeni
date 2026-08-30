@@ -61,6 +61,7 @@ import {
 import {
   countVariableSets,
   beginRigChangeVerificationAttempt,
+  beginRigVersionVerificationAttempt,
   createVariableSet,
   decryptVariableSetValue,
   encryptVariableSetValue,
@@ -4289,10 +4290,16 @@ function registerRigTools(
         if (!rig.activeVersion) {
           throw new Error("rig has no active version");
         }
+        const verification = await beginRigVersionVerificationAttempt(deps.db, {
+          workspaceId: rig.workspaceId,
+          versionId: rig.activeVersion.id,
+          requestedAt: new Date().toISOString(),
+        });
         await deps.workflowClient.startRigVerification({
           workspaceId: rig.workspaceId,
           versionId: rig.activeVersion.id,
-          workflowId: `rig-verification-version-${rig.activeVersion.id}-${crypto.randomUUID()}`,
+          versionAttempt: verification.attempt,
+          workflowId: `rig-verification-version-${rig.activeVersion.id}-attempt-${verification.attempt}`,
         });
         return json(
           mcpMutationReceipt({
@@ -4307,7 +4314,8 @@ function registerRigTools(
               state: "verification_started",
             },
             relatedResources: [{ type: "rig", id: rig.id }],
-            idempotency: { status: "not_supported" },
+            idempotency: { status: "applied" },
+            facts: { verificationAttempt: verification.attempt },
             nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
           }),
         );

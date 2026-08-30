@@ -46,6 +46,10 @@ function readyImage(definition: RigVersion = version): RigProviderImage {
     imageDigest: null,
     artifactId: "55555555-5555-4555-8555-555555555555",
     providerBindingKeyHash: `sha256:${"4".repeat(64)}`,
+    coldBootValidation: {
+      version: 2,
+      checkedAt: "2026-08-10T00:00:00.500Z",
+    },
     provenance: {
       kind: "rig_verification",
       targetKind: "version",

@@ -58,6 +58,15 @@ describe("release schema contract", () => {
     ).toMatchObject({ deploymentMode: "maintenance" });
   });
 
+  test("classifies the fail-closed Rig verification cutover as maintenance-only", async () => {
+    const contract = await buildSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0381_fail_closed_rig_version_activation.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
+
   test("is deterministic across creation order and classifies only executable SQL migrations", async () => {
     const first = await fixture([
       ["0002_second.sql", "-- deployment-mode: rolling\nselect 2;"],

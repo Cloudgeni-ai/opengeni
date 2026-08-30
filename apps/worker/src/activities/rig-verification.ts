@@ -82,7 +82,12 @@ type SandboxLifecycleCommandRunner = (
 
 export type RigVerificationWorkflowInput =
   | { workspaceId: string; changeId: string; versionId?: never }
-  | { workspaceId: string; versionId: string; changeId?: never };
+  | {
+      workspaceId: string;
+      versionId: string;
+      versionAttempt?: number;
+      changeId?: never;
+    };
 
 type CommandResult = {
   exitCode: number | null;
@@ -1243,7 +1248,7 @@ export async function buildVerifiedRigProviderImage(input: {
         ? rigProviderImageProviderBindingKeyHash(built.providerBindingKey)
         : null,
       coldBootValidation: {
-        version: 1,
+        version: 2,
         checkedAt: coldBootValidatedAt,
       },
       finishedAt: new Date().toISOString(),
@@ -1578,8 +1583,22 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
         }
       }),
 
-    verifyRigVersion: (input: { workspaceId: string; versionId: string }) =>
+    verifyRigVersion: (input: {
+      workspaceId: string;
+      versionId: string;
+      versionAttempt?: number;
+    }) =>
       withRigVerificationActivityLifecycle(async (lifecycle) => {
+        const versionAttempt = input.versionAttempt;
+        if (
+          typeof versionAttempt !== "number" ||
+          !Number.isSafeInteger(versionAttempt) ||
+          versionAttempt < 1
+        ) {
+          throw new Error(
+            "rig version verification has no durable attempt identity; retry through the current API",
+          );
+        }
         const { settings, db, observability } = await services();
         throwIfAborted(lifecycle.signal);
         const { rig, version } = await loadVersionTarget(db, input.workspaceId, input.versionId);
@@ -1679,12 +1698,31 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     signal: runContext.signal,
                   })
                 : null;
+              const finishedAt = new Date().toISOString();
+              const audit = {
+                subjectId: grant.subjectId,
+                metadata: {
+                  versionId: version.id,
+                  startedAt,
+                  finishedAt,
+                  passed,
+                  platformCheckResults,
+                  platformSurfaceValidation,
+                  checkResults,
+                  providerImage,
+                  activated: false,
+                  stale: false,
+                },
+              };
               const activation = passed
                 ? await completeRigVersionVerification(db, {
                     workspaceId: input.workspaceId,
                     rigId: rig.id,
                     versionId: version.id,
+                    attempt: versionAttempt,
                     receipt: platformSurfaceValidation,
+                    verifiedAt: finishedAt,
+                    audit,
                   })
                 : null;
               if (!passed) {
@@ -1692,36 +1730,10 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   workspaceId: input.workspaceId,
                   rigId: rig.id,
                   versionId: version.id,
+                  attempt: versionAttempt,
                   error: "one or more mandatory Rig checks failed",
-                });
-              }
-              await recordRigAuditEvent(db, {
-                grant,
-                action: passed ? "rig.verification.passed" : "rig.verification.failed",
-                rigId: rig.id,
-                metadata: {
-                  versionId: version.id,
-                  startedAt,
-                  finishedAt: new Date().toISOString(),
-                  passed,
-                  platformCheckResults,
-                  platformSurfaceValidation,
-                  checkResults,
-                  providerImage,
-                  activated: activation?.activated ?? false,
-                  stale: activation?.stale ?? false,
-                },
-              });
-              if (activation?.activated) {
-                await recordRigAuditEvent(db, {
-                  grant,
-                  action: "rig.version.activated",
-                  rigId: rig.id,
-                  metadata: {
-                    versionId: version.id,
-                    version: version.version,
-                    verification: true,
-                  },
+                  verifiedAt: finishedAt,
+                  audit,
                 });
               }
               return {
@@ -1733,6 +1745,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 providerImage,
                 activated: activation?.activated ?? false,
                 stale: activation?.stale ?? false,
+                superseded: activation?.superseded ?? false,
               };
             },
           );
@@ -1746,20 +1759,19 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
             workspaceId: input.workspaceId,
             rigId: rig.id,
             versionId: version.id,
+            attempt: versionAttempt,
             error: detail,
-          }).catch(() => undefined);
-          await recordRigAuditEvent(db, {
-            grant,
-            action: "rig.verification.failed",
-            rigId: rig.id,
-            metadata: {
-              versionId: version.id,
-              startedAt,
-              finishedAt: new Date().toISOString(),
-              passed: false,
-              error: detail,
+            audit: {
+              subjectId: grant.subjectId,
+              metadata: {
+                versionId: version.id,
+                startedAt,
+                finishedAt: new Date().toISOString(),
+                passed: false,
+                error: detail,
+              },
             },
-          });
+          }).catch(() => undefined);
           throw error;
         }
       }),

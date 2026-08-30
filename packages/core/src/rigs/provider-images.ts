@@ -42,7 +42,9 @@ export function rigProviderImageContentHash(input: {
 }): string {
   return sha256(
     stableJson({
-      version: 2,
+      // v3 requires the native Browser/Computer surface proof added to the
+      // independent cold boot. A v2 record must never compare equal.
+      version: 3,
       backend: input.backend,
       sourceImage: input.sourceImage,
       setupScript: input.definition.setupScript,
@@ -54,14 +56,14 @@ export function rigProviderImageContentHash(input: {
 }
 
 /** Modal's patched snapshot API accepts a caller-owned UUID idempotency key.
- * v2 denotes images proven by a separate cold boot before publication. */
+ * v3 denotes images proven by the current native-surface cold-boot protocol. */
 export function rigProviderImageBuildRequestId(input: {
   targetId: string;
   backend: SandboxBackend;
   contentHash: string;
 }): string {
   const bytes = createHash("sha256")
-    .update("opengeni-rig-provider-image-build-v2\0", "utf8")
+    .update("opengeni-rig-provider-image-build-v3\0", "utf8")
     .update(input.targetId, "utf8")
     .update("\0", "utf8")
     .update(input.backend, "utf8")
@@ -104,6 +106,7 @@ export function rigProviderImagesFromVerification(
 ): RigProviderImages {
   const parsed = RigProviderImageContract.safeParse(verification?.providerImage);
   if (!parsed.success || parsed.data.status === "building") return {};
+  if (parsed.data.status === "ready" && parsed.data.coldBootValidation?.version !== 2) return {};
   if (!rigProviderImageMatchesDefinition(parsed.data, definition)) return {};
   return { [parsed.data.backend]: parsed.data };
 }
