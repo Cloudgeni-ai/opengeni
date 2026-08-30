@@ -346,8 +346,6 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "del" }),
     });
     const rig = await created.json();
-    const [initialVersion] = await listRigVersions(client.db, ws.workspaceId, rig.id);
-    expect(initialVersion).toBeDefined();
     await activateInitialVersion(ws.workspaceId, rig.id);
 
     const session = await createSession(client.db, {
@@ -390,6 +388,8 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "retry-verify" }),
     });
     const rig = await created.json();
+    const [initialVersion] = await listRigVersions(client.db, ws.workspaceId, rig.id);
+    expect(initialVersion).toBeDefined();
     await activateInitialVersion(ws.workspaceId, rig.id);
     const proposed = await http.request(`${base}/${rig.id}/changes`, {
       method: "POST",
