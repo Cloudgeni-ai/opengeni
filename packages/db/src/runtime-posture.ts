@@ -606,6 +606,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "resolve_workspace_codex_subscription_source(uuid, uuid)",
   SESSION_REFERENCE_VISIBLE_ROUTINE,
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
 ] as const;
@@ -664,8 +665,6 @@ export const FORCE_RLS_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
-  "organization_codex_rotation_settings",
-  "workspace_codex_subscription_preferences",
   "company_brain_context_selection_receipts",
   "company_brain_preference_proposal_receipts",
   "company_brain_turn_context_snapshots",
@@ -779,6 +778,7 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_invitation_binding_events",
@@ -940,6 +940,7 @@ export const FORCE_RLS_TABLES = [
   "workspace_artifact_versions",
   "workspace_artifacts",
   "workspace_captures",
+  "workspace_codex_subscription_preferences",
   "workspace_control_events",
   "workspace_inference_controls",
   "workspace_instruction_policy_activation_events",
@@ -1025,8 +1026,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
-  "organization_codex_rotation_settings",
-  "workspace_codex_subscription_preferences",
   "composer_drafts",
   "computer_session_associations",
   "connection_disconnect_operations",
@@ -1067,6 +1066,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publications",
   "model_call_facts",
   "new_session_drafts",
+  "organization_codex_rotation_settings",
   "pack_installation_components",
   "pack_installations",
   "pr_review_app_registrations",
@@ -1133,6 +1133,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "video_generation_references",
   "workspace_artifacts",
   "workspace_captures",
+  "workspace_codex_subscription_preferences",
   "workspace_control_events",
   "workspace_inference_controls",
   "workspace_instruction_policy_heads",

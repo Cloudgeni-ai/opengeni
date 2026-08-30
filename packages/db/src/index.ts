@@ -20990,6 +20990,15 @@ export async function getWorkspaceCodexSubscriptionSource(
   );
 }
 
+async function lockWorkspaceCodexSubscriptionSource(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<void> {
+  await scopedDb.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`codex-subscription-source:${workspaceId}`}, 0))`,
+  );
+}
+
 function codexCredentialPoolCondition(input: {
   accountId: string;
   workspaceId: string;
@@ -21036,6 +21045,7 @@ export async function setWorkspaceCodexSubscriptionMode(
   },
 ): Promise<WorkspaceCodexSubscriptionSource> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
+    await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
     const current = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
     if (current.accountId !== input.accountId) {
       throw new Error("Codex source account does not match the workspace account");
@@ -21044,6 +21054,19 @@ export async function setWorkspaceCodexSubscriptionMode(
       throw new Error("personal workspaces always use workspace Codex subscriptions");
     }
     if (current.mode === input.mode) return current;
+    const [liveLease] = await scopedDb
+      .select({ id: schema.codexCredentialLeases.id })
+      .from(schema.codexCredentialLeases)
+      .where(
+        and(
+          eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
+          gt(schema.codexCredentialLeases.leasedUntil, new Date()),
+        ),
+      )
+      .limit(1);
+    if (liveLease) {
+      throw new Error("Codex subscription source cannot change while active turns are using it");
+    }
     await scopedDb
       .insert(schema.workspaceCodexSubscriptionPreferences)
       .values({
@@ -21426,6 +21449,13 @@ export async function setActiveOrganizationCodexCredential(
   input: { organizationId: string; actorSubjectId: string; credentialId: string },
 ): Promise<boolean> {
   return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const [settings] = await scopedDb
+      .select({ id: schema.organizationCodexRotationSettings.id })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
+      .for("update")
+      .limit(1);
+    if (!settings) return false;
     const [credential] = await scopedDb
       .select({ id: schema.codexSubscriptionCredentials.id })
       .from(schema.codexSubscriptionCredentials)
@@ -22154,6 +22184,7 @@ async function getCodexCredentialStatusScoped(
         })
         .from(schema.organizationCodexRotationSettings)
         .where(eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId))
+        .for("update")
         .limit(1)
     : await scopedDb
         .select({
@@ -22161,6 +22192,7 @@ async function getCodexCredentialStatusScoped(
         })
         .from(schema.codexRotationSettings)
         .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
+        .for("update")
         .limit(1);
 
   let row:
@@ -22695,6 +22727,7 @@ export async function acquireCodexCredentialLease<
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
+      await lockWorkspaceCodexSubscriptionSource(tx, input.workspaceId);
       const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
       if (source.accountId !== input.accountId) {
         throw new Error("Codex subscription source account does not match the turn account");

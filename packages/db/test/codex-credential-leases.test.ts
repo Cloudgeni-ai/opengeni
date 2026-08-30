@@ -1281,7 +1281,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     }
     const databaseError = (triggerError as { cause?: unknown })?.cause ?? triggerError;
     expect(String(databaseError)).toContain(
-      "Codex credential reference must remain in the row workspace",
+      "Codex session credential is outside the workspace effective pool",
     );
 
     let turnFkError: unknown;

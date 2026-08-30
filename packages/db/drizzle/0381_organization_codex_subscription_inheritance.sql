@@ -187,14 +187,26 @@ CREATE POLICY organization_scope_select ON "codex_subscription_credentials"
     AND organization_id = account_id
     AND opengeni_private.codex_organization_scope_visible(account_id)
   );
-CREATE POLICY organization_scope_update ON "codex_subscription_credentials"
+CREATE POLICY organization_scope_update_admin ON "codex_subscription_credentials"
   FOR UPDATE USING (
     authority_scope = 'organization'
     AND organization_id = account_id
+    AND opengeni_private.codex_organization_admin_visible(account_id)
+  ) WITH CHECK (
+    authority_scope = 'organization'
+    AND organization_id = account_id
+    AND opengeni_private.codex_organization_admin_visible(account_id)
+  );
+CREATE POLICY organization_scope_update_runtime ON "codex_subscription_credentials"
+  FOR UPDATE USING (
+    authority_scope = 'organization'
+    AND organization_id = account_id
+    AND opengeni_private.current_workspace_id() IS NOT NULL
     AND opengeni_private.codex_organization_scope_visible(account_id)
   ) WITH CHECK (
     authority_scope = 'organization'
     AND organization_id = account_id
+    AND opengeni_private.current_workspace_id() IS NOT NULL
     AND opengeni_private.codex_organization_scope_visible(account_id)
   );
 CREATE POLICY organization_scope_insert ON "codex_subscription_credentials"
@@ -209,6 +221,83 @@ CREATE POLICY organization_scope_delete ON "codex_subscription_credentials"
     AND organization_id = account_id
     AND opengeni_private.codex_organization_admin_visible(account_id)
   );
+
+-- Shared-workspace runtime paths must refresh tokens and maintain health,
+-- quota, cooldown, and fairness metadata on the inherited organization row.
+-- RLS selects the exact organization pool; this trigger keeps that runtime
+-- exception column- and transition-limited so workspace-context code cannot
+-- mutate organization ownership, provider identity, labels, or allocator
+-- administration. Organization owner/admin writes run without a workspace GUC
+-- and are governed by organization_scope_update_admin instead.
+CREATE OR REPLACE FUNCTION opengeni_private.enforce_organization_codex_runtime_update()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $body$
+BEGIN
+  IF OLD.authority_scope IS DISTINCT FROM 'organization'
+    OR opengeni_private.current_workspace_id() IS NULL
+  THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.id IS DISTINCT FROM OLD.id
+    OR NEW.account_id IS DISTINCT FROM OLD.account_id
+    OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+    OR NEW.organization_id IS DISTINCT FROM OLD.organization_id
+    OR NEW.authority_scope IS DISTINCT FROM OLD.authority_scope
+    OR NEW.owner_organization_membership_id IS DISTINCT FROM OLD.owner_organization_membership_id
+    OR NEW.organization_user_resource_authority_id IS DISTINCT FROM OLD.organization_user_resource_authority_id
+    OR NEW.organization_user_resource_kind IS DISTINCT FROM OLD.organization_user_resource_kind
+    OR NEW.organization_user_resource_authority_generation IS DISTINCT FROM OLD.organization_user_resource_authority_generation
+    OR NEW.chatgpt_account_id IS DISTINCT FROM OLD.chatgpt_account_id
+    OR NEW.scopes IS DISTINCT FROM OLD.scopes
+    OR NEW.plan_type IS DISTINCT FROM OLD.plan_type
+    OR NEW.is_fedramp IS DISTINCT FROM OLD.is_fedramp
+    OR NEW.label IS DISTINCT FROM OLD.label
+    OR NEW.account_email IS DISTINCT FROM OLD.account_email
+    OR NEW.allocator_enabled IS DISTINCT FROM OLD.allocator_enabled
+    OR NEW.allocator_version IS DISTINCT FROM OLD.allocator_version
+    OR NEW.allocator_updated_by_subject_id IS DISTINCT FROM OLD.allocator_updated_by_subject_id
+    OR NEW.allocator_updated_at IS DISTINCT FROM OLD.allocator_updated_at
+    OR NEW.connected_by_subject_id IS DISTINCT FROM OLD.connected_by_subject_id
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at
+  THEN
+    RAISE EXCEPTION 'organization Codex credential management requires organization administration'
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NEW.credential_encrypted IS DISTINCT FROM OLD.credential_encrypted
+    OR NEW.expires_at IS DISTINCT FROM OLD.expires_at
+    OR NEW.last_refresh_at IS DISTINCT FROM OLD.last_refresh_at
+    OR NEW.version IS DISTINCT FROM OLD.version
+  THEN
+    IF NEW.credential_encrypted IS NOT DISTINCT FROM OLD.credential_encrypted
+      OR NEW.version IS DISTINCT FROM OLD.version + 1
+      OR NEW.last_refresh_at IS NULL
+      OR NEW.last_refresh_at IS NOT DISTINCT FROM OLD.last_refresh_at
+      OR NEW.status IS DISTINCT FROM 'active'
+      OR NEW.last_error IS NOT NULL
+      OR NEW.primary_used_percent IS DISTINCT FROM OLD.primary_used_percent
+      OR NEW.primary_reset_at IS DISTINCT FROM OLD.primary_reset_at
+      OR NEW.secondary_used_percent IS DISTINCT FROM OLD.secondary_used_percent
+      OR NEW.secondary_reset_at IS DISTINCT FROM OLD.secondary_reset_at
+      OR NEW.usage_checked_at IS DISTINCT FROM OLD.usage_checked_at
+      OR NEW.exhausted_until IS DISTINCT FROM OLD.exhausted_until
+      OR NEW.reset_credit_available_count IS DISTINCT FROM OLD.reset_credit_available_count
+      OR NEW.reset_credits_checked_at IS DISTINCT FROM OLD.reset_credits_checked_at
+      OR NEW.selection_count IS DISTINCT FROM OLD.selection_count
+      OR NEW.last_selected_at IS DISTINCT FROM OLD.last_selected_at
+    THEN
+      RAISE EXCEPTION 'organization Codex runtime token refresh has an invalid mutation shape'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END
+$body$;
 
 CREATE TABLE "organization_codex_rotation_settings" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -432,6 +521,26 @@ BEGIN
       RETURN NEW;
     END
     $function$;
+
+    CREATE OR REPLACE FUNCTION opengeni_private.prevent_organization_codex_disconnect_with_live_leases()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I
+    AS $function$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM codex_credential_leases lease
+        WHERE lease.account_id = OLD.account_id
+          AND lease.credential_id = OLD.id
+          AND lease.leased_until > now()
+      ) THEN
+        RAISE EXCEPTION 'Codex subscription cannot disconnect while active turns are using it'
+          USING ERRCODE = '55006';
+      END IF;
+      RETURN OLD;
+    END
+    $function$;
   $ddl$, data_schema);
 END
 $codex_reference_guards$;
@@ -445,6 +554,15 @@ BEFORE INSERT OR UPDATE OF
   organization_user_resource_kind, organization_user_resource_authority_generation
 ON "codex_subscription_credentials"
 FOR EACH ROW EXECUTE FUNCTION validate_personal_codex_credential_authority();
+
+CREATE TRIGGER codex_credentials_organization_runtime_update_guard
+BEFORE UPDATE ON "codex_subscription_credentials"
+FOR EACH ROW EXECUTE FUNCTION opengeni_private.enforce_organization_codex_runtime_update();
+
+CREATE TRIGGER codex_credentials_organization_live_lease_disconnect_guard
+BEFORE DELETE ON "codex_subscription_credentials"
+FOR EACH ROW WHEN (OLD.authority_scope = 'organization')
+EXECUTE FUNCTION opengeni_private.prevent_organization_codex_disconnect_with_live_leases();
 
 CREATE TRIGGER codex_credential_leases_source_guard
 BEFORE INSERT OR UPDATE OF account_id, workspace_id, credential_id
@@ -486,6 +604,9 @@ DECLARE data_schema text := current_schema();
 BEGIN
   REVOKE ALL ON FUNCTION opengeni_private.codex_organization_scope_visible(uuid) FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.codex_organization_admin_visible(uuid) FROM PUBLIC;
+  REVOKE ALL ON FUNCTION opengeni_private.enforce_organization_codex_runtime_update() FROM PUBLIC;
+  REVOKE ALL ON FUNCTION opengeni_private.prevent_organization_codex_disconnect_with_live_leases()
+    FROM PUBLIC;
   REVOKE ALL ON FUNCTION resolve_workspace_codex_subscription_source(uuid,uuid) FROM PUBLIC;
   REVOKE ALL ON FUNCTION opengeni_private.codex_credential_serves_workspace(uuid,uuid,uuid)
     FROM PUBLIC;

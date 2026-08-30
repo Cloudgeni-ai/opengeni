@@ -74,11 +74,13 @@ export function OrganizationSettingsShell({
   workspaceId,
   organizationLabel,
   section,
+  showModels,
   children,
 }: {
   workspaceId: string;
   organizationLabel: string;
   section: OrganizationAdminSection;
+  showModels: boolean;
   children: ReactNode;
 }) {
   const copy = COPY[section];
@@ -138,7 +140,7 @@ export function OrganizationSettingsShell({
             aria-label="Organization settings"
             className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-4 lg:flex lg:flex-col"
           >
-            {ITEMS.map((item) => {
+            {ITEMS.filter((item) => item.id !== "models" || showModels).map((item) => {
               const Icon = item.icon;
               const selected = item.id === section;
               return (

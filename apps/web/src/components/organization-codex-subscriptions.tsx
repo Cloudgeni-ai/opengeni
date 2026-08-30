@@ -21,12 +21,15 @@ export function OrganizationCodexSubscriptions({ organizationId }: { organizatio
   const client = useAppContext().client;
   const [data, setData] = useState<OrganizationCodexAccountsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<{
     userCode: string;
     verificationUri: string;
   } | null>(null);
   const refresh = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
     try {
       const result = await client.requestJson<OrganizationCodexAccountsResponse>(
         "GET",
@@ -35,14 +38,15 @@ export function OrganizationCodexSubscriptions({ organizationId }: { organizatio
       setData(result);
     } catch (error) {
       setData(null);
-      toast.error(error instanceof Error ? error.message : "Failed to load subscriptions");
+      const message = error instanceof Error ? error.message : "Failed to load subscriptions";
+      setLoadError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
   }, [client, organizationId]);
 
   useEffect(() => {
-    setLoading(true);
     void refresh();
   }, [refresh]);
 
@@ -175,6 +179,16 @@ export function OrganizationCodexSubscriptions({ organizationId }: { organizatio
         <p role="status" className="flex items-center gap-2 text-xs text-fg-muted">
           <Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…
         </p>
+      ) : loadError ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-danger/30 bg-danger/5 p-4"
+        >
+          <p className="text-xs text-danger">{loadError}</p>
+          <Button type="button" size="sm" variant="ghost" onClick={() => void refresh()}>
+            Retry
+          </Button>
+        </div>
       ) : pending ? (
         <CodexDeviceCodePanel
           userCode={pending.userCode}

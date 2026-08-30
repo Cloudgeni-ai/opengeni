@@ -679,7 +679,11 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       );
     } catch (error) {
-      if (error instanceof Error && error.message.includes("personal workspaces")) {
+      if (
+        error instanceof Error &&
+        (error.message.includes("personal workspaces") ||
+          error.message.includes("active turns are using it"))
+      ) {
         throw new HTTPException(409, { message: error.message });
       }
       throw error;
@@ -888,11 +892,24 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const result = await disconnectOrganizationCodexAccount(db, {
-      organizationId,
-      actorSubjectId: human.subjectId,
-      credentialId: c.req.param("accountId"),
-    });
+    let result: Awaited<ReturnType<typeof disconnectOrganizationCodexAccount>>;
+    try {
+      result = await disconnectOrganizationCodexAccount(db, {
+        organizationId,
+        actorSubjectId: human.subjectId,
+        credentialId: c.req.param("accountId"),
+      });
+    } catch (error) {
+      const cause = (error as { cause?: unknown } | null)?.cause;
+      const message =
+        cause instanceof Error ? cause.message : error instanceof Error ? error.message : "";
+      if (message.includes("active turns are using it")) {
+        throw new HTTPException(409, {
+          message: "Codex subscription cannot disconnect while active turns are using it",
+        });
+      }
+      throw error;
+    }
     return c.json({ disconnected: result.removed, newActiveId: result.newActiveCredentialId });
   });
 
