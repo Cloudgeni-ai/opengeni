@@ -1,4 +1,7 @@
-import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+} from "@opengeni/config";
 import {
   CreatePrReviewAppRegistrationRequest,
   CreatePrReviewRepositoryBindingRequest,
@@ -13,6 +16,7 @@ import {
   canonicalConfiguredModel,
   defaultPrReviewProviderBaseUrl,
   getCapabilityPack,
+  isWorkspaceGatewayCustomModelId,
   prReviewWebhookAuthKind,
   normalizePrReviewProviderBaseUrl,
   prReviewPackConnectorId,
@@ -33,6 +37,7 @@ import {
   getPackInstallation,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
   nestedPostgresSqlState,
   recordAuditEvent,
   updatePrReviewAppRegistration,
@@ -396,6 +401,14 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
       ? (canonicalConfiguredModel(catalogSettings, payload.model) ?? null)
       : null;
     if (model) await assertWorkspaceModelPolicyAllows(db, catalogSettings, workspaceId, model);
+    const beforeCreateCommit = model
+      ? prReviewCustomModelCommitGuard({
+          settings: catalogSettings,
+          accountId: grant.accountId,
+          workspaceId,
+          modelId: model,
+        })
+      : undefined;
     const template = getCapabilityPack(OPENGENI_PR_REVIEW_PACK_ID)?.automationTemplates?.find(
       (candidate) => candidate.id === PR_REVIEW_AUTOMATION_TEMPLATE_ID,
     );
@@ -424,6 +437,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
         eventTypes: template.eventTypes,
         configuration: template.configuration,
         sessionTemplate: template.sessionTemplate,
+        ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       }),
       "This repository is already bound to the selected PR Review registration",
     );
@@ -461,6 +475,27 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
           ? null
           : (canonicalConfiguredModel(catalogSettings, payload.model) ?? null);
     if (model) await assertWorkspaceModelPolicyAllows(db, catalogSettings, workspaceId, model);
+    const beforeUpdateCommit = async (
+      tx: ApiRouteDeps["db"],
+      context: {
+        currentModel: string | null;
+        currentStatus: "active" | "disabled";
+        nextModel: string | null;
+        nextStatus: "active" | "disabled";
+      },
+    ): Promise<void> => {
+      const materialExecutionChange =
+        payload.model !== undefined ||
+        payload.additionalInstructions !== undefined ||
+        (context.currentStatus === "disabled" && context.nextStatus === "active");
+      if (!materialExecutionChange || !context.nextModel) return;
+      await prReviewCustomModelCommitGuard({
+        settings: catalogSettings,
+        accountId: grant.accountId,
+        workspaceId,
+        modelId: context.nextModel,
+      })?.(tx);
+    };
     const binding = await updatePrReviewRepositoryBinding(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -471,6 +506,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
         ? { additionalInstructions: payload.additionalInstructions }
         : {}),
       ...(payload.status !== undefined ? { status: payload.status } : {}),
+      beforeUpdateCommit,
     });
     if (!binding)
       throw new HTTPException(404, {
@@ -512,6 +548,27 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     return c.body(null, 204);
   });
+}
+
+function prReviewCustomModelCommitGuard(input: {
+  settings: ApiRouteDeps["settings"];
+  accountId: string;
+  workspaceId: string;
+  modelId: string;
+}): ((tx: ApiRouteDeps["db"]) => Promise<void>) | undefined {
+  if (!isWorkspaceGatewayCustomModelId(input.settings, input.modelId)) return undefined;
+  return async (tx): Promise<void> => {
+    const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      upstreamModelId: input.modelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length),
+    });
+    if (!active) {
+      throw new HTTPException(422, {
+        message: `model is not available: ${input.modelId}`,
+      });
+    }
+  };
 }
 
 function assertPrReviewSandboxBackend(deps: ApiRouteDeps): void {

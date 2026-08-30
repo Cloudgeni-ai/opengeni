@@ -7,7 +7,11 @@ import {
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { canonicalConfiguredModel } from "../src/domain/sessions";
-import { resolveCatalogSettings, resolveWorkspaceCatalogSettings } from "../src/model-catalog";
+import {
+  isWorkspaceGatewayCustomModelId,
+  resolveCatalogSettings,
+  resolveWorkspaceCatalogSettings,
+} from "../src/model-catalog";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -149,6 +153,19 @@ describe("model catalog source resolution", () => {
           "workspace-gateway/anthropic/claude-sonnet-4.6",
         ),
       ).toBe("workspace-gateway/anthropic/claude-sonnet-4.6");
+      expect(
+        isWorkspaceGatewayCustomModelId(
+          resolved.settings,
+          "workspace-gateway/anthropic/claude-sonnet-4.6",
+        ),
+      ).toBe(true);
+      expect(
+        isWorkspaceGatewayCustomModelId(
+          resolved.settings,
+          "workspace-gateway/deepseek-v4-flash-0731",
+        ),
+      ).toBe(false);
+      expect(isWorkspaceGatewayCustomModelId(resolved.settings, "gpt-5.6-luna")).toBe(false);
       expect(() =>
         canonicalConfiguredModel(resolved.settings, "workspace-gateway/unstored/model"),
       ).toThrow("model is not available");

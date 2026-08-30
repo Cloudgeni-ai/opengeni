@@ -134,6 +134,7 @@ import {
 } from "../session-authorization";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { managedSessionGroupBackend } from "../sandbox/runtime-settings";
+import { isWorkspaceGatewayCustomModelId, resolveWorkspaceCatalogSettings } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
@@ -664,6 +665,9 @@ export async function createAndStartSessionWithOutcome(input: {
   /** The custom workspace model was frozen by an earlier accepted boundary or
    * inherited from an existing session, so retirement must not invalidate it. */
   retainWorkspaceGatewayModel?: boolean;
+  /** The selected workspace Gateway product is backed by a mutable custom row,
+   * rather than deployment-curated Gateway membership. */
+  workspaceGatewayCustomModel?: boolean;
   accountId: string;
   workspaceId: string;
   visibility?: "user_private" | "workspace_shared";
@@ -797,8 +801,7 @@ export async function createAndStartSessionWithOutcome(input: {
     input.initialAutomaticTitle,
   );
   const requiresActiveWorkspaceGatewayModel =
-    input.model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) &&
-    input.retainWorkspaceGatewayModel !== true;
+    input.workspaceGatewayCustomModel === true && input.retainWorkspaceGatewayModel !== true;
   const beforeCreateCommit =
     requiresActiveWorkspaceGatewayModel || input.beforeCreateCommit
       ? async (tx: Database, sessionId: string, context?: { created: boolean }): Promise<void> => {
@@ -1461,7 +1464,8 @@ export async function postUserMessageTurn(
   const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
   const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
   const freshWorkspaceGatewayModel =
-    requestedModel?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true &&
+    requestedModel !== null &&
+    isWorkspaceGatewayCustomModelId(settings, requestedModel) &&
     requestedModel !== sessionForModelGate.model
       ? requestedModel
       : null;
@@ -1805,6 +1809,7 @@ export async function createSessionForRequestWithOutcome(
     : authorization?.canonicalManagedHumanSession || grant.principalKind === "human_session"
       ? grant.subjectId
       : null;
+  let retainedKeyedShellModel: string | null = null;
   if (
     payload.idempotencyKey &&
     (effectiveVisibility !== "user_private" || replayManagedHumanSubjectId !== null)
@@ -1828,28 +1833,32 @@ export async function createSessionForRequestWithOutcome(
         if (initializedReplay.outcome === "denied") {
           throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(initializedReplay.denial));
         }
-        if (initializedReplay.workflowWakeRevision !== null) {
-          await unresolvedDeps.workflowClient.wakeSessionWorkflow({
-            accountId: grant.accountId,
+        if (initializedReplay.outcome === "pending") {
+          retainedKeyedShellModel = initializedReplay.session.model;
+        } else {
+          if (initializedReplay.workflowWakeRevision !== null) {
+            await unresolvedDeps.workflowClient.wakeSessionWorkflow({
+              accountId: grant.accountId,
+              workspaceId,
+              sessionId: initializedReplay.session.id,
+              workflowId: initializedReplay.temporalWorkflowId,
+              wakeRevision: initializedReplay.workflowWakeRevision,
+            });
+          }
+          return await withSessionCreateUsageRecording({
+            deps: unresolvedDeps,
+            grant,
             workspaceId,
-            sessionId: initializedReplay.session.id,
-            workflowId: initializedReplay.temporalWorkflowId,
-            wakeRevision: initializedReplay.workflowWakeRevision,
+            startMode: payload.startMode,
+            origin: creationInitiator.actor ? "system" : "user",
+            createOutcome: {
+              session: initializedReplay.session,
+              outcome: initializedReplay.changed ? "repaired" : "replayed",
+              replay: !initializedReplay.changed,
+              changed: initializedReplay.changed,
+            },
           });
         }
-        return await withSessionCreateUsageRecording({
-          deps: unresolvedDeps,
-          grant,
-          workspaceId,
-          startMode: payload.startMode,
-          origin: creationInitiator.actor ? "system" : "user",
-          createOutcome: {
-            session: initializedReplay.session,
-            outcome: initializedReplay.changed ? "repaired" : "replayed",
-            replay: !initializedReplay.changed,
-            changed: initializedReplay.changed,
-          },
-        });
       }
     } catch (error) {
       if (error instanceof SessionIdConflictError) {
@@ -1863,9 +1872,13 @@ export async function createSessionForRequestWithOutcome(
       throw error;
     }
   }
-  let settings = await resolveWorkspaceModelBoundarySettings(unresolvedDeps, grant, workspaceId, [
-    payload.model,
-  ]);
+  let settings = await resolveWorkspaceModelBoundarySettings(
+    unresolvedDeps,
+    grant,
+    workspaceId,
+    [payload.model],
+    retainedKeyedShellModel,
+  );
   let deps =
     settings === unresolvedDeps.settings
       ? unresolvedDeps
@@ -2653,6 +2666,7 @@ export async function createSessionForRequestWithOutcome(
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
+      workspaceGatewayCustomModel: isWorkspaceGatewayCustomModelId(settings, model),
       retainWorkspaceGatewayModel: parentSession !== null && model === inheritedModel,
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,

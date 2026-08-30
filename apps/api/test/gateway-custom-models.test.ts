@@ -10,6 +10,7 @@ import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { createSessionForRequest, resolveCatalogSettings, type ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  createAutomationSource,
   createConnection,
   createDb,
   createSession,
@@ -47,6 +48,39 @@ const settings = testSettings({
   productAccessMode: "managed",
   delegationSecret: SECRET,
 });
+
+function automationSessionTemplate(model: string | null) {
+  return {
+    prompt: "Investigate the accepted event",
+    instructions: null,
+    resources: [],
+    skills: [],
+    tools: [],
+    firstPartyMcpTools: [],
+    firstPartyMcpPermissions: [],
+    model,
+    reasoningEffort: null,
+    sandboxBackend: null,
+    policyRole: null,
+    metadata: {},
+  };
+}
+
+async function createAutomationSourceFixture(name: string) {
+  if (!client || !grant) throw new Error("Gateway custom model fixture is unavailable");
+  return await createAutomationSource(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    createdBySubjectId: grant.subjectId,
+    webhookSecretEncrypted: "test-ciphertext",
+    request: {
+      name,
+      adapterId: "signed-json.v1",
+      webhookSecret: "never-stored-secret",
+      configuration: {},
+    },
+  });
+}
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
   const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
@@ -643,6 +677,185 @@ describe("workspace Gateway custom model API", () => {
     expect(stored?.count).toBe(0);
   });
 
+  test("repairs a keyed custom-model shell after the model is retired", async () => {
+    if (!shared || !publicApp || !grant) return;
+    const upstreamModelId = `race/keyed-shell-model-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const createdModelResponse = await request("/gateway-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId },
+    });
+    expect(createdModelResponse.status).toBe(201);
+    const customModel = (await createdModelResponse.json()) as {
+      id: string;
+      version: number;
+    };
+    const idempotencyKey = crypto.randomUUID();
+    const shell = await createSession(client!.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Repair this custom-model session shell",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      subjectId: grant.subjectId,
+      model: productModelId,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: idempotencyKey,
+    });
+    const removed = await request(`/gateway-custom-models/${customModel.id}`, {
+      method: "DELETE",
+      body: {
+        expectedVersion: customModel.version,
+        operationId: crypto.randomUUID(),
+      },
+    });
+    expect(removed.status).toBe(204);
+
+    const repaired = await request(
+      "/sessions",
+      {
+        method: "POST",
+        permissions: ["sessions:create"],
+        body: {
+          initialMessage: "Repair this custom-model session shell",
+          resources: [],
+          model: productModelId,
+          sandboxBackend: "none",
+          idempotencyKey,
+        },
+      },
+      publicApp,
+    );
+    expect(repaired.status).toBe(202);
+    expect(await repaired.json()).toMatchObject({ id: shell.id, model: productModelId });
+    const [stored] = await shared.admin<Array<{ createdEvents: number; queuedTurns: number }>>`
+      select
+        (select count(*)::int
+           from session_events
+          where workspace_id = ${grant.workspaceId}::uuid
+            and session_id = ${shell.id}::uuid
+            and type = 'session.created') as "createdEvents",
+        (select count(*)::int
+           from session_turns
+          where workspace_id = ${grant.workspaceId}::uuid
+            and session_id = ${shell.id}::uuid) as "queuedTurns"
+    `;
+    expect(stored).toEqual({ createdEvents: 1, queuedTurns: 1 });
+  });
+
+  test("admits deployment-curated workspace Gateway models without a custom row", async () => {
+    if (!publicApp || !grant) return;
+    const curatedModelId = "workspace-gateway/deepseek-v4-flash-0731";
+
+    const createdSessionResponse = await request(
+      "/sessions",
+      {
+        method: "POST",
+        permissions: ["sessions:create"],
+        body: {
+          initialMessage: "Use the curated workspace Gateway model",
+          resources: [],
+          model: curatedModelId,
+          sandboxBackend: "none",
+          idempotencyKey: crypto.randomUUID(),
+        },
+      },
+      publicApp,
+    );
+    expect(createdSessionResponse.status).toBe(202);
+    expect(await createdSessionResponse.json()).toMatchObject({
+      model: curatedModelId,
+    });
+
+    const defaultSession = await createSession(client!.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Curated follow-up switch fixture",
+      resources: [],
+      metadata: {},
+      model: settings.openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const switched = await publicApp.request(
+      `http://x/v1/workspaces/${grant.workspaceId}/sessions/${defaultSession.id}/events`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(["sessions:control"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: crypto.randomUUID(),
+          payload: {
+            text: "Switch to the curated workspace Gateway model",
+            resources: [],
+            model: curatedModelId,
+          },
+        }),
+      },
+    );
+    expect(switched.status).toBe(202);
+
+    const scheduled = await request(
+      "/scheduled-tasks",
+      {
+        method: "POST",
+        permissions: ["scheduled_tasks:manage"],
+        body: {
+          name: `Curated Gateway schedule ${crypto.randomUUID()}`,
+          schedule: { type: "manual" },
+          runMode: "new_session_per_run",
+          overlapPolicy: "allow_concurrent",
+          status: "active",
+          agentConfig: {
+            prompt: "Run with the curated workspace Gateway model",
+            model: curatedModelId,
+            resources: [],
+            tools: [],
+            metadata: {},
+          },
+          metadata: {},
+        },
+      },
+      publicApp,
+    );
+    expect(scheduled.status).toBe(201);
+    expect(await scheduled.json()).toMatchObject({
+      agentConfig: { model: curatedModelId },
+    });
+
+    const source = await createAutomationSourceFixture("Curated Gateway automation source");
+    const trigger = await request(
+      "/automations/triggers",
+      {
+        method: "POST",
+        permissions: ["workspace:admin"],
+        body: {
+          sourceId: source.id,
+          name: "Curated Gateway automation trigger",
+          eventTypes: ["curated.gateway.event"],
+          configuration: {},
+          parameters: {},
+          sessionTemplate: automationSessionTemplate(curatedModelId),
+          status: "active",
+          packInstallationId: null,
+          packTemplateId: null,
+        },
+      },
+      publicApp,
+    );
+    expect(trigger.status).toBe(201);
+    expect(await trigger.json()).toMatchObject({
+      sessionTemplate: { model: curatedModelId },
+    });
+  });
+
   test("rejects a follow-up switch when custom-model retirement wins before prompt commit", async () => {
     if (!shared || !publicApp || !grant) return;
     const upstreamModelId = `race/follow-up-model-${crypto.randomUUID()}`;
@@ -880,6 +1093,174 @@ describe("workspace Gateway custom model API", () => {
     expect(await renamed.json()).toMatchObject({
       name: "Retired custom-model task renamed",
       status: "paused",
+    });
+  });
+
+  test("rejects an automation trigger create when custom-model retirement wins before commit", async () => {
+    if (!shared || !publicApp || !grant) return;
+    const upstreamModelId = `race/automation-create-model-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const createdModelResponse = await request("/gateway-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId },
+    });
+    expect(createdModelResponse.status).toBe(201);
+    const customModel = (await createdModelResponse.json()) as { id: string };
+    const source = await createAutomationSourceFixture("Automation create race source");
+    const name = `Automation create retirement race ${crypto.randomUUID()}`;
+    let createPromise: Promise<Response> | null = null;
+
+    await shared.admin.begin(async (barrier) => {
+      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+      if (!backend) throw new Error("database barrier has no backend pid");
+      await barrier`
+        select pg_advisory_xact_lock(
+          hashtextextended(${"workspace-gateway-custom-models:" + grant.workspaceId}, 0)
+        )
+      `;
+      createPromise = request(
+        "/automations/triggers",
+        {
+          method: "POST",
+          permissions: ["workspace:admin"],
+          body: {
+            sourceId: source.id,
+            name,
+            eventTypes: ["automation.create.race"],
+            configuration: {},
+            parameters: {},
+            sessionTemplate: automationSessionTemplate(productModelId),
+            status: "active",
+            packInstallationId: null,
+            packTemplateId: null,
+          },
+        },
+        publicApp,
+      );
+      await waitForBlockedBackend(backend.pid, "automation trigger custom-model create");
+      await barrier`
+        update workspace_gateway_custom_models
+        set retired_at = clock_timestamp(), updated_at = clock_timestamp()
+        where id = ${customModel.id}::uuid
+      `;
+    });
+
+    if (!createPromise) throw new Error("automation trigger create was not started");
+    const response = await createPromise;
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain(`model is not available: ${productModelId}`);
+    const [stored] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from automation_triggers
+      where workspace_id = ${grant.workspaceId}::uuid
+        and name = ${name}
+    `;
+    expect(stored?.count).toBe(0);
+  });
+
+  test("rejects a material automation update after retirement but permits a name-only edit", async () => {
+    if (!shared || !publicApp || !grant) return;
+    const upstreamModelId = `race/automation-update-model-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const createdModelResponse = await request("/gateway-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId },
+    });
+    expect(createdModelResponse.status).toBe(201);
+    const customModel = (await createdModelResponse.json()) as { id: string };
+    const source = await createAutomationSourceFixture("Automation update race source");
+    const createdTriggerResponse = await request(
+      "/automations/triggers",
+      {
+        method: "POST",
+        permissions: ["workspace:admin"],
+        body: {
+          sourceId: source.id,
+          name: "Automation update retirement race",
+          eventTypes: ["automation.update.race"],
+          configuration: {},
+          parameters: {},
+          sessionTemplate: automationSessionTemplate(productModelId),
+          status: "active",
+          packInstallationId: null,
+          packTemplateId: null,
+        },
+      },
+      publicApp,
+    );
+    expect(createdTriggerResponse.status).toBe(201);
+    const trigger = (await createdTriggerResponse.json()) as {
+      id: string;
+      revision: number;
+    };
+    let updatePromise: Promise<Response> | null = null;
+
+    await shared.admin.begin(async (barrier) => {
+      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+      if (!backend) throw new Error("database barrier has no backend pid");
+      await barrier`
+        select pg_advisory_xact_lock(
+          hashtextextended(${"workspace-gateway-custom-models:" + grant.workspaceId}, 0)
+        )
+      `;
+      updatePromise = request(
+        `/automations/triggers/${trigger.id}`,
+        {
+          method: "PATCH",
+          permissions: ["workspace:admin"],
+          body: {
+            expectedRevision: trigger.revision,
+            configuration: { material: true },
+          },
+        },
+        publicApp,
+      );
+      await waitForBlockedBackend(backend.pid, "automation trigger custom-model update");
+      await barrier`
+        update workspace_gateway_custom_models
+        set retired_at = clock_timestamp(), updated_at = clock_timestamp()
+        where id = ${customModel.id}::uuid
+      `;
+    });
+
+    if (!updatePromise) throw new Error("automation trigger update was not started");
+    const response = await updatePromise;
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain(`model is not available: ${productModelId}`);
+    const [stored] = await shared.admin<
+      Array<{ currentRevision: number; configuration: Record<string, unknown> }>
+    >`
+      select
+        trigger.current_revision as "currentRevision",
+        revision.configuration
+      from automation_triggers trigger
+      join automation_trigger_revisions revision
+        on revision.trigger_id = trigger.id
+       and revision.revision = trigger.current_revision
+      where trigger.workspace_id = ${grant.workspaceId}::uuid
+        and trigger.id = ${trigger.id}::uuid
+    `;
+    expect(stored).toMatchObject({
+      currentRevision: trigger.revision,
+      configuration: {},
+    });
+
+    const renamed = await request(
+      `/automations/triggers/${trigger.id}`,
+      {
+        method: "PATCH",
+        permissions: ["workspace:admin"],
+        body: {
+          expectedRevision: trigger.revision,
+          name: "Retired custom-model automation renamed",
+        },
+      },
+      publicApp,
+    );
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toMatchObject({
+      name: "Retired custom-model automation renamed",
+      revision: trigger.revision + 1,
     });
   });
 

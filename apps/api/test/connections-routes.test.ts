@@ -34,6 +34,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import postgres from "postgres";
 import {
   OFFICIAL_GMAIL_MCP_SCOPES,
   OFFICIAL_GMAIL_MCP_URL,
@@ -57,6 +58,24 @@ let settings: Settings;
 
 const rawKey = randomBytes(32);
 const encryptionKey = rawKey.toString("base64");
+
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("api_connections");
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
 
 describe("OAuth self-registration selection", () => {
   test("prefers DCR generically when both DCR and CIMD are advertised", () => {
@@ -100,7 +119,7 @@ describe("OAuth self-registration selection", () => {
 });
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("api_connections");
+  shared = await acquireDatabase();
   if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
@@ -977,12 +996,32 @@ describe("connections routes", () => {
     };
     expect(
       firstConnection.connection.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY],
-    ).toBe(firstOperationId);
+    ).toBeUndefined();
     expect(
       firstConnection.connection.metadata[
         VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY
       ],
-    ).toMatch(/^[0-9a-f]{64}$/u);
+    ).toBeUndefined();
+    const readOnlyList = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections`,
+      {
+        headers: {
+          authorization: await bearer(workspace, "subject-b", ["connections:read"]),
+        },
+      },
+    );
+    expect(readOnlyList.status).toBe(200);
+    const listedGateway = (
+      (await readOnlyList.json()) as {
+        connections: Array<{ id: string; metadata: Record<string, unknown> }>;
+      }
+    ).connections.find((connection) => connection.id === firstConnection.connection.id);
+    expect(listedGateway?.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]).toBe(
+      undefined,
+    );
+    expect(
+      listedGateway?.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY],
+    ).toBeUndefined();
 
     const retried = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
       method: "POST",
@@ -1105,7 +1144,7 @@ describe("connections routes", () => {
     expect(patchedConnection.connection.id).not.toBe(firstConnection.connection.id);
     expect(
       patchedConnection.connection.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY],
-    ).toBe(rotateOperationId);
+    ).toBeUndefined();
     expect(
       await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
     ).toBe("gateway-patch");

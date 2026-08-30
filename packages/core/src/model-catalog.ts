@@ -1,5 +1,6 @@
 import {
   applyModelCatalogDocument,
+  configuredGatewayWorkspaceProductModelIds,
   configuredModels,
   configuredModelNotes,
   configuredProviders,
@@ -7,6 +8,7 @@ import {
   withCodexCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
   withXaiSubscriptionCatalogProvider,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type ConfiguredModel,
   type Settings,
 } from "@opengeni/config";
@@ -29,6 +31,18 @@ export type ResolvedCatalogSettings = {
   version: number | null;
   modelNotes: Record<string, string>;
 };
+
+/**
+ * Curated workspace Gateway products and workspace-owned custom slugs share
+ * one public prefix. Only the latter have a mutable catalog row whose active
+ * generation must be rechecked at a fresh acceptance commit boundary.
+ */
+export function isWorkspaceGatewayCustomModelId(settings: Settings, modelId: string): boolean {
+  return (
+    modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) &&
+    !configuredGatewayWorkspaceProductModelIds(settings).includes(modelId)
+  );
+}
 
 /**
  * Resolve the deployment catalog without making synchronous env settings read

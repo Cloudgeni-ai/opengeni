@@ -1,4 +1,7 @@
-import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+} from "@opengeni/config";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
   AUTOMATION_MAX_MATCHED_TRIGGERS,
@@ -25,6 +28,7 @@ import {
   listAutomationRuns,
   listAutomationSources,
   listAutomationTriggers,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
   recordAutomationEvent,
   resolveAutomationWebhookEndpoint,
   updateAutomationSource,
@@ -37,6 +41,7 @@ import {
   assertWorkspaceModelPolicyAllows,
   buildAutomationAcceptedExecution,
   canonicalConfiguredModel,
+  isWorkspaceGatewayCustomModelId,
   requireAccessGrant,
   requireAutomationAdapter,
   requirePermission,
@@ -175,6 +180,14 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...request,
       sessionTemplate: { ...request.sessionTemplate, model },
     };
+    const beforeCreateCommit = model
+      ? workspaceGatewayCustomModelCommitGuard({
+          settings: catalogSettings,
+          accountId: grant.accountId,
+          workspaceId,
+          modelId: model,
+        })
+      : undefined;
     return c.json(
       await createAutomationTrigger(deps.db, {
         accountId: grant.accountId,
@@ -182,6 +195,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         createdBySubjectId: grant.subjectId,
         request: normalizedRequest,
         adapterId: adapter.id,
+        ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       }),
       201,
     );
@@ -235,12 +249,31 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         normalizedRequest.sessionTemplate.model,
       );
     }
+    const effectiveModel = normalizedRequest.sessionTemplate
+      ? normalizedRequest.sessionTemplate.model
+      : existing.sessionTemplate.model;
+    const materialExecutionChange =
+      request.eventTypes !== undefined ||
+      request.configuration !== undefined ||
+      request.parameters !== undefined ||
+      request.sessionTemplate !== undefined ||
+      (request.status === "active" && existing.status !== "active");
+    const beforeUpdateCommit =
+      materialExecutionChange && effectiveModel
+        ? workspaceGatewayCustomModelCommitGuard({
+            settings: catalogSettings,
+            accountId: grant.accountId,
+            workspaceId,
+            modelId: effectiveModel,
+          })
+        : undefined;
     try {
       const trigger = await updateAutomationTrigger(deps.db, {
         workspaceId,
         triggerId: c.req.param("triggerId"),
         subjectId: grant.subjectId,
         request: normalizedRequest,
+        ...(beforeUpdateCommit ? { beforeUpdateCommit } : {}),
       });
       if (!trigger)
         throw new HTTPException(404, {
@@ -454,7 +487,12 @@ export async function acceptAutomationEvent(
             const matchingAtAcceptance = [];
             for (const trigger of matchingByEvent) {
               try {
-                const requestedModel = trigger.sessionTemplate.model ?? catalogSettings.openaiModel;
+                const render = adapter.render({
+                  event: input.normalizedEvent,
+                  trigger,
+                  source,
+                });
+                const requestedModel = render.sessionTemplate.model ?? catalogSettings.openaiModel;
                 const model = canonicalConfiguredModel(catalogSettings, requestedModel);
                 if (!model) continue;
                 await assertWorkspaceModelPolicyAllows(
@@ -549,6 +587,27 @@ function isUnprocessableEntity(error: unknown): boolean {
     "status" in error &&
     (error as Error & { status?: unknown }).status === 422
   );
+}
+
+function workspaceGatewayCustomModelCommitGuard(input: {
+  settings: ApiRouteDeps["settings"];
+  accountId: string;
+  workspaceId: string;
+  modelId: string;
+}): ((tx: ApiRouteDeps["db"]) => Promise<void>) | undefined {
+  if (!isWorkspaceGatewayCustomModelId(input.settings, input.modelId)) return undefined;
+  return async (tx): Promise<void> => {
+    const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      upstreamModelId: input.modelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length),
+    });
+    if (!active) {
+      throw new HTTPException(422, {
+        message: `model is not available: ${input.modelId}`,
+      });
+    }
+  };
 }
 
 async function requireSource(

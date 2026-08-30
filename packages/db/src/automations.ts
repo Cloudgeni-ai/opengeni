@@ -223,6 +223,8 @@ export async function createAutomationTrigger(
     createdBySubjectId: string;
     request: CreateAutomationTriggerRequest;
     adapterId: string;
+    /** Trusted database-only admission seam. Throwing rolls creation back. */
+    beforeCreateCommit?: (tx: Database) => Promise<void>;
   },
 ): Promise<AutomationTrigger> {
   return await withWorkspaceRls(
@@ -289,6 +291,7 @@ export async function createAutomationTrigger(
             throw new Error("Automation Pack trigger must use its frozen manifest template");
           }
         }
+        await input.beforeCreateCommit?.(tx);
         const [head] = await tx
           .insert(schema.automationTriggers)
           .values({
@@ -438,6 +441,8 @@ export async function updateAutomationTrigger(
     triggerId: string;
     subjectId: string;
     request: UpdateAutomationTriggerRequest;
+    /** Trusted database-only admission seam. Throwing rolls the revision back. */
+    beforeUpdateCommit?: (tx: Database) => Promise<void>;
   },
 ): Promise<AutomationTrigger | null> {
   return await withWorkspaceRls(
@@ -478,6 +483,7 @@ export async function updateAutomationTrigger(
             "Pack-owned automation triggers must be managed through their Pack setup API",
           );
         }
+        await input.beforeUpdateCommit?.(tx);
         const revisionNumber = existing.head.currentRevision + 1;
         const [head] = await tx
           .update(schema.automationTriggers)

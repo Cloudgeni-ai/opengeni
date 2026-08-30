@@ -144,12 +144,19 @@ already accepted turn or an existing-session continuation can still resolve
 its retained definition. Re-adding the same slug creates a fresh row identity;
 stale mutations against an older generation cannot affect the replacement.
 Fresh session admission, an explicit follow-up switch from another model, and a
-new or materially reaccepted scheduled task recheck the active row under the
-custom-model shared transaction lock in the same commit that inserts the
-session, accepts the turn, or writes the task. Retirement takes the exclusive
-counterpart, so a successful removal cannot be followed by new work committing
-from a stale pre-removal catalog snapshot. Existing-session scheduled tasks and
-administrative-only task edits retain their already accepted model definition.
+new or materially reaccepted scheduled task, automation trigger, or PR-review
+repository binding recheck the active row under the custom-model shared
+transaction lock in the same commit that inserts the session, accepts the turn,
+or writes the task/trigger/binding. A committed keyed session shell is detected
+before active-only catalog validation and reopens its persisted model only as a
+retained definition, so the same key can finish initialization after retirement
+without reopening fresh-selection authority.
+Retirement takes the exclusive counterpart, so a successful removal cannot be
+followed by new work committing from a stale pre-removal catalog snapshot.
+Deployment-curated workspace Gateway products share the public prefix but have
+no custom row and bypass this row-admission fence. Existing-session scheduled
+tasks and administrative-only task/trigger edits retain their already accepted
+model definition.
 Each workspace may keep 100 active slugs and 1,000 retained generations.
 Retirement does not reclaim generation capacity because those rows remain the
 execution authority for accepted turns and existing sessions.
@@ -386,7 +393,10 @@ A workspace admin can instead connect **Vercel AI Gateway** in workspace Setting
 The key is stored in the encrypted workspace connection table, resolved only in
 the worker, and uses the same curated models and exact routes. These turns have
 `upstreamPayer: workspace` and `metering: external`, so OpenGeni never debits
-credits. The picker hides this rail until the connection is active.
+credits. Gateway credential create/rotation replay receipts use a
+deployment-keyed HMAC and their reserved operation fields are stripped from all
+public connection metadata projections. The picker hides this rail until the
+connection is active.
 
 Admins may also add one exact Vercel model slug at a time in the same Settings
 card. The durable row stores only the workspace, slug, optional label, actor,

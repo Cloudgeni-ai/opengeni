@@ -30482,11 +30482,13 @@ export async function getSessionByCreateIdempotencyKey(
 }
 
 /**
- * Recover a fully initialized keyed create before mutable create dependencies
- * (notably the current model catalog) are consulted. A fully initialized queued
- * turn receives a fresh durable wake revision from persisted state only. The
- * same request-identity checks as transactional create replay run before any
- * session or committed denial is returned.
+ * Recover a keyed create before mutable create dependencies (notably the
+ * current model catalog) are consulted. A fully initialized queued turn gets a
+ * fresh durable wake revision from persisted state only; an uninitialized shell
+ * returns its persisted model so the caller can reopen it strictly as retained
+ * while the canonical keyed transaction repairs initialization. The same
+ * request-identity checks as transactional create replay run before any session
+ * or committed denial is returned.
  */
 export type InitializedSessionCreateReplay =
   | {
@@ -30495,6 +30497,10 @@ export type InitializedSessionCreateReplay =
       temporalWorkflowId: string;
       workflowWakeRevision: number | null;
       changed: boolean;
+    }
+  | {
+      outcome: "pending";
+      session: Session;
     }
   | { outcome: "denied"; denial: SessionSpawnDenial };
 
@@ -30565,7 +30571,6 @@ export async function getInitializedSessionCreateReplay(
         .orderBy(asc(schema.sessionEvents.sequence))
         .limit(2);
       const createdEvent = startEvents.find((event) => event.type === "session.created");
-      if (!createdEvent) return null;
       const initialUserEvent = startEvents.find((event) => event.type === "user.message");
 
       const grouped = await sessionMcpServerMetadataForSessions(scopedDb, input.workspaceId, [
@@ -30576,6 +30581,9 @@ export async function getInitializedSessionCreateReplay(
         existing,
         grouped.get(existing.id) ?? [],
       );
+      if (!createdEvent) {
+        return { outcome: "pending", session };
+      }
       const [initialTurn] = await scopedDb
         .select({
           id: schema.sessionTurns.id,
@@ -72005,6 +72013,11 @@ function mapConnectionMetadata(row: {
   createdAt: Date;
   updatedAt: Date;
 }): ConnectionMetadataWithVerification {
+  const {
+    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
+    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    ...publicMetadata
+  } = row.metadata;
   return {
     id: row.id,
     ...(row.subjectId !== null && row.authorityId ? { authorityId: row.authorityId } : {}),
@@ -72022,7 +72035,7 @@ function mapConnectionMetadata(row: {
     version: row.version,
     verifiedInstallAt: row.verifiedInstallAt?.toISOString() ?? null,
     verifiedInstallVersion: row.verifiedInstallVersion,
-    metadata: row.metadata,
+    metadata: publicMetadata,
     createdBySubjectId: row.createdBySubjectId,
     updatedBySubjectId: row.updatedBySubjectId,
     createdAt: row.createdAt.toISOString(),

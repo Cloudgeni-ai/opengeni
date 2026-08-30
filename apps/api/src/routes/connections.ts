@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
@@ -223,7 +223,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: grant.accountId,
             workspaceId,
             operationId: payload.operationId,
-            requestDigest: vercelAiGatewayCredentialRequestDigest({
+            requestDigest: vercelAiGatewayCredentialRequestDigest(key, {
               action: "create",
               providerDomain,
               kind: payload.kind,
@@ -940,7 +940,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         connectionId: existing.id,
         expectedVersion: payload.expectedVersion,
         operationId: payload.operationId,
-        requestDigest: vercelAiGatewayCredentialRequestDigest({
+        requestDigest: vercelAiGatewayCredentialRequestDigest(key, {
           action: "rotate",
           connectionId: existing.id,
           expectedVersion: payload.expectedVersion,
@@ -1612,8 +1612,8 @@ function vercelAiGatewayCredentialMetadata(
   };
 }
 
-function vercelAiGatewayCredentialRequestDigest(value: unknown): string {
-  return createHash("sha256").update(stableJson(value), "utf8").digest("hex");
+function vercelAiGatewayCredentialRequestDigest(key: Uint8Array, value: unknown): string {
+  return createHmac("sha256", key).update(stableJson(value), "utf8").digest("hex");
 }
 
 function slackBotCredentialBundle(token: string): Record<string, unknown> {

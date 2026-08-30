@@ -59,6 +59,7 @@ import {
 } from "../session-authorization";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
+import { isWorkspaceGatewayCustomModelId } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateVariableSetAttachment } from "./environments";
 import {
@@ -105,11 +106,12 @@ export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
 }
 
 function workspaceGatewayCustomModelCommitGuard(input: {
+  settings: Settings;
   accountId: string;
   workspaceId: string;
   modelId: string;
 }): ((tx: Database) => Promise<void>) | undefined {
-  if (!input.modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) return undefined;
+  if (!isWorkspaceGatewayCustomModelId(input.settings, input.modelId)) return undefined;
   return async (tx: Database): Promise<void> => {
     const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
       accountId: input.accountId,
@@ -263,6 +265,7 @@ export async function createValidatedScheduledTask(input: {
   const beforeCreateCommit =
     !knowledgeAction && input.payload.runMode !== "existing_session"
       ? workspaceGatewayCustomModelCommitGuard({
+          settings: input.settings,
           accountId: input.grant.accountId,
           workspaceId: input.grant.workspaceId,
           modelId: agentConfig.model ?? input.settings.openaiModel,
@@ -770,6 +773,7 @@ export async function validatedScheduledTaskUpdate(input: {
     (input.existing.status === "paused" && input.payload.status === "active");
   if (materialExecutionChange && nextRunMode !== "existing_session") {
     const beforeUpdateCommit = workspaceGatewayCustomModelCommitGuard({
+      settings: input.settings,
       accountId: input.existing.accountId,
       workspaceId: input.existing.workspaceId,
       modelId: nextAgentConfig.model ?? input.settings.openaiModel,
