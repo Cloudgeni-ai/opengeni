@@ -38,6 +38,7 @@ import {
   getRigVersionById,
   getRigVersionHealth,
   listRigChanges,
+  listPendingInactiveRigVersionVerificationAttempts,
   listRigVersions,
   listRigs,
   markSandboxCheckpointArtifactDeletePending,
@@ -382,6 +383,89 @@ describe("rig CRUD lifecycle", () => {
 });
 
 describe("rig version invariants", () => {
+  test("deferred recovery candidates include only inactive pending attempts", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "deferred-recovery-candidates",
+    });
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(db, ws.workspaceId, rig.id),
+    ).toEqual([]);
+
+    const firstAttemptId = randomUUID();
+    const first = await createRigVersion(
+      db,
+      ws.workspaceId,
+      rig.id,
+      { setupScript: "echo first" },
+      {
+        verification: {
+          status: "pending",
+          attemptId: firstAttemptId,
+          expectedActiveVersionId: rig.activeVersion!.id,
+          requestedAt: "2026-08-30T12:00:00.000Z",
+        },
+      },
+    );
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(db, ws.workspaceId, rig.id),
+    ).toEqual([
+      {
+        versionId: first.id,
+        version: first.version,
+        attemptId: firstAttemptId,
+        expectedActiveVersionId: rig.activeVersion!.id,
+        requestedAt: "2026-08-30T12:00:00.000Z",
+      },
+    ]);
+
+    const secondAttemptId = randomUUID();
+    const second = await createRigVersion(
+      db,
+      ws.workspaceId,
+      rig.id,
+      { setupScript: "echo second" },
+      {
+        verification: {
+          status: "pending",
+          attemptId: secondAttemptId,
+          expectedActiveVersionId: rig.activeVersion!.id,
+          requestedAt: "2026-08-30T12:01:00.000Z",
+        },
+      },
+    );
+    const candidates = await listPendingInactiveRigVersionVerificationAttempts(
+      db,
+      ws.workspaceId,
+      rig.id,
+    );
+    expect(candidates.map((candidate) => candidate.versionId).sort()).toEqual(
+      [first.id, second.id].sort(),
+    );
+
+    await failRigVersionVerification(db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: first.id,
+      attemptId: firstAttemptId,
+      error: "dispatch failed",
+    });
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(db, ws.workspaceId, rig.id),
+    ).toEqual([
+      {
+        versionId: second.id,
+        version: second.version,
+        attemptId: secondAttemptId,
+        expectedActiveVersionId: rig.activeVersion!.id,
+        requestedAt: "2026-08-30T12:01:00.000Z",
+      },
+    ]);
+  });
+
   test("database fences old active writes and obsolete provider-image proof", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

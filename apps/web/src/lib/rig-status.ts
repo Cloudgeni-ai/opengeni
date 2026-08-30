@@ -139,3 +139,30 @@ export function rigActorLabel(createdBy: string | null | undefined): string {
 export function versionHasChecks(version: RigVersion | null | undefined): boolean {
   return (version?.checks.length ?? 0) > 0;
 }
+
+export type DeferredRigVerificationView =
+  | { state: "none" }
+  | { state: "available"; versionId: string; version: number }
+  | { state: "ambiguous"; candidateCount: number };
+
+/**
+ * Mirror the server's recovery eligibility for display only. The mutation
+ * still resolves the candidate server-side and fails closed if this polled
+ * projection is stale or another pending version appears.
+ */
+export function deferredRigVerificationView(
+  versions: readonly RigVersion[],
+): DeferredRigVerificationView {
+  const candidates = versions.filter(
+    (version) => !version.active && version.verificationStatus === "pending",
+  );
+  if (candidates.length === 0) return { state: "none" };
+  if (candidates.length !== 1) {
+    return { state: "ambiguous", candidateCount: candidates.length };
+  }
+  return {
+    state: "available",
+    versionId: candidates[0]!.id,
+    version: candidates[0]!.version,
+  };
+}

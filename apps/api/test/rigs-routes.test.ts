@@ -10,6 +10,7 @@ import {
   createSession,
   createVariableSet,
   getRigChange,
+  listPendingInactiveRigVersionVerificationAttempts,
   listRigVersions,
   updateRigChangeStatus,
   withWorkspaceSessionActivityRls,
@@ -478,21 +479,80 @@ describe("rig route permission matrix", () => {
     expect(calls.every((call) => call.attemptId === attemptId)).toBe(true);
   });
 
-  test("a committed rig create survives an unavailable initial verification dispatcher", async () => {
+  test("exact version verification is manager-only and use-only denial has zero side effects", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; attemptId: string }> = [];
     const http = createApp({
       settings,
       db: client.db,
       bus: {} as never,
       workflowClient: {
-        startRigVerification: async () => {
-          throw new Error("temporal unavailable");
+        startRigVerification: async (input: { workflowId: string; attemptId: string }) => {
+          calls.push(input);
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manager = {
+      authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]),
+    };
+    const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manager,
+      body: JSON.stringify({ name: "manager-exact-version" }),
+    });
+    const rig = await created.json();
+    const [pendingBefore] = await listPendingInactiveRigVersionVerificationAttempts(
+      client.db,
+      ws.workspaceId,
+      rig.id,
+    );
+    expect(pendingBefore).toBeDefined();
+    const callsBefore = [...calls];
+    const auditsBefore = await auditActions(ws.workspaceId, rig.id);
+
+    const denied = await http.request(
+      `${base}/${rig.id}/versions/${pendingBefore!.versionId}/verify`,
+      { method: "POST", headers: useOnly },
+    );
+    expect(denied.status).toBe(403);
+    expect(calls).toEqual(callsBefore);
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(client.db, ws.workspaceId, rig.id),
+    ).toEqual([pendingBefore]);
+    expect(await auditActions(ws.workspaceId, rig.id)).toEqual(auditsBefore);
+
+    const accepted = await http.request(
+      `${base}/${rig.id}/versions/${pendingBefore!.versionId}/verify`,
+      { method: "POST", headers: manager },
+    );
+    expect(accepted.status).toBe(202);
+    expect(calls).toHaveLength(callsBefore.length + 1);
+    expect(calls.at(-1)?.attemptId).toBe(pendingBefore!.attemptId);
+  });
+
+  test("a committed rig create survives an unavailable initial verification dispatcher", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; attemptId: string }> = [];
+    let dispatcherAvailable = false;
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: { workflowId: string; attemptId: string }) => {
+          calls.push(input);
+          if (!dispatcherAvailable) throw new Error("temporal unavailable");
         },
       } as never,
       managedAuth: null,
     } as never);
     const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use"]) };
     const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
     const created = await http.request(base, {
       method: "POST",
@@ -505,6 +565,7 @@ describe("rig route permission matrix", () => {
     expect(rig.activeVersion).toBeNull();
     const [version] = await listRigVersions(client.db, ws.workspaceId, rig.id);
     expect(version?.active).toBe(false);
+    expect(version?.verificationStatus).toBe("pending");
     expect((await http.request(`${base}/${rig.id}`, { headers: manage })).status).toBe(200);
     expect(
       (
@@ -514,6 +575,129 @@ describe("rig route permission matrix", () => {
         })
       ).status,
     ).toBe(422);
+
+    const [pendingBefore] = await listPendingInactiveRigVersionVerificationAttempts(
+      client.db,
+      ws.workspaceId,
+      rig.id,
+    );
+    expect(pendingBefore?.versionId).toBe(version!.id);
+    const deferredRecovery = await http.request(`${base}/${rig.id}/versions/recover`, {
+      method: "POST",
+      headers: useOnly,
+    });
+    expect(deferredRecovery.status).toBe(503);
+    expect(await deferredRecovery.json()).toMatchObject({
+      error: {
+        code: "upstream_unavailable",
+        retryable: true,
+        outcomeUnknown: true,
+        details: {
+          code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+          versionId: version!.id,
+        },
+      },
+    });
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(client.db, ws.workspaceId, rig.id),
+    ).toEqual([pendingBefore]);
+
+    dispatcherAvailable = true;
+    const recovered = await http.request(`${base}/${rig.id}/versions/recover`, {
+      method: "POST",
+      headers: useOnly,
+    });
+    expect(recovered.status).toBe(202);
+    expect(await recovered.json()).toEqual({ ok: true, versionId: version!.id });
+    expect(calls.map((call) => call.attemptId)).toEqual([
+      pendingBefore!.attemptId,
+      pendingBefore!.attemptId,
+      pendingBefore!.attemptId,
+    ]);
+    const [{ count } = { count: 0 }] = await shared!.admin<Array<{ count: number }>>`
+      select count(*)::int as count from rigs
+      where workspace_id = ${ws.workspaceId} and name = 'deferred-initial-verification'
+    `;
+    expect(Number(count)).toBe(1);
+  });
+
+  test("deferred version recovery fails closed on zero or ambiguous pending candidates", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: unknown[] = [];
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: unknown) => {
+          calls.push(input);
+          throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manager = {
+      authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]),
+    };
+    const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manager,
+      body: JSON.stringify({ name: "ambiguous-deferred-version" }),
+    });
+    const rig = await created.json();
+    const authored = await http.request(`${base}/${rig.id}/versions`, {
+      method: "POST",
+      headers: manager,
+      body: JSON.stringify({ setupScript: "echo second" }),
+    });
+    expect(authored.status).toBe(201);
+    const pendingBefore = await listPendingInactiveRigVersionVerificationAttempts(
+      client.db,
+      ws.workspaceId,
+      rig.id,
+    );
+    expect(pendingBefore).toHaveLength(2);
+    const callsBeforeAmbiguous = calls.length;
+    const ambiguous = await http.request(`${base}/${rig.id}/versions/recover`, {
+      method: "POST",
+      headers: useOnly,
+    });
+    expect(ambiguous.status).toBe(409);
+    expect(await ambiguous.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: "RIG_DEFERRED_VERIFICATION_AMBIGUOUS", candidateCount: 2 },
+      },
+    });
+    expect(calls).toHaveLength(callsBeforeAmbiguous);
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(client.db, ws.workspaceId, rig.id),
+    ).toEqual(pendingBefore);
+
+    const activeRigResponse = await app().request(base, {
+      method: "POST",
+      headers: manager,
+      body: JSON.stringify({ name: "no-deferred-version" }),
+    });
+    const activeRig = await activeRigResponse.json();
+    await activateInitialVersion(ws.workspaceId, activeRig.id);
+    const none = await http.request(`${base}/${activeRig.id}/versions/recover`, {
+      method: "POST",
+      headers: useOnly,
+    });
+    expect(none.status).toBe(409);
+    expect(await none.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        details: { code: "RIG_DEFERRED_VERIFICATION_NOT_FOUND", candidateCount: 0 },
+      },
+    });
+    expect(calls).toHaveLength(callsBeforeAmbiguous);
   });
 
   test("a committed proposal reports deferred dispatch and retries the same verification attempt", async () => {

@@ -32,6 +32,7 @@ import {
   getRigChange,
   getRigVersion,
   getVariableSet,
+  listPendingInactiveRigVersionVerificationAttempts,
   listRigChanges,
   listRigVersions,
   recordAuditEvent,
@@ -54,6 +55,20 @@ export const MAX_CHECKS_PER_RIG = 100;
 export const MAX_CREDENTIAL_HOOKS_PER_RIG = 50;
 export const MAX_DEFAULT_VARIABLE_SETS_PER_RIG = 25;
 export const RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY = 4;
+
+export class RigDeferredVerificationRecoveryError extends Error {
+  constructor(
+    readonly reason: "not_found" | "ambiguous",
+    readonly candidateCount: number,
+  ) {
+    super(
+      reason === "ambiguous"
+        ? "More than one inactive Rig version has a pending verification attempt; a manager must choose the exact version."
+        : "This Rig has no inactive pending verification attempt to recover.",
+    );
+    this.name = "RigDeferredVerificationRecoveryError";
+  }
+}
 
 type VariableSetEnvironment = { values: Record<string, string> } | null;
 
@@ -722,6 +737,29 @@ export async function listRigVersionsForApi(
   rigId: string,
 ): Promise<RigVersion[]> {
   return await listRigVersions(deps.db, workspaceId, rigId);
+}
+
+/**
+ * Resolve only a uniquely pending inactive version. The caller cannot select a
+ * historical version, and this read creates no attempt or activation state.
+ */
+export async function resolveDeferredRigVersionVerificationRecovery(
+  deps: RigServices,
+  workspaceId: string,
+  rigId: string,
+) {
+  const candidates = await listPendingInactiveRigVersionVerificationAttempts(
+    deps.db,
+    workspaceId,
+    rigId,
+  );
+  if (candidates.length === 0) {
+    throw new RigDeferredVerificationRecoveryError("not_found", 0);
+  }
+  if (candidates.length !== 1) {
+    throw new RigDeferredVerificationRecoveryError("ambiguous", candidates.length);
+  }
+  return candidates[0]!;
 }
 
 export async function listRigChangesForApi(

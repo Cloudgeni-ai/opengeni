@@ -5080,6 +5080,7 @@ export type RigVersion = {
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
   createdBy: string | null;
   active: boolean;
+  verificationStatus?: "unverified" | "pending" | "passed" | "failed" | undefined;
   createdAt: string;
 };
 

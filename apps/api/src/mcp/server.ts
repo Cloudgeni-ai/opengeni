@@ -181,6 +181,7 @@ import {
 import {
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
+  resolveDeferredRigVersionVerificationRecovery,
   requireRigChangeForApi,
   requireRigForApi,
   assertAllowedVariableSetVariableName,
@@ -4218,14 +4219,18 @@ function registerRigTools(
       "rig_verify",
       {
         description:
-          "Trigger rig verification. Pass changeId for a proposed change, or omit it to re-verify the active version's checks.",
+          "Trigger rig verification. Pass changeId for a proposed change, recoverDeferredVersion=true to resume the one unique inactive pending version, or omit both to re-verify the active version's checks.",
         inputSchema: {
           rigId: z4.string().uuid(),
           changeId: z4.string().uuid().optional(),
+          recoverDeferredVersion: z4.boolean().optional(),
         },
       },
-      async ({ rigId, changeId }) => {
+      async ({ rigId, changeId, recoverDeferredVersion }) => {
         const rig = await requireMutableRig(rigId);
+        if (changeId && recoverDeferredVersion) {
+          throw new Error("changeId and recoverDeferredVersion are mutually exclusive");
+        }
         if (changeId) {
           const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
           const verifying = await beginMcpRigVerificationAttempt(deps, rig.workspaceId, change.id);
@@ -4282,6 +4287,71 @@ function registerRigTools(
               facts: {
                 verificationStarted: true,
                 verificationAttempt: attempt,
+              },
+              nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+            }),
+          );
+        }
+        if (recoverDeferredVersion) {
+          const recovery = await resolveDeferredRigVersionVerificationRecovery(
+            { db: deps.db },
+            rig.workspaceId,
+            rig.id,
+          );
+          try {
+            await deps.workflowClient.startRigVerification({
+              workspaceId: rig.workspaceId,
+              versionId: recovery.versionId,
+              attemptId: recovery.attemptId,
+              workflowId: `rig-verification-version-${recovery.versionId}-attempt-${recovery.attemptId}`,
+            });
+          } catch {
+            return json(
+              mcpMutationReceipt({
+                operation: "rig_verify",
+                committed: true,
+                outcome: "partial_failure",
+                changed: false,
+                resource: {
+                  type: "rig_version",
+                  id: recovery.versionId,
+                  version: recovery.version,
+                  state: "verification_pending",
+                },
+                relatedResources: [{ type: "rig", id: rig.id }],
+                idempotency: { status: "unknown" },
+                partialFailure: {
+                  stage: "verification_workflow_start",
+                  retryable: true,
+                },
+                warnings: [
+                  "The pending version and attempt are unchanged, but verification workflow dispatch could not be confirmed. Retry with recoverDeferredVersion=true.",
+                ],
+                facts: {
+                  verificationAttempt: recovery.attemptId,
+                  expectedActiveVersionId: recovery.expectedActiveVersionId,
+                },
+                nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+              }),
+            );
+          }
+          return json(
+            mcpMutationReceipt({
+              operation: "rig_verify",
+              committed: true,
+              outcome: "accepted",
+              changed: false,
+              resource: {
+                type: "rig_version",
+                id: recovery.versionId,
+                version: recovery.version,
+                state: "verification_pending",
+              },
+              relatedResources: [{ type: "rig", id: rig.id }],
+              idempotency: { status: "applied" },
+              facts: {
+                verificationAttempt: recovery.attemptId,
+                expectedActiveVersionId: recovery.expectedActiveVersionId,
               },
               nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
             }),

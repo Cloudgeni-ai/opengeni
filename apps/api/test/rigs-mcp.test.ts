@@ -1,12 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
 import {
+  beginRigVersionVerificationAttempt,
   bootstrapWorkspace,
   createDb,
   createRigChange,
   createRigVersion,
   createSession,
   getRigChange,
+  listPendingInactiveRigVersionVerificationAttempts,
   updateRigChangeStatus,
   type DbClient,
 } from "@opengeni/db";
@@ -242,6 +244,121 @@ describe("rig MCP tools", () => {
     ]);
   });
 
+  test("rig_verify recovers only the unique inactive pending attempt without superseding it", async () => {
+    if (!available) return;
+    const workflow = new FakeWorkflowClient();
+    const rig = await createRig(client.db, {
+      accountId,
+      workspaceId,
+      name: `mcp-recover-${crypto.randomUUID()}`,
+      createdBy: "user:mcp",
+      initialVersion: { setupScript: "true" },
+    });
+    const candidate = await createRigVersion(client.db, workspaceId, rig.id, {
+      setupScript: "echo candidate",
+    });
+    const attempt = await beginRigVersionVerificationAttempt(client.db, {
+      workspaceId,
+      rigId: rig.id,
+      versionId: candidate.id,
+    });
+    const server = buildOpenGeniMcpServer(deps(workflow), grant(["rigs:use"]));
+
+    workflow.failRigVerification = true;
+    const deferred = await callMcpTool<{
+      outcome: string;
+      changed: boolean;
+      partialFailure: { retryable: boolean };
+      facts: { verificationAttempt: string; expectedActiveVersionId: string };
+    }>(server, "rig_verify", { rigId: rig.id, recoverDeferredVersion: true });
+    expect(deferred).toMatchObject({
+      outcome: "partial_failure",
+      changed: false,
+      resource: { id: candidate.id, state: "verification_pending" },
+      partialFailure: { retryable: true },
+      facts: {
+        verificationAttempt: attempt.attemptId,
+        expectedActiveVersionId: rig.activeVersion!.id,
+      },
+    });
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(client.db, workspaceId, rig.id),
+    ).toEqual([
+      {
+        versionId: candidate.id,
+        version: candidate.version,
+        attemptId: attempt.attemptId,
+        expectedActiveVersionId: rig.activeVersion!.id,
+        requestedAt: attempt.requestedAt,
+      },
+    ]);
+
+    workflow.failRigVerification = false;
+    const recovered = await callMcpTool<{
+      outcome: string;
+      changed: boolean;
+      facts: { verificationAttempt: string };
+    }>(server, "rig_verify", { rigId: rig.id, recoverDeferredVersion: true });
+    expect(recovered).toMatchObject({
+      outcome: "accepted",
+      changed: false,
+      resource: { id: candidate.id, state: "verification_pending" },
+      facts: { verificationAttempt: attempt.attemptId },
+    });
+    expect(workflow.rigVerifications).toHaveLength(2);
+    expect(workflow.rigVerifications).toEqual([
+      {
+        workspaceId,
+        versionId: candidate.id,
+        attemptId: attempt.attemptId,
+        workflowId: `rig-verification-version-${candidate.id}-attempt-${attempt.attemptId}`,
+      },
+      {
+        workspaceId,
+        versionId: candidate.id,
+        attemptId: attempt.attemptId,
+        workflowId: `rig-verification-version-${candidate.id}-attempt-${attempt.attemptId}`,
+      },
+    ]);
+  });
+
+  test("rig_verify deferred recovery refuses zero and ambiguous candidates", async () => {
+    if (!available) return;
+    const workflow = new FakeWorkflowClient();
+    const rig = await createRig(client.db, {
+      accountId,
+      workspaceId,
+      name: `mcp-recover-ambiguous-${crypto.randomUUID()}`,
+      createdBy: "user:mcp",
+      initialVersion: { setupScript: "true" },
+    });
+    const server = buildOpenGeniMcpServer(deps(workflow), grant(["rigs:use"]));
+    await expect(
+      callMcpTool(server, "rig_verify", { rigId: rig.id, recoverDeferredVersion: true }),
+    ).rejects.toThrow(/no inactive pending verification attempt/iu);
+
+    const first = await createRigVersion(client.db, workspaceId, rig.id, {
+      setupScript: "echo first",
+    });
+    const second = await createRigVersion(client.db, workspaceId, rig.id, {
+      setupScript: "echo second",
+    });
+    await beginRigVersionVerificationAttempt(client.db, {
+      workspaceId,
+      rigId: rig.id,
+      versionId: first.id,
+    });
+    await beginRigVersionVerificationAttempt(client.db, {
+      workspaceId,
+      rigId: rig.id,
+      versionId: second.id,
+    });
+    await expect(
+      callMcpTool(server, "rig_verify", { rigId: rig.id, recoverDeferredVersion: true }),
+    ).rejects.toThrow(/more than one inactive Rig version/iu);
+    expect(workflow.rigVerifications).toEqual([]);
+  });
+
   test("rig_propose_change creates a setup_append change and triggers verification", async () => {
     if (!available) return;
     const workflow = new FakeWorkflowClient();
@@ -465,6 +582,7 @@ async function callMcpTool<T = unknown>(
 
 class FakeWorkflowClient implements SessionWorkflowClient {
   rigVerifications: unknown[] = [];
+  failRigVerification = false;
   async signalUserMessage(): Promise<void> {}
   async wakeSessionWorkflow(): Promise<void> {}
   async requestSessionWorkflowWakeDispatch(): Promise<void> {}
@@ -475,5 +593,6 @@ class FakeWorkflowClient implements SessionWorkflowClient {
   async triggerScheduledTask(): Promise<void> {}
   async startRigVerification(input: unknown): Promise<void> {
     this.rigVerifications.push(input);
+    if (this.failRigVerification) throw new Error("temporal unavailable");
   }
 }

@@ -17546,6 +17546,7 @@ function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion 
     providerImages: row.providerImages,
     createdBy: row.createdBy,
     active: row.active,
+    verificationStatus: row.verification.status,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -19621,6 +19622,51 @@ export type RigVersionVerificationAttempt = {
   expectedActiveVersionId: string | null;
   requestedAt: string;
 };
+
+export type PendingInactiveRigVersionVerificationAttempt = {
+  versionId: string;
+  version: number;
+  attemptId: string;
+  expectedActiveVersionId: string | null;
+  requestedAt: string;
+};
+
+/**
+ * Read the inactive attempts that are already durably pending for one Rig.
+ * This never creates, supersedes, or rewrites verification state; callers use
+ * it only to recover transport dispatch for a previously authorized attempt.
+ */
+export async function listPendingInactiveRigVersionVerificationAttempts(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+): Promise<PendingInactiveRigVersionVerificationAttempt[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        versionId: schema.rigVersions.id,
+        version: schema.rigVersions.version,
+        active: schema.rigVersions.active,
+        verification: schema.rigVersions.verification,
+      })
+      .from(schema.rigVersions)
+      .where(
+        and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)),
+      );
+    return rows.flatMap((row) => {
+      if (row.active || row.verification.status !== "pending") return [];
+      return [
+        {
+          versionId: row.versionId,
+          version: row.version,
+          attemptId: row.verification.attemptId,
+          expectedActiveVersionId: row.verification.expectedActiveVersionId,
+          requestedAt: row.verification.requestedAt,
+        },
+      ];
+    });
+  });
+}
 
 /**
  * Atomically claim an opaque verification attempt for one exact version.

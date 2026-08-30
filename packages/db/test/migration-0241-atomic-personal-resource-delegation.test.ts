@@ -1259,12 +1259,42 @@ async function createFixture(
     values (${account!.id}, ${personalWorkspace!.id}, 'personal-rig') returning id
   `;
   const defaultIds = options.directOnly ? [] : [defaultVariableSet!.id];
+  const rigVersionId = crypto.randomUUID();
+  const rigVersionAttemptId = crypto.randomUUID();
   const [rigVersion] = await sql<Array<{ id: string }>>`
     insert into rig_versions (
-      account_id, workspace_id, rig_id, version, default_variable_set_ids, active
+      id, account_id, workspace_id, rig_id, version, default_variable_set_ids,
+      verification, active
     ) values (
-      ${account!.id}, ${personalWorkspace!.id}, ${rig!.id}, 1,
-      ${sql.json(defaultIds)}, true
+      ${rigVersionId}, ${account!.id}, ${personalWorkspace!.id}, ${rig!.id}, 1,
+      ${sql.json(defaultIds)}, ${sql.json({
+        status: "passed",
+        attemptId: rigVersionAttemptId,
+        expectedActiveVersionId: null,
+        verifiedAt: "2026-08-30T12:00:00.000Z",
+        receipt: {
+          version: 2,
+          checkedAt: "2026-08-30T12:00:00.000Z",
+          binding: {
+            leaseId: "11111111-2222-4333-8444-555555555555",
+            sandboxGroupId: rigVersionId,
+            leaseEpoch: 1,
+            workspaceGeneration: 1,
+            instanceId: "migration-0241-fixture",
+            backendId: "docker",
+            rigVersionId,
+          },
+          terminal: { status: "disabled" },
+          browser: {
+            status: "passed",
+            browserSessionId: "22222222-3333-4444-8555-666666666666",
+            controllerGeneration: "migration-0241-fixture",
+            targetId: "page-1",
+            observedTargetGeneration: "page-generation-1",
+          },
+          computer: { status: "disabled" },
+        },
+      })}, true
     ) returning id
   `;
 

@@ -258,9 +258,11 @@ describe("rig contracts", () => {
       providerImages: {},
       createdBy: "user:alice",
       active: true,
+      verificationStatus: "passed",
       createdAt: "2026-07-08T00:00:00.000Z",
     };
     expect(RigVersion.safeParse(version).success).toBe(true);
+    expect(RigVersion.safeParse({ ...version, verificationStatus: "running" }).success).toBe(false);
 
     const providerImage = {
       backend: "modal",

@@ -1,7 +1,7 @@
 // The rig's version history: append-only, newest-first, exactly one active.
 // Rollback = activate an older version (mints nothing). Each row expands to the
 // immutable content that version pinned.
-import { ChevronDownIcon, HistoryIcon } from "lucide-react";
+import { ChevronDownIcon, HistoryIcon, Loader2Icon, RotateCwIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -11,7 +11,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { StatusDot } from "@/components/ui/status-dot";
 import { formatTimestamp } from "@/lib/format";
-import { rigActorLabel } from "@/lib/rig-status";
+import { rigActorLabel, type DeferredRigVerificationView } from "@/lib/rig-status";
 import { withOccurrenceKeys } from "@/lib/react-key";
 import { cn } from "@/lib/utils";
 import type { RigVersion } from "@/types";
@@ -22,6 +22,8 @@ export function RigVersionsTimeline({
   variableSetName,
   canManage,
   mutating,
+  deferredVerification,
+  onRecoverDeferred,
   onActivate,
 }: {
   versions: RigVersion[];
@@ -29,6 +31,8 @@ export function RigVersionsTimeline({
   variableSetName: (id: string) => string;
   canManage: boolean;
   mutating: boolean;
+  deferredVerification: DeferredRigVerificationView;
+  onRecoverDeferred: () => Promise<unknown>;
   onActivate: (versionId: string) => Promise<unknown>;
 }) {
   const [confirmVersion, setConfirmVersion] = useState<RigVersion | null>(null);
@@ -54,6 +58,14 @@ export function RigVersionsTimeline({
             variableSetName={variableSetName}
             canManage={canManage}
             mutating={mutating}
+            canRecover={
+              deferredVerification.state === "available" &&
+              deferredVerification.versionId === version.id
+            }
+            recoveryAmbiguous={
+              deferredVerification.state === "ambiguous" && version.verificationStatus === "pending"
+            }
+            onRecoverDeferred={onRecoverDeferred}
             onRequestActivate={() => setConfirmVersion(version)}
           />
         ))}
@@ -88,6 +100,9 @@ function VersionRow({
   variableSetName,
   canManage,
   mutating,
+  canRecover,
+  recoveryAmbiguous,
+  onRecoverDeferred,
   onRequestActivate,
 }: {
   version: RigVersion;
@@ -95,6 +110,9 @@ function VersionRow({
   variableSetName: (id: string) => string;
   canManage: boolean;
   mutating: boolean;
+  canRecover: boolean;
+  recoveryAmbiguous: boolean;
+  onRecoverDeferred: () => Promise<unknown>;
   onRequestActivate: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -121,6 +139,13 @@ function VersionRow({
                 Active
               </MetaChip>
             ) : null}
+            {!isActive && version.verificationStatus === "pending" ? (
+              <MetaChip dot="queued">Verification pending</MetaChip>
+            ) : null}
+            {!isActive && version.verificationStatus === "failed" ? (
+              <MetaChip dot="failed">Verification failed</MetaChip>
+            ) : null}
+            {recoveryAmbiguous ? <MetaChip>Manager choice required</MetaChip> : null}
           </span>
           <span className="mt-0.5 block truncate text-xs text-fg-muted">
             {version.changelog ?? "No changelog"}
@@ -130,7 +155,29 @@ function VersionRow({
           </span>
         </button>
         <div className="flex shrink-0 items-center gap-1.5">
-          {!isActive && canManage ? (
+          {canRecover ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-8"
+              disabled={mutating}
+              onClick={async () => {
+                const result = await onRecoverDeferred();
+                if (result) {
+                  toast.success(`Resumed verification for version ${version.version}`);
+                }
+              }}
+            >
+              {mutating ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
+                <RotateCwIcon className="size-3.5" />
+              )}
+              Resume verification
+            </Button>
+          ) : null}
+          {!isActive && canManage && version.verificationStatus === "passed" ? (
             <Button
               type="button"
               variant="secondary"

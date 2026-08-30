@@ -8055,6 +8055,9 @@ export const RigVersion = z.object({
   // Attribution: 'user:<subject>' | 'session:<id>' | 'system'.
   createdBy: z.string().nullable(),
   active: z.boolean(),
+  // Public lifecycle summary only. Attempt tokens, activation CAS identity,
+  // receipts, and failure detail remain server-internal verification state.
+  verificationStatus: z.enum(["unverified", "pending", "passed", "failed"]).optional(),
   createdAt: z.string(),
 });
 export type RigVersion = z.infer<typeof RigVersion>;

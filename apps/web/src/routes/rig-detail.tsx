@@ -34,6 +34,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { deferredRigVerificationView } from "@/lib/rig-status";
 
 // Live cadence: fast enough that a verifying change resolves without a manual
 // refresh, slow enough to stay quiet.
@@ -106,6 +107,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
 
   const current = rig.rig;
   const active = current.activeVersion;
+  const deferredVerification = deferredRigVerificationView(versions.versions);
   const pendingChanges = changes.changes.filter(
     (change) => change.status === "proposed" || change.status === "verifying",
   ).length;
@@ -260,6 +262,12 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
             variableSetName={variableSetName}
             canUse={canView}
             mutating={rig.mutating}
+            deferredVerification={deferredVerification}
+            onRecoverDeferred={async () => {
+              const result = await rig.recoverDeferredVerification();
+              if (result) await Promise.all([versions.refresh(), changes.refresh()]);
+              return result;
+            }}
             onVerify={rig.verify}
           />
         </TabsContent>
@@ -294,6 +302,12 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
               variableSetName={variableSetName}
               canManage={canManage}
               mutating={rig.mutating}
+              deferredVerification={deferredVerification}
+              onRecoverDeferred={async () => {
+                const result = await rig.recoverDeferredVerification();
+                if (result) await Promise.all([versions.refresh(), changes.refresh()]);
+                return result;
+              }}
               onActivate={async (versionId) => {
                 const result = await rig.activateVersion(versionId);
                 await versions.refresh();

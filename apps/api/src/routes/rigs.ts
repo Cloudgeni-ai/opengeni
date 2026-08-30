@@ -29,6 +29,8 @@ import {
   listRigVersionsForApi,
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
+  resolveDeferredRigVersionVerificationRecovery,
+  RigDeferredVerificationRecoveryError,
   requireRigChangeForApi,
   requireRigForApi,
   updateRigForApi,
@@ -147,13 +149,21 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       { workspaceId, rigId, versionId },
       { allowAlreadyPending: true },
     );
+    await dispatchVersionVerification(workspaceId, versionId, attempt.attemptId);
+    return attempt;
+  }
+
+  async function dispatchVersionVerification(
+    workspaceId: string,
+    versionId: string,
+    attemptId: string,
+  ): Promise<void> {
     await workflowClient.startRigVerification({
       workspaceId,
       versionId,
-      attemptId: attempt.attemptId,
-      workflowId: `rig-verification-version-${versionId}-attempt-${attempt.attemptId}`,
+      attemptId,
+      workflowId: `rig-verification-version-${versionId}-attempt-${attemptId}`,
     });
-    return attempt;
   }
 
   async function tryStartInitialVersionVerification(
@@ -271,7 +281,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions/:versionId/verify", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { rig } = await requireRigMutation(c, workspaceId, "rigs:use");
+    const { rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
     const versionId = c.req.param("versionId");
     const versions = await listRigVersionsForApi({ db }, rig.workspaceId, rig.id);
     if (!versions.some((version) => version.id === versionId)) {
@@ -279,6 +289,59 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     await startVersionVerification(rig.workspaceId, rig.id, versionId);
     return c.json({ ok: true, versionId }, 202);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions/recover", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { rig } = await requireRigMutation(c, workspaceId, "rigs:use");
+    let recovery;
+    try {
+      recovery = await resolveDeferredRigVersionVerificationRecovery(
+        { db },
+        rig.workspaceId,
+        rig.id,
+      );
+    } catch (error) {
+      if (error instanceof RigDeferredVerificationRecoveryError) {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: error.message,
+          retryable: false,
+          outcomeUnknown: false,
+          details: {
+            code:
+              error.reason === "ambiguous"
+                ? "RIG_DEFERRED_VERIFICATION_AMBIGUOUS"
+                : "RIG_DEFERRED_VERIFICATION_NOT_FOUND",
+            candidateCount: error.candidateCount,
+          },
+        });
+      }
+      throw error;
+    }
+    try {
+      await dispatchVersionVerification(rig.workspaceId, recovery.versionId, recovery.attemptId);
+    } catch (error) {
+      deps.observability?.warn("deferred rig version verification recovery dispatch failed", {
+        workspaceId: rig.workspaceId,
+        rigId: rig.id,
+        versionId: recovery.versionId,
+        attemptId: recovery.attemptId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new ApiHttpError(503, {
+        code: "upstream_unavailable",
+        message:
+          "OpenGeni could not confirm Rig verification dispatch. Retry this recovery operation; it will reuse the same pending attempt.",
+        retryable: true,
+        outcomeUnknown: true,
+        details: {
+          code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+          versionId: recovery.versionId,
+        },
+      });
+    }
+    return c.json({ ok: true, versionId: recovery.versionId }, 202);
   });
 
   // Rollback / promote-activate: flips which existing version is active.

@@ -5303,6 +5303,33 @@ export class OpenGeniClient {
     );
   }
 
+  /** Start or retry one exact version verification (rigs:manage). */
+  async verifyRigVersion(
+    workspaceId: string,
+    rigId: string,
+    versionId: string,
+  ): Promise<{ ok: boolean; versionId: string }> {
+    return await this.requestJson<{ ok: boolean; versionId: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions/${versionId}/verify`,
+    );
+  }
+
+  /**
+   * Resume the one unique inactive version whose verification attempt is
+   * already pending (rigs:use). The server refuses zero or ambiguous candidates
+   * and never creates a new attempt through this operation.
+   */
+  async recoverDeferredRigVerification(
+    workspaceId: string,
+    rigId: string,
+  ): Promise<{ ok: boolean; versionId: string }> {
+    return await this.requestJson<{ ok: boolean; versionId: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions/recover`,
+    );
+  }
+
   /** Roll the active version to an existing one (rollback / promote-activate). */
   async activateRigVersion(
     workspaceId: string,

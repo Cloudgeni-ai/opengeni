@@ -1341,6 +1341,20 @@ export class MockOpenGeniClient implements SessionClientLike {
       .sort((a, b) => b.version - a.version);
   }
 
+  async recoverDeferredRigVerification(
+    _workspaceId: string,
+    rigId: string,
+  ): Promise<{ ok: boolean; versionId: string }> {
+    const candidates = this.rigVersions.filter(
+      (version) =>
+        version.rigId === rigId && !version.active && version.verificationStatus === "pending",
+    );
+    if (candidates.length !== 1) {
+      throw new Error("Rig deferred verification recovery requires one pending version");
+    }
+    return { ok: true, versionId: candidates[0]!.id };
+  }
+
   async activateRigVersion(
     _workspaceId: string,
     rigId: string,
