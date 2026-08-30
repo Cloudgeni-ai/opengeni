@@ -116,6 +116,17 @@ export function createOpenGeniAppsHttpTransport(
           },
         )) as OpenGeniAppsControlOperationMap[K]["output"];
       }
+      if (operation === "apps.runtime.availableCatalog") {
+        const value =
+          input as OpenGeniAppsControlOperationMap["apps.runtime.availableCatalog"]["input"];
+        return (await request(
+          `${appsBase(value.workspaceId)}/${segment(value.appId)}/runtime/available-catalog`,
+          {
+            method: "GET",
+            ...(options.signal ? { signal: options.signal } : {}),
+          },
+        )) as OpenGeniAppsControlOperationMap[K]["output"];
+      }
       if (operation === "apps.launch.create") {
         const value = input as OpenGeniAppsControlOperationMap["apps.launch.create"]["input"];
         return (await mutation(

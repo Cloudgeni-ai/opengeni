@@ -93,7 +93,8 @@ export const AppFilePath = z
     ) {
       ctx.addIssue({
         code: "custom",
-        message: "app file paths must be normalized relative POSIX paths without control characters",
+        message:
+          "app file paths must be normalized relative POSIX paths without control characters",
       });
     }
   });
@@ -545,6 +546,13 @@ export const AppRuntimeCatalogResponse = z.object({
   tools: z.array(AppToolDescriptor).max(1_000),
 });
 export type AppRuntimeCatalogResponse = z.infer<typeof AppRuntimeCatalogResponse>;
+
+export const AppAvailableRuntimeCatalogResponse = z.object({
+  appId: Uuid,
+  catalogDigest: Sha256,
+  tools: z.array(AppToolDescriptor).max(1_000),
+});
+export type AppAvailableRuntimeCatalogResponse = z.infer<typeof AppAvailableRuntimeCatalogResponse>;
 
 export const AppRuntimeToolCallRequest = z.object({
   operationId: Uuid,

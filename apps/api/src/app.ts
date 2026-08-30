@@ -98,6 +98,7 @@ import { assertManagedEmailTransportMetadata } from "./auth/organization-user-se
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
+import { createCurrentHumanAppRuntimeToolProvider } from "./app-runtime-tools";
 import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
@@ -246,6 +247,17 @@ export function createAppComposition(deps: AppDependencies): {
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
+  let composedRouteDeps: ApiRouteDeps | undefined;
+  const appRuntimeToolProvider =
+    deps.appRuntimeToolProvider ??
+    (deps.settings.appsEnabled
+      ? createCurrentHumanAppRuntimeToolProvider(() => {
+          if (!composedRouteDeps) {
+            throw new Error("Apps runtime tools were resolved before API composition completed");
+          }
+          return composedRouteDeps;
+        })
+      : undefined);
   const appsApplication =
     deps.apps ??
     (deps.settings.appsEnabled
@@ -253,9 +265,7 @@ export function createAppComposition(deps: AppDependencies): {
           db: deps.db,
           storage: objectStorage,
           settings: deps.settings,
-          ...(deps.appRuntimeToolProvider
-            ? { runtimeToolProvider: deps.appRuntimeToolProvider }
-            : {}),
+          ...(appRuntimeToolProvider ? { runtimeToolProvider: appRuntimeToolProvider } : {}),
         })
       : undefined);
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
@@ -387,6 +397,7 @@ export function createAppComposition(deps: AppDependencies): {
     ...(sandboxClient ? { sandboxClient } : {}),
     resumeBoxById,
   };
+  composedRouteDeps = routeDeps;
   const app = new Hono();
   const correlationIds = new WeakMap<Request, string>();
 

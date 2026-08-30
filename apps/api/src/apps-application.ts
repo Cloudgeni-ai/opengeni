@@ -14,11 +14,13 @@ import {
   callAppRuntimeTool,
   freezeAppBuildObjects,
   freezeAppSourceArchive,
+  projectAvailableAppRuntimeCatalog,
   projectAppRuntimeCatalog,
   resolveWorkspaceAppOrigin,
   type AppRuntimeToolProvider,
   type AppsApplicationPort,
 } from "@opengeni/core";
+import { canonicalToolIdentityKey } from "@opengeni/tool-runtime";
 import {
   AppPersistenceConflictError,
   AppPersistenceIdempotencyError,
@@ -123,7 +125,41 @@ export function createDatabaseAppsApplication(input: {
       );
     },
 
-    async createToolPolicy({ authority, appId, request }) {
+    async getAvailableRuntimeCatalog({ authority, appId }, options) {
+      if (!input.runtimeToolProvider) {
+        throw new HTTPException(503, { message: "Apps runtime tools are not configured" });
+      }
+      return await projectAvailableAppRuntimeCatalog({
+        authority,
+        appId,
+        provider: input.runtimeToolProvider,
+        ...(options?.signal ? { signal: options.signal } : {}),
+      });
+    },
+
+    async createToolPolicy({ authority, appId, request }, options) {
+      if (!input.runtimeToolProvider) {
+        throw new HTTPException(503, { message: "Apps runtime tools are not configured" });
+      }
+      const available = await projectAvailableAppRuntimeCatalog({
+        authority,
+        appId,
+        provider: input.runtimeToolProvider,
+        ...(options?.signal ? { signal: options.signal } : {}),
+      });
+      if (available.catalogDigest !== request.catalogDigest) {
+        throw new HTTPException(409, { message: "Apps tool catalog changed" });
+      }
+      const availableIdentities = new Set(
+        available.tools.map((tool) => canonicalToolIdentityKey(tool.identity)),
+      );
+      if (
+        request.allowedTools.some(
+          (identity) => !availableIdentities.has(canonicalToolIdentityKey(identity)),
+        )
+      ) {
+        throw new HTTPException(422, { message: "App tool policy contains an unavailable tool" });
+      }
       await appPersistence(() =>
         createAppToolPolicyRevision(input.db, {
           accountId: authority.accountId,

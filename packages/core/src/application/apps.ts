@@ -1,5 +1,6 @@
 import type {
   AppBuildMutationResponse,
+  AppAvailableRuntimeCatalogResponse,
   AppBuildUploadListQuery,
   AppBuildUploadListResponse,
   AppReleaseMutationResponse,
@@ -143,9 +144,13 @@ export interface AppsApplicationPort {
     options?: AppApplicationCallOptions,
   ): Promise<WorkspaceAppMutationResponse>;
   createToolPolicy(
-    input: AppResourceInput & Readonly<{ request: CreateAppToolPolicyRequest }>,
+    input: AppCurrentHumanResourceInput & Readonly<{ request: CreateAppToolPolicyRequest }>,
     options?: AppApplicationCallOptions,
   ): Promise<WorkspaceAppDetailResponse>;
+  getAvailableRuntimeCatalog(
+    input: AppCurrentHumanResourceInput,
+    options?: AppApplicationCallOptions,
+  ): Promise<AppAvailableRuntimeCatalogResponse>;
   beginSourceUpload(
     input: AppResourceInput & Readonly<{ request: BeginAppSourceUploadRequest }>,
     options?: AppApplicationCallOptions,

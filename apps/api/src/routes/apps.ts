@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
+  AppAvailableRuntimeCatalogResponse,
   AppBuildMutationResponse,
   AppBuildUploadListQuery,
   AppBuildUploadListResponse,
@@ -280,7 +281,7 @@ export function registerAppRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.post(`${base}/:appId/tool-policies`, async (context) => {
-    const actor = await controlAuthority(context, deps, "apps:write", true);
+    const actor = await currentHumanAuthority(context, deps, "apps:write", true);
     const request = await body(context, CreateAppToolPolicyRequest);
     return context.json(
       WorkspaceAppDetailResponse.parse(
@@ -290,6 +291,18 @@ export function registerAppRoutes(app: Hono, deps: ApiRouteDeps): void {
         ),
       ),
       201,
+    );
+  });
+
+  app.get(`${base}/:appId/runtime/available-catalog`, async (context) => {
+    const actor = await currentHumanAuthority(context, deps, "apps:write", false);
+    return context.json(
+      AppAvailableRuntimeCatalogResponse.parse(
+        await apps(deps).getAvailableRuntimeCatalog(
+          { authority: actor, appId: id(context, "appId") },
+          signal(context),
+        ),
+      ),
     );
   });
 

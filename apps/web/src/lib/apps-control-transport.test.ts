@@ -27,11 +27,16 @@ describe("standalone Apps HTTP transport", () => {
       appId: APP_ID,
       releaseId: "release / one",
     });
+    await transport.request("apps.runtime.availableCatalog", {
+      workspaceId: WORKSPACE_ID,
+      appId: APP_ID,
+    });
 
     expect(calls.map(({ path }) => path)).toEqual([
       "/v1/workspaces/workspace%20%2F%20one/apps?limit=25&cursor=next+%2F+page",
       "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one",
       "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/runtime/catalog?releaseId=release+%2F+one",
+      "/v1/workspaces/workspace%20%2F%20one/apps/app%20%2F%20one/runtime/available-catalog",
     ]);
     expect(calls.every(({ init }) => init?.method === "GET")).toBe(true);
   });

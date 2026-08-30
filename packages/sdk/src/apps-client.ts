@@ -1,4 +1,6 @@
 import {
+  AppAvailableRuntimeCatalogResponse as AppAvailableRuntimeCatalogResponseSchema,
+  type AppAvailableRuntimeCatalogResponse,
   AppRuntimeCatalogResponse as AppRuntimeCatalogResponseSchema,
   AppRuntimeToolCallRequest as AppRuntimeToolCallRequestSchema,
   AppRuntimeToolCallResponse as AppRuntimeToolCallResponseSchema,
@@ -39,6 +41,13 @@ export type OpenGeniAppsControlOperationMap = {
       releaseId: string;
     };
     output: AppRuntimeCatalogResponse;
+  };
+  "apps.runtime.availableCatalog": {
+    input: {
+      workspaceId: string;
+      appId: string;
+    };
+    output: AppAvailableRuntimeCatalogResponse;
   };
   "apps.launch.create": {
     input: {
@@ -153,6 +162,23 @@ export class OpenGeniAppsClient {
           workspaceId: requiredId(workspaceId, "workspaceId"),
           appId: requiredId(appId, "appId"),
           releaseId: requiredId(releaseId, "releaseId"),
+        },
+        options,
+      ),
+    );
+  }
+
+  async getAvailableRuntimeCatalog(
+    workspaceId: string,
+    appId: string,
+    options: OpenGeniAppsControlRequestOptions = {},
+  ): Promise<AppAvailableRuntimeCatalogResponse> {
+    return AppAvailableRuntimeCatalogResponseSchema.parse(
+      await this.transport.request(
+        "apps.runtime.availableCatalog",
+        {
+          workspaceId: requiredId(workspaceId, "workspaceId"),
+          appId: requiredId(appId, "appId"),
         },
         options,
       ),

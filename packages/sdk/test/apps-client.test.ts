@@ -56,6 +56,11 @@ describe("OpenGeni Apps SDK client", () => {
             catalogDigest: "a".repeat(64),
             tools: [],
           },
+          "apps.runtime.availableCatalog": {
+            appId: APP_ID,
+            catalogDigest: "a".repeat(64),
+            tools: [],
+          },
           "apps.launch.create": {
             launchId: LAUNCH_ID,
             appId: APP_ID,
@@ -82,6 +87,7 @@ describe("OpenGeni Apps SDK client", () => {
     await client.listApps(" workspace-1 ", { limit: 20 });
     await client.getApp("workspace-1", "app-1");
     await client.getRuntimeCatalog("workspace-1", "app-1", RELEASE_ID);
+    await client.getAvailableRuntimeCatalog("workspace-1", "app-1");
     await client.createLaunch("workspace-1", "app-1", { releaseId: RELEASE_ID });
     await client.callRuntimeTool(
       "workspace-1",
@@ -91,10 +97,10 @@ describe("OpenGeni Apps SDK client", () => {
       "actor:7",
       "n".repeat(32),
       {
-      operationId: OPERATION_ID,
-      identity: { serverId: "status", toolName: "read" },
-      input: {},
-      catalogDigest: "a".repeat(64),
+        operationId: OPERATION_ID,
+        identity: { serverId: "status", toolName: "read" },
+        input: {},
+        catalogDigest: "a".repeat(64),
       },
     );
 
@@ -104,6 +110,10 @@ describe("OpenGeni Apps SDK client", () => {
       {
         operation: "apps.runtime.catalog",
         input: { workspaceId: "workspace-1", appId: "app-1", releaseId: RELEASE_ID },
+      },
+      {
+        operation: "apps.runtime.availableCatalog",
+        input: { workspaceId: "workspace-1", appId: "app-1" },
       },
       {
         operation: "apps.launch.create",
@@ -143,20 +153,12 @@ describe("OpenGeni Apps SDK client", () => {
     });
     await expect(client.getApp("workspace-1", " ")).rejects.toBeInstanceOf(TypeError);
     await expect(
-      client.callRuntimeTool(
-        "workspace-1",
-        "app-1",
-        "release-1",
-        LAUNCH_ID,
-        "actor:7",
-        "weak",
-        {
-          operationId: "11111111-1111-4111-8111-111111111111",
-          identity: { serverId: "status", toolName: "read" },
-          input: {},
-          catalogDigest: "a".repeat(64),
-        },
-      ),
+      client.callRuntimeTool("workspace-1", "app-1", "release-1", LAUNCH_ID, "actor:7", "weak", {
+        operationId: "11111111-1111-4111-8111-111111111111",
+        identity: { serverId: "status", toolName: "read" },
+        input: {},
+        catalogDigest: "a".repeat(64),
+      }),
     ).rejects.toBeInstanceOf(RangeError);
     expect(calls).toBe(0);
   });

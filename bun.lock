@@ -84,6 +84,7 @@
         "@opengeni/observability": "workspace:*",
         "@opengeni/runtime": "workspace:*",
         "@opengeni/storage": "workspace:*",
+        "@opengeni/tool-runtime": "workspace:*",
         "@opengeni/xai-subscription": "workspace:*",
         "@temporalio/client": "^1.17.0",
         "better-auth": "^1.6.14",

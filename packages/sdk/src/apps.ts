@@ -7,6 +7,7 @@ export type {
   OpenGeniAppsControlTransport,
 } from "./apps-client";
 export type {
+  AppAvailableRuntimeCatalogResponse,
   AppRelease,
   AppRuntimeCatalogResponse,
   AppRuntimeToolCallError,

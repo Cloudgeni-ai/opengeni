@@ -1,4 +1,5 @@
 import type {
+  AppAvailableRuntimeCatalogResponse,
   AppRuntimeCatalogResponse,
   AppRuntimeToolCallRequest,
   AppRuntimeToolCallResponse,
@@ -56,16 +57,43 @@ export type AppRuntimeToolBinding = Readonly<{
  * inside the server process.
  */
 export interface AppRuntimeToolProvider {
-  resolve(input: Readonly<{
+  resolve(
+    input: Readonly<{
+      authority: AppCurrentHumanAuthority;
+      appId: string;
+      releaseId?: string;
+      signal?: AbortSignal;
+    }>,
+  ): Promise<
+    Readonly<{
+      /** Digest of the authoritative canonical definitions, not display names. */
+      catalogDigest: string;
+      bindings: readonly AppRuntimeToolBinding[];
+    }>
+  >;
+}
+
+export async function projectAvailableAppRuntimeCatalog(
+  input: Readonly<{
     authority: AppCurrentHumanAuthority;
     appId: string;
-    releaseId: string;
+    provider: AppRuntimeToolProvider;
     signal?: AbortSignal;
-  }>): Promise<Readonly<{
-    /** Digest of the authoritative canonical definitions, not display names. */
-    catalogDigest: string;
-    bindings: readonly AppRuntimeToolBinding[];
-  }>>;
+  }>,
+): Promise<AppAvailableRuntimeCatalogResponse> {
+  const resolved = await input.provider.resolve({
+    authority: input.authority,
+    appId: input.appId,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  const tools = runtimeBindings(input.authority, resolved.bindings).map((binding) =>
+    AppToolDescriptorSchema.parse(binding.descriptor),
+  );
+  return {
+    appId: input.appId,
+    catalogDigest: resolved.catalogDigest,
+    tools: sortCanonicalToolDescriptors(tools),
+  };
 }
 
 export class AppRuntimeCatalogDriftError extends Error {
@@ -92,12 +120,14 @@ export class AppRuntimeCatalogMismatchError extends Error {
   }
 }
 
-export async function projectAppRuntimeCatalog(input: Readonly<{
-  authority: AppCurrentHumanAuthority;
-  policy: AppRuntimePolicySnapshot;
-  provider: AppRuntimeToolProvider;
-  signal?: AbortSignal;
-}>): Promise<AppRuntimeCatalogResponse> {
+export async function projectAppRuntimeCatalog(
+  input: Readonly<{
+    authority: AppCurrentHumanAuthority;
+    policy: AppRuntimePolicySnapshot;
+    provider: AppRuntimeToolProvider;
+    signal?: AbortSignal;
+  }>,
+): Promise<AppRuntimeCatalogResponse> {
   const resolved = await input.provider.resolve({
     authority: input.authority,
     appId: input.policy.appId,
@@ -120,13 +150,15 @@ export async function projectAppRuntimeCatalog(input: Readonly<{
   };
 }
 
-export async function callAppRuntimeTool(input: Readonly<{
-  authority: AppCurrentHumanAuthority;
-  policy: AppRuntimePolicySnapshot;
-  request: AppRuntimeToolCallRequest;
-  provider: AppRuntimeToolProvider;
-  signal?: AbortSignal;
-}>): Promise<AppRuntimeToolCallResponse> {
+export async function callAppRuntimeTool(
+  input: Readonly<{
+    authority: AppCurrentHumanAuthority;
+    policy: AppRuntimePolicySnapshot;
+    request: AppRuntimeToolCallRequest;
+    provider: AppRuntimeToolProvider;
+    signal?: AbortSignal;
+  }>,
+): Promise<AppRuntimeToolCallResponse> {
   if (input.request.catalogDigest !== input.policy.catalogDigest) {
     throw new AppRuntimeCatalogMismatchError();
   }
@@ -148,9 +180,7 @@ export async function callAppRuntimeTool(input: Readonly<{
 
   const validators = compileCanonicalToolSchemaValidators({
     inputSchema: binding.descriptor.inputSchema,
-    ...(binding.descriptor.outputSchema
-      ? { outputSchema: binding.descriptor.outputSchema }
-      : {}),
+    ...(binding.descriptor.outputSchema ? { outputSchema: binding.descriptor.outputSchema } : {}),
   });
   assertCanonicalToolInput(validators.input, input.request.input);
   try {
@@ -214,7 +244,10 @@ export async function callAppRuntimeTool(input: Readonly<{
       throw error;
     }
     const code =
-      typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
         ? error.code
         : "app_tool_failed";
     return {
