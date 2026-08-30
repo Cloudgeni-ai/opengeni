@@ -47429,9 +47429,7 @@ export async function settleRetainedProcess(
         const durableProof = retainedProcessReconciliationProof(mapRetainedProcess(process));
         if (
           durableProof &&
-          (durableProof.outcome !== input.outcome ||
-            durableProof.exitCode !== exitCode ||
-            durableProof.reason !== reason)
+          (durableProof.outcome !== input.outcome || durableProof.exitCode !== exitCode)
         ) {
           throw new SandboxWorkspaceMutationFencedError(
             "process_fenced",
@@ -47509,7 +47507,11 @@ export async function settleRetainedProcess(
           .set({
             state: input.outcome,
             exitCode,
-            settlementReason: reason,
+            // A checkpointed provider proof is the first durable evidence for
+            // this physical terminal state. A later owner/reaper observation
+            // may classify the same state + exit code differently, but it must
+            // not overwrite that already-durable evidence provenance.
+            settlementReason: durableProof?.reason ?? reason,
             settledAt: new Date(),
             reconcileClaimId: null,
             reconcileClaimedAt: null,

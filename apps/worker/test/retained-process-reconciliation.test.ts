@@ -1488,7 +1488,9 @@ describe("retained-process terminal-owner reconciliation", () => {
       processId: fixture.process.id,
       expected,
       reconciliationClaimId: claimId,
-      ...proof,
+      outcome: "lost",
+      exitCode: null,
+      reason: "provider_session_lost_banner",
       idleGraceMs: SETTINGS.sandboxIdleGraceMs,
     });
     const successor = await settlementProjection(fixture);
