@@ -373,7 +373,7 @@ export function recordWorkerDeathRecoveryMetrics(
 }
 
 export class TurnLifecycleMetrics {
-  private readonly turns = new Map<string, { startedAt: number; lastProgressAt: number }>();
+  private readonly attempts = new Map<string, { startedAt: number; lastProgressAt: number }>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
@@ -384,42 +384,46 @@ export class TurnLifecycleMetrics {
     } = {},
   ) {}
 
-  start(turnId: string): void {
+  start(input: { attemptId: string }): void {
     const now = this.now();
-    this.turns.set(turnId, { startedAt: now, lastProgressAt: now });
+    this.attempts.set(input.attemptId, { startedAt: now, lastProgressAt: now });
     this.ensureTimer();
     this.refreshGauges();
   }
 
-  progress(turnId: string): void {
-    const turn = this.turns.get(turnId);
-    if (!turn) return;
-    turn.lastProgressAt = this.now();
+  progress(input: { attemptId: string }): void {
+    const attempt = this.attempts.get(input.attemptId);
+    if (!attempt) return;
+    attempt.lastProgressAt = this.now();
   }
 
-  finish(turnId: string, outcome: TurnOutcome | null, durationSeconds?: number): void {
-    const startedAt = this.turns.get(turnId)?.startedAt;
+  finish(input: {
+    attemptId: string;
+    outcome: TurnOutcome | null;
+    durationSeconds?: number;
+  }): void {
+    const startedAt = this.attempts.get(input.attemptId)?.startedAt;
     if (startedAt !== undefined) {
-      this.turns.delete(turnId);
+      this.attempts.delete(input.attemptId);
     }
-    if (outcome) {
+    if (input.outcome) {
       const observedDuration =
-        durationSeconds ??
+        input.durationSeconds ??
         (startedAt === undefined ? 0 : Math.max(0, (this.now() - startedAt) / 1000));
       this.observability.incrementCounter({
         name: "opengeni_turns_total",
         help: "Total agent turns by terminal outcome.",
-        labels: { outcome },
+        labels: { outcome: input.outcome },
       });
       this.observability.observeHistogram({
         name: "opengeni_turn_duration_seconds",
         help: "Agent turn duration in seconds by terminal outcome.",
-        labels: { outcome },
+        labels: { outcome: input.outcome },
         value: observedDuration,
       });
     }
     this.refreshGauges();
-    if (this.turns.size === 0) {
+    if (this.attempts.size === 0) {
       this.stopTimer();
     }
   }
@@ -428,7 +432,7 @@ export class TurnLifecycleMetrics {
     this.observability.setGauge({
       name: "opengeni_turns_inflight",
       help: "Current number of in-flight agent turns in this worker process.",
-      value: this.turns.size,
+      value: this.attempts.size,
     });
     this.observability.setGauge({
       name: "opengeni_turn_oldest_inflight_age_seconds",
@@ -443,26 +447,26 @@ export class TurnLifecycleMetrics {
   }
 
   stop(): void {
-    this.turns.clear();
+    this.attempts.clear();
     this.refreshGauges();
     this.stopTimer();
   }
 
   private oldestInflightAgeSeconds(): number {
-    if (this.turns.size === 0) {
+    if (this.attempts.size === 0) {
       return 0;
     }
     let oldest = Number.POSITIVE_INFINITY;
-    for (const { startedAt } of this.turns.values()) {
+    for (const { startedAt } of this.attempts.values()) {
       oldest = Math.min(oldest, startedAt);
     }
     return Math.max(0, (this.now() - oldest) / 1000);
   }
 
   private oldestNoProgressAgeSeconds(): number {
-    if (this.turns.size === 0) return 0;
+    if (this.attempts.size === 0) return 0;
     let leastRecentProgress = Number.POSITIVE_INFINITY;
-    for (const { lastProgressAt } of this.turns.values()) {
+    for (const { lastProgressAt } of this.attempts.values()) {
       leastRecentProgress = Math.min(leastRecentProgress, lastProgressAt);
     }
     return Math.max(0, (this.now() - leastRecentProgress) / 1000);

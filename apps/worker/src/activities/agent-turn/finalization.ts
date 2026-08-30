@@ -715,12 +715,17 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       status: finalizationError ? "cleanup_failed" : control.activityStatus,
       durationSeconds,
     });
-    if (attempt.turnId && control.activityStatus !== "unknown") {
-      turnLifecycleMetricsFor(observability).finish(
-        attempt.turnId,
-        control.turnMetricOutcome,
+    if (attempt.turnId) {
+      // This registry describes physical activity ownership, not durable turn
+      // settlement. Always clear the exact attempt when its activity unwinds,
+      // even when failure settlement could not classify an outcome. Otherwise
+      // a recovered successor can make progress while the predecessor leaves a
+      // process-local false stuck-turn alert behind.
+      turnLifecycleMetricsFor(observability).finish({
+        attemptId: input.attemptId,
+        outcome: control.turnMetricOutcome,
         durationSeconds,
-      );
+      });
     }
     activitySpan.end({
       attributes: {
