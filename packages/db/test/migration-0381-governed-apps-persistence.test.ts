@@ -11,6 +11,7 @@ import {
   archiveWorkspaceApp,
   claimArchivedAppGc,
   completeAppBuild,
+  createAppPreview,
   createWorkspaceApp,
   createDatabaseAppLaunchResolver,
   getAppReleaseToolPolicy,
@@ -195,6 +196,13 @@ describe("migration 0381 governed Apps persistence", () => {
     expect(source).toContain("action_value = 'archive_app'");
     expect(source).toContain("App tool operation was reused with different input");
     expect(source).toContain("App tool operation settlement was reused with different output");
+    expect(source).toContain("action_value = 'begin' AND call_row.status = 'pending'");
+    expect(source).toContain(
+      "launch_row.status <> 'active' OR launch_row.expires_at <= clock_timestamp()",
+    );
+    expect(source).toContain("octet_length(tool_server_id) BETWEEN 1 AND 256");
+    expect(source).toContain("octet_length(allowed_tool->>'serverId') NOT BETWEEN 1 AND 256");
+    expect(source).not.toContain("[A-Za-z0-9_-]{1,256}");
     expect(source).toContain("call_row.output IS DISTINCT FROM (\n          CASE");
     expect(source).toContain("call_row.error IS DISTINCT FROM (\n          CASE");
     expect(source).toContain("policy_row.allowed_tools @> jsonb_build_array(p_input->'identity')");
@@ -216,6 +224,8 @@ describe("migration 0381 governed Apps persistence", () => {
       "ON requested.launch_id = route.launch_id AND requested.path = p_requested_path",
     );
     expect(source).toContain("AND route.expires_at > clock_timestamp()");
+    expect(source).not.toContain("app_previews_active_host_uq");
+    expect(source).toContain("app_previews_host_status_expiry_idx");
 
     const resolver = source.slice(
       source.indexOf("CREATE FUNCTION opengeni_private.resolve_app_host_launch"),
@@ -519,6 +529,246 @@ describe("migration 0381 live PostgreSQL posture", () => {
       await client.close();
     }
   });
+
+  test("allows concurrent previews and fences pending tool replays after launch settlement", async () => {
+    if (!clean) return;
+    const actorSubjectId = `human:${crypto.randomUUID()}`;
+    const appId = crypto.randomUUID();
+    const sourceRevisionId = crypto.randomUUID();
+    const toolPolicyRevisionId = crypto.randomUUID();
+    const buildId = crypto.randomUUID();
+    const releaseId = crypto.randomUUID();
+    const previewId = crypto.randomUUID();
+    const revokedLaunchId = crypto.randomUUID();
+    const expiredLaunchId = crypto.randomUUID();
+    const settledLaunchId = crypto.randomUUID();
+    const revokedOperationId = crypto.randomUUID();
+    const expiredOperationId = crypto.randomUUID();
+    const settledOperationId = crypto.randomUUID();
+    const sourceSha256 = "a".repeat(64);
+    const catalogDigest = "b".repeat(64);
+    const manifestSha256 = "c".repeat(64);
+    const receiptDigest = "d".repeat(64);
+    const launchNonceSha256 = `sha256:${"e".repeat(64)}`;
+    const expiredLaunchNonceSha256 = `sha256:${"f".repeat(64)}`;
+    const settledLaunchNonceSha256 = `sha256:${"0".repeat(64)}`;
+    const authorityGeneration = `generation-${crypto.randomUUID()}`;
+    const inputHash = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+    const hostname = `${appId}.apps.example.com`;
+    const manifest = {
+      version: "opengeni.app-build.v1",
+      entryPath: "index.html",
+      totalBytes: 1,
+      files: [
+        {
+          path: "index.html",
+          contentType: "text/html",
+          contentSha256: sourceSha256,
+          sizeBytes: 1,
+          executable: false,
+        },
+      ],
+    };
+
+    await clean.admin.begin(async (transaction) => {
+      await transaction`
+        insert into apps (
+          id, account_id, workspace_id, slug, title, created_by_subject_id
+        ) values (
+          ${appId}, ${cleanAccountId}, ${cleanWorkspaceId},
+          ${`replay-${appId}`}, 'Replay fixture', ${actorSubjectId}
+        )`;
+      await transaction`
+        insert into app_source_revisions (
+          id, account_id, workspace_id, app_id, revision, status,
+          staging_object_key, frozen_object_key, frozen_version_token,
+          content_sha256, size_bytes, file_count, created_by_subject_id, verified_at
+        ) values (
+          ${sourceRevisionId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, 1, 'ready',
+          ${`apps/${appId}/staging/source.tar`},
+          ${`apps/${appId}/frozen/${sourceSha256}.tar`}, 'source-version',
+          ${sourceSha256}, 1, 1, ${actorSubjectId}, clock_timestamp()
+        )`;
+      await transaction`
+        insert into app_tool_policy_revisions (
+          id, account_id, workspace_id, app_id, revision, catalog_digest,
+          allowed_tools, created_by_subject_id
+        ) values (
+          ${toolPolicyRevisionId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, 1,
+          ${catalogDigest},
+          ${transaction.json([{ serverId: "docs", toolName: "memory_search" }])}::jsonb,
+          ${actorSubjectId}
+        )`;
+      await transaction`
+        insert into app_builds (
+          id, account_id, workspace_id, app_id, source_revision_id,
+          tool_policy_revision_id, revision, status, manifest_object_key,
+          manifest_version_token, manifest_sha256, manifest, entry_path,
+          file_count, total_bytes, checks, receipt_digest, created_by_subject_id, verified_at
+        ) values (
+          ${buildId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, ${sourceRevisionId},
+          ${toolPolicyRevisionId}, 1, 'succeeded',
+          ${`apps/${appId}/frozen/${manifestSha256}/manifest.json`}, 'manifest-version',
+          ${manifestSha256}, ${transaction.json(manifest)}::jsonb, 'index.html', 1, 1,
+          ${transaction.json(["manifest", "files", "receipt"])}::jsonb,
+          ${receiptDigest}, ${actorSubjectId}, clock_timestamp()
+        )`;
+      await transaction`
+        insert into app_releases (
+          id, account_id, workspace_id, app_id, build_id, source_revision_id,
+          tool_policy_revision_id, revision, manifest_sha256, entry_path,
+          file_count, total_bytes, build_receipt_digest, created_by_subject_id
+        ) values (
+          ${releaseId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, ${buildId},
+          ${sourceRevisionId}, ${toolPolicyRevisionId}, 1, ${manifestSha256},
+          'index.html', 1, 1, ${receiptDigest}, ${actorSubjectId}
+        )`;
+      await transaction`
+        insert into app_previews (
+          id, account_id, workspace_id, app_id, release_id, hostname,
+          created_by_subject_id, expires_at
+        ) values (
+          ${previewId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, ${releaseId},
+          ${hostname}, ${actorSubjectId}, clock_timestamp() + interval '1 hour'
+        )`;
+      await transaction`
+        insert into app_launches (
+          id, account_id, workspace_id, app_id, release_id, preview_id,
+          hostname, nonce_sha256, authority_generation, status, expires_at,
+          revoked_at, created_by_subject_id
+        ) values
+          (
+            ${revokedLaunchId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId},
+            ${releaseId}, ${previewId}, ${hostname}, ${launchNonceSha256},
+            ${authorityGeneration}, 'revoked', clock_timestamp() + interval '10 minutes',
+            clock_timestamp(), ${actorSubjectId}
+          ),
+          (
+            ${expiredLaunchId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId},
+            ${releaseId}, ${previewId}, ${hostname}, ${expiredLaunchNonceSha256},
+            ${authorityGeneration}, 'active', clock_timestamp() - interval '1 second',
+            null, ${actorSubjectId}
+          ),
+          (
+            ${settledLaunchId}, ${cleanAccountId}, ${cleanWorkspaceId}, ${appId},
+            ${releaseId}, ${previewId}, ${hostname}, ${settledLaunchNonceSha256},
+            ${authorityGeneration}, 'revoked', clock_timestamp() + interval '10 minutes',
+            clock_timestamp(), ${actorSubjectId}
+          )`;
+      await transaction`
+        insert into app_tool_calls (
+          account_id, workspace_id, app_id, release_id, launch_id, operation_id,
+          tool_server_id, tool_name, catalog_digest, input_hash, status,
+          output, created_by_subject_id, settled_at
+        ) values
+          (
+            ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, ${releaseId},
+            ${revokedLaunchId}, ${revokedOperationId}, 'docs', 'memory_search',
+            ${catalogDigest}, ${inputHash}, 'pending', null, ${actorSubjectId}, null
+          ),
+          (
+            ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, ${releaseId},
+            ${expiredLaunchId}, ${expiredOperationId}, 'docs', 'memory_search',
+            ${catalogDigest}, ${inputHash}, 'pending', null, ${actorSubjectId}, null
+          ),
+          (
+            ${cleanAccountId}, ${cleanWorkspaceId}, ${appId}, ${releaseId},
+            ${settledLaunchId}, ${settledOperationId}, 'docs', 'memory_search',
+            ${catalogDigest}, ${inputHash}, 'succeeded', ${transaction.json({ ok: true })}::jsonb,
+            ${actorSubjectId}, clock_timestamp()
+          )`;
+    });
+
+    const appUrl = runtimeUrl(clean.adminUrl, clean.appPassword);
+    const client = createDb(appUrl, { max: 2, rlsStrategy: "force" });
+    const rawApp = postgres(appUrl, { max: 1, prepare: false, onnotice: () => undefined });
+    const beginCommand = (launchId: string, launchDigest: string, operationId: string) => ({
+      action: "begin",
+      accountId: cleanAccountId,
+      workspaceId: cleanWorkspaceId,
+      actorSubjectId,
+      appId,
+      releaseId,
+      launchId,
+      launchNonceSha256: launchDigest,
+      authorityHash: null,
+      authorityEpoch: null,
+      authorityGeneration,
+      operationId,
+      identity: { serverId: "docs", toolName: "memory_search" },
+      catalogDigest,
+      input: {},
+    });
+    const replayState = async (command: ReturnType<typeof beginCommand>) =>
+      await capturedSqlState(
+        rawApp.begin(async (transaction) => {
+          await transaction`select
+            set_config('opengeni.account_id', ${cleanAccountId}, true),
+            set_config('opengeni.workspace_id', ${cleanWorkspaceId}, true),
+            set_config('opengeni.subject_id', ${actorSubjectId}, true)`;
+          await transaction`
+            select app_tool_call_command(${transaction.json(command)}::jsonb)`;
+        }),
+      );
+
+    try {
+      const firstPreview = await createAppPreview(client.db, {
+        accountId: cleanAccountId,
+        workspaceId: cleanWorkspaceId,
+        actorSubjectId,
+        appId,
+        releaseId,
+        hostname,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1_000),
+        idempotencyKey: crypto.randomUUID(),
+      });
+      const secondPreview = await createAppPreview(client.db, {
+        accountId: cleanAccountId,
+        workspaceId: cleanWorkspaceId,
+        actorSubjectId,
+        appId,
+        releaseId,
+        hostname,
+        expiresAt: new Date(Date.now() + 45 * 60 * 1_000),
+        idempotencyKey: crypto.randomUUID(),
+      });
+      expect(firstPreview.preview.id).not.toBe(secondPreview.preview.id);
+      const [activePreviews] = await clean.admin<Array<{ count: number }>>`
+        select count(*)::int as count from app_previews
+        where workspace_id = ${cleanWorkspaceId} and app_id = ${appId}
+          and hostname = ${hostname} and status = 'active'`;
+      expect(activePreviews).toEqual({ count: 3 });
+
+      expect(
+        await replayState(beginCommand(revokedLaunchId, launchNonceSha256, revokedOperationId)),
+      ).toBe("P0002");
+      expect(
+        await replayState(
+          beginCommand(expiredLaunchId, expiredLaunchNonceSha256, expiredOperationId),
+        ),
+      ).toBe("P0002");
+
+      const [settledReplay] = await rawApp.begin(async (transaction) => {
+        await transaction`select
+          set_config('opengeni.account_id', ${cleanAccountId}, true),
+          set_config('opengeni.workspace_id', ${cleanWorkspaceId}, true),
+          set_config('opengeni.subject_id', ${actorSubjectId}, true)`;
+        return await transaction<
+          Array<{ result: { replayed: boolean; toolCall: { status: string } } }>
+        >`
+          select app_tool_call_command(${transaction.json(
+            beginCommand(settledLaunchId, settledLaunchNonceSha256, settledOperationId),
+          )}::jsonb) as result`;
+      });
+      expect(settledReplay!.result).toMatchObject({
+        replayed: true,
+        toolCall: { status: "succeeded" },
+      });
+    } finally {
+      await rawApp.end();
+      await client.close();
+    }
+  }, 900_000);
 
   test("upgrades a pre-0381 database without changing existing HTML Artifacts", async () => {
     if (!upgrade) return;

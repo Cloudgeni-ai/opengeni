@@ -357,9 +357,11 @@ export const appPreviews = pgTable(
       table.releaseId,
       table.id,
     ),
-    activeHost: uniqueIndex("app_previews_active_host_uq")
-      .on(table.hostname)
-      .where(sql`${table.status} = 'active'`),
+    hostStatusExpiry: index("app_previews_host_status_expiry_idx").on(
+      table.hostname,
+      table.status,
+      table.expiresAt,
+    ),
     expiry: index("app_previews_expiry_idx").on(table.status, table.expiresAt),
   }),
 );

@@ -419,7 +419,8 @@ CREATE TABLE app_previews (
     OR (status IN ('expired', 'revoked') AND revoked_at IS NOT NULL)
   )
 );
-CREATE UNIQUE INDEX app_previews_active_host_uq ON app_previews(hostname) WHERE status = 'active';
+CREATE INDEX app_previews_host_status_expiry_idx
+  ON app_previews(hostname, status, expires_at);
 CREATE INDEX app_previews_expiry_idx ON app_previews(status, expires_at);
 
 CREATE TABLE app_publications (
@@ -536,7 +537,8 @@ CREATE TABLE app_tool_calls (
   CONSTRAINT app_tool_calls_workspace_id_uq UNIQUE (workspace_id, id),
   CONSTRAINT app_tool_calls_launch_operation_uq UNIQUE (workspace_id, launch_id, operation_id),
   CONSTRAINT app_tool_calls_identity_chk CHECK (
-    tool_server_id ~ '^[A-Za-z0-9_-]{1,256}$'
+    octet_length(tool_server_id) BETWEEN 1 AND 256
+    AND tool_server_id ~ '^[A-Za-z0-9_-]+$'
     AND length(tool_name) BETWEEN 1 AND 512
     AND tool_name !~ '[[:cntrl:]]'
     AND catalog_digest ~ '^[0-9a-f]{64}$'
@@ -894,7 +896,8 @@ BEGIN
         WHERE jsonb_typeof(allowed_tool) IS DISTINCT FROM 'object'
           OR allowed_tool->>'serverId' IS NULL
           OR allowed_tool->>'toolName' IS NULL
-          OR allowed_tool->>'serverId' !~ '^[A-Za-z0-9_-]{1,256}$'
+          OR octet_length(allowed_tool->>'serverId') NOT BETWEEN 1 AND 256
+          OR allowed_tool->>'serverId' !~ '^[A-Za-z0-9_-]+$'
           OR length(allowed_tool->>'toolName') NOT BETWEEN 1 AND 512
           OR allowed_tool->>'toolName' ~ '[[:cntrl:]]'
           OR allowed_tool - 'serverId' - 'toolName' <> '{}'::jsonb
@@ -1553,10 +1556,12 @@ BEGIN
   SELECT * INTO call_row FROM app_tool_calls
   WHERE workspace_id = workspace_id_value AND launch_id = launch_id_value
     AND operation_id = operation_id_value FOR UPDATE;
-  IF FOUND AND call_row.created_by_subject_id IS DISTINCT FROM actor_subject_id_value THEN
+  IF call_row.id IS NOT NULL
+    AND call_row.created_by_subject_id IS DISTINCT FROM actor_subject_id_value
+  THEN
     RAISE EXCEPTION 'App tool operation belongs to another actor' USING ERRCODE = '42501';
   END IF;
-  IF FOUND THEN
+  IF call_row.id IS NOT NULL THEN
     SELECT * INTO launch_row FROM app_launches
     WHERE workspace_id = workspace_id_value AND id = call_row.launch_id
       AND app_id = app_id_value AND release_id = release_id_value
@@ -1568,6 +1573,11 @@ BEGIN
     IF NOT FOUND THEN
       RAISE EXCEPTION 'App launch actor generation changed' USING ERRCODE = '42501';
     END IF;
+    IF action_value = 'begin' AND call_row.status = 'pending'
+      AND (launch_row.status <> 'active' OR launch_row.expires_at <= clock_timestamp())
+    THEN
+      RAISE EXCEPTION 'Active App launch not found' USING ERRCODE = 'P0002';
+    END IF;
   END IF;
 
   IF action_value = 'begin' THEN
@@ -1575,7 +1585,7 @@ BEGIN
       pg_catalog.sha256(pg_catalog.convert_to(COALESCE(p_input->'input', '{}'::jsonb)::text, 'UTF8')),
       'hex'
     );
-    IF FOUND THEN
+    IF call_row.id IS NOT NULL THEN
       IF call_row.tool_server_id IS DISTINCT FROM p_input->'identity'->>'serverId'
         OR call_row.tool_name IS DISTINCT FROM p_input->'identity'->>'toolName'
         OR call_row.catalog_digest IS DISTINCT FROM p_input->>'catalogDigest'
@@ -1620,7 +1630,9 @@ BEGIN
     RETURN jsonb_build_object('replayed', false, 'toolCall', to_jsonb(call_row));
 
   ELSIF action_value = 'settle' THEN
-    IF NOT FOUND THEN RAISE EXCEPTION 'App tool call not found' USING ERRCODE = 'P0002'; END IF;
+    IF call_row.id IS NULL THEN
+      RAISE EXCEPTION 'App tool call not found' USING ERRCODE = 'P0002';
+    END IF;
     IF call_row.status <> 'pending' THEN
       IF call_row.status IS DISTINCT FROM p_input->>'status'
         OR call_row.output IS DISTINCT FROM (
