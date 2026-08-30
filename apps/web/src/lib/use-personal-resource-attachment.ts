@@ -1,5 +1,4 @@
 import {
-  PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING,
   type PersonalResourceAttachmentIntent,
   type ResourceAuthorityScope,
   type SendMessageInput,
@@ -37,13 +36,9 @@ export type PersonalResourceAttachmentController = Readonly<{
   catalog: PersonalResourceCatalog | null;
   selected: ReturnType<typeof personalSelection>;
   mode: PersonalAttachmentMode | null;
-  acknowledged: boolean;
   visibility: "private" | "workspace";
-  warning: string;
   requiresDecision: boolean;
   intent: PersonalResourceAttachmentIntent | undefined;
-  setMode: (mode: PersonalAttachmentMode | null) => void;
-  setAcknowledged: (acknowledged: boolean) => void;
   refresh: () => Promise<void>;
   onAccepted: (
     input: SendMessageInput | { personalResourceAttachment?: PersonalResourceAttachmentIntent },
@@ -177,8 +172,6 @@ export function usePersonalResourceAttachment(input: {
   const [error, setError] = useState<Error | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [sourceLost, setSourceLost] = useState(false);
-  const [mode, setModeState] = useState<PersonalAttachmentMode | null>(null);
-  const [acknowledged, setAcknowledgedState] = useState(false);
   const loadGeneration = useRef(0);
   const acceptedScopeKey = useRef(scopeKey);
 
@@ -220,8 +213,6 @@ export function usePersonalResourceAttachment(input: {
     acceptedScopeKey.current = scopeKey;
     loadGeneration.current += 1;
     setCatalog(null);
-    setModeState(null);
-    setAcknowledgedState(false);
     setNotice(null);
     setSourceLost(false);
     setError(null);
@@ -263,8 +254,6 @@ export function usePersonalResourceAttachment(input: {
     priorFixedIdentity.current = fixedIdentity;
     priorSelectionScopeKey.current = scopeKey;
     priorSelectedCount.current = selected.resourceCount;
-    setModeState(null);
-    setAcknowledgedState(false);
     setSourceLost(lost);
     setNotice(
       lost
@@ -281,6 +270,9 @@ export function usePersonalResourceAttachment(input: {
       ? "private"
       : (input.createVisibility ?? "workspace");
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
+  const mode: PersonalAttachmentMode | null =
+    selected.resourceCount > 0 ? (visibility === "private" ? "session" : "once") : null;
+  const acknowledged = visibility === "workspace" && selected.resourceCount > 0;
   const fixedResourceCount =
     (input.fixed.variableSetIds?.length ?? Number(input.fixed.variableSetId !== null)) +
     Number(input.fixed.rigId !== null) +
@@ -304,7 +296,10 @@ export function usePersonalResourceAttachment(input: {
         visibility,
         acknowledged,
         expectedAuthorityEpoch,
-        resourceCount: selected.closureUnverified ? 0 : selected.resourceCount,
+        resourceCount:
+          selected.closureUnverified || sourceLost || effectiveError !== null
+            ? 0
+            : selected.resourceCount,
       })
     : undefined;
   const requiresDecision =
@@ -312,20 +307,7 @@ export function usePersonalResourceAttachment(input: {
     (sourceLost ||
       (positivelyPersonal &&
         fixedResourceCount > 0 &&
-        (loading || refreshing || effectiveError !== null)) ||
-      (selected.resourceCount > 0 &&
-        (mode === null || (visibility === "workspace" && !acknowledged))));
-
-  const setMode = useCallback((next: PersonalAttachmentMode | null) => {
-    setModeState(next);
-    setSourceLost(false);
-    setNotice(null);
-    if (next === null) setAcknowledgedState(false);
-  }, []);
-  const setAcknowledged = useCallback((next: boolean) => {
-    setAcknowledgedState(next);
-    setNotice(null);
-  }, []);
+        (loading || refreshing || effectiveError !== null)));
   const refresh = useCallback(async () => await load(true), [load]);
   const onAccepted = useCallback(
     (acceptedInput: {
@@ -333,10 +315,6 @@ export function usePersonalResourceAttachment(input: {
     }) => {
       if (!acceptedInput.personalResourceAttachment) return;
       setNotice("Personal-resource use was accepted for this work.");
-      if (acceptedInput.personalResourceAttachment.mode === "once") {
-        setModeState(null);
-        setAcknowledgedState(false);
-      }
       void load(true);
     },
     [load],
@@ -344,11 +322,7 @@ export function usePersonalResourceAttachment(input: {
   const onDeliveryError = useCallback(
     (deliveryError: Error, attemptedInput: PersonalResourceAttachmentAttempt) => {
       if (!isPersonalAttachmentConflict(deliveryError, attemptedInput)) return;
-      setModeState(null);
-      setAcknowledgedState(false);
-      setNotice(
-        "Session authority changed. Personal resources were reloaded; review and confirm them again before retrying.",
-      );
+      setNotice("Session authority changed. Personal resources were reloaded before retrying.");
       void Promise.all([load(true), onReloadSession?.() ?? Promise.resolve()]);
     },
     [load, onReloadSession],
@@ -369,13 +343,9 @@ export function usePersonalResourceAttachment(input: {
     catalog,
     selected,
     mode,
-    acknowledged,
     visibility,
-    warning: PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING,
     requiresDecision,
     intent,
-    setMode,
-    setAcknowledged,
     refresh,
     onAccepted,
     onDeliveryError,

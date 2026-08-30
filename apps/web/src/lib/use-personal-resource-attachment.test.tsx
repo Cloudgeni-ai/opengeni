@@ -294,9 +294,7 @@ describe("usePersonalResourceAttachment", () => {
     );
     await flush();
     expect(hook.result.current.selected.resourceCount).toBe(1);
-    await actRun(() => hook.result.current.setMode("session"));
-    await actRun(() => hook.result.current.setAcknowledged(true));
-    expect(hook.result.current.intent?.mode).toBe("session");
+    expect(hook.result.current.intent?.mode).toBe("once");
 
     active = false;
     await actRun(() => hook.result.current.refresh());
@@ -343,11 +341,12 @@ describe("usePersonalResourceAttachment", () => {
       variableSetId,
     ]);
     expect(hook.result.current.selected.resourceCount).toBe(1);
-    expect(hook.result.current.requiresDecision).toBe(true);
+    expect(hook.result.current.requiresDecision).toBe(false);
+    expect(hook.result.current.intent?.mode).toBe("once");
     await hook.unmount();
   });
 
-  test("a definitive stale-authority denial reloads the session and requires reconfirmation", async () => {
+  test("a definitive stale-authority denial reloads the session without restoring a duration choice", async () => {
     let sessionReloads = 0;
     const client = {
       listVariableSets: async () => [variableSet()],
@@ -385,8 +384,6 @@ describe("usePersonalResourceAttachment", () => {
       undefined,
     );
     await flush();
-    await actRun(() => hook.result.current.setMode("always"));
-    await actRun(() => hook.result.current.setAcknowledged(true));
     const attempted = {
       text: "Deploy",
       personalResourceAttachment: hook.result.current.intent,
@@ -402,14 +399,14 @@ describe("usePersonalResourceAttachment", () => {
     );
     await flush();
     expect(sessionReloads).toBe(1);
-    expect(hook.result.current.mode).toBeNull();
-    expect(hook.result.current.intent).toBeUndefined();
-    expect(hook.result.current.requiresDecision).toBe(true);
+    expect(hook.result.current.mode).toBe("once");
+    expect(hook.result.current.intent?.mode).toBe("once");
+    expect(hook.result.current.requiresDecision).toBe(false);
     expect(hook.result.current.notice).toContain("Session authority changed");
     await hook.unmount();
   });
 
-  test("a selected personal Connected Machine requires and produces an attachment decision", async () => {
+  test("a selected personal Connected Machine automatically uses message-only authority", async () => {
     const enrollmentId = "99999999-9999-4999-8999-999999999999";
     const client = {
       listVariableSets: async () => [],
@@ -460,12 +457,6 @@ describe("usePersonalResourceAttachment", () => {
     expect(hook.result.current.selected.connectedMachines).toEqual([
       { enrollmentId, name: "Owner Mac" },
     ]);
-    expect(hook.result.current.requiresDecision).toBe(true);
-    expect(hook.result.current.intent).toBeUndefined();
-
-    await actRun(() => hook.result.current.setMode("once"));
-    expect(hook.result.current.requiresDecision).toBe(true);
-    await actRun(() => hook.result.current.setAcknowledged(true));
     expect(hook.result.current.requiresDecision).toBe(false);
     expect(hook.result.current.intent).toMatchObject({
       mode: "once",
@@ -507,7 +498,7 @@ describe("usePersonalResourceAttachment", () => {
       });
     }
 
-    test(`personal ${label} positively identifies the selection and requires a decision`, async () => {
+    test(`personal ${label} positively identifies the selection and applies the visibility rule`, async () => {
       const client = personalClient();
       const current = identity("owner");
       const hook = await renderHook(
@@ -528,7 +519,8 @@ describe("usePersonalResourceAttachment", () => {
       expect(hook.result.current.error).toBeNull();
       expect(hook.result.current.selected.resourceCount).toBe(1);
       expect(hook.result.current.selected.personalResourceCount).toBe(1);
-      expect(hook.result.current.requiresDecision).toBe(true);
+      expect(hook.result.current.requiresDecision).toBe(false);
+      expect(hook.result.current.intent?.mode).toBe("once");
       await hook.unmount();
     });
 
@@ -710,7 +702,8 @@ describe("usePersonalResourceAttachment", () => {
       await flush();
       expect(hook.result.current.error).toBeNull();
       expect(hook.result.current.selected.resourceCount).toBe(1);
-      expect(hook.result.current.requiresDecision).toBe(true);
+      expect(hook.result.current.requiresDecision).toBe(false);
+      expect(hook.result.current.intent?.mode).toBe("once");
       await hook.unmount();
     });
   }
@@ -741,8 +734,6 @@ describe("usePersonalResourceAttachment", () => {
       { enabled: true },
     );
     await flush();
-    await actRun(() => hook.result.current.setMode("session"));
-    await actRun(() => hook.result.current.setAcknowledged(true));
     expect(hook.result.current.intent).toBeDefined();
 
     await hook.rerender({ enabled: false });
@@ -753,8 +744,8 @@ describe("usePersonalResourceAttachment", () => {
 
     await hook.rerender({ enabled: true });
     await flush();
-    expect(hook.result.current.mode).toBeNull();
-    expect(hook.result.current.requiresDecision).toBe(true);
+    expect(hook.result.current.mode).toBe("once");
+    expect(hook.result.current.requiresDecision).toBe(false);
     await hook.unmount();
   });
 });

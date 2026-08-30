@@ -94,10 +94,12 @@ describe("session control surface architecture", () => {
     expect(setupImplementation).not.toContain("<ModelPicker");
   });
 
-  test("keeps Variable Set access inside the multi-select setup instead of a status box", async () => {
-    const [route, establishedControl] = await Promise.all([
+  test("keeps Variable Sets editable at create time and beside an established composer", async () => {
+    const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
       source("routes/sessions-index.tsx"),
+      source("routes/session.tsx"),
       source("components/personal-resource-attachment-control.tsx"),
+      source("components/session/session-variable-set-picker.tsx"),
     ]);
     expect(route).toContain("Add Variable Set…");
     expect(route).toContain("<SelectedVariableSetList");
@@ -106,12 +108,9 @@ describe("session control surface architecture", () => {
     );
     expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
-    expect(route).toContain("personalResourceSendBlocker");
-    expect(route).toContain(
-      "This workspace-visible chat uses an Only me Variable Set. Confirm private credential use below before sending.",
-    );
-    expect(route).toContain("Confirm private credential or resource use before sending");
-    expect(route).toContain("messages={");
+    expect(route).toContain("will be used only for the message you send");
+    expect(route).not.toContain("personalResourceSendBlocker");
+    expect(route).not.toContain("Confirm private credential or resource use before sending");
     expect(route).not.toContain("PersonalResourceAttachmentControl");
     expect(route).not.toContain("Your resource access");
     expect(route).not.toContain("loadPersonalResourceCatalog");
@@ -137,10 +136,15 @@ describe("session control surface architecture", () => {
     );
     expect(route).toContain("Couldn’t verify the selected Variable Set or Rig");
     expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
-    expect(establishedControl).not.toContain("<fieldset");
-    expect(establishedControl).toContain("aria-labelledby={durationLabelId}");
-    expect(establishedControl).not.toContain("Your resource access");
-    expect(establishedControl).not.toContain("couldn’t check access");
+    expect(establishedRoute).toContain("<SessionVariableSetPicker");
+    expect(establishedPicker).toContain("Attach Variable Set…");
+    expect(establishedPicker).toContain("Attached entries can still be removed");
+    expect(establishedPicker).toContain("updateSessionVariableSets");
+    expect(establishedControl).not.toContain('value: "once"');
+    expect(establishedControl).not.toContain('value: "session"');
+    expect(establishedControl).not.toContain('value: "always"');
+    expect(establishedControl).not.toContain('type="checkbox"');
+    expect(establishedControl).toContain("is available in this private session");
   });
 
   test("announces pin results through an independent live region", async () => {

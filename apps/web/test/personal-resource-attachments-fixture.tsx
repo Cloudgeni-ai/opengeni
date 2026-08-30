@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { PersonalResourceAttachmentControl } from "../src/components/personal-resource-attachment-control";
-import type { PersonalAttachmentMode } from "../src/lib/personal-resource-attachments";
 import type { PersonalResourceAttachmentController } from "../src/lib/use-personal-resource-attachment";
 import "../src/styles.css";
 
@@ -22,8 +21,6 @@ const variableSet = {
 
 function Fixture() {
   const [principal, setPrincipal] = useState("owner");
-  const [mode, setMode] = useState<PersonalAttachmentMode | null>(null);
-  const [acknowledged, setAcknowledged] = useState(false);
   const [epoch, setEpoch] = useState(3);
   const [sourceLost, setSourceLost] = useState(false);
   const [authorityUnavailable, setAuthorityUnavailable] = useState(false);
@@ -34,9 +31,9 @@ function Fixture() {
   const controller = useMemo<PersonalResourceAttachmentController>(() => {
     const resourceCount = principal === "owner" && !sourceLost && !authorityUnavailable ? 1 : 0;
     const intent =
-      resourceCount > 0 && mode && acknowledged
+      resourceCount > 0
         ? {
-            mode,
+            mode: "once" as const,
             expectedAuthorityEpoch: epoch,
             workspaceSharedAcknowledged: true,
             sharedOutputWarningVersion: 1 as const,
@@ -59,31 +56,17 @@ function Fixture() {
         personalResourceCount: resourceCount,
         closureUnverified: false,
       },
-      mode,
-      acknowledged,
+      mode: resourceCount > 0 ? "once" : null,
       visibility: "workspace",
-      warning:
-        "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.",
-      requiresDecision:
-        sourceLost || authorityUnavailable || (resourceCount > 0 && (!mode || !acknowledged)),
+      requiresDecision: sourceLost || authorityUnavailable,
       intent,
-      setMode: (next) => {
-        setMode(next);
-        setNotice(null);
-      },
-      setAcknowledged: (next) => {
-        setAcknowledged(next);
-        setNotice(null);
-      },
       refresh: async () => undefined,
       onAccepted: () => undefined,
       onDeliveryError: () => undefined,
     };
-  }, [acknowledged, authorityUnavailable, epoch, mode, notice, principal, sourceLost]);
+  }, [authorityUnavailable, epoch, notice, principal, sourceLost]);
 
   const resetDecision = (message: string) => {
-    setMode(null);
-    setAcknowledged(false);
     setNotice(message);
   };
 

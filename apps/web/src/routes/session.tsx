@@ -66,6 +66,7 @@ import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
+import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
@@ -2012,22 +2013,42 @@ function SessionChatPane(props: {
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             transcriptionSuppressed={voiceActive}
             controlsLeading={
-              <ComposerMobilePlus
-                disabled={terminal || composer.sending}
-                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-                servers={selectableSessionMcpServers}
-                firstPartyTools={firstPartyToolOptions}
-                selection={durableToolSelection}
-                toolsDisabled={
-                  composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
-                }
-                onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
-                repositories={{
-                  selectedCount: repositories.selectionCount,
-                  disabled: terminal || composer.sending,
-                  panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
-                }}
-              />
+              <>
+                <ComposerMobilePlus
+                  disabled={terminal || composer.sending}
+                  fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                  servers={selectableSessionMcpServers}
+                  firstPartyTools={firstPartyToolOptions}
+                  selection={durableToolSelection}
+                  toolsDisabled={
+                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                  }
+                  onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+                  repositories={{
+                    selectedCount: repositories.selectionCount,
+                    disabled: terminal || composer.sending,
+                    panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
+                  }}
+                />
+                <SessionVariableSetPicker
+                  session={props.session}
+                  canAttach={workspacePermissions.includes("variable-sets:attach")}
+                  canUse={workspacePermissions.includes("variable-sets:use")}
+                  canList={
+                    workspacePermissions.includes("variable-sets:list") &&
+                    workspacePermissions.includes("secrets:list")
+                  }
+                  disabled={terminal}
+                  busy={
+                    composer.sending ||
+                    props.session.activeTurnId !== null ||
+                    props.queue.queue.length > 0
+                  }
+                  compact
+                  triggerClassName="sm:hidden"
+                  onReloadSession={props.onReloadSession}
+                />
+              </>
             }
             actions={
               !terminal ? (
@@ -2094,6 +2115,23 @@ function SessionChatPane(props: {
                 <FollowUpRepositoryPicker
                   {...repositoryPickerProps}
                   triggerClassName="max-sm:hidden"
+                />
+                <SessionVariableSetPicker
+                  session={props.session}
+                  canAttach={workspacePermissions.includes("variable-sets:attach")}
+                  canUse={workspacePermissions.includes("variable-sets:use")}
+                  canList={
+                    workspacePermissions.includes("variable-sets:list") &&
+                    workspacePermissions.includes("secrets:list")
+                  }
+                  disabled={terminal}
+                  busy={
+                    composer.sending ||
+                    props.session.activeTurnId !== null ||
+                    props.queue.queue.length > 0
+                  }
+                  triggerClassName="max-sm:hidden"
+                  onReloadSession={props.onReloadSession}
                 />
                 {durableToolsError ? (
                   <span className="sr-only" role="alert">
