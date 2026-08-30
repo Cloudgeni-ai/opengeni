@@ -287,13 +287,17 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
     expect(again.timedOut).toBe(true);
   }, 30_000);
 
-  test("completion mode ignores goal completion until the child produces a result", async () => {
+  test("completion mode ignores goal and assistant messages until the child turn settles", async () => {
     const target = await newSession(workspaceId, "completion-aware child fixture");
     const cursor = await lastSequence(target);
-    const goalEvents = await appendSessionEvents(client.db, workspaceId, target, [
+    const progressEvents = await appendSessionEvents(client.db, workspaceId, target, [
       { type: "goal.completed", payload: { summary: "goal state settled before output" } },
+      {
+        type: "agent.message.completed",
+        payload: { text: "commentary is not the final child result", phase: "commentary" },
+      },
     ]);
-    await bus.publish(workspaceId, target, goalEvents);
+    await bus.publish(workspaceId, target, progressEvents);
 
     const early = await callSessionWait({
       targets: [{ sessionId: target, afterSequence: cursor }],
@@ -306,6 +310,7 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
 
     const resultEvents = await appendSessionEvents(client.db, workspaceId, target, [
       { type: "agent.message.completed", payload: { text: "detailed child result" } },
+      { type: "turn.completed", payload: { output: "detailed child result" } },
     ]);
     await bus.publish(workspaceId, target, resultEvents);
     const completed = await callSessionWait({
@@ -317,8 +322,8 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
     expect(completed.timedOut).toBe(false);
     expect(completed.changed[0]!.events).toEqual([
       expect.objectContaining({
-        sequence: resultEvents[0]!.sequence,
-        type: "agent.message.completed",
+        sequence: resultEvents[1]!.sequence,
+        type: "turn.completed",
         text: "detailed child result",
       }),
     ]);

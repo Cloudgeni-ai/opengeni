@@ -82,9 +82,11 @@ export const SESSION_WAIT_EVENT_TYPES = [
 ] as const satisfies readonly SessionEventType[];
 
 /**
- * Result, settlement, and blocking events that make a child result usable.
+ * Settlement and blocking events that make a child result usable.
  * Goal facts are deliberately absent: an agent can complete its durable goal
- * before it emits the final assistant message and settles the turn.
+ * before it emits the final assistant message and settles the turn. Completed
+ * agent messages are also absent because commentary messages use the same
+ * event type; `turn.completed` carries the authoritative final output.
  */
 export const SESSION_WAIT_COMPLETION_EVENT_TYPES = [
   "turn.completed",
@@ -92,7 +94,6 @@ export const SESSION_WAIT_COMPLETION_EVENT_TYPES = [
   "turn.cancelled",
   "turn.superseded",
   "turn.capacity_waiting",
-  "agent.message.completed",
   "session.requiresAction",
   "session.humanInput.requested",
   "session.control.paused",
