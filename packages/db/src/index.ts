@@ -2241,9 +2241,16 @@ export async function createWorkspace(
     externalSource?: string | null;
     externalId?: string | null;
     agentInstructions?: string | null;
+    maxWorkspacesPerAccount?: number | null;
   },
 ): Promise<Workspace> {
   return await db.transaction(async (tx) => {
+    const transaction = tx as unknown as Database;
+    if (workspaceLimitConfigured(input.maxWorkspacesPerAccount)) {
+      await setRlsContext(transaction, { accountId: input.accountId, workspaceId: null });
+    }
+    await acquireWorkspaceLimitLock(transaction, input.accountId, input.maxWorkspacesPerAccount);
+    await assertWorkspaceCapacity(transaction, input.accountId, input.maxWorkspacesPerAccount);
     const [row] = await tx
       .insert(schema.workspaces)
       .values({
@@ -2258,7 +2265,7 @@ export async function createWorkspace(
     if (!row) {
       throw new Error("Failed to create workspace");
     }
-    await setRlsContext(tx as unknown as Database, {
+    await setRlsContext(transaction, {
       accountId: row.accountId,
       workspaceId: row.id,
     });
@@ -2316,6 +2323,36 @@ export class WorkspaceLimitExceededError extends Error {
   }
 }
 
+function workspaceLimitConfigured(limit: number | null | undefined): limit is number {
+  return limit !== null && limit !== undefined;
+}
+
+async function acquireWorkspaceLimitLock(
+  db: Database,
+  accountId: string,
+  limit: number | null | undefined,
+): Promise<void> {
+  if (!workspaceLimitConfigured(limit)) return;
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-limit:${accountId}`}, 0))`,
+  );
+}
+
+async function assertWorkspaceCapacity(
+  db: Database,
+  accountId: string,
+  limit: number | null | undefined,
+): Promise<void> {
+  if (!workspaceLimitConfigured(limit)) return;
+  const [{ count } = { count: 0 }] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.accountId, accountId));
+  if (Number(count) >= limit) {
+    throw new WorkspaceLimitExceededError(limit);
+  }
+}
+
 /**
  * Create an organization workspace exactly once for a stable external tenant
  * identity. The global unique index is the concurrency arbiter. A replay never
@@ -2336,11 +2373,7 @@ export async function ensureWorkspaceByExternalIdentity(
   return await db.transaction(async (tx) => {
     const transaction = tx as unknown as Database;
     await setRlsContext(transaction, { accountId: input.accountId, workspaceId: null });
-    if (input.maxWorkspacesPerAccount) {
-      await transaction.execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-limit:${input.accountId}`}, 0))`,
-      );
-    }
+    await acquireWorkspaceLimitLock(transaction, input.accountId, input.maxWorkspacesPerAccount);
 
     const [existingBeforeCreate] = await tx
       .select()
@@ -2370,15 +2403,7 @@ export async function ensureWorkspaceByExternalIdentity(
       };
     }
 
-    if (input.maxWorkspacesPerAccount) {
-      const [{ count } = { count: 0 }] = await tx
-        .select({ count: sql<number>`count(*)::int` })
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.accountId, input.accountId));
-      if (Number(count) >= input.maxWorkspacesPerAccount) {
-        throw new WorkspaceLimitExceededError(input.maxWorkspacesPerAccount);
-      }
-    }
+    await assertWorkspaceCapacity(transaction, input.accountId, input.maxWorkspacesPerAccount);
 
     const [inserted] = await tx
       .insert(schema.workspaces)
@@ -3738,7 +3763,7 @@ export async function createOrganizationApiKey(
     db,
     { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
-      if (input.maxActiveKeys) {
+      if (input.maxActiveKeys !== null && input.maxActiveKeys !== undefined) {
         await scopedDb.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`organization-api-key:${input.accountId}`}, 0))`,
         );

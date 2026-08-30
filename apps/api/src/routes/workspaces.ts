@@ -194,7 +194,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(payload.agentInstructions !== undefined
           ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
           : {}),
-        maxWorkspacesPerAccount: externalWorkspaceLimit(deps),
+        maxWorkspacesPerAccount: workspaceLimit(deps),
       });
       const response = EnsureWorkspaceResponse.parse(result);
       return result.created ? c.json(response, 201) : c.json(response);
@@ -226,27 +226,35 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       action: "workspace:create",
       quantity: 1,
     });
-    const workspace = await createWorkspace(deps.db, {
-      accountId,
-      name: payload.name.trim(),
-      slug: payload.slug?.trim() || null,
-      externalSource: payload.externalSource ?? null,
-      externalId: payload.externalId ?? null,
-      ...(payload.agentInstructions !== undefined
-        ? {
-            agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
-          }
-        : {}),
-    });
-    await grantWorkspaceAccess(deps.db, {
-      accountId,
-      workspaceId: workspace.id,
-      subjectId: context.subjectId,
-      role: "owner",
-      permissions: allWorkspacePermissions,
-      ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
-    });
-    return c.json(Workspace.parse(workspace), 201);
+    try {
+      const workspace = await createWorkspace(deps.db, {
+        accountId,
+        name: payload.name.trim(),
+        slug: payload.slug?.trim() || null,
+        externalSource: payload.externalSource ?? null,
+        externalId: payload.externalId ?? null,
+        ...(payload.agentInstructions !== undefined
+          ? {
+              agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
+            }
+          : {}),
+        maxWorkspacesPerAccount: workspaceLimit(deps),
+      });
+      await grantWorkspaceAccess(deps.db, {
+        accountId,
+        workspaceId: workspace.id,
+        subjectId: context.subjectId,
+        role: "owner",
+        permissions: allWorkspacePermissions,
+        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+      });
+      return c.json(Workspace.parse(workspace), 201);
+    } catch (error) {
+      if (error instanceof WorkspaceLimitExceededError) {
+        throw new HTTPException(429, { message: error.message });
+      }
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId", async (c) => {
@@ -705,7 +713,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
-function externalWorkspaceLimit(deps: ApiRouteDeps): number | null {
+function workspaceLimit(deps: ApiRouteDeps): number | null {
   if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
     return null;
   }

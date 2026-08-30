@@ -582,6 +582,49 @@ describe("managed personal workspace access", () => {
     });
   });
 
+  test("organization keys share one cap across direct and external workspace creation", async () => {
+    if (!shared || !client || !app) return;
+
+    const keyResponse = await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({ name: "Cross-route workspace provisioner" }),
+    });
+    expect(keyResponse.status).toBe(201);
+    const key = (await keyResponse.json()) as { token: string };
+    const existingCount = await countWorkspacesForAccount(client.db, accountId);
+    const limitedApp = createTestApp({
+      usageLimitsMode: "static",
+      staticUsageLimitsJson: JSON.stringify({
+        maxWorkspacesPerAccount: existingCount + 1,
+      }),
+    });
+    const headers = {
+      authorization: `Bearer ${key.token}`,
+      "content-type": "application/json",
+    };
+    const responses = await Promise.all([
+      limitedApp.request("http://x/v1/workspaces", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ accountId, name: "Direct tenant workspace" }),
+      }),
+      limitedApp.request("http://x/v1/workspaces/external", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({
+          accountId,
+          externalSource: `cross-route-limit-${crypto.randomUUID()}`,
+          externalId: "tenant-1",
+          name: "External tenant workspace",
+        }),
+      }),
+    ]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 429]);
+    expect(await countWorkspacesForAccount(client.db, accountId)).toBe(existingCount + 1);
+  });
+
   test("organization key creation serializes the cap and permits one authenticated rotation overlap", async () => {
     if (!shared || !client) return;
 
