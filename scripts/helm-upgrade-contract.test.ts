@@ -65,6 +65,8 @@ describe("Helm database upgrade contract", () => {
       source("deploy/helm/opengeni/templates/api-deployment.yaml"),
       source("deploy/helm/opengeni/templates/worker-deployment.yaml"),
       source("deploy/helm/opengeni/templates/worker-turns-deployment.yaml"),
+      source("deploy/helm/opengeni/templates/migration-job.yaml"),
+      source("deploy/helm/opengeni/templates/catalog-import-job.yaml"),
     ]);
 
     for (const workload of workloads) {
@@ -77,6 +79,16 @@ describe("Helm database upgrade contract", () => {
         "Later envFrom sources win duplicate keys",
       );
     }
+
+    const migrationJob = workloads[3]!;
+    const runtimeSecret = migrationJob.indexOf('name: {{ include "opengeni.secretName" . }}');
+    const migrationSecret = migrationJob.indexOf(
+      'name: {{ include "opengeni.migrationSecretName" . }}',
+    );
+    expect(migrationSecret).toBeGreaterThan(runtimeSecret);
+    expect(migrationJob.slice(runtimeSecret, migrationSecret)).toContain(
+      "The migration Secret is last so owner-only database settings win",
+    );
   });
 
   test("routes worker first-party MCP over the private service by default", async () => {

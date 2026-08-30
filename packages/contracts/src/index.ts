@@ -2304,6 +2304,7 @@ export const WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH = 238;
 
 export const CreateWorkspaceGatewayCustomModelRequest = z
   .object({
+    operationId: z.string().uuid(),
     upstreamModelId: z
       .string()
       .max(WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH)
@@ -2325,10 +2326,21 @@ export type CreateWorkspaceGatewayCustomModelRequest = z.infer<
   typeof CreateWorkspaceGatewayCustomModelRequest
 >;
 
+export const DeleteWorkspaceGatewayCustomModelRequest = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type DeleteWorkspaceGatewayCustomModelRequest = z.infer<
+  typeof DeleteWorkspaceGatewayCustomModelRequest
+>;
+
 export const WorkspaceGatewayCustomModel = z.object({
   id: z.string().uuid(),
   upstreamModelId: z.string(),
   label: z.string().nullable(),
+  version: z.number().int().positive(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });
@@ -10537,6 +10549,8 @@ export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBund
 
 export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY =
   "vercelAiGatewayCredentialOperationId" as const;
+export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
+  "vercelAiGatewayCredentialOperationDigest" as const;
 
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),

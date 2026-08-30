@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   AddWorkspaceMemberRequest,
   CreateWorkspaceRequest,
@@ -8,6 +9,7 @@ import {
   SetWorkspaceDefaultRigRequest,
   UpdateWorkspaceMemberRequest,
   CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
@@ -20,6 +22,7 @@ import {
   Workspace,
   WorkspaceMember,
   workspaceControlUtf8Bytes,
+  stableJson,
   type AccessContext,
   type Permission,
   type WorkspaceMemberCandidate,
@@ -42,6 +45,7 @@ import {
   listWorkspaceGatewayCustomModels,
   createWorkspaceGatewayCustomModel,
   deleteWorkspaceGatewayCustomModel,
+  replayWorkspaceGatewayCustomModelCreate,
   listWorkspacesForSubject,
   nestedPostgresSqlState,
   removeWorkspaceMember,
@@ -112,6 +116,7 @@ function projectWorkspaceGatewayCustomModel(model: {
   id: string;
   upstreamModelId: string;
   label: string | null;
+  version: number;
   createdAt: Date;
   updatedAt: Date;
 }) {
@@ -119,9 +124,14 @@ function projectWorkspaceGatewayCustomModel(model: {
     id: model.id,
     upstreamModelId: model.upstreamModelId,
     label: model.label,
+    version: model.version,
     createdAt: model.createdAt.toISOString(),
     updatedAt: model.updatedAt.toISOString(),
   });
+}
+
+function workspaceGatewayCustomModelRequestHash(value: unknown): string {
+  return createHash("sha256").update(stableJson(value), "utf8").digest("hex");
 }
 
 type WorkspaceMemberProjectionInput = Omit<WorkspaceMemberValue, "permissions"> & {
@@ -401,6 +411,25 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(422, { message: "invalid Gateway custom model" });
     }
+    const requestHash = workspaceGatewayCustomModelRequestHash({
+      action: "create",
+      upstreamModelId: parsed.data.upstreamModelId,
+      label: parsed.data.label ?? null,
+    });
+    const replay = await replayWorkspaceGatewayCustomModelCreate(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      operationId: parsed.data.operationId,
+      requestHash,
+    });
+    if (replay.outcome === "conflict") {
+      throw new HTTPException(409, {
+        message: "Gateway custom model operation conflicts with current state",
+      });
+    }
+    if (replay.outcome === "success") {
+      return c.json(projectWorkspaceGatewayCustomModel(replay.model), 201);
+    }
     const catalog = await deps.resolveCatalogSettings();
     if (configuredGatewayUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)) {
       throw new HTTPException(422, {
@@ -423,8 +452,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         upstreamModelId: parsed.data.upstreamModelId,
         label: parsed.data.label ?? null,
+        operationId: parsed.data.operationId,
+        requestHash,
         createdBySubjectId: grant.subjectId,
       });
+      if (!model || model.retiredAt) {
+        throw new HTTPException(409, {
+          message: "Gateway custom model operation conflicts with current state",
+        });
+      }
       return c.json(projectWorkspaceGatewayCustomModel(model), 201);
     } catch (error) {
       if (error instanceof WorkspaceGatewayCustomModelLimitError) {
@@ -448,12 +484,30 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       throw new HTTPException(422, { message: "invalid Gateway custom model id" });
     }
+    const parsed = DeleteWorkspaceGatewayCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid Gateway custom model deletion" });
+    }
     const removed = await deleteWorkspaceGatewayCustomModel(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       customModelId,
+      expectedVersion: parsed.data.expectedVersion,
+      operationId: parsed.data.operationId,
+      requestHash: workspaceGatewayCustomModelRequestHash({
+        action: "delete",
+        customModelId,
+        expectedVersion: parsed.data.expectedVersion,
+      }),
     });
-    if (!removed) throw new HTTPException(404, { message: "Gateway custom model not found" });
+    if (removed.outcome === "not_found") {
+      throw new HTTPException(404, { message: "Gateway custom model not found" });
+    }
+    if (removed.outcome === "conflict") {
+      throw new HTTPException(409, { message: "Gateway custom model changed; reload and retry" });
+    }
     return c.body(null, 204);
   });
 

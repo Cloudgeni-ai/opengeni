@@ -79,8 +79,11 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       upstreamModelId,
+      operationId: crypto.randomUUID(),
+      requestHash: "1".repeat(64),
       createdBySubjectId: grant.subjectId,
     });
+    if (!customModel) throw new Error("custom model create unexpectedly conflicted");
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -116,8 +119,11 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         customModelId: customModel.id,
+        expectedVersion: customModel.version,
+        operationId: crypto.randomUUID(),
+        requestHash: "2".repeat(64),
       }),
-    ).toBe(true);
+    ).toMatchObject({ outcome: "success" });
 
     const activities = createScheduledTaskActivities(
       async () =>

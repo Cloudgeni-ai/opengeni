@@ -3,6 +3,8 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type {
   ConnectionMetadata,
   CreateConnectionRequest,
+  CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
   UpdateConnectionRequest,
   WorkspaceGatewayCustomModel,
   WorkspaceModelCatalogModel,
@@ -40,11 +42,15 @@ const deleteConnection = mock(
 const createWorkspaceGatewayCustomModel = mock(
   async (
     _workspaceId: string,
-    request: { upstreamModelId: string },
+    request: CreateWorkspaceGatewayCustomModelRequest,
   ): Promise<WorkspaceGatewayCustomModel> => customModel(request.upstreamModelId),
 );
 const deleteWorkspaceGatewayCustomModel = mock(
-  async (_workspaceId: string, _customModelId: string): Promise<void> => {},
+  async (
+    _workspaceId: string,
+    _customModelId: string,
+    _request: DeleteWorkspaceGatewayCustomModelRequest,
+  ): Promise<void> => {},
 );
 const toastSuccess = mock((_message: string) => {});
 const toastError = mock((_message: string) => {});
@@ -94,6 +100,7 @@ function customModel(upstreamModelId: string): WorkspaceGatewayCustomModel {
     id: crypto.randomUUID(),
     upstreamModelId,
     label: null,
+    version: 1,
     createdAt: "2026-08-27T12:00:00.000Z",
     updatedAt: "2026-08-27T12:00:00.000Z",
   };
@@ -270,8 +277,12 @@ describe("AiGatewayConnectionCard custom models", () => {
       });
 
       expect(createWorkspaceGatewayCustomModel).toHaveBeenCalledWith("workspace-a", {
+        operationId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
+        ),
         upstreamModelId: "anthropic/claude-sonnet-4.6",
       });
+      expect(add?.className).toContain("min-h-11");
       expect(container.textContent).toContain("anthropic/claude-sonnet-4.6");
       expect(container.textContent).toContain("Waiting for a Gateway connection");
       expect(onConnectionChange).toHaveBeenCalledTimes(1);
@@ -873,7 +884,12 @@ describe("AiGatewayConnectionCard custom models", () => {
         await flush();
       });
 
-      expect(deleteWorkspaceGatewayCustomModel).toHaveBeenCalledWith("workspace-a", model.id);
+      expect(deleteWorkspaceGatewayCustomModel).toHaveBeenCalledWith("workspace-a", model.id, {
+        expectedVersion: model.version,
+        operationId: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
+        ),
+      });
       expect(container.textContent).not.toContain("xai/grok-4.1-fast");
       expect(container.textContent).toContain("No custom model slugs yet");
       expect(onConnectionChange).toHaveBeenCalledTimes(1);
@@ -886,9 +902,53 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
-  test("does not present a failed custom-model read as an authoritative empty list", async () => {
+  test("retries a lost delete response with the same operation id", async () => {
+    const model = customModel("xai/grok-4.1-fast");
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({ models: [model] }));
+    const operationIds: string[] = [];
+    deleteWorkspaceGatewayCustomModel.mockImplementation(
+      async (_workspaceId, _customModelId, request) => {
+        operationIds.push(request.operationId);
+        if (operationIds.length === 1) {
+          throw new Error("response lost after delete commit");
+        }
+      },
+    );
+    const { container, root } = await renderCard();
+
+    try {
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(`button[aria-label="Remove ${model.upstreamModelId}"]`)!
+          .click();
+        await flush();
+      });
+      const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Remove model",
+      )!;
+      await act(async () => {
+        confirm.click();
+        await flush();
+      });
+
+      expect(deleteWorkspaceGatewayCustomModel).toHaveBeenCalledTimes(2);
+      expect(operationIds[0]).toBe(operationIds[1]);
+      expect(container.textContent).not.toContain(model.upstreamModelId);
+      expect(toastSuccess).toHaveBeenCalledWith("Gateway model removed");
+      expect(toastError).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("does not present a failed custom-model read as empty and offers an in-page retry", async () => {
+    const recovered = customModel("recovered/provider-model");
+    let reads = 0;
     listWorkspaceGatewayCustomModels.mockImplementation(async () => {
-      throw new Error("catalog unavailable");
+      reads += 1;
+      if (reads === 1) throw new Error("catalog unavailable");
+      return { models: [recovered] };
     });
     const { container, root } = await renderCard();
 
@@ -896,20 +956,27 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(container.textContent).toContain("catalog unavailable");
       expect(container.textContent).toContain("Unavailable");
       expect(container.textContent).not.toContain("No custom model slugs yet");
+      const retry = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Retry",
+      );
+      expect(retry).not.toBeUndefined();
+      await act(async () => {
+        retry!.click();
+        await flush();
+      });
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toContain(recovered.upstreamModelId);
+      expect(container.textContent).not.toContain("catalog unavailable");
     } finally {
       await act(async () => root.unmount());
       container.remove();
     }
   });
 
-  test("refetches the complete list after adding from an unavailable initial state", async () => {
-    const existing = customModel("existing/provider-model");
+  test("recovers an unavailable initial state from the successful create response", async () => {
     const created = customModel("anthropic/claude-sonnet-4.6");
-    let reads = 0;
     listWorkspaceGatewayCustomModels.mockImplementation(async () => {
-      reads += 1;
-      if (reads === 1) throw new Error("catalog unavailable");
-      return { models: [existing, created] };
+      throw new Error("catalog unavailable");
     });
     createWorkspaceGatewayCustomModel.mockImplementation(async () => created);
     const { container, root } = await renderCard();
@@ -927,31 +994,25 @@ describe("AiGatewayConnectionCard custom models", () => {
         await flush();
       });
 
-      expect(container.textContent).toContain(existing.upstreamModelId);
       expect(container.textContent).toContain(created.upstreamModelId);
-      expect(container.textContent).toContain("2 models");
+      expect(container.textContent).toContain("1 model");
       expect(container.textContent).not.toContain("catalog unavailable");
-      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(2);
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();
     }
   });
 
-  test("ignores an older custom-model read after a successful add refresh", async () => {
+  test("ignores an older custom-model read after a successful add", async () => {
     const created = customModel("anthropic/claude-sonnet-4.6");
     let resolveInitialRead:
       | ((value: { models: WorkspaceGatewayCustomModel[] }) => void)
       | undefined;
-    let reads = 0;
     listWorkspaceGatewayCustomModels.mockImplementation(async () => {
-      reads += 1;
-      if (reads === 1) {
-        return await new Promise<{ models: WorkspaceGatewayCustomModel[] }>((resolve) => {
-          resolveInitialRead = resolve;
-        });
-      }
-      return { models: [created] };
+      return await new Promise<{ models: WorkspaceGatewayCustomModel[] }>((resolve) => {
+        resolveInitialRead = resolve;
+      });
     });
     createWorkspaceGatewayCustomModel.mockImplementation(async () => created);
     const { container, root } = await renderCard();
@@ -976,6 +1037,41 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(container.textContent).toContain(created.upstreamModelId);
       expect(container.textContent).toContain("1 model");
       expect(container.textContent).not.toContain("No custom model slugs yet");
+      expect(listWorkspaceGatewayCustomModels).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("retries a lost create response with the same operation id", async () => {
+    const created = customModel("anthropic/claude-sonnet-4.6");
+    const operationIds: string[] = [];
+    createWorkspaceGatewayCustomModel.mockImplementation(async (_workspaceId, request) => {
+      operationIds.push(request.operationId);
+      if (operationIds.length === 1) throw new Error("response lost after create commit");
+      return created;
+    });
+    const { container, root } = await renderCard();
+
+    try {
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway model slug"]',
+      )!;
+      await setInputValue(input, created.upstreamModelId);
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+
+      expect(createWorkspaceGatewayCustomModel).toHaveBeenCalledTimes(2);
+      expect(operationIds[0]).toBe(operationIds[1]);
+      expect(container.textContent).toContain(created.upstreamModelId);
+      expect(input.value).toBe("");
+      expect(toastSuccess).toHaveBeenCalledWith("Gateway model added", expect.any(Object));
+      expect(toastError).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -1020,9 +1116,8 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(document.activeElement).toBe(input);
       expect(input.className).toContain("text-base");
       expect(input.className).toContain("md:text-base");
-      expect(input.className).toContain("lg:pointer-fine:text-xs");
-      expect(input.className).toContain("[@media(any-pointer:coarse)]:text-base!");
       expect(input.className).not.toContain("lg:text-xs");
+      expect(input.className).not.toContain("pointer-fine:text-xs");
       expect(input.className).not.toContain("lg:pointer-coarse:text-base");
       expect(input.className).not.toContain("sm:text-xs");
     } finally {
@@ -1052,7 +1147,14 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(input.disabled).toBe(false);
       expect(input.value).toBe("anthropic/claude-sonnet-4.6");
       expect(document.activeElement).toBe(input);
-      expect(toastError).toHaveBeenCalledWith("Couldn't add Gateway model", expect.any(Object));
+      expect(createWorkspaceGatewayCustomModel).toHaveBeenCalledTimes(2);
+      expect(createWorkspaceGatewayCustomModel.mock.calls[0]?.[1].operationId).toBe(
+        createWorkspaceGatewayCustomModel.mock.calls[1]?.[1].operationId,
+      );
+      expect(toastError).toHaveBeenCalledWith(
+        "Couldn't confirm Gateway model add",
+        expect.any(Object),
+      );
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -1071,7 +1173,7 @@ describe("AiGatewayConnectionCard custom models", () => {
       const removeFirst = container.querySelector<HTMLButtonElement>(
         `button[aria-label="Remove ${first.upstreamModelId}"]`,
       )!;
-      expect(removeFirst.className).toContain("pointer-coarse:size-11");
+      expect(removeFirst.className).toContain("size-11");
       await act(async () => {
         removeFirst.click();
         await flush();

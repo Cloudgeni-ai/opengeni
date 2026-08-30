@@ -15,7 +15,14 @@ const workspaceId = "22222222-2222-4222-8222-222222222222";
 const timestamp = "2026-08-27T12:00:00.000Z";
 
 function customModel(id: string, upstreamModelId: string): WorkspaceGatewayCustomModel {
-  return { id, upstreamModelId, label: null, createdAt: timestamp, updatedAt: timestamp };
+  return {
+    id,
+    upstreamModelId,
+    label: null,
+    version: 1,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
 }
 
 function connectedGateway(status: ConnectionMetadata["status"] = "active"): ConnectionMetadata {
@@ -67,11 +74,11 @@ function Fixture() {
         setReceipt({ action: "create-model", upstreamModelId: request.upstreamModelId });
         return model;
       },
-      deleteWorkspaceGatewayCustomModel: async (_workspaceId, customModelId) => {
+      deleteWorkspaceGatewayCustomModel: async (_workspaceId, customModelId, request) => {
         customModelsRef.current = customModelsRef.current.filter(
           (model) => model.id !== customModelId,
         );
-        setReceipt({ action: "delete-model", customModelId });
+        setReceipt({ action: "delete-model", customModelId, operationId: request.operationId });
       },
       createConnection: async (_workspaceId, request: CreateConnectionRequest) => {
         setReceipt({ action: "connect", providerDomain: request.providerDomain });

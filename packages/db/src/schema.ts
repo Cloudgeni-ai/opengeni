@@ -12667,6 +12667,11 @@ export const workspaceGatewayCustomModels = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
+    version: integer("version").notNull().default(1),
+    createOperationId: uuid("create_operation_id").notNull(),
+    createRequestHash: text("create_request_hash").notNull(),
+    deleteOperationId: uuid("delete_operation_id"),
+    deleteRequestHash: text("delete_request_hash"),
     createdBySubjectId: text("created_by_subject_id").notNull(),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -12678,10 +12683,16 @@ export const workspaceGatewayCustomModels = pgTable(
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
-    workspaceUpstream: uniqueIndex("workspace_gateway_custom_models_workspace_upstream_uq").on(
+    workspaceUpstream: uniqueIndex("workspace_gateway_custom_models_workspace_upstream_uq")
+      .on(table.workspaceId, table.upstreamModelId)
+      .where(sql`${table.retiredAt} is null`),
+    createOperation: uniqueIndex("workspace_gateway_custom_models_create_operation_uq").on(
       table.workspaceId,
-      table.upstreamModelId,
+      table.createOperationId,
     ),
+    deleteOperation: uniqueIndex("workspace_gateway_custom_models_delete_operation_uq")
+      .on(table.workspaceId, table.deleteOperationId)
+      .where(sql`${table.deleteOperationId} is not null`),
     upstreamCheck: check(
       "workspace_gateway_custom_models_upstream_chk",
       sql`octet_length(${table.upstreamModelId}) between 1 and 238 and ${table.upstreamModelId} ~ '^[!-~]+$' and ${table.upstreamModelId} !~ '[|]'`,
@@ -12693,6 +12704,15 @@ export const workspaceGatewayCustomModels = pgTable(
     actorCheck: check(
       "workspace_gateway_custom_models_actor_chk",
       sql`octet_length(${table.createdBySubjectId}) between 1 and 1024`,
+    ),
+    versionCheck: check("workspace_gateway_custom_models_version_chk", sql`${table.version} > 0`),
+    createHashCheck: check(
+      "workspace_gateway_custom_models_create_hash_chk",
+      sql`${table.createRequestHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    deleteReceiptCheck: check(
+      "workspace_gateway_custom_models_delete_receipt_chk",
+      sql`(${table.deleteOperationId} is null and ${table.deleteRequestHash} is null) or (${table.deleteOperationId} is not null and ${table.deleteRequestHash} ~ '^[a-f0-9]{64}$' and ${table.retiredAt} is not null)`,
     ),
   }),
 );

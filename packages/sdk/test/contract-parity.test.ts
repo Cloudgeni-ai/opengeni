@@ -20,6 +20,10 @@ import {
   CodexRealtimeVoice as ContractCodexRealtimeVoice,
   EndSessionRealtimeRequest as ContractEndSessionRealtimeRequest,
   WorkspaceModelCatalogResponse as ContractWorkspaceModelCatalogResponse,
+  CreateWorkspaceGatewayCustomModelRequest as ContractCreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest as ContractDeleteWorkspaceGatewayCustomModelRequest,
+  WorkspaceGatewayCustomModel as ContractWorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse as ContractWorkspaceGatewayCustomModelsResponse,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
   CreateSessionResponse as ContractCreateSessionResponse,
@@ -170,6 +174,10 @@ import type {
   CodexRealtimeVoice,
   EndSessionRealtimeRequest,
   WorkspaceModelCatalogResponse,
+  CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
+  WorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse,
   ClientSessionEventInput,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -1335,5 +1343,26 @@ describe("SDK / contracts parity", () => {
     // in v1; the axis exists so macOS/Windows light up without a schema change).
     const sdkOs: readonly SandboxOs[] = ["linux", "macos", "windows"];
     expect([...sdkOs].sort()).toEqual([...ContractSandboxOs.options].sort());
+  });
+
+  test("workspace Gateway custom-model requests and projections match contracts", () => {
+    const acceptModel = (
+      value: z.infer<typeof ContractWorkspaceGatewayCustomModel>,
+    ): WorkspaceGatewayCustomModel => value;
+    const acceptModels = (
+      value: z.infer<typeof ContractWorkspaceGatewayCustomModelsResponse>,
+    ): WorkspaceGatewayCustomModelsResponse => value;
+    const acceptCreateRequest = (
+      value: CreateWorkspaceGatewayCustomModelRequest,
+    ): z.input<typeof ContractCreateWorkspaceGatewayCustomModelRequest> => value;
+    const acceptDeleteRequest = (
+      value: DeleteWorkspaceGatewayCustomModelRequest,
+    ): z.input<typeof ContractDeleteWorkspaceGatewayCustomModelRequest> => value;
+
+    expect(
+      [acceptModel, acceptModels, acceptCreateRequest, acceptDeleteRequest].every(
+        (value) => typeof value === "function",
+      ),
+    ).toBe(true);
   });
 });

@@ -172,6 +172,7 @@ import type {
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
   CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -4074,10 +4075,19 @@ export class OpenGeniClient {
   async deleteWorkspaceGatewayCustomModel(
     workspaceId: string,
     customModelId: string,
+    request: DeleteWorkspaceGatewayCustomModelRequest,
   ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new TypeError("customModelId must be a UUID");
+    }
     await this.requestVoid(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/gateway-custom-models/${customModelId}`,
+      `/v1/workspaces/${workspaceId}/gateway-custom-models/${encodeURIComponent(customModelId)}`,
+      request,
     );
   }
 

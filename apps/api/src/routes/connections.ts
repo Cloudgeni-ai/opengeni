@@ -30,6 +30,9 @@ import {
   OAuthStartRequest,
   OAuthStartResponse,
   UpdateConnectionRequest,
+  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  stableJson,
 } from "@opengeni/contracts";
 import {
   bindConnectorDocumentDestination,
@@ -214,17 +217,29 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               message: "connecting Vercel AI Gateway requires an operationId",
             });
           }
+          const expiresAt = payload.expiresAt ? new Date(payload.expiresAt) : null;
+          const metadata = vercelAiGatewayCredentialMetadata(payload.metadata);
           const created = await upsertWorkspaceVercelAiGatewayConnection(db, {
             accountId: grant.accountId,
             workspaceId,
             operationId: payload.operationId,
+            requestDigest: vercelAiGatewayCredentialRequestDigest({
+              action: "create",
+              providerDomain,
+              kind: payload.kind,
+              subjectId,
+              credential: payload.credential,
+              grantedScopes: payload.grantedScopes,
+              expiresAt: expiresAt?.toISOString() ?? null,
+              metadata,
+            }),
             credentialEncrypted,
             grantedScopes: payload.grantedScopes,
-            expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
-            metadata: payload.metadata,
+            expiresAt,
+            metadata,
             updatedBySubjectId: grant.subjectId,
           });
-          if (!created) {
+          if (!created || created.status === "revoked") {
             throw new HTTPException(409, {
               message: "Vercel AI Gateway is already connected; reload before replacing its key",
             });
@@ -906,27 +921,38 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
       const key = requireEnvironmentEncryption(settings);
+      const grantedScopes = payload.grantedScopes ?? existing.grantedScopes;
+      const expiresAt =
+        payload.expiresAt !== undefined
+          ? payload.expiresAt
+            ? new Date(payload.expiresAt)
+            : null
+          : existing.expiresAt
+            ? new Date(existing.expiresAt)
+            : null;
+      const metadata = vercelAiGatewayCredentialMetadata({
+        ...existing.metadata,
+        ...(payload.metadata ?? {}),
+      });
       const connection = await rotateWorkspaceVercelAiGatewayConnection(db, {
         accountId: grant.accountId,
         workspaceId,
         connectionId: existing.id,
         expectedVersion: payload.expectedVersion,
         operationId: payload.operationId,
+        requestDigest: vercelAiGatewayCredentialRequestDigest({
+          action: "rotate",
+          connectionId: existing.id,
+          expectedVersion: payload.expectedVersion,
+          credential: payload.credential,
+          grantedScopes,
+          expiresAt: expiresAt?.toISOString() ?? null,
+          metadata,
+        }),
         credentialEncrypted: encryptCredentialBundle(key, payload.credential),
-        grantedScopes: payload.grantedScopes ?? existing.grantedScopes,
-        expiresAt:
-          payload.expiresAt !== undefined
-            ? payload.expiresAt
-              ? new Date(payload.expiresAt)
-              : null
-            : existing.expiresAt
-              ? new Date(existing.expiresAt)
-              : null,
-        metadata: {
-          ...existing.metadata,
-          ...(payload.metadata ?? {}),
-          credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
-        },
+        grantedScopes,
+        expiresAt,
+        metadata,
         updatedBySubjectId: grant.subjectId,
       });
       if (!connection) {
@@ -1570,6 +1596,24 @@ function createConnectionSubjectId(
 
 function encryptCredentialBundle(key: Uint8Array, credential: Record<string, unknown>): string {
   return encryptEnvironmentValue(key, JSON.stringify(credential));
+}
+
+function vercelAiGatewayCredentialMetadata(
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const {
+    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
+    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    ...effectiveMetadata
+  } = metadata ?? {};
+  return {
+    ...effectiveMetadata,
+    credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  };
+}
+
+function vercelAiGatewayCredentialRequestDigest(value: unknown): string {
+  return createHash("sha256").update(stableJson(value), "utf8").digest("hex");
 }
 
 function slackBotCredentialBundle(token: string): Record<string, unknown> {

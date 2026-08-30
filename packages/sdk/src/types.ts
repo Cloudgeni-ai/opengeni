@@ -3136,6 +3136,7 @@ export type WorkspaceGatewayCustomModel = {
   id: string;
   upstreamModelId: string;
   label: string | null;
+  version: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -3145,8 +3146,14 @@ export type WorkspaceGatewayCustomModelsResponse = {
 };
 
 export type CreateWorkspaceGatewayCustomModelRequest = {
+  operationId: string;
   upstreamModelId: string;
   label?: string | undefined;
+};
+
+export type DeleteWorkspaceGatewayCustomModelRequest = {
+  expectedVersion: number;
+  operationId: string;
 };
 
 /**

@@ -124,6 +124,7 @@ describe("AI Gateway custom model settings in Chromium", () => {
       expect(await slug.inputValue()).toBe("");
       expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
       expect((await add.boundingBox())?.width).toBeGreaterThan(100);
+      expect((await add.boundingBox())?.height).toBeGreaterThanOrEqual(44);
       expect((await key.boundingBox())?.width).toBeGreaterThan(300);
       expect((await remove.boundingBox())?.width).toBeGreaterThanOrEqual(44);
       expect((await remove.boundingBox())?.height).toBeGreaterThanOrEqual(44);
@@ -137,6 +138,9 @@ describe("AI Gateway custom model settings in Chromium", () => {
 
       await mobilePage.setViewportSize({ width: 1024, height: 768 });
       expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
+      expect((await add.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+      expect((await remove.boundingBox())?.width).toBeGreaterThanOrEqual(44);
+      expect((await remove.boundingBox())?.height).toBeGreaterThanOrEqual(44);
       await assertAccessibleAndBounded(mobilePage);
 
       await mobilePage.setViewportSize({ width: 390, height: 844 });

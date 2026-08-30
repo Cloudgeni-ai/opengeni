@@ -77,6 +77,13 @@ export function AiGatewayConnectionCardWithClient(
   const customModelsRequestGenerationRef = useRef(0);
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const removeButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const removeFocusTargetRef = useRef<HTMLElement | null>(null);
+  const restoreModelInputFocusRef = useRef(false);
+  const restoreRemovalFocusRef = useRef(false);
+  const pendingModelCreateRef = useRef<{ upstreamModelId: string; operationId: string } | null>(
+    null,
+  );
+  const pendingModelDeleteOperationsRef = useRef(new Map<string, string>());
 
   useEffect(() => {
     activeRef.current = true;
@@ -165,6 +172,20 @@ export function AiGatewayConnectionCardWithClient(
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (modelBusy || !restoreModelInputFocusRef.current) return;
+    restoreModelInputFocusRef.current = false;
+    modelInputRef.current?.focus();
+  }, [modelBusy]);
+
+  useEffect(() => {
+    if (modelPendingRemoval !== null || !restoreRemovalFocusRef.current) return;
+    restoreRemovalFocusRef.current = false;
+    const target = removeFocusTargetRef.current;
+    if (target?.isConnected) target.focus();
+    else modelInputRef.current?.focus();
+  }, [customModels, modelPendingRemoval]);
 
   async function save() {
     const value = apiKey.trim();
@@ -283,15 +304,36 @@ export function AiGatewayConnectionCardWithClient(
   async function addCustomModel() {
     if (modelBusy || !modelSlugValid || modelSlugExists) return;
     const submittedSlug = modelSlug;
+    const pending = pendingModelCreateRef.current;
+    const operationId =
+      pending?.upstreamModelId === submittedSlug ? pending.operationId : crypto.randomUUID();
+    pendingModelCreateRef.current = { upstreamModelId: submittedSlug, operationId };
+    customModelsRequestGenerationRef.current += 1;
     restoreModelInputFocusRef.current = true;
     setModelBusy(true);
     try {
-      await client.createWorkspaceGatewayCustomModel(props.workspaceId, {
-        upstreamModelId: submittedSlug,
-      });
+      const create = () =>
+        client.createWorkspaceGatewayCustomModel(props.workspaceId, {
+          operationId,
+          upstreamModelId: submittedSlug,
+        });
+      let saved: WorkspaceGatewayCustomModel;
+      try {
+        saved = await create();
+      } catch {
+        saved = await create();
+      }
       if (!activeRef.current) return;
-      await refreshCustomModels();
-      if (!activeRef.current) return;
+      pendingModelCreateRef.current = null;
+      setCustomModels((current) => [
+        ...current.filter(
+          (candidate) =>
+            candidate.id !== saved.id && candidate.upstreamModelId !== saved.upstreamModelId,
+        ),
+        saved,
+      ]);
+      setCustomModelsError(null);
+      setCustomModelsLoaded(true);
       setModelSlug((current) => (current === submittedSlug ? "" : current));
       props.onConnectionChange?.();
       toast.success("Gateway model added", {
@@ -301,7 +343,9 @@ export function AiGatewayConnectionCardWithClient(
       });
     } catch (caught) {
       if (!activeRef.current) return;
-      toast.error("Couldn't add Gateway model", {
+      await refreshCustomModels();
+      if (!activeRef.current) return;
+      toast.error("Couldn't confirm Gateway model add", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
     } finally {
@@ -314,22 +358,37 @@ export function AiGatewayConnectionCardWithClient(
     const focusModelId =
       customModels[modelIndex + 1]?.id ?? customModels[modelIndex - 1]?.id ?? null;
     setRemovingModelId(model.id);
+    const operationId =
+      pendingModelDeleteOperationsRef.current.get(model.id) ?? crypto.randomUUID();
+    pendingModelDeleteOperationsRef.current.set(model.id, operationId);
+    customModelsRequestGenerationRef.current += 1;
     try {
-      await client.deleteWorkspaceGatewayCustomModel(props.workspaceId, model.id);
+      const remove = () =>
+        client.deleteWorkspaceGatewayCustomModel(props.workspaceId, model.id, {
+          expectedVersion: model.version,
+          operationId,
+        });
+      try {
+        await remove();
+      } catch {
+        await remove();
+      }
       if (!activeRef.current) return true;
-      await refreshCustomModels();
-      if (!activeRef.current) return true;
-      queueMicrotask(() => {
-        if (!activeRef.current) return;
-        if (focusModelId) removeButtonRefs.current.get(focusModelId)?.focus();
-        else modelInputRef.current?.focus();
-      });
+      pendingModelDeleteOperationsRef.current.delete(model.id);
+      setCustomModels((current) => current.filter((candidate) => candidate.id !== model.id));
+      setCustomModelsError(null);
+      setCustomModelsLoaded(true);
+      removeFocusTargetRef.current = focusModelId
+        ? (removeButtonRefs.current.get(focusModelId) ?? modelInputRef.current)
+        : modelInputRef.current;
       props.onConnectionChange?.();
       toast.success("Gateway model removed");
       return true;
     } catch (caught) {
       if (!activeRef.current) return false;
-      toast.error("Couldn't remove Gateway model", {
+      await refreshCustomModels();
+      if (!activeRef.current) return false;
+      toast.error("Couldn't confirm Gateway model removal", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
       return false;
@@ -459,7 +518,7 @@ export function AiGatewayConnectionCardWithClient(
                       }
                     }}
                     disabled={modelBusy}
-                    className="h-9 font-mono text-base md:text-base lg:pointer-fine:text-xs [@media(any-pointer:coarse)]:text-base!"
+                    className="h-9 font-mono text-base md:text-base"
                     placeholder="anthropic/claude-sonnet-4.6"
                     aria-label="Vercel AI Gateway model slug"
                     aria-describedby="gateway-model-slug-help"
@@ -473,6 +532,7 @@ export function AiGatewayConnectionCardWithClient(
                     variant="secondary"
                     disabled={modelBusy || !modelSlugValid || modelSlugExists}
                     onClick={addCustomModel}
+                    className="min-h-11"
                   >
                     {modelBusy ? (
                       <Loader2Icon className="size-3.5 animate-spin" />
@@ -495,7 +555,19 @@ export function AiGatewayConnectionCardWithClient(
             ) : null}
 
             {customModelsError ? (
-              <p className="text-xs text-destructive">{customModelsError}</p>
+              <div className="flex flex-wrap items-center justify-between gap-2" role="alert">
+                <p className="min-w-0 flex-1 text-xs text-destructive">{customModelsError}</p>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={modelBusy}
+                  onClick={() => void refreshCustomModels()}
+                  className="min-h-11"
+                >
+                  Retry
+                </Button>
+              </div>
             ) : null}
 
             {customModelsLoaded && !customModelsError && customModels.length === 0 ? (
@@ -525,10 +597,15 @@ export function AiGatewayConnectionCardWithClient(
                         type="button"
                         size="icon-xs"
                         variant="ghost"
-                        className="shrink-0 text-fg-subtle hover:text-destructive"
+                        className="size-11 shrink-0 text-fg-subtle hover:text-destructive"
                         disabled={removingModelId !== null}
                         aria-label={`Remove ${model.upstreamModelId}`}
-                        onClick={() => setModelPendingRemoval(model)}
+                        onClick={() => {
+                          removeFocusTargetRef.current =
+                            removeButtonRefs.current.get(model.id) ?? modelInputRef.current;
+                          restoreRemovalFocusRef.current = true;
+                          setModelPendingRemoval(model);
+                        }}
                       >
                         {removingModelId === model.id ? (
                           <Loader2Icon className="size-3.5 animate-spin" />
@@ -561,6 +638,8 @@ export function AiGatewayConnectionCardWithClient(
         }
         description="The model disappears from new selections. Already accepted turns keep their frozen definition so they can finish safely."
         confirmLabel="Remove model"
+        restoreFocusRef={removeFocusTargetRef}
+        restoreFocusFallbackRef={modelInputRef}
         onConfirm={async () =>
           modelPendingRemoval ? await removeCustomModel(modelPendingRemoval) : false
         }

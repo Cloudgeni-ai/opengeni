@@ -132,13 +132,14 @@ async function bearer(permissions: Permission[]): Promise<string> {
 async function request(
   path: string,
   options: { method?: string; body?: unknown; permissions?: Permission[] } = {},
+  target: Hono | null = app,
 ): Promise<Response> {
-  if (!app || !grant) throw new Error("Gateway custom model fixture is unavailable");
+  if (!target || !grant) throw new Error("Gateway custom model fixture is unavailable");
   const headers: Record<string, string> = {
     authorization: await bearer(options.permissions ?? ["workspace:read", "workspace:admin"]),
   };
   if (options.body !== undefined) headers["content-type"] = "application/json";
-  return await app.request(`http://x/v1/workspaces/${grant.workspaceId}${path}`, {
+  return await target.request(`http://x/v1/workspaces/${grant.workspaceId}${path}`, {
     method: options.method ?? "GET",
     headers,
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
@@ -186,7 +187,10 @@ describe("workspace Gateway custom model API", () => {
       { upstreamModelId: "anthropic/claude-sonnet-4.6", apiKey: "must-not-be-accepted" },
       { upstreamModelId: "anthropic/claude-sonnet-4.6", enabled: true },
     ]) {
-      const invalid = await request("/gateway-custom-models", { method: "POST", body });
+      const invalid = await request("/gateway-custom-models", {
+        method: "POST",
+        body: { operationId: crypto.randomUUID(), ...body },
+      });
       expect(invalid.status).toBe(422);
     }
 
@@ -197,7 +201,7 @@ describe("workspace Gateway custom model API", () => {
     ]) {
       const collision = await request("/gateway-custom-models", {
         method: "POST",
-        body: { upstreamModelId },
+        body: { operationId: crypto.randomUUID(), upstreamModelId },
       });
       expect(collision.status).toBe(422);
     }
@@ -207,20 +211,68 @@ describe("workspace Gateway custom model API", () => {
     if (!app || !publicApp || !grant) return;
     const upstreamModelId = "anthropic/claude-sonnet-4.6";
     const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const createOperationId = crypto.randomUUID();
+    const createBody = {
+      operationId: createOperationId,
+      upstreamModelId,
+      label: "Claude Sonnet 4.6",
+    };
 
     const created = await request("/gateway-custom-models", {
       method: "POST",
-      body: { upstreamModelId, label: "Claude Sonnet 4.6" },
+      body: createBody,
     });
     expect(created.status).toBe(201);
-    const createdModel = (await created.json()) as { id: string; upstreamModelId: string };
+    const createdModel = (await created.json()) as {
+      id: string;
+      upstreamModelId: string;
+      version: number;
+    };
     expect(createdModel.upstreamModelId).toBe(upstreamModelId);
+    expect(createdModel.version).toBe(1);
+
+    const replayedCreate = await request("/gateway-custom-models", {
+      method: "POST",
+      body: createBody,
+    });
+    expect(replayedCreate.status).toBe(201);
+    expect(await replayedCreate.json()).toMatchObject({
+      id: createdModel.id,
+      upstreamModelId,
+      version: 1,
+    });
+
+    const replayOnlyApp = new Hono();
+    registerWorkspaceRoutes(replayOnlyApp, {
+      settings,
+      db: client!.db,
+      resolveCatalogSettings: async () => {
+        throw new Error("catalog unavailable after committed custom-model create");
+      },
+    } as ApiRouteDeps);
+    const replayedWithoutCatalog = await request(
+      "/gateway-custom-models",
+      { method: "POST", body: createBody },
+      replayOnlyApp,
+    );
+    expect(replayedWithoutCatalog.status).toBe(201);
+    expect(await replayedWithoutCatalog.json()).toMatchObject({
+      id: createdModel.id,
+      upstreamModelId,
+      version: 1,
+    });
+
+    const reusedCreateOperation = await request("/gateway-custom-models", {
+      method: "POST",
+      body: { ...createBody, label: "Different payload" },
+    });
+    expect(reusedCreateOperation.status).toBe(409);
 
     const duplicate = await request("/gateway-custom-models", {
       method: "POST",
-      body: { upstreamModelId },
+      body: { operationId: crypto.randomUUID(), upstreamModelId },
     });
-    expect(duplicate.status).toBe(422);
+    expect(duplicate.status).toBe(409);
 
     const listed = await request("/gateway-custom-models", {
       permissions: ["workspace:read"],
@@ -369,13 +421,25 @@ describe("workspace Gateway custom model API", () => {
     const readOnlyDelete = await request(`/gateway-custom-models/${createdModel.id}`, {
       method: "DELETE",
       permissions: ["workspace:read"],
+      body: { expectedVersion: createdModel.version, operationId: crypto.randomUUID() },
     });
     expect(readOnlyDelete.status).toBe(403);
 
+    const deleteOperationId = crypto.randomUUID();
+    const deleteBody = {
+      expectedVersion: createdModel.version,
+      operationId: deleteOperationId,
+    };
     const removed = await request(`/gateway-custom-models/${createdModel.id}`, {
       method: "DELETE",
+      body: deleteBody,
     });
     expect(removed.status).toBe(204);
+    const replayedDelete = await request(`/gateway-custom-models/${createdModel.id}`, {
+      method: "DELETE",
+      body: deleteBody,
+    });
+    expect(replayedDelete.status).toBe(204);
     expect((await (await request("/gateway-custom-models")).json()).models).toEqual([]);
 
     await upsertWorkspaceModelPolicy(client!.db, {
@@ -445,6 +509,36 @@ describe("workspace Gateway custom model API", () => {
       },
     );
     expect(switchedAfterDelete.status).toBe(202);
+
+    const replacementResponse = await request("/gateway-custom-models", {
+      method: "POST",
+      body: {
+        operationId: crypto.randomUUID(),
+        upstreamModelId,
+        label: "Claude Sonnet replacement",
+      },
+    });
+    expect(replacementResponse.status).toBe(201);
+    const replacement = (await replacementResponse.json()) as {
+      id: string;
+      version: number;
+    };
+    expect(replacement.id).not.toBe(createdModel.id);
+    expect(replacement.version).toBe(1);
+
+    const delayedDeleteReplay = await request(`/gateway-custom-models/${createdModel.id}`, {
+      method: "DELETE",
+      body: deleteBody,
+    });
+    expect(delayedDeleteReplay.status).toBe(204);
+    const staleDelete = await request(`/gateway-custom-models/${createdModel.id}`, {
+      method: "DELETE",
+      body: { expectedVersion: createdModel.version, operationId: crypto.randomUUID() },
+    });
+    expect(staleDelete.status).toBe(409);
+    expect(await (await request("/gateway-custom-models")).json()).toMatchObject({
+      models: [{ id: replacement.id, version: 1 }],
+    });
   });
 
   test("enforces the transactional per-workspace custom-model bound", async () => {
@@ -460,6 +554,8 @@ describe("workspace Gateway custom model API", () => {
         workspace_id,
         upstream_model_id,
         label,
+        create_operation_id,
+        create_request_hash,
         created_by_subject_id
       )
       select
@@ -468,9 +564,10 @@ describe("workspace Gateway custom model API", () => {
         ${grant.workspaceId}::uuid,
         'limit/provider-model-' || ordinal::text,
         null,
+        gen_random_uuid(),
+        repeat('0', 64),
         ${grant.subjectId}
       from generate_series(1, ${MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS - 1}) as ordinal
-      on conflict (workspace_id, upstream_model_id) do nothing
     `;
 
     const results = await Promise.all(
@@ -478,7 +575,7 @@ describe("workspace Gateway custom model API", () => {
         async (upstreamModelId) =>
           await request("/gateway-custom-models", {
             method: "POST",
-            body: { upstreamModelId },
+            body: { operationId: crypto.randomUUID(), upstreamModelId },
           }),
       ),
     );

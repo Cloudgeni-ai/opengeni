@@ -74,6 +74,14 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
     expect(migration).toContain("octet_length(upstream_model_id) BETWEEN 1 AND 238");
     expect(migration).toContain("upstream_model_id ~ '^[!-~]+$'");
     expect(migration).toContain("upstream_model_id !~ '[|]'");
+    expect(migration).toContain("version integer NOT NULL DEFAULT 1");
+    expect(migration).toContain("create_operation_id uuid NOT NULL");
+    expect(migration).toContain("create_request_hash text NOT NULL");
+    expect(migration).toContain("delete_operation_id uuid");
+    expect(migration).toContain("delete_request_hash text");
+    expect(migration).toContain("WHERE retired_at IS NULL");
+    expect(migration).toContain("workspace_gateway_custom_models_create_operation_uq");
+    expect(migration).toContain("workspace_gateway_custom_models_delete_operation_uq");
     expect(migration).not.toContain("{1,256}");
 
     const catalogTable = migration.slice(
@@ -234,6 +242,8 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
         accountId: account!.id,
         workspaceId: firstWorkspace!.id,
         upstreamModelId: "anthropic|claude",
+        operationId: randomUUID(),
+        requestHash: "1".repeat(64),
         createdBySubjectId: "user:migration-0383",
       }),
     ).rejects.toThrow();
@@ -241,9 +251,13 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
       accountId: account!.id,
       workspaceId: firstWorkspace!.id,
       upstreamModelId: "anthropic/claude-sonnet-4.6",
+      operationId: randomUUID(),
+      requestHash: "2".repeat(64),
       createdBySubjectId: "user:migration-0383",
     });
+    if (!created) throw new Error("custom model create unexpectedly conflicted");
     expect(created.upstreamModelId).toBe("anthropic/claude-sonnet-4.6");
+    expect(created.version).toBe(1);
     expect(
       await listWorkspaceGatewayCustomModels(client.db, {
         accountId: account!.id,
@@ -261,15 +275,31 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
         accountId: account!.id,
         workspaceId: secondWorkspace!.id,
         customModelId: created.id,
+        expectedVersion: created.version,
+        operationId: randomUUID(),
+        requestHash: "3".repeat(64),
       }),
-    ).toBe(false);
+    ).toEqual({ outcome: "not_found" });
+    const deleteOperationId = randomUUID();
+    const deleted = await deleteWorkspaceGatewayCustomModel(client.db, {
+      accountId: account!.id,
+      workspaceId: firstWorkspace!.id,
+      customModelId: created.id,
+      expectedVersion: created.version,
+      operationId: deleteOperationId,
+      requestHash: "4".repeat(64),
+    });
+    expect(deleted).toMatchObject({ outcome: "success", model: { version: 2 } });
     expect(
       await deleteWorkspaceGatewayCustomModel(client.db, {
         accountId: account!.id,
         workspaceId: firstWorkspace!.id,
         customModelId: created.id,
+        expectedVersion: created.version,
+        operationId: deleteOperationId,
+        requestHash: "4".repeat(64),
       }),
-    ).toBe(true);
+    ).toMatchObject({ outcome: "success", model: { id: created.id, version: 2 } });
     expect(
       await listWorkspaceGatewayCustomModels(client.db, {
         accountId: account!.id,
@@ -283,13 +313,30 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
         upstreamModelId: created.upstreamModelId,
       }),
     ).toMatchObject({ id: created.id, retiredAt: expect.any(Date) });
-    const restored = await createWorkspaceGatewayCustomModel(client.db, {
+    const replacement = await createWorkspaceGatewayCustomModel(client.db, {
       accountId: account!.id,
       workspaceId: firstWorkspace!.id,
       upstreamModelId: created.upstreamModelId,
-      label: "A replacement label must not rewrite accepted definition identity",
+      label: "A replacement definition gets a fresh identity",
+      operationId: randomUUID(),
+      requestHash: "5".repeat(64),
       createdBySubjectId: "user:replacement",
     });
-    expect(restored).toMatchObject({ id: created.id, label: null, retiredAt: null });
+    expect(replacement).toMatchObject({
+      label: "A replacement definition gets a fresh identity",
+      retiredAt: null,
+      version: 1,
+    });
+    expect(replacement?.id).not.toBe(created.id);
+    expect(
+      await deleteWorkspaceGatewayCustomModel(client.db, {
+        accountId: account!.id,
+        workspaceId: firstWorkspace!.id,
+        customModelId: created.id,
+        expectedVersion: created.version,
+        operationId: randomUUID(),
+        requestHash: "6".repeat(64),
+      }),
+    ).toEqual({ outcome: "conflict" });
   });
 });

@@ -8,6 +8,7 @@ import {
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   signDelegatedAccessToken,
   type Permission,
@@ -977,6 +978,11 @@ describe("connections routes", () => {
     expect(
       firstConnection.connection.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY],
     ).toBe(firstOperationId);
+    expect(
+      firstConnection.connection.metadata[
+        VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY
+      ],
+    ).toMatch(/^[0-9a-f]{64}$/u);
 
     const retried = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
       method: "POST",
@@ -997,6 +1003,19 @@ describe("connections routes", () => {
         })
       )?.credential,
     ).toEqual({ apiKey: "gateway-first" });
+
+    const conflictingCreateReplay = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections`,
+      {
+        method: "POST",
+        headers,
+        body: body("must-not-overwrite-replayed-operation", firstOperationId),
+      },
+    );
+    expect(conflictingCreateReplay.status).toBe(409);
+    expect(
+      await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
+    ).toBe("gateway-first");
 
     const conflictingCreate = await app().request(
       `/v1/workspaces/${workspace.workspaceId}/connections`,
@@ -1062,25 +1081,53 @@ describe("connections routes", () => {
     );
     expect(identityChange.status).toBe(422);
 
+    const rotateOperationId = randomUUID();
+    const rotateBody = (apiKey: string) =>
+      JSON.stringify({
+        status: "active",
+        credential: { apiKey },
+        metadata: { credentialLabel: "Rotated Vercel AI Gateway" },
+        expectedVersion: firstConnection.connection.version,
+        operationId: rotateOperationId,
+      });
     const patched = await app().request(
       `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
       {
         method: "PATCH",
         headers,
-        body: JSON.stringify({
-          status: "active",
-          credential: { apiKey: "gateway-patch" },
-          metadata: { credentialLabel: "Rotated Vercel AI Gateway" },
-          expectedVersion: firstConnection.connection.version,
-          operationId: randomUUID(),
-        }),
+        body: rotateBody("gateway-patch"),
       },
     );
     expect(patched.status).toBe(200);
     const patchedConnection = (await patched.json()) as {
       connection: { id: string; version: number; metadata: Record<string, unknown> };
     };
-    expect(patchedConnection.connection.id).toBe(firstConnection.connection.id);
+    expect(patchedConnection.connection.id).not.toBe(firstConnection.connection.id);
+    expect(
+      patchedConnection.connection.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY],
+    ).toBe(rotateOperationId);
+    expect(
+      await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
+    ).toBe("gateway-patch");
+
+    const replayedPatch = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      { method: "PATCH", headers, body: rotateBody("gateway-patch") },
+    );
+    expect(replayedPatch.status).toBe(200);
+    expect(((await replayedPatch.json()) as { connection: { id: string } }).connection.id).toBe(
+      patchedConnection.connection.id,
+    );
+
+    const conflictingPatchReplay = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      {
+        method: "PATCH",
+        headers,
+        body: rotateBody("must-not-overwrite-replayed-rotation"),
+      },
+    );
+    expect(conflictingPatchReplay.status).toBe(409);
     expect(
       await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
     ).toBe("gateway-patch");
@@ -1095,20 +1142,24 @@ describe("connections routes", () => {
     expect(rowsAfterPatch.filter((connection) => connection.status === "active")).toHaveLength(1);
     expect(
       rowsAfterPatch.find((connection) => connection.id === firstConnection.connection.id)?.status,
-    ).toBe("active");
+    ).toBe("revoked");
     expect(rowsAfterPatch.find((connection) => connection.id === legacyDuplicate.id)?.status).toBe(
       "revoked",
     );
+    expect(
+      rowsAfterPatch.find((connection) => connection.id === patchedConnection.connection.id)
+        ?.status,
+    ).toBe("active");
 
     const disconnected = await app().request(
-      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      `/v1/workspaces/${workspace.workspaceId}/connections/${patchedConnection.connection.id}`,
       { method: "DELETE", headers },
     );
     expect(disconnected.status).toBe(200);
     const concurrentReplay = await revokeWorkspaceVercelAiGatewayConnections(client.db, {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
-      connectionId: firstConnection.connection.id,
+      connectionId: patchedConnection.connection.id,
       expectedVersion: patchedConnection.connection.version,
       updatedBySubjectId: "subject-a",
     });
@@ -1122,7 +1173,7 @@ describe("connections routes", () => {
         connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
     );
     expect(gatewayRows.map((connection) => connection.id).sort()).toEqual(
-      [firstConnection.connection.id, legacyDuplicate.id].sort(),
+      [firstConnection.connection.id, legacyDuplicate.id, patchedConnection.connection.id].sort(),
     );
     expect(gatewayRows.every((connection) => connection.status === "revoked")).toBe(true);
 
@@ -1135,6 +1186,15 @@ describe("connections routes", () => {
     const reconnectedId = ((await reconnected.json()) as { connection: { id: string } }).connection
       .id;
     expect(reconnectedId).not.toBe(legacyDuplicate.id);
+
+    const replayedOriginalCreate = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections`,
+      { method: "POST", headers, body: body("gateway-first", firstOperationId) },
+    );
+    expect(replayedOriginalCreate.status).toBe(409);
+    expect(
+      await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
+    ).toBe("gateway-after-disconnect");
 
     const stalePatch = await app().request(
       `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
@@ -1152,10 +1212,15 @@ describe("connections routes", () => {
     expect(stalePatch.status).toBe(409);
 
     const replayedDisconnect = await app().request(
-      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      `/v1/workspaces/${workspace.workspaceId}/connections/${patchedConnection.connection.id}`,
       { method: "DELETE", headers },
     );
     expect(replayedDisconnect.status).toBe(200);
+    const staleGenerationDisconnect = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      { method: "DELETE", headers },
+    );
+    expect(staleGenerationDisconnect.status).toBe(200);
     expect(
       await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
     ).toBe("gateway-after-disconnect");

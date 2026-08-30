@@ -497,6 +497,7 @@ export type {
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
   CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
   WorkspaceModelAccessPolicy,
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,

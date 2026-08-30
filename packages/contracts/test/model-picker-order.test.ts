@@ -57,11 +57,13 @@ describe("workspace Gateway upstream slug", () => {
   test("rejects field separators while preserving exact printable provider slugs", () => {
     expect(
       CreateWorkspaceGatewayCustomModelRequest.safeParse({
+        operationId: crypto.randomUUID(),
         upstreamModelId: "anthropic/claude-sonnet-4.6",
       }).success,
     ).toBe(true);
     expect(
       CreateWorkspaceGatewayCustomModelRequest.safeParse({
+        operationId: crypto.randomUUID(),
         upstreamModelId: "anthropic|claude",
       }).success,
     ).toBe(false);

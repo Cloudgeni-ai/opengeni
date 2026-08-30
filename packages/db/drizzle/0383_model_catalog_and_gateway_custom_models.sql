@@ -83,6 +83,11 @@ CREATE TABLE workspace_gateway_custom_models (
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   upstream_model_id text NOT NULL,
   label text,
+  version integer NOT NULL DEFAULT 1,
+  create_operation_id uuid NOT NULL,
+  create_request_hash text NOT NULL,
+  delete_operation_id uuid,
+  delete_request_hash text,
   created_by_subject_id text NOT NULL,
   retired_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -103,11 +108,31 @@ CREATE TABLE workspace_gateway_custom_models (
   ),
   CONSTRAINT workspace_gateway_custom_models_actor_chk CHECK (
     octet_length(created_by_subject_id) BETWEEN 1 AND 1024
+  ),
+  CONSTRAINT workspace_gateway_custom_models_version_chk CHECK (version > 0),
+  CONSTRAINT workspace_gateway_custom_models_create_hash_chk CHECK (
+    create_request_hash ~ '^[a-f0-9]{64}$'
+  ),
+  CONSTRAINT workspace_gateway_custom_models_delete_receipt_chk CHECK (
+    (delete_operation_id IS NULL AND delete_request_hash IS NULL)
+    OR (
+      delete_operation_id IS NOT NULL
+      AND delete_request_hash ~ '^[a-f0-9]{64}$'
+      AND retired_at IS NOT NULL
+    )
   )
 );
 
 CREATE UNIQUE INDEX workspace_gateway_custom_models_workspace_upstream_uq
-  ON workspace_gateway_custom_models (workspace_id, upstream_model_id);
+  ON workspace_gateway_custom_models (workspace_id, upstream_model_id)
+  WHERE retired_at IS NULL;
+
+CREATE UNIQUE INDEX workspace_gateway_custom_models_create_operation_uq
+  ON workspace_gateway_custom_models (workspace_id, create_operation_id);
+
+CREATE UNIQUE INDEX workspace_gateway_custom_models_delete_operation_uq
+  ON workspace_gateway_custom_models (workspace_id, delete_operation_id)
+  WHERE delete_operation_id IS NOT NULL;
 
 -- New Send/Steer receipts persist one parsed boundary-request fingerprint and
 -- replay it before mutable model-catalog resolution. Legacy receipt identity
