@@ -5,7 +5,9 @@ import {
   bootstrapWorkspace,
   createAutomationSource,
   createAutomationTrigger,
+  createWorkspaceGatewayCustomModel,
   createDb,
+  deleteWorkspaceGatewayCustomModel,
   deleteWorkspace,
   type DbClient,
 } from "@opengeni/db";
@@ -27,6 +29,11 @@ let workspaceId: string;
 let subjectId: string;
 let sourceId: string;
 let triggerId: string;
+const triggeredRuns: Array<{
+  accountId: string;
+  workspaceId: string;
+  runId: string;
+}> = [];
 const sessionTemplate = {
   prompt: "Investigate the event",
   instructions: null,
@@ -91,7 +98,6 @@ beforeAll(async () => {
   });
   triggerId = trigger.id;
   app = new Hono();
-  const noop = async () => undefined;
   registerAutomationRoutes(app, {
     settings: testSettings({
       productAccessMode: "managed",
@@ -100,7 +106,9 @@ beforeAll(async () => {
     }),
     db: client.db,
     workflowClient: {
-      triggerAutomationRun: noop,
+      triggerAutomationRun: async (input) => {
+        triggeredRuns.push(input);
+      },
     } as unknown as SessionWorkflowClient,
   } as unknown as ApiRouteDeps);
 }, 300_000);
@@ -166,5 +174,71 @@ describe("automation route authorization", () => {
       },
     );
     expect(response.status).toBe(409);
+  });
+
+  test("does not accept a new event for a trigger whose custom model was retired", async () => {
+    triggeredRuns.length = 0;
+    const upstreamModelId = `fixture/retired-${crypto.randomUUID()}`;
+    const model = await createWorkspaceGatewayCustomModel(client.db, {
+      accountId,
+      workspaceId,
+      upstreamModelId,
+      operationId: crypto.randomUUID(),
+      requestHash: "a".repeat(64),
+      createdBySubjectId: subjectId,
+    });
+    if (!model) throw new Error("custom model create unexpectedly conflicted");
+    await createAutomationTrigger(client.db, {
+      accountId,
+      workspaceId,
+      createdBySubjectId: subjectId,
+      adapterId: "signed-json.v1",
+      request: {
+        sourceId,
+        name: "Retired model trigger",
+        eventTypes: ["retired.model.event"],
+        configuration: {},
+        parameters: {},
+        sessionTemplate: {
+          ...sessionTemplate,
+          model: `workspace-gateway/${upstreamModelId}`,
+        },
+        status: "active",
+        packInstallationId: null,
+        packTemplateId: null,
+      },
+    });
+    await deleteWorkspaceGatewayCustomModel(client.db, {
+      accountId,
+      workspaceId,
+      customModelId: model.id,
+      expectedVersion: model.version,
+      operationId: crypto.randomUUID(),
+      requestHash: "b".repeat(64),
+    });
+
+    const response = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/automations/sources/${sourceId}/events`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await authorization(["workspace:read", "workspace:admin"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          eventType: "retired.model.event",
+          occurrenceKey: `retired:${crypto.randomUUID()}`,
+          payload: {},
+        }),
+      },
+    );
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({
+      accepted: true,
+      ignoredReason: "no_executable_triggers",
+      runIds: [],
+    });
+    expect(triggeredRuns).toEqual([]);
   });
 });

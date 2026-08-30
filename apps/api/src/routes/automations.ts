@@ -29,6 +29,7 @@ import {
   resolveAutomationWebhookEndpoint,
   updateAutomationSource,
   updateAutomationTrigger,
+  withWorkspaceGatewayCustomModelReadLock,
   type AutomationSourceSecret,
 } from "@opengeni/db";
 import {
@@ -417,29 +418,65 @@ export async function acceptAutomationEvent(
     workspaceId: source.workspaceId,
     sourceId: source.id,
   });
-  const matchingAtAcceptance = triggers.filter((trigger) =>
+  const matchingByEvent = triggers.filter((trigger) =>
     adapter.matches({ event: input.normalizedEvent, trigger }),
   );
-  if (matchingAtAcceptance.length > AUTOMATION_MAX_MATCHED_TRIGGERS) {
+  if (matchingByEvent.length > AUTOMATION_MAX_MATCHED_TRIGGERS) {
     throw new HTTPException(422, {
       message: `automation event matches more than ${AUTOMATION_MAX_MATCHED_TRIGGERS} triggers`,
     });
   }
-  const stored = await recordAutomationEvent(deps.db, {
-    accountId: source.accountId,
-    workspaceId: source.workspaceId,
-    sourceId: source.id,
-    sourceVersion: source.version,
-    sourceConfiguration: source.configuration,
-    matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
-      triggerId: trigger.id,
-      revision: trigger.revision,
-    })),
-    deliveryKey: input.deliveryKey,
-    requestDigest: input.requestDigest,
-    normalizedEvent: input.normalizedEvent,
-    ignoredReason: matchingAtAcceptance.length === 0 ? "no_matching_triggers" : null,
-  });
+  const stored = await withWorkspaceGatewayCustomModelReadLock(
+    deps.db,
+    { accountId: source.accountId, workspaceId: source.workspaceId },
+    async (lockedDb) => {
+      const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
+      const catalogSettings = (
+        await resolveWorkspaceCatalogSettings(lockedDb, catalogSourceSettings, {
+          accountId: source.accountId,
+          workspaceId: source.workspaceId,
+        })
+      ).settings;
+      const matchingAtAcceptance = [];
+      for (const trigger of matchingByEvent) {
+        try {
+          const requestedModel = trigger.sessionTemplate.model ?? catalogSettings.openaiModel;
+          const model = canonicalConfiguredModel(catalogSettings, requestedModel);
+          if (!model) continue;
+          await assertWorkspaceModelPolicyAllows(
+            lockedDb,
+            catalogSettings,
+            source.workspaceId,
+            model,
+          );
+          matchingAtAcceptance.push(trigger);
+        } catch (error) {
+          if (isUnprocessableEntity(error)) continue;
+          throw error;
+        }
+      }
+      return await recordAutomationEvent(lockedDb, {
+        accountId: source.accountId,
+        workspaceId: source.workspaceId,
+        sourceId: source.id,
+        sourceVersion: source.version,
+        sourceConfiguration: source.configuration,
+        matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
+          triggerId: trigger.id,
+          revision: trigger.revision,
+        })),
+        deliveryKey: input.deliveryKey,
+        requestDigest: input.requestDigest,
+        normalizedEvent: input.normalizedEvent,
+        ignoredReason:
+          matchingByEvent.length === 0
+            ? "no_matching_triggers"
+            : matchingAtAcceptance.length === 0
+              ? "no_executable_triggers"
+              : null,
+      });
+    },
+  );
   const matching = await getAutomationTriggerRevisions(deps.db, {
     workspaceId: source.workspaceId,
     refs: stored.event.matchedTriggerRevisions,
@@ -495,6 +532,14 @@ export async function acceptAutomationEvent(
     eventId: stored.event.id,
     runIds,
   });
+}
+
+function isUnprocessableEntity(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "status" in error &&
+    (error as Error & { status?: unknown }).status === 422
+  );
 }
 
 async function requireSource(

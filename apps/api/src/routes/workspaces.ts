@@ -60,6 +60,7 @@ import {
   workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
+  WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceExternalIdentityConflictError,
   WorkspaceGatewayCustomModelLimitError,
   WorkspaceLimitExceededError,
@@ -230,7 +231,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         name: payload.name,
         slug: payload.slug ?? null,
         ...(payload.agentInstructions !== undefined
-          ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
+          ? {
+              agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
+            }
           : {}),
         maxWorkspacesPerAccount: workspaceLimit(deps),
       });
@@ -463,11 +466,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       return c.json(projectWorkspaceGatewayCustomModel(model), 201);
     } catch (error) {
-      if (error instanceof WorkspaceGatewayCustomModelLimitError) {
+      if (
+        error instanceof WorkspaceGatewayCustomModelLimitError ||
+        error instanceof WorkspaceGatewayCustomModelHistoryLimitError
+      ) {
         throw new HTTPException(422, { message: error.message });
       }
       if (nestedPostgresSqlState(error) === "23505") {
-        throw new HTTPException(422, { message: "Gateway custom model already exists" });
+        throw new HTTPException(422, {
+          message: "Gateway custom model already exists",
+        });
       }
       throw error;
     }
@@ -482,13 +490,17 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         customModelId,
       )
     ) {
-      throw new HTTPException(422, { message: "invalid Gateway custom model id" });
+      throw new HTTPException(422, {
+        message: "invalid Gateway custom model id",
+      });
     }
     const parsed = DeleteWorkspaceGatewayCustomModelRequest.safeParse(
       await c.req.json().catch(() => null),
     );
     if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid Gateway custom model deletion" });
+      throw new HTTPException(422, {
+        message: "invalid Gateway custom model deletion",
+      });
     }
     const removed = await deleteWorkspaceGatewayCustomModel(deps.db, {
       accountId: grant.accountId,
@@ -503,10 +515,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
     });
     if (removed.outcome === "not_found") {
-      throw new HTTPException(404, { message: "Gateway custom model not found" });
+      throw new HTTPException(404, {
+        message: "Gateway custom model not found",
+      });
     }
     if (removed.outcome === "conflict") {
-      throw new HTTPException(409, { message: "Gateway custom model changed; reload and retry" });
+      throw new HTTPException(409, {
+        message: "Gateway custom model changed; reload and retry",
+      });
     }
     return c.body(null, 204);
   });

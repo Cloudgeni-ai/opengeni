@@ -57,7 +57,10 @@ export function createAutomationActivities(
         return { action: "already_dispatched", sessionId: run.sessionId };
       }
       if (run.status === "skipped") {
-        return { action: "skipped", reason: run.errorCode ?? "authority_revoked" };
+        return {
+          action: "skipped",
+          reason: run.errorCode ?? "authority_revoked",
+        };
       }
       if (run.status === "failed") {
         return { action: "failed", reason: run.errorCode ?? "dispatch_failed" };
@@ -94,9 +97,22 @@ export function createAutomationActivities(
             ).settings
           : deploymentCatalogSettings;
         const catalogService = { ...service, settings: catalogSettings };
-        const model = canonicalConfiguredModel(catalogSettings, requestedModel);
-        if (!model) throw new Error("automation has no configured model");
-        await assertModelPolicy(service.db, catalogSettings, input.workspaceId, model);
+        let model: string;
+        try {
+          const configuredModel = canonicalConfiguredModel(catalogSettings, requestedModel);
+          if (!configuredModel) throw new Error("automation has no configured model");
+          await assertModelPolicy(service.db, catalogSettings, input.workspaceId, configuredModel);
+          model = configuredModel;
+        } catch (error) {
+          if (!isUnprocessableEntity(error)) throw error;
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "failed",
+            errorCode: "dispatch_failed",
+          });
+          return { action: "failed", reason: "dispatch_failed" };
+        }
         const denial = await admit(catalogService, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -121,7 +137,10 @@ export function createAutomationActivities(
             status: "skipped",
             errorCode: "interactive_compute_not_allowed",
           });
-          return { action: "skipped", reason: "interactive_compute_not_allowed" };
+          return {
+            action: "skipped",
+            reason: "interactive_compute_not_allowed",
+          };
         }
         const turnExecutionPolicy = resolveTurnExecutionPolicyV1(catalogSettings, {
           modelId: model,
@@ -217,14 +236,16 @@ export function createAutomationActivities(
           });
           return { action: "skipped", reason: "authority_revoked" };
         }
-        await settle(service.db, {
-          workspaceId: input.workspaceId,
-          runId: run.id,
-          status: "failed",
-          errorCode: "dispatch_failed",
-        });
-        return { action: "failed", reason: "dispatch_failed" };
+        throw error;
       }
     },
   };
+}
+
+function isUnprocessableEntity(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "status" in error &&
+    (error as Error & { status?: unknown }).status === 422
+  );
 }

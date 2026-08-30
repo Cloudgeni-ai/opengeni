@@ -372,6 +372,25 @@ describe("ModelPolicyPicker", () => {
     ).toBeTruthy();
   });
 
+  test("preserves the Gateway billing rail for a removed custom-model selection", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="workspace-gateway/retired/provider-model"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).toBeTruthy();
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeNull();
+  });
+
   test("renders the External rail mark for an anonymous provider", async () => {
     const external: ClientModel = {
       id: "opencode/x-preview-f-free",

@@ -23,12 +23,53 @@ export type WorkspaceGatewayCustomModel = {
 };
 
 export const MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS = 100;
+export const MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS = 1_000;
 
 export class WorkspaceGatewayCustomModelLimitError extends Error {
   constructor() {
     super(`workspace Gateway custom model limit reached (${MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS})`);
     this.name = "WorkspaceGatewayCustomModelLimitError";
   }
+}
+
+export class WorkspaceGatewayCustomModelHistoryLimitError extends Error {
+  constructor() {
+    super(
+      `workspace Gateway custom model history limit reached (${MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS})`,
+    );
+    this.name = "WorkspaceGatewayCustomModelHistoryLimitError";
+  }
+}
+
+function workspaceGatewayCustomModelLockKey(workspaceId: string): string {
+  return `workspace-gateway-custom-models:${workspaceId}`;
+}
+
+/** Serialize custom-model mutations while allowing concurrent acceptance reads. */
+export async function withWorkspaceGatewayCustomModelReadLock<T>(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(${workspaceGatewayCustomModelLockKey(input.workspaceId)}, 0))`,
+    );
+    return await fn(scopedDb);
+  });
+}
+
+async function withWorkspaceGatewayCustomModelWriteLock<T>(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(db, input, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${workspaceGatewayCustomModelLockKey(input.workspaceId)}, 0))`,
+    );
+    return await fn(scopedDb);
+  });
 }
 
 function mapCustomModel(
@@ -136,10 +177,7 @@ export async function createWorkspaceGatewayCustomModel(
     createdBySubjectId: string;
   },
 ): Promise<WorkspaceGatewayCustomModel | null> {
-  return await withRlsContext(db, input, async (scopedDb) => {
-    await scopedDb.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-gateway-custom-models:${input.workspaceId}`}, 0))`,
-    );
+  return await withWorkspaceGatewayCustomModelWriteLock(db, input, async (scopedDb) => {
     const [operationRow] = await scopedDb
       .select()
       .from(schema.workspaceGatewayCustomModels)
@@ -171,6 +209,18 @@ export async function createWorkspaceGatewayCustomModel(
       .for("update")
       .limit(1);
     if (active) return null;
+    const [total] = await scopedDb
+      .select({ value: count() })
+      .from(schema.workspaceGatewayCustomModels)
+      .where(
+        and(
+          eq(schema.workspaceGatewayCustomModels.accountId, input.accountId),
+          eq(schema.workspaceGatewayCustomModels.workspaceId, input.workspaceId),
+        ),
+      );
+    if ((total?.value ?? 0) >= MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS) {
+      throw new WorkspaceGatewayCustomModelHistoryLimitError();
+    }
     const [current] = await scopedDb
       .select({ value: count() })
       .from(schema.workspaceGatewayCustomModels)
@@ -216,10 +266,7 @@ export async function deleteWorkspaceGatewayCustomModel(
   | { outcome: "conflict" }
   | { outcome: "not_found" }
 > {
-  return await withRlsContext(db, input, async (scopedDb) => {
-    await scopedDb.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-gateway-custom-models:${input.workspaceId}`}, 0))`,
-    );
+  return await withWorkspaceGatewayCustomModelWriteLock(db, input, async (scopedDb) => {
     const [operationRow] = await scopedDb
       .select()
       .from(schema.workspaceGatewayCustomModels)

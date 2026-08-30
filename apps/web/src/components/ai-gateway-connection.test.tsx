@@ -154,7 +154,12 @@ function gatewayCatalogModel(): WorkspaceModelCatalogModel {
       basis: "connection",
       checkedAt: null,
     },
-    availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+    availability: {
+      status: "available",
+      selectable: true,
+      reason: null,
+      checkedAt: null,
+    },
   };
 }
 
@@ -204,7 +209,9 @@ async function pressEnter(input: HTMLInputElement): Promise<void> {
     const onKeyDown = (
       input as unknown as Record<
         string,
-        { onKeyDown?: (event: { key: string; preventDefault: () => void }) => void }
+        {
+          onKeyDown?: (event: { key: string; preventDefault: () => void }) => void;
+        }
       >
     )[reactPropsKey!]!.onKeyDown;
     onKeyDown!({ key: "Enter", preventDefault: () => {} });
@@ -240,7 +247,9 @@ beforeEach(() => {
   createConnection.mockImplementation(async () => gatewayConnection());
   updateConnection.mockImplementation(async () => gatewayConnection());
   deleteConnection.mockImplementation(async () => gatewayConnection("revoked"));
-  listWorkspaceGatewayCustomModels.mockImplementation(async () => ({ models: [] }));
+  listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
+    models: [],
+  }));
   createWorkspaceGatewayCustomModel.mockImplementation(async (_workspaceId, request) =>
     customModel(request.upstreamModelId),
   );
@@ -772,7 +781,9 @@ describe("AiGatewayConnectionCard custom models", () => {
   });
 
   test("shows connected models read-only to non-admin workspace members", async () => {
-    getWorkspaceModelCatalog.mockImplementation(async () => ({ models: [gatewayCatalogModel()] }));
+    getWorkspaceModelCatalog.mockImplementation(async () => ({
+      models: [gatewayCatalogModel()],
+    }));
     listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
       models: [customModel("deepseek/deepseek-v3.2")],
     }));
@@ -785,6 +796,39 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(container.querySelector("input")).toBeNull();
       expect(container.querySelector('button[aria-label^="Remove "]')).toBeNull();
       expect(listConnections).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("does not expose a transient read-only summary before empty loads settle", async () => {
+    let resolveCatalog: ((value: { models: WorkspaceModelCatalogModel[] }) => void) | undefined;
+    let resolveCustomModels:
+      | ((value: { models: WorkspaceGatewayCustomModel[] }) => void)
+      | undefined;
+    getWorkspaceModelCatalog.mockImplementation(
+      async () =>
+        await new Promise<{ models: WorkspaceModelCatalogModel[] }>((resolve) => {
+          resolveCatalog = resolve;
+        }),
+    );
+    listWorkspaceGatewayCustomModels.mockImplementation(
+      async () =>
+        await new Promise<{ models: WorkspaceGatewayCustomModel[] }>((resolve) => {
+          resolveCustomModels = resolve;
+        }),
+    );
+    const { container, root } = await renderCard(false);
+
+    try {
+      expect(container.querySelector("summary")).toBeNull();
+      await act(async () => {
+        resolveCatalog?.({ models: [] });
+        resolveCustomModels?.({ models: [] });
+        await flush();
+      });
+      expect(container.querySelector("summary")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -857,6 +901,24 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
+  test("does not mislabel custom models as disconnected when readiness is unavailable", async () => {
+    getWorkspaceModelCatalog.mockImplementation(async () => {
+      throw new Error("readiness unavailable");
+    });
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
+      models: [customModel("deepseek/deepseek-v3.2")],
+    }));
+    const { container, root } = await renderCard(false);
+
+    try {
+      expect(container.textContent).toContain("Gateway connection status unavailable");
+      expect(container.textContent).not.toContain("Waiting for a Gateway connection");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("removes a custom slug by its stable row id", async () => {
     const model = customModel("xai/grok-4.1-fast");
     listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
@@ -904,7 +966,9 @@ describe("AiGatewayConnectionCard custom models", () => {
 
   test("retries a lost delete response with the same operation id", async () => {
     const model = customModel("xai/grok-4.1-fast");
-    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({ models: [model] }));
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({
+      models: [model],
+    }));
     const operationIds: string[] = [];
     deleteWorkspaceGatewayCustomModel.mockImplementation(
       async (_workspaceId, _customModelId, request) => {

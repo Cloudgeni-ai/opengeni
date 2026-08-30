@@ -50,7 +50,9 @@ describe("AI Gateway custom model settings in Chromium", () => {
       ? "/usr/local/bin/chromium"
       : undefined;
     browser = await chromium.launch(executablePath ? { executablePath } : undefined);
-    context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+    });
     page = await context.newPage();
   }, 60_000);
 
@@ -70,7 +72,9 @@ describe("AI Gateway custom model settings in Chromium", () => {
     await slug.fill("anthropic/claude sonnet");
     expect(await add.isDisabled()).toBe(true);
     await page
-      .getByText("Use the exact printable slug with no spaces or |.", { exact: true })
+      .getByText("Use the exact printable slug with no spaces or |.", {
+        exact: true,
+      })
       .waitFor();
 
     await slug.fill("fixture/fail-add");
@@ -86,23 +90,33 @@ describe("AI Gateway custom model settings in Chromium", () => {
     expect(await add.isEnabled()).toBe(true);
     await add.click();
     await page.getByText("xai/grok-4.1-fast", { exact: true }).waitFor();
-    await expectReceipt(page, { action: "create-model", upstreamModelId: "xai/grok-4.1-fast" });
+    await waitForAriaLabelFocus(page, "Vercel AI Gateway model slug");
+    await expectReceipt(page, {
+      action: "create-model",
+      upstreamModelId: "xai/grok-4.1-fast",
+    });
     await page.getByRole("button", { name: "Remove xai/grok-4.1-fast" }).click();
     const removeDialog = page.getByRole("dialog");
     await removeDialog
-      .getByRole("heading", { name: "Remove Gateway model “xai/grok-4.1-fast”?" })
+      .getByRole("heading", {
+        name: "Remove Gateway model “xai/grok-4.1-fast”?",
+      })
       .waitFor();
     await removeDialog
       .getByText(
-        "The model disappears from new selections. Already accepted turns keep their frozen definition so they can finish safely.",
+        "The model disappears from new selections. Already accepted turns and existing sessions can continue with their retained definition.",
         { exact: true },
       )
       .waitFor();
     await removeDialog.getByRole("button", { name: "Remove model", exact: true }).click();
     await page.getByText("xai/grok-4.1-fast", { exact: true }).waitFor({ state: "detached" });
+    await waitForAriaLabelFocus(page, "Remove deepseek/deepseek-v3.2");
 
     await assertAccessibleAndBounded(page);
-    await page.screenshot({ path: `${evidenceDir}desktop-1280x900.png`, fullPage: true });
+    await page.screenshot({
+      path: `${evidenceDir}desktop-1280x900.png`,
+      fullPage: true,
+    });
   }, 60_000);
 
   test("stays readable and bounded at a narrow mobile viewport", async () => {
@@ -120,7 +134,9 @@ describe("AI Gateway custom model settings in Chromium", () => {
       const slug = mobilePage.getByLabel("Vercel AI Gateway model slug");
       const add = mobilePage.getByRole("button", { name: "Add model" });
       const key = mobilePage.getByLabel("Vercel AI Gateway key");
-      const remove = mobilePage.getByRole("button", { name: "Remove deepseek/deepseek-v3.2" });
+      const remove = mobilePage.getByRole("button", {
+        name: "Remove deepseek/deepseek-v3.2",
+      });
       expect(await slug.inputValue()).toBe("");
       expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
       expect((await add.boundingBox())?.width).toBeGreaterThan(100);
@@ -130,7 +146,10 @@ describe("AI Gateway custom model settings in Chromium", () => {
       expect((await remove.boundingBox())?.height).toBeGreaterThanOrEqual(44);
 
       await assertAccessibleAndBounded(mobilePage);
-      await mobilePage.screenshot({ path: `${evidenceDir}narrow-390x844.png`, fullPage: true });
+      await mobilePage.screenshot({
+        path: `${evidenceDir}narrow-390x844.png`,
+        fullPage: true,
+      });
 
       await mobilePage.setViewportSize({ width: 844, height: 390 });
       expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
@@ -147,10 +166,16 @@ describe("AI Gateway custom model settings in Chromium", () => {
       const maximumSlug = "a".repeat(238);
       await slug.fill(maximumSlug);
       await add.click();
-      await expectReceipt(mobilePage, { action: "create-model", upstreamModelId: maximumSlug });
+      await expectReceipt(mobilePage, {
+        action: "create-model",
+        upstreamModelId: maximumSlug,
+      });
       await mobilePage.getByRole("button", { name: `Remove ${maximumSlug}` }).click();
       const expectedTitle = `Remove Gateway model “${maximumSlug}”?`;
-      const dialog = mobilePage.getByRole("dialog", { name: expectedTitle, exact: true });
+      const dialog = mobilePage.getByRole("dialog", {
+        name: expectedTitle,
+        exact: true,
+      });
       await dialog.waitFor();
       await dialog.getByRole("heading", { name: expectedTitle, exact: true }).waitFor();
       await assertDialogBounded(mobilePage, dialog);

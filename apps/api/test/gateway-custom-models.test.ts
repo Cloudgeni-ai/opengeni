@@ -13,6 +13,7 @@ import {
   createConnection,
   createDb,
   createSession,
+  MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS,
   MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS,
   upsertWorkspaceModelPolicy,
   type DbClient,
@@ -154,7 +155,10 @@ async function callMcpTool(
 ): Promise<unknown> {
   const server = buildOpenGeniMcpServer(deps, accessGrant);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const mcpClient = new Client({ name: "gateway-custom-models-test", version: "1" });
+  const mcpClient = new Client({
+    name: "gateway-custom-models-test",
+    version: "1",
+  });
   await server.connect(serverTransport);
   await mcpClient.connect(clientTransport);
   try {
@@ -184,7 +188,10 @@ describe("workspace Gateway custom model API", () => {
       { upstreamModelId: "anthropic/claude-sonnet-4.6", capabilities: {} },
       { upstreamModelId: "anthropic/claude-sonnet-4.6", billing: "credits" },
       { upstreamModelId: "anthropic/claude-sonnet-4.6", credentialSource: {} },
-      { upstreamModelId: "anthropic/claude-sonnet-4.6", apiKey: "must-not-be-accepted" },
+      {
+        upstreamModelId: "anthropic/claude-sonnet-4.6",
+        apiKey: "must-not-be-accepted",
+      },
       { upstreamModelId: "anthropic/claude-sonnet-4.6", enabled: true },
     ]) {
       const invalid = await request("/gateway-custom-models", {
@@ -384,7 +391,11 @@ describe("workspace Gateway custom model API", () => {
         body: JSON.stringify({
           type: "user.message",
           clientEventId: crypto.randomUUID(),
-          payload: { text: "blocked custom model", resources: [], model: productModelId },
+          payload: {
+            text: "blocked custom model",
+            resources: [],
+            model: productModelId,
+          },
         }),
       },
     );
@@ -421,7 +432,10 @@ describe("workspace Gateway custom model API", () => {
     const readOnlyDelete = await request(`/gateway-custom-models/${createdModel.id}`, {
       method: "DELETE",
       permissions: ["workspace:read"],
-      body: { expectedVersion: createdModel.version, operationId: crypto.randomUUID() },
+      body: {
+        expectedVersion: createdModel.version,
+        operationId: crypto.randomUUID(),
+      },
     });
     expect(readOnlyDelete.status).toBe(403);
 
@@ -533,7 +547,10 @@ describe("workspace Gateway custom model API", () => {
     expect(delayedDeleteReplay.status).toBe(204);
     const staleDelete = await request(`/gateway-custom-models/${createdModel.id}`, {
       method: "DELETE",
-      body: { expectedVersion: createdModel.version, operationId: crypto.randomUUID() },
+      body: {
+        expectedVersion: createdModel.version,
+        operationId: crypto.randomUUID(),
+      },
     });
     expect(staleDelete.status).toBe(409);
     expect(await (await request("/gateway-custom-models")).json()).toMatchObject({
@@ -586,6 +603,50 @@ describe("workspace Gateway custom model API", () => {
     );
     expect((await (await request("/gateway-custom-models")).json()).models).toHaveLength(
       MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS,
+    );
+  });
+
+  test("bounds retained custom-model generations", async () => {
+    if (!shared || !grant) return;
+    await shared.admin`
+      delete from workspace_gateway_custom_models
+      where workspace_id = ${grant.workspaceId}::uuid
+    `;
+    await shared.admin`
+      insert into workspace_gateway_custom_models (
+        id,
+        account_id,
+        workspace_id,
+        upstream_model_id,
+        label,
+        create_operation_id,
+        create_request_hash,
+        created_by_subject_id,
+        retired_at
+      )
+      select
+        gen_random_uuid(),
+        ${grant.accountId}::uuid,
+        ${grant.workspaceId}::uuid,
+        'history/provider-model-' || ordinal::text,
+        null,
+        gen_random_uuid(),
+        repeat('0', 64),
+        ${grant.subjectId},
+        clock_timestamp()
+      from generate_series(1, ${MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS}) as ordinal
+    `;
+
+    const overflow = await request("/gateway-custom-models", {
+      method: "POST",
+      body: {
+        operationId: crypto.randomUUID(),
+        upstreamModelId: "history/provider-model-overflow",
+      },
+    });
+    expect(overflow.status).toBe(422);
+    expect(await overflow.text()).toContain(
+      `workspace Gateway custom model history limit reached (${MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS})`,
     );
   });
 });

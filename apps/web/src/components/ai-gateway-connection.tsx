@@ -80,9 +80,10 @@ export function AiGatewayConnectionCardWithClient(
   const removeFocusTargetRef = useRef<HTMLElement | null>(null);
   const restoreModelInputFocusRef = useRef(false);
   const restoreRemovalFocusRef = useRef(false);
-  const pendingModelCreateRef = useRef<{ upstreamModelId: string; operationId: string } | null>(
-    null,
-  );
+  const pendingModelCreateRef = useRef<{
+    upstreamModelId: string;
+    operationId: string;
+  } | null>(null);
   const pendingModelDeleteOperationsRef = useRef(new Map<string, string>());
 
   useEffect(() => {
@@ -307,7 +308,10 @@ export function AiGatewayConnectionCardWithClient(
     const pending = pendingModelCreateRef.current;
     const operationId =
       pending?.upstreamModelId === submittedSlug ? pending.operationId : crypto.randomUUID();
-    pendingModelCreateRef.current = { upstreamModelId: submittedSlug, operationId };
+    pendingModelCreateRef.current = {
+      upstreamModelId: submittedSlug,
+      operationId,
+    };
     customModelsRequestGenerationRef.current += 1;
     restoreModelInputFocusRef.current = true;
     setModelBusy(true);
@@ -400,6 +404,13 @@ export function AiGatewayConnectionCardWithClient(
   // Hide an empty card only when the caller can manage neither the credential
   // nor custom models. Read-only members still see an existing connection or
   // catalog, and either management authority can reach its own controls.
+  if (
+    !props.canManageConnection &&
+    !props.canManageCustomModels &&
+    (!loaded || !customModelsLoaded)
+  ) {
+    return null;
+  }
   if (
     !props.canManageConnection &&
     !props.canManageCustomModels &&
@@ -583,9 +594,11 @@ export function AiGatewayConnectionCardWithClient(
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-mono text-xs text-fg">{model.upstreamModelId}</p>
                       <p className="mt-0.5 text-2xs text-fg-subtle">
-                        {connected
-                          ? "Ready through Your Gateway"
-                          : "Waiting for a Gateway connection"}
+                        {error
+                          ? "Gateway connection status unavailable"
+                          : connected
+                            ? "Ready through Your Gateway"
+                            : "Waiting for a Gateway connection"}
                       </p>
                     </div>
                     {props.canManageCustomModels ? (
@@ -630,13 +643,14 @@ export function AiGatewayConnectionCardWithClient(
           modelPendingRemoval ? (
             <>
               Remove Gateway model “
-              <span className="break-all">{modelPendingRemoval.upstreamModelId}</span>”?
+              <span className="break-all">{modelPendingRemoval.upstreamModelId}</span>
+              ”?
             </>
           ) : (
             "Remove Gateway model?"
           )
         }
-        description="The model disappears from new selections. Already accepted turns keep their frozen definition so they can finish safely."
+        description="The model disappears from new selections. Already accepted turns and existing sessions can continue with their retained definition."
         confirmLabel="Remove model"
         restoreFocusRef={removeFocusTargetRef}
         restoreFocusFallbackRef={modelInputRef}

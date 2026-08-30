@@ -66,7 +66,10 @@ function services(): () => Promise<ActivityServices> {
       bus: new MemoryEventBus(),
       wakeSessionWorkflow: null,
       entitlements: null,
-      observability: { info: mock(() => undefined), warn: mock(() => undefined) } as never,
+      observability: {
+        info: mock(() => undefined),
+        warn: mock(() => undefined),
+      } as never,
     }) as ActivityServices;
 }
 
@@ -195,7 +198,10 @@ describe("automation dispatch activity", () => {
         requestedModelId: "codex/gpt-5.6-sol",
         modelSource: "explicit",
         credentialSource: { kind: "connected_subscription", provider: "codex" },
-        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+        billing: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+        },
       },
     });
   });
@@ -257,10 +263,30 @@ describe("automation dispatch activity", () => {
     });
   });
 
+  test("rethrows transient model-policy failures so Temporal can retry the accepted run", async () => {
+    const settle = mock(async () => undefined);
+    const activity = createAutomationActivities(services(), {
+      claim: async () => run,
+      settle,
+      assertModelPolicy: async () => {
+        throw new Error("temporary database outage");
+      },
+    });
+
+    await expect(activity.dispatchAutomationRun({ accountId, workspaceId, runId })).rejects.toThrow(
+      "temporary database outage",
+    );
+    expect(settle).not.toHaveBeenCalled();
+  });
+
   test("replays a durably failed run without reclaiming it", async () => {
     const settle = mock(async () => undefined);
     const activity = createAutomationActivities(services(), {
-      claim: async () => ({ ...run, status: "failed", errorCode: "dispatch_failed" }),
+      claim: async () => ({
+        ...run,
+        status: "failed",
+        errorCode: "dispatch_failed",
+      }),
       settle,
     });
 

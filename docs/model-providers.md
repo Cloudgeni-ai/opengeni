@@ -141,8 +141,11 @@ window that stops all catalog consumers is the simpler alternative.
 Workspace-admin removal of a custom Vercel AI Gateway slug is a retirement,
 not a hard delete. The slug leaves new model selection immediately, while an
 already accepted turn or an existing-session continuation can still resolve
-its frozen definition. Re-adding the same slug restores the original row and
-definition identity rather than replacing accepted execution truth.
+its retained definition. Re-adding the same slug creates a fresh row identity;
+stale mutations against an older generation cannot affect the replacement.
+Each workspace may keep 100 active slugs and 1,000 retained generations.
+Retirement does not reclaim generation capacity because those rows remain the
+execution authority for accepted turns and existing sessions.
 
 Database mode permits cost-policy entries for product IDs that are not yet in
 the current singleton so operators can stage cost and pricing before adding

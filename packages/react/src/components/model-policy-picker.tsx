@@ -196,6 +196,13 @@ function isCodexModel(model: ClientModel): boolean {
   return model.id.startsWith("codex/") || model.source === "codex";
 }
 
+function billingClassForMissingSelection(modelId: string): PickerBillingClass {
+  if (modelId.startsWith("workspace-gateway/")) return "byok";
+  if (modelId.startsWith("codex/")) return "codex_subscription";
+  if (modelId.startsWith("supergrok/")) return "supergrok_subscription";
+  return "opengeni_credits";
+}
+
 function applyCodexOnly(
   rows: ClientPickerModelRow[],
   codexOnly: boolean,
@@ -228,7 +235,11 @@ function defaultNavState(rows: ClientPickerModelRow[], modelId: string): PickerN
       ? { level: "models", rail: onlyRail, modelId: null }
       : { level: "providers", rail: null, modelId: null };
   }
-  return { level: "thinking", rail: selected.billingClass, modelId: selected.id };
+  return {
+    level: "thinking",
+    rail: selected.billingClass,
+    modelId: selected.id,
+  };
 }
 
 function usePickerNavState(
@@ -353,7 +364,11 @@ export function ModelPolicyPickerMenu(
 
   const effectiveNav =
     nav.level === "providers" && groups.length === 1
-      ? { level: "models" as const, rail: groups[0]!.billingClass, modelId: null }
+      ? {
+          level: "models" as const,
+          rail: groups[0]!.billingClass,
+          modelId: null,
+        }
       : nav;
   const activeGroup =
     effectiveNav.rail === null
@@ -424,7 +439,14 @@ export function ModelPolicyPickerMenu(
               testId={`model-picker-choice-${row.id}`}
               onClick={() => {
                 if (row.selectable) {
-                  go({ level: "thinking", rail: row.billingClass, modelId: row.id }, 1);
+                  go(
+                    {
+                      level: "thinking",
+                      rail: row.billingClass,
+                      modelId: row.id,
+                    },
+                    1,
+                  );
                 }
               }}
             />
@@ -606,10 +628,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           )}
         >
           <BillingClassMark
-            billingClass={
-              selected?.billingClass ??
-              (props.model.startsWith("codex/") ? "codex_subscription" : "opengeni_credits")
-            }
+            billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
             className="text-og-fg"
           />
           <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden">

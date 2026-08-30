@@ -322,7 +322,9 @@ Operator flow: `bun run upsert` after Zod validation. Document it in
 Table: `workspace_gateway_custom_models` with account, workspace, `upstream_model_id` unique,
 optional label, actor, `retired_at`, and timestamps. FORCE RLS. DELETE retires rather than destroys
 the row: new selection excludes it, accepted/existing execution may retain it, and re-adding the
-same slug restores the original row without rewriting definition identity.
+same slug creates a fresh generation so stale mutations cannot affect its successor. The runtime
+bounds each workspace to 100 active slugs and 1,000 retained generations; retirement cannot reclaim
+history while accepted turns or existing sessions may still depend on it.
 
 HTTP: `GET`/`POST`/`DELETE /v1/workspaces/:id/gateway-custom-models`.
 
