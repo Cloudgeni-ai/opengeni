@@ -1,8 +1,4 @@
-import type {
-  ConnectionMetadata,
-  WorkspaceGatewayCustomModel,
-  WorkspaceModelCatalogModel,
-} from "@opengeni/sdk";
+import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ChevronDownIcon, Loader2Icon, PlusIcon, Trash2Icon } from "lucide-react";
@@ -121,56 +117,47 @@ export function AiGatewayConnectionCardWithClient(
     }
   }, [client, props.workspaceId]);
 
-  const refresh = useCallback(async () => {
-    const connectionRequestGeneration = ++connectionRequestGenerationRef.current;
-    const customModelsRequestGeneration = ++customModelsRequestGenerationRef.current;
-    const [connectionResult, modelsResult] = await Promise.allSettled([
-      props.canManageConnection
-        ? client.listConnections(props.workspaceId)
-        : client.getWorkspaceModelCatalog(props.workspaceId),
-      client.listWorkspaceGatewayCustomModels(props.workspaceId),
-    ]);
-    if (!activeRef.current) return;
-    if (connectionRequestGeneration === connectionRequestGenerationRef.current) {
-      if (connectionResult.status === "fulfilled") {
-        if (props.canManageConnection) {
-          setConnections(connectionResult.value as ConnectionMetadata[]);
-        } else {
-          setReadOnlyConnected(
-            (connectionResult.value as { models: WorkspaceModelCatalogModel[] }).models.some(
-              (model) =>
-                model.source === "workspace_gateway" &&
-                model.credentialReadiness.status === "ready",
-            ),
-          );
+  const refreshConnection = useCallback(async (): Promise<ConnectionMetadata[] | null> => {
+    const requestGeneration = ++connectionRequestGenerationRef.current;
+    try {
+      if (props.canManageConnection) {
+        const result = await client.listConnections(props.workspaceId);
+        if (!activeRef.current || requestGeneration !== connectionRequestGenerationRef.current) {
+          return null;
         }
+        setConnections(result);
         setError(null);
-      } else {
-        setConnections([]);
-        setReadOnlyConnected(false);
-        setError(
-          connectionResult.reason instanceof Error
-            ? connectionResult.reason.message
-            : String(connectionResult.reason),
-        );
+        setLoaded(true);
+        return result;
       }
+      const result = await client.getWorkspaceModelCatalog(props.workspaceId);
+      if (!activeRef.current || requestGeneration !== connectionRequestGenerationRef.current) {
+        return null;
+      }
+      setReadOnlyConnected(
+        result.models.some(
+          (model) =>
+            model.source === "workspace_gateway" && model.credentialReadiness.status === "ready",
+        ),
+      );
+      setError(null);
       setLoaded(true);
-    }
-    if (customModelsRequestGeneration === customModelsRequestGenerationRef.current) {
-      if (modelsResult.status === "fulfilled") {
-        setCustomModels(modelsResult.value.models);
-        setCustomModelsError(null);
-      } else {
-        setCustomModels([]);
-        setCustomModelsError(
-          modelsResult.reason instanceof Error
-            ? modelsResult.reason.message
-            : String(modelsResult.reason),
-        );
+      return [];
+    } catch (caught) {
+      if (!activeRef.current || requestGeneration !== connectionRequestGenerationRef.current) {
+        return null;
       }
-      setCustomModelsLoaded(true);
+      if (props.canManageConnection) setConnections([]);
+      setReadOnlyConnected(false);
+      setError(caught instanceof Error ? caught.message : String(caught));
+      setLoaded(true);
+      return null;
     }
   }, [client, props.canManageConnection, props.workspaceId]);
+
+  const refresh = useCallback(async () => {
+    await Promise.all([refreshConnection(), refreshCustomModels()]);
+  }, [refreshConnection, refreshCustomModels]);
 
   useEffect(() => {
     void refresh();
@@ -179,6 +166,9 @@ export function AiGatewayConnectionCardWithClient(
   async function save() {
     const value = apiKey.trim();
     if (!value) return;
+    const gatewayVersionsBefore = new Map(
+      connections.filter(isGatewayConnection).map((candidate) => [candidate.id, candidate.version]),
+    );
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
     try {
@@ -203,7 +193,8 @@ export function AiGatewayConnectionCardWithClient(
             });
       if (!activeRef.current) return;
       connectionRequestGenerationRef.current += 1;
-      setConnections((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
+      setConnections((current) => [saved, ...current.filter((item) => !isGatewayConnection(item))]);
+      setError(null);
       setLoaded(true);
       setApiKey("");
       setOpen(false);
@@ -211,8 +202,23 @@ export function AiGatewayConnectionCardWithClient(
       toast.success("Vercel AI Gateway connected");
     } catch (caught) {
       if (!activeRef.current) return;
-      await refresh();
+      const reconciled = await refreshConnection();
       if (!activeRef.current) return;
+      const committed =
+        reconciled?.some(
+          (candidate) =>
+            isGatewayConnection(candidate) &&
+            candidate.status === "active" &&
+            (!gatewayVersionsBefore.has(candidate.id) ||
+              candidate.version > gatewayVersionsBefore.get(candidate.id)!),
+        ) === true;
+      if (committed) {
+        setApiKey("");
+        setOpen(false);
+        props.onConnectionChange?.();
+        toast.success("Vercel AI Gateway connected");
+        return;
+      }
       toast.error("Couldn't save Vercel AI Gateway key", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
@@ -226,18 +232,42 @@ export function AiGatewayConnectionCardWithClient(
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
     try {
-      const revoked = await client.deleteConnection(props.workspaceId, connection.id);
+      await client.deleteConnection(props.workspaceId, connection.id);
       if (!activeRef.current) return;
-      connectionRequestGenerationRef.current += 1;
-      setConnections((current) => current.map((item) => (item.id === revoked.id ? revoked : item)));
-      setLoaded(true);
+      const reconciled = await refreshConnection();
+      if (!activeRef.current) return;
+      const committed =
+        reconciled !== null &&
+        !reconciled.some(
+          (candidate) => isGatewayConnection(candidate) && candidate.status === "active",
+        );
+      if (!committed) {
+        toast.error("Couldn't confirm Vercel AI Gateway disconnect", {
+          description:
+            reconciled === null
+              ? "Reload the connection state before trying again."
+              : "A newer Vercel AI Gateway connection is still active.",
+        });
+        return;
+      }
       setOpen(false);
       props.onConnectionChange?.();
       toast.success("Vercel AI Gateway disconnected");
     } catch (caught) {
       if (!activeRef.current) return;
-      await refresh();
+      const reconciled = await refreshConnection();
       if (!activeRef.current) return;
+      const committed =
+        reconciled !== null &&
+        !reconciled.some(
+          (candidate) => isGatewayConnection(candidate) && candidate.status === "active",
+        );
+      if (committed) {
+        setOpen(false);
+        props.onConnectionChange?.();
+        toast.success("Vercel AI Gateway disconnected");
+        return;
+      }
       toast.error("Couldn't disconnect Vercel AI Gateway", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
@@ -425,7 +455,7 @@ export function AiGatewayConnectionCardWithClient(
                       }
                     }}
                     disabled={modelBusy}
-                    className="h-9 font-mono md:text-base lg:text-xs"
+                    className="h-9 font-mono md:text-base lg:text-xs pointer-coarse:text-base lg:pointer-coarse:text-base"
                     placeholder="anthropic/claude-sonnet-4.6"
                     aria-label="Vercel AI Gateway model slug"
                     aria-describedby="gateway-model-slug-help"

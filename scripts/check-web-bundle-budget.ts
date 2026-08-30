@@ -370,7 +370,7 @@ const budgets = {
   // initial, per-file, lazy-chunk, and CSS caps remain fixed.
   // The deployment catalog, managed OpenRouter route, workspace Gateway CRUD,
   // shared picker ordering, payment-source copy, and current main measure
-  // 2,272,533 raw / 638,460 gzip bytes across 33 files in the exact Linux/x64
+  // 2,272,681 raw / 638,474 gzip bytes across 33 files in the exact Linux/x64
   // Bun 1.4 production build.
   // Advance the raw policy envelope, gzip to 625 KiB (preserving the established
   // 1.5-KiB platform-skew allowance), and the exact file-count cap. Initial,

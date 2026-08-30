@@ -9614,6 +9614,12 @@ export async function revokeWorkspaceVercelAiGatewayConnections(
         ) {
           return null;
         }
+        // A replay of an already-committed DELETE is idempotent for that exact
+        // connection generation. It must not sweep a newer Gateway connection
+        // that was established after the original response was lost.
+        if (targetRow.status === "revoked") {
+          return mapConnectionMetadata(targetRow);
+        }
         const gatewayRows = await tx
           .select(connectionMetadataColumns)
           .from(schema.connections)

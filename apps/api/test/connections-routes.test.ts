@@ -20,6 +20,7 @@ import {
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
   loadConnectionCredentialForBroker,
+  loadWorkspaceVercelAiGatewayApiKey,
   type DbClient,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -1005,12 +1006,80 @@ describe("connections routes", () => {
     });
     expect(legacyDuplicate.id).not.toBe(firstConnection.connection.id);
 
-    const disconnected = await app().request(
+    const generic = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerDomain: "api.example.com",
+        kind: "api_key",
+        credential: { headers: { authorization: "Bearer generic" } },
+      }),
+    });
+    expect(generic.status).toBe(201);
+    const genericId = ((await generic.json()) as { connection: { id: string } }).connection.id;
+    const convertGeneric = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${genericId}`,
+      {
+        method: "PATCH",
+        headers,
+        body: body("must-not-convert-generic-row"),
+      },
+    );
+    expect(convertGeneric.status).toBe(422);
+
+    const identityChange = await app().request(
       `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({
+          providerDomain: "api.example.com",
+          credential: { apiKey: "must-not-escape-gateway-authority" },
+        }),
+      },
+    );
+    expect(identityChange.status).toBe(422);
+
+    const patched = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({
+          status: "active",
+          credential: { apiKey: "gateway-patch" },
+          metadata: { credentialLabel: "Rotated Vercel AI Gateway" },
+        }),
+      },
+    );
+    expect(patched.status).toBe(200);
+    expect(((await patched.json()) as { connection: { id: string } }).connection.id).toBe(
+      legacyDuplicate.id,
+    );
+    expect(
+      await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
+    ).toBe("gateway-patch");
+    const rowsAfterPatch = (
+      await listConnectionsMetadata(client.db, workspace.workspaceId, null)
+    ).filter(
+      (connection) =>
+        connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
+        connection.kind === "api_key" &&
+        connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+    );
+    expect(rowsAfterPatch.filter((connection) => connection.status === "active")).toHaveLength(1);
+    expect(
+      rowsAfterPatch.find((connection) => connection.id === firstConnection.connection.id)?.status,
+    ).toBe("revoked");
+
+    const disconnected = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${legacyDuplicate.id}`,
       { method: "DELETE", headers },
     );
     expect(disconnected.status).toBe(200);
-    const gatewayRows = (await listConnectionsMetadata(client.db, workspace.workspaceId, null)).filter(
+    const gatewayRows = (
+      await listConnectionsMetadata(client.db, workspace.workspaceId, null)
+    ).filter(
       (connection) =>
         connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
         connection.kind === "api_key" &&
@@ -1020,6 +1089,28 @@ describe("connections routes", () => {
       [firstConnection.connection.id, legacyDuplicate.id].sort(),
     );
     expect(gatewayRows.every((connection) => connection.status === "revoked")).toBe(true);
+
+    const reconnected = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: body("gateway-after-disconnect"),
+    });
+    expect(reconnected.status).toBe(201);
+    const reconnectedId = ((await reconnected.json()) as { connection: { id: string } }).connection
+      .id;
+    expect(reconnectedId).not.toBe(legacyDuplicate.id);
+
+    const replayedDisconnect = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${legacyDuplicate.id}`,
+      { method: "DELETE", headers },
+    );
+    expect(replayedDisconnect.status).toBe(200);
+    expect(
+      await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
+    ).toBe("gateway-after-disconnect");
+    expect(
+      await getConnectionMetadata(client.db, workspace.workspaceId, reconnectedId, "subject-a"),
+    ).toMatchObject({ status: "active" });
   });
 
   test("providerDomain is canonicalized on create and update", async () => {

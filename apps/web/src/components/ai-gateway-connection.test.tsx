@@ -94,8 +94,11 @@ function customModel(upstreamModelId: string): WorkspaceGatewayCustomModel {
   };
 }
 
-function gatewayConnection(status: ConnectionMetadata["status"] = "active"): ConnectionMetadata {
-  return {
+function gatewayConnection(
+  status: ConnectionMetadata["status"] = "active",
+  overrides: Partial<ConnectionMetadata> = {},
+): ConnectionMetadata {
+  const connection: ConnectionMetadata = {
     id: "33333333-3333-4333-8333-333333333333",
     accountId: "11111111-1111-4111-8111-111111111111",
     workspaceId: "workspace-a",
@@ -117,6 +120,11 @@ function gatewayConnection(status: ConnectionMetadata["status"] = "active"): Con
     updatedBySubjectId: "user:fixture-admin",
     createdAt: "2026-08-27T12:00:00.000Z",
     updatedAt: "2026-08-27T12:00:00.000Z",
+  };
+  return {
+    ...connection,
+    ...overrides,
+    metadata: { ...connection.metadata, ...overrides.metadata },
   };
 }
 
@@ -413,7 +421,8 @@ describe("AiGatewayConnectionCard custom models", () => {
       connectionCommitted = true;
       throw new Error("response lost after commit");
     });
-    const { container, root } = await renderCard();
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderCard(true, onConnectionChange);
 
     try {
       const keyInput = container.querySelector<HTMLInputElement>(
@@ -428,7 +437,12 @@ describe("AiGatewayConnectionCard custom models", () => {
       });
       expect(container.textContent).toContain("Connected");
       expect(container.textContent).toContain("Disconnect");
+      expect(keyInput.value).toBe("");
       expect(createConnection).toHaveBeenCalledTimes(1);
+      expect(modelReadCount).toBe(1);
+      expect(onConnectionChange).toHaveBeenCalledTimes(1);
+      expect(toastSuccess).toHaveBeenCalledWith("Vercel AI Gateway connected");
+      expect(toastError).not.toHaveBeenCalled();
 
       await act(async () => {
         resolveInitialModels?.({ models: [] });
@@ -436,6 +450,167 @@ describe("AiGatewayConnectionCard custom models", () => {
       });
       expect(container.textContent).toContain("Connected");
       expect(createConnection).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("reconciles an outcome-unknown key replacement from a newer connection version", async () => {
+    let connectionVersion = 1;
+    listConnections.mockImplementation(async () => [
+      gatewayConnection("active", { version: connectionVersion }),
+    ]);
+    updateConnection.mockImplementation(async () => {
+      connectionVersion = 2;
+      throw new Error("response lost after replacement commit");
+    });
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderCard(true, onConnectionChange);
+
+    try {
+      const keyInput = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway key"]',
+      )!;
+      await setInputValue(keyInput, "replacement-key");
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Replace"))
+          ?.click();
+        await flush();
+      });
+
+      expect(container.textContent).toContain("Connected");
+      expect(keyInput.value).toBe("");
+      expect(updateConnection).toHaveBeenCalledTimes(1);
+      expect(onConnectionChange).toHaveBeenCalledTimes(1);
+      expect(toastSuccess).toHaveBeenCalledWith("Vercel AI Gateway connected");
+      expect(toastError).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("removes every local active Gateway duplicate after a successful disconnect", async () => {
+    const selected = gatewayConnection("active");
+    const duplicate = gatewayConnection("active", {
+      id: "44444444-4444-4444-8444-444444444444",
+      version: 3,
+    });
+    let disconnected = false;
+    listConnections.mockImplementation(async () =>
+      disconnected
+        ? [
+            gatewayConnection("revoked", { id: selected.id, version: 2 }),
+            gatewayConnection("revoked", { id: duplicate.id, version: 4 }),
+          ]
+        : [selected, duplicate],
+    );
+    deleteConnection.mockImplementation(async () => {
+      disconnected = true;
+      return gatewayConnection("revoked", { id: selected.id, version: 2 });
+    });
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderCard(true, onConnectionChange);
+
+    try {
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Disconnect"))
+          ?.click();
+        await flush();
+      });
+
+      expect(deleteConnection).toHaveBeenCalledWith("workspace-a", selected.id);
+      expect(container.textContent).toContain("Off");
+      expect(container.textContent).not.toContain("Disconnect");
+      expect(onConnectionChange).toHaveBeenCalledTimes(1);
+      expect(toastSuccess).toHaveBeenCalledWith("Vercel AI Gateway disconnected");
+      expect(toastError).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps a newer Gateway generation connected after replaying an older disconnect", async () => {
+    const selected = gatewayConnection("active");
+    const replacement = gatewayConnection("active", {
+      id: "44444444-4444-4444-8444-444444444444",
+      version: 1,
+    });
+    let deleteReturned = false;
+    listConnections.mockImplementation(async () =>
+      deleteReturned
+        ? [gatewayConnection("revoked", { id: selected.id, version: 2 }), replacement]
+        : [selected],
+    );
+    deleteConnection.mockImplementation(async () => {
+      deleteReturned = true;
+      return gatewayConnection("revoked", { id: selected.id, version: 2 });
+    });
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderCard(true, onConnectionChange);
+
+    try {
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Disconnect"))
+          ?.click();
+        await flush();
+      });
+
+      expect(container.textContent).toContain("Connected");
+      expect(container.textContent).toContain("Disconnect");
+      expect(onConnectionChange).not.toHaveBeenCalled();
+      expect(toastSuccess).not.toHaveBeenCalled();
+      expect(toastError).toHaveBeenCalledWith(
+        "Couldn't confirm Vercel AI Gateway disconnect",
+        expect.any(Object),
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("reconciles an outcome-unknown disconnect when no active Gateway row remains", async () => {
+    const selected = gatewayConnection("active");
+    const duplicate = gatewayConnection("active", {
+      id: "44444444-4444-4444-8444-444444444444",
+      version: 3,
+    });
+    let disconnected = false;
+    listConnections.mockImplementation(async () =>
+      disconnected
+        ? [
+            gatewayConnection("revoked", { id: selected.id, version: 2 }),
+            gatewayConnection("revoked", { id: duplicate.id, version: 4 }),
+          ]
+        : [selected, duplicate],
+    );
+    deleteConnection.mockImplementation(async () => {
+      disconnected = true;
+      throw new Error("response lost after disconnect commit");
+    });
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderCard(true, onConnectionChange);
+
+    try {
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Disconnect"))
+          ?.click();
+        await flush();
+      });
+
+      expect(container.textContent).toContain("Off");
+      expect(container.textContent).not.toContain("Disconnect");
+      expect(deleteConnection).toHaveBeenCalledTimes(1);
+      expect(onConnectionChange).toHaveBeenCalledTimes(1);
+      expect(toastSuccess).toHaveBeenCalledWith("Vercel AI Gateway disconnected");
+      expect(toastError).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();

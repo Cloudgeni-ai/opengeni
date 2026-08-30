@@ -816,6 +816,23 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         payload.providerDomain ?? existing.providerDomain,
       );
       const kind = payload.kind ?? existing.kind;
+      const subjectId =
+        payload.subjectId === undefined
+          ? existing.subjectId
+          : writableSubjectId(payload.subjectId, grant.subjectId);
+      if (
+        !isWorkspaceVercelAiGatewayConnection(existing) &&
+        isWorkspaceVercelAiGatewayConnection({
+          subjectId,
+          providerDomain,
+          kind,
+          metadata: payload.metadata ?? existing.metadata,
+        })
+      ) {
+        throw new HTTPException(422, {
+          message: "use the Vercel AI Gateway connect flow to create this connection",
+        });
+      }
       assertNotDirectPersonalSlackOAuth(providerDomain, kind);
       assertNotDirectGoogleDriveOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
       assertNotDirectAtlassianOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
@@ -840,6 +857,54 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "reactivating a connection requires a new credential",
         });
       }
+    }
+    if (existing && isWorkspaceVercelAiGatewayConnection(existing)) {
+      const providerDomain = canonicalProviderDomain(
+        payload.providerDomain ?? existing.providerDomain,
+      );
+      const subjectId =
+        payload.subjectId === undefined
+          ? existing.subjectId
+          : writableSubjectId(payload.subjectId, grant.subjectId);
+      const kind = payload.kind ?? existing.kind;
+      if (
+        subjectId !== null ||
+        providerDomain !== VERCEL_AI_GATEWAY_CONNECTION_DOMAIN ||
+        kind !== "api_key" ||
+        (payload.metadata?.credentialRole !== undefined &&
+          payload.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE)
+      ) {
+        throw new HTTPException(422, {
+          message: "Vercel AI Gateway connection identity cannot be changed",
+        });
+      }
+      if (payload.credential === undefined) {
+        throw new HTTPException(400, {
+          message: "updating a Vercel AI Gateway connection requires a new credential",
+        });
+      }
+      const key = requireEnvironmentEncryption(settings);
+      const connection = await upsertWorkspaceVercelAiGatewayConnection(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        credentialEncrypted: encryptCredentialBundle(key, payload.credential),
+        grantedScopes: payload.grantedScopes ?? existing.grantedScopes,
+        expiresAt:
+          payload.expiresAt !== undefined
+            ? payload.expiresAt
+              ? new Date(payload.expiresAt)
+              : null
+            : existing.expiresAt
+              ? new Date(existing.expiresAt)
+              : null,
+        metadata: {
+          ...existing.metadata,
+          ...(payload.metadata ?? {}),
+          credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+        },
+        updatedBySubjectId: grant.subjectId,
+      });
+      return c.json(ConnectionResponse.parse({ connection }));
     }
     const key = payload.credential === undefined ? null : requireEnvironmentEncryption(settings);
     const subjectId =
@@ -981,13 +1046,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                   expectedVersion: existing.version,
                   updatedBySubjectId: grant.subjectId,
                 })
-            : await revokeConnection(
-                db,
-                workspaceId,
-                connectionId,
-                grant.subjectId,
-                existing.version,
-              );
+              : await revokeConnection(
+                  db,
+                  workspaceId,
+                  connectionId,
+                  grant.subjectId,
+                  existing.version,
+                );
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during disconnect; try again" });
     }

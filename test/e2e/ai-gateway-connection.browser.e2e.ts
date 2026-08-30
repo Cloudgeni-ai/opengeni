@@ -135,6 +135,10 @@ describe("AI Gateway custom model settings in Chromium", () => {
       expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
       await assertAccessibleAndBounded(mobilePage);
 
+      await mobilePage.setViewportSize({ width: 1024, height: 768 });
+      expect(await slug.evaluate((input) => getComputedStyle(input).fontSize)).toBe("16px");
+      await assertAccessibleAndBounded(mobilePage);
+
       await mobilePage.setViewportSize({ width: 390, height: 844 });
       const maximumSlug = "a".repeat(238);
       await slug.fill(maximumSlug);

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
+  applyProductOverlay,
   contractForProfile,
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
@@ -1112,6 +1113,15 @@ describe("deployment contract", () => {
     ] as const) {
       expect(() => contractForProfile(profile, "managed-saas-production")).toThrow(
         "managed-saas-production is supported only for azure-managed, aws-managed, and gcp-managed profiles",
+      );
+    }
+  });
+
+  test("does not relabel or reapply an already-derived managed SaaS contract", () => {
+    const production = contractForProfile("azure-managed", "managed-saas-production");
+    for (const overlay of ["none", "managed-saas-staging", "managed-saas-production"] as const) {
+      expect(() => applyProductOverlay(production, overlay)).toThrow(
+        `cannot apply product overlay ${overlay} to a contract already derived with managed-saas-production`,
       );
     }
   });

@@ -581,13 +581,18 @@ export function applyProductOverlay(
   overlay: ProductOverlayId,
   env: Record<string, string | undefined> = process.env,
 ): DeploymentContract {
+  if (contract.productOverlay !== "none") {
+    throw new Error(
+      `cannot apply product overlay ${overlay} to a contract already derived with ${contract.productOverlay}`,
+    );
+  }
   if (overlay === "managed-saas-production" && !supportsManagedSaasProduction(contract.profile)) {
     throw new Error(
       "managed-saas-production is supported only for azure-managed, aws-managed, and gcp-managed profiles",
     );
   }
   if (overlay === "none") {
-    return parseDeploymentContract({ ...contract, productOverlay: "none" });
+    return parseDeploymentContract(contract);
   }
   const publicBaseUrl =
     overlay === "managed-saas-staging"
