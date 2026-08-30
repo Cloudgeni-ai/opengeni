@@ -38,6 +38,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -113,7 +114,6 @@ import {
   updateLocalSessionDeliveryAttention,
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
-  restoreUnreadSessionAttentionProjection,
   shouldAcknowledgeActiveSession,
   shouldProjectActiveSessionRead,
 } from "@/lib/session-attention";
@@ -206,7 +206,6 @@ export function SessionRoute({
     loadNewer,
     loadingOldest,
     loadOldest,
-    loadingLatest,
     lastSequence: renderedThroughSequence,
     jumpToLatest,
     error: streamError,
@@ -333,7 +332,6 @@ export function SessionRoute({
   } = context;
   const acknowledgedProjectionRef = useRef<string | null>(null);
   const confirmedProjectionRef = useRef<string | null>(null);
-  const failedProjectionRef = useRef<string | null>(null);
   const retriedProjectionRef = useRef<string | null>(null);
   const [foreground, setForeground] = useState(() => ({
     documentVisible: document.visibilityState === "visible",
@@ -424,11 +422,10 @@ export function SessionRoute({
         : null,
     [readThroughSequence, session],
   );
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!session || !activeReadProjectionKey) return;
     if (
       confirmedProjectionRef.current === activeReadProjectionKey ||
-      failedProjectionRef.current === activeReadProjectionKey ||
       !shouldProjectActiveSessionRead({
         activeSessionId: sessionId,
         workspaceId,
@@ -447,15 +444,6 @@ export function SessionRoute({
       lastSequence: readThroughSequence,
     };
     projectSessionAttention(optimisticProjection);
-    return () => {
-      if (
-        confirmedProjectionRef.current === activeReadProjectionKey ||
-        failedProjectionRef.current === activeReadProjectionKey
-      ) {
-        return;
-      }
-      projectSessionAttention({ ...optimisticProjection, unread: true });
-    };
   }, [
     activeReadProjectionKey,
     foreground,
@@ -468,8 +456,6 @@ export function SessionRoute({
   ]);
   useEffect(() => {
     const projectionKey = activeReadProjectionKey;
-    const liveTipLoaded =
-      !initialLoading && !hasNewer && !loadingNewer && !loadingOldest && !loadingLatest;
     if (
       !session ||
       !projectionKey ||
@@ -478,67 +464,53 @@ export function SessionRoute({
         activeSessionId: sessionId,
         workspaceId,
         session: routeUnreadProjection,
-        liveTipLoaded,
         ...foreground,
       })
     ) {
       return;
     }
-    const targetSession = session;
     let active = true;
-    const timer = window.setTimeout(() => {
-      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
-      const acceptedTransition = captureWorkspaceInvocation(workspaceId);
-      if (!acceptedTransition) {
-        failedProjectionRef.current = projectionKey;
-        projectSessionAttention(
-          restoreUnreadSessionAttentionProjection(targetSession, readThroughSequence),
-        );
-        return;
-      }
-      acknowledgedProjectionRef.current = projectionKey;
-      void client
-        .updateSessionAttention(workspaceId, targetSession.id, {
-          unread: false,
-          acknowledgedThroughSequence: readThroughSequence,
-        })
-        .then((updated) => {
-          if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
-          confirmedProjectionRef.current = projectionKey;
-          if (failedProjectionRef.current === projectionKey) {
-            failedProjectionRef.current = null;
-          }
-          // The rail owns separately polled page objects. Keep this exact
-          // frontier result there so a stale list poll cannot resurrect or
-          // prematurely clear the unread dot.
-          projectSessionAttention(updated);
-        })
-        .catch(() => {
-          // Retry one transient failure for this exact frontier. Keeping the
-          // receipt after the second failure prevents a permanent 4xx/5xx from
-          // becoming an unbounded request and log loop.
-          if (
-            active &&
-            ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
-            acknowledgedProjectionRef.current === projectionKey &&
-            retriedProjectionRef.current !== projectionKey
-          ) {
-            retriedProjectionRef.current = projectionKey;
-            acknowledgedProjectionRef.current = null;
-            setAttentionRetryRevision((revision) => revision + 1);
-            return;
-          }
-          if (active && ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
-            failedProjectionRef.current = projectionKey;
-            projectSessionAttention(
-              restoreUnreadSessionAttentionProjection(targetSession, readThroughSequence),
-            );
-          }
-        });
-    }, 750);
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    acknowledgedProjectionRef.current = projectionKey;
+    void client
+      .updateSessionAttention(workspaceId, session.id, {
+        unread: false,
+        acknowledgedThroughSequence: readThroughSequence,
+      })
+      .then((updated) => {
+        if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+        confirmedProjectionRef.current = projectionKey;
+        // The rail owns separately polled page objects. Keep this exact
+        // frontier result there so a stale list poll cannot resurrect or
+        // prematurely clear the unread dot.
+        projectSessionAttention(updated);
+      })
+      .catch(() => {
+        // Retry one transient failure for this exact frontier. Keeping the
+        // receipt after the second failure prevents a permanent 4xx/5xx from
+        // becoming an unbounded request and log loop.
+        if (
+          active &&
+          ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
+          acknowledgedProjectionRef.current === projectionKey &&
+          retriedProjectionRef.current !== projectionKey
+        ) {
+          retriedProjectionRef.current = projectionKey;
+          acknowledgedProjectionRef.current = null;
+          setAttentionRetryRevision((revision) => revision + 1);
+          return;
+        }
+        // A transient failure must never resurrect a dot the user already
+        // cleared. Release the attempt receipt so a later focus/navigation
+        // can retry this exact frontier; a reload still reads durable truth
+        // if both attempts failed.
+        if (acknowledgedProjectionRef.current === projectionKey) {
+          acknowledgedProjectionRef.current = null;
+        }
+      });
     return () => {
       active = false;
-      window.clearTimeout(timer);
     };
   }, [
     attentionRetryRevision,
@@ -546,11 +518,6 @@ export function SessionRoute({
     captureWorkspaceInvocation,
     client,
     foreground,
-    hasNewer,
-    initialLoading,
-    loadingLatest,
-    loadingNewer,
-    loadingOldest,
     ownsWorkspaceInvocation,
     projectSessionAttention,
     readThroughSequence,

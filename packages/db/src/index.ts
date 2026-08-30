@@ -30081,6 +30081,7 @@ type SessionTreeStatsRow = {
   attentionDescendants: number | string;
   pausedDescendants: number | string;
   failedDescendants: number | string;
+  unreadFailedDescendants: number | string;
   unreadDescendants: number | string;
   activelyWorkingDescendants: number | string;
   attentionSince: Date | string | null;
@@ -30100,6 +30101,7 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   attentionDescendants: 0,
   pausedDescendants: 0,
   failedDescendants: 0,
+  unreadFailedDescendants: 0,
   unreadDescendants: 0,
   activelyWorkingDescendants: 0,
   attentionSince: null,
@@ -30215,6 +30217,7 @@ export async function sessionTreeStatsForSessions(
         stats."attentionDescendants",
         stats."pausedDescendants",
         stats."failedDescendants",
+        stats."unreadFailedDescendants",
         stats."unreadDescendants",
         stats."activelyWorkingDescendants",
         stats."attentionSince",
@@ -30347,6 +30350,19 @@ export async function sessionTreeStatsForSessions(
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
               and depth > 0
+              and status = 'failed'
+              and ${subjectId ?? null}::text is not null
+              and last_sequence > coalesce((
+                select personal.acknowledged_sequence
+                from ${schema.sessionPins} personal
+                where personal.workspace_id = ${workspaceId}
+                  and personal.subject_id = ${subjectId ?? null}
+                  and personal.session_id = numbered.id
+              ), 0)
+          )::int as "unreadFailedDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0
               and ${subjectId ?? null}::text is not null
               and last_sequence > coalesce((
                 select personal.acknowledged_sequence
@@ -30423,6 +30439,7 @@ export async function sessionTreeStatsForSessions(
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
         failedDescendants: Number(row.failedDescendants),
+        unreadFailedDescendants: Number(row.unreadFailedDescendants),
         unreadDescendants: Number(row.unreadDescendants),
         activelyWorkingDescendants: Number(row.activelyWorkingDescendants),
         attentionSince: row.attentionSince ? new Date(row.attentionSince).toISOString() : null,

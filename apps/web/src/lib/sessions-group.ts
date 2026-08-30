@@ -219,7 +219,10 @@ function ownRailStatusCounts(
     attention: session.status === "requires_action" ? 1 : 0,
     attentionSince:
       session.status === "requires_action" ? (session.requiresActionSince ?? null) : null,
-    failed: session.status === "failed" ? 1 : 0,
+    // Failed is a review signal in the rail, not a permanent copy of the
+    // lifecycle badge. Opening the session (or a parent agent consuming its
+    // result) acknowledges the failure together with the unread frontier.
+    failed: session.status === "failed" && session.unread ? 1 : 0,
     active:
       session.backgroundCommandActivity ||
       (hasActiveEffectiveControl(session) &&
@@ -255,7 +258,7 @@ function railStatusCounts(
     counts.total += stats.totalDescendants;
     counts.attention += stats.attentionDescendants;
     counts.attentionSince = earliestIso(counts.attentionSince, stats.attentionSince);
-    counts.failed += stats.failedDescendants;
+    counts.failed += stats.unreadFailedDescendants ?? stats.failedDescendants;
     counts.active += stats.runningDescendants + stats.queuedDescendants;
     counts.unread += stats.unreadDescendants ?? 0;
     counts.activeWork += stats.activelyWorkingDescendants ?? 0;
@@ -759,10 +762,23 @@ type RemovedCounts = {
   attention: number;
   paused: number;
   failed: number;
+  unreadFailed: number;
+  unread: number;
+  activeWork: number;
 };
 
 function emptyRemovedCounts(): RemovedCounts {
-  return { total: 0, running: 0, queued: 0, attention: 0, paused: 0, failed: 0 };
+  return {
+    total: 0,
+    running: 0,
+    queued: 0,
+    attention: 0,
+    paused: 0,
+    failed: 0,
+    unreadFailed: 0,
+    unread: 0,
+    activeWork: 0,
+  };
 }
 
 function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
@@ -772,6 +788,9 @@ function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
   target.attention += source.attention;
   target.paused += source.paused;
   target.failed += source.failed;
+  target.unreadFailed += source.unreadFailed;
+  target.unread += source.unread;
+  target.activeWork += source.activeWork;
 }
 
 function subtreeCounts(node: SessionTreeNode): RemovedCounts {
@@ -784,6 +803,9 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     attention: status === "requires_action" ? 1 : 0,
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
+    unreadFailed: status === "failed" && node.session.unread ? 1 : 0,
+    unread: node.session.unread ? 1 : 0,
+    activeWork: node.session.activelyWorking ? 1 : 0,
   };
   const stats = node.session.treeStats;
   if (stats) {
@@ -793,6 +815,9 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     counts.attention += stats.attentionDescendants;
     counts.paused += stats.pausedDescendants;
     counts.failed += stats.failedDescendants;
+    counts.unreadFailed += stats.unreadFailedDescendants ?? stats.failedDescendants;
+    counts.unread += stats.unreadDescendants ?? 0;
+    counts.activeWork += stats.activelyWorkingDescendants ?? 0;
   } else {
     for (const child of node.children) addRemovedCounts(counts, subtreeCounts(child));
   }
@@ -829,6 +854,25 @@ function prunePinnedSubtreesWithCounts(
           attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
           pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
           failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
+          ...(stats.unreadFailedDescendants !== undefined
+            ? {
+                unreadFailedDescendants: Math.max(
+                  0,
+                  stats.unreadFailedDescendants - removed.unreadFailed,
+                ),
+              }
+            : {}),
+          ...(stats.unreadDescendants !== undefined
+            ? { unreadDescendants: Math.max(0, stats.unreadDescendants - removed.unread) }
+            : {}),
+          ...(stats.activelyWorkingDescendants !== undefined
+            ? {
+                activelyWorkingDescendants: Math.max(
+                  0,
+                  stats.activelyWorkingDescendants - removed.activeWork,
+                ),
+              }
+            : {}),
           // The pruned subtree may have held the oldest waiter; keep the server
           // timestamp only while some counted attention descendant remains.
           ...(stats.attentionSince !== undefined

@@ -233,6 +233,22 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // only be caused by the event appended below, not by a second initial
       // render of the same chat.
       await page.waitForTimeout(1_500);
+      await page.evaluate((sessionId) => {
+        const observedWindow = window as Window & { __activeSessionUnreadFlash?: boolean };
+        observedWindow.__activeSessionUnreadFlash = false;
+        const row = document.querySelector(`a[data-session-row="${sessionId}"]`);
+        if (!row) throw new Error("active session row is missing");
+        const observeLabel = () => {
+          if (row.getAttribute("aria-label")?.includes("unread")) {
+            observedWindow.__activeSessionUnreadFlash = true;
+          }
+        };
+        observeLabel();
+        new MutationObserver(observeLabel).observe(row, {
+          attributes: true,
+          attributeFilter: ["aria-label"],
+        });
+      }, target.id);
 
       const laterAcknowledgement = page.waitForResponse(
         (response) =>
@@ -272,8 +288,76 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .locator(`a[data-session-row="${target.id}"]`)
         .waitFor({ state: "visible", timeout: 10_000 });
       expect(await targetRow.getAttribute("aria-label")).not.toContain("unread");
+      expect(
+        await page.evaluate(
+          () =>
+            (window as Window & { __activeSessionUnreadFlash?: boolean })
+              .__activeSessionUnreadFlash,
+        ),
+      ).toBe(false);
     } finally {
       releaseFirstAcknowledgement();
+      await context.close();
+    }
+  }, 60_000);
+
+  test("keeps a rapidly viewed chat read after switching to another chat", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const first = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Rapid read first chat",
+      );
+      const second = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Rapid read second chat",
+      );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      await page.locator(`a[data-session-row="${first.id}"]`).waitFor();
+      await page.locator(`a[data-session-row="${second.id}"]`).waitFor();
+
+      // Exercise the real rail links inside the old 750 ms acknowledgement
+      // window. Merely visiting the first chat must commit its read receipt;
+      // changing routes cannot cancel or roll back that receipt.
+      await page.evaluate(
+        ({ firstId, secondId }) => {
+          document.querySelector<HTMLElement>(`a[data-session-row="${firstId}"]`)?.click();
+          window.setTimeout(() => {
+            document.querySelector<HTMLElement>(`a[data-session-row="${secondId}"]`)?.click();
+          }, 50);
+        },
+        { firstId: first.id, secondId: second.id },
+      );
+      await page.waitForURL(`**/sessions/${second.id}`);
+      await page.waitForResponse(
+        (response) =>
+          response.ok() &&
+          response.request().method() === "PUT" &&
+          new URL(response.url()).pathname ===
+            `/v1/workspaces/${workspaceId}/sessions/${second.id}/attention`,
+        { timeout: 10_000 },
+      );
+
+      await page.reload();
+      const firstRow = page.locator(`a[data-session-row="${first.id}"]`);
+      await firstRow.waitFor();
+      const pageAfterSwitch = await listPageFromBrowser(page, apiBaseUrl, workspaceId, {
+        limit: 50,
+      });
+      expect(pageAfterSwitch.sessions.find((session) => session.id === first.id)?.unread).toBe(
+        false,
+      );
+    } finally {
       await context.close();
     }
   }, 60_000);

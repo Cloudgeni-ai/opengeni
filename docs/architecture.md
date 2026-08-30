@@ -109,7 +109,8 @@ sequence authority. Semantic writers retain the session row because state and
 event truth commit together. Accepted raw exact-attempt batches hold only the
 session identity with `FOR KEY SHARE`, serialize on the compact cursor, retain
 the exact turn/attempt fence, and do not update the wide session row. Public
-`lastSequence`, unread, child acknowledgment, and tree projections read the
+`lastSequence`, unread, child acknowledgment, and viewer-specific tree
+attention projections (including unacknowledged failed descendants) read the
 cursor; `sessions.last_sequence` remains only a semantic/legacy compatibility
 projection. Legacy SQL writers are rebased at the database boundary, and late
 raw events roll back and retry through the semantic gate before becoming
