@@ -1824,6 +1824,11 @@ all image builds, and generates Helm values from the supplied digests. A source
 tag, a rebuild from the same commit, or a newly resolved digest is not staging
 evidence and must not be substituted for this promotion receipt.
 
+This promotion path is supported only by the `azure-managed`, `aws-managed`,
+and `gcp-managed` profiles, whose plans own and can verify the destination
+registry. The production overlay rejects existing-services and local profiles
+instead of emitting a plan that cannot prove or inject the accepted digests.
+
 ### Deployment database model catalog cutover
 
 The default source remains the reviewed code/env catalog. Database mode is an

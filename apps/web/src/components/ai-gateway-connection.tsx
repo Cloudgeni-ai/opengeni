@@ -179,6 +179,7 @@ export function AiGatewayConnectionCardWithClient(
   async function save() {
     const value = apiKey.trim();
     if (!value) return;
+    connectionRequestGenerationRef.current += 1;
     setBusy(true);
     try {
       const metadata = {
@@ -210,6 +211,8 @@ export function AiGatewayConnectionCardWithClient(
       toast.success("Vercel AI Gateway connected");
     } catch (caught) {
       if (!activeRef.current) return;
+      await refresh();
+      if (!activeRef.current) return;
       toast.error("Couldn't save Vercel AI Gateway key", {
         description: caught instanceof Error ? caught.message : String(caught),
       });
@@ -220,6 +223,7 @@ export function AiGatewayConnectionCardWithClient(
 
   async function disconnect() {
     if (!connection) return;
+    connectionRequestGenerationRef.current += 1;
     setBusy(true);
     try {
       const revoked = await client.deleteConnection(props.workspaceId, connection.id);
@@ -231,6 +235,8 @@ export function AiGatewayConnectionCardWithClient(
       props.onConnectionChange?.();
       toast.success("Vercel AI Gateway disconnected");
     } catch (caught) {
+      if (!activeRef.current) return;
+      await refresh();
       if (!activeRef.current) return;
       toast.error("Couldn't disconnect Vercel AI Gateway", {
         description: caught instanceof Error ? caught.message : String(caught),
@@ -419,7 +425,7 @@ export function AiGatewayConnectionCardWithClient(
                       }
                     }}
                     disabled={modelBusy}
-                    className="h-9 font-mono text-base sm:text-xs pointer-coarse:text-base"
+                    className="h-9 font-mono md:text-base lg:text-xs"
                     placeholder="anthropic/claude-sonnet-4.6"
                     aria-label="Vercel AI Gateway model slug"
                     aria-describedby="gateway-model-slug-help"

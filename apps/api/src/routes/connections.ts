@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import {
+  VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+  VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+} from "@opengeni/config";
+import {
   ATLASSIAN_PROVIDER_DOMAIN,
   AtlassianConnectionMetadata,
   AtlassianDisconnectRequest,
@@ -69,11 +73,13 @@ import {
   persistSlackBotInstallationWithSuccessAudit,
   recordSlackBotInstallCallbackFailure,
   revokeConnection,
+  revokeWorkspaceVercelAiGatewayConnections,
   revokeConnectionWithSlackBotSuccessAudit,
   SlackBotLifecycleSuccessAuditError,
   SlackInstallationBindingConflictError,
   updateConnection,
   updateSlackBotDocumentDestination,
+  upsertWorkspaceVercelAiGatewayConnection,
   type SlackBotInstallCallbackFailureReason,
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
@@ -193,18 +199,34 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertNotDirectGoogleDriveOAuth(providerDomain, payload.kind, payload.metadata);
     assertNotDirectAtlassianOAuth(providerDomain, payload.kind, payload.metadata);
     assertNotDirectPersonalGitHubOAuth(providerDomain, payload.kind, payload.metadata);
-    const connection = await createConnection(db, {
-      accountId: grant.accountId,
-      workspaceId,
+    const credentialEncrypted = encryptCredentialBundle(key, payload.credential);
+    const connection = isWorkspaceVercelAiGatewayConnection({
       subjectId,
       providerDomain,
       kind: payload.kind,
-      credentialEncrypted: encryptCredentialBundle(key, payload.credential),
-      grantedScopes: payload.grantedScopes,
-      expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
       metadata: payload.metadata,
-      createdBySubjectId: grant.subjectId,
-    });
+    })
+      ? await upsertWorkspaceVercelAiGatewayConnection(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          credentialEncrypted,
+          grantedScopes: payload.grantedScopes,
+          expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
+          metadata: payload.metadata,
+          updatedBySubjectId: grant.subjectId,
+        })
+      : await createConnection(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId,
+          providerDomain,
+          kind: payload.kind,
+          credentialEncrypted,
+          grantedScopes: payload.grantedScopes,
+          expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
+          metadata: payload.metadata,
+          createdBySubjectId: grant.subjectId,
+        });
     return c.json(ConnectionResponse.parse({ connection }), 201);
   });
 
@@ -879,6 +901,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       existing.providerDomain === ATLASSIAN_PROVIDER_DOMAIN &&
       existing.kind === "oauth2" &&
       AtlassianConnectionMetadata.safeParse(existing.metadata).success;
+    const isVercelAiGateway = isWorkspaceVercelAiGatewayConnection(existing);
     const disconnectPayload = await c.req.json().catch(() => null);
     const googleDriveDisconnect = isGoogleDrive
       ? GoogleDriveDisconnectRequest.safeParse(disconnectPayload)
@@ -909,7 +932,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           "invalid personal GitHub disconnect request",
       });
     }
-    if (existing.status === "revoked" && !isGoogleDrive && !isAtlassian && !isPersonalGitHub) {
+    if (
+      existing.status === "revoked" &&
+      !isGoogleDrive &&
+      !isAtlassian &&
+      !isPersonalGitHub &&
+      !isVercelAiGateway
+    ) {
       return c.json(ConnectionResponse.parse({ connection: existing }));
     }
     const connection = isGoogleDrive
@@ -944,6 +973,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
                 slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
               })
+            : isVercelAiGateway
+              ? await revokeWorkspaceVercelAiGatewayConnections(db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  connectionId,
+                  expectedVersion: existing.version,
+                  updatedBySubjectId: grant.subjectId,
+                })
             : await revokeConnection(
                 db,
                 workspaceId,
@@ -1365,6 +1402,20 @@ function assertNotReservedPersonalGitHubMetadata(
       message: "personal GitHub metadata is reserved for the dedicated OAuth connection flow",
     });
   }
+}
+
+function isWorkspaceVercelAiGatewayConnection(input: {
+  subjectId?: string | null;
+  providerDomain: string;
+  kind: string;
+  metadata?: Record<string, unknown>;
+}): boolean {
+  return (
+    input.subjectId == null &&
+    input.providerDomain.toLowerCase() === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
+    input.kind === "api_key" &&
+    input.metadata?.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE
+  );
 }
 
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {

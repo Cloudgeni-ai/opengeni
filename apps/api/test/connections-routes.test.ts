@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import type { Settings } from "@opengeni/config";
+import {
+  VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+  VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  type Settings,
+} from "@opengeni/config";
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -932,6 +936,90 @@ describe("connections routes", () => {
     expect(((await revoked.json()) as { connection: { status: string } }).connection.status).toBe(
       "revoked",
     );
+  });
+
+  test("Gateway creates converge and disconnect revokes every legacy active duplicate", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const body = (apiKey: string) =>
+      JSON.stringify({
+        providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+        kind: "api_key",
+        credential: { apiKey },
+        grantedScopes: [],
+        metadata: {
+          credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+          credentialLabel: "Vercel AI Gateway",
+        },
+      });
+
+    const first = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: body("gateway-first"),
+    });
+    expect(first.status).toBe(201);
+    const firstConnection = (await first.json()) as { connection: { id: string } };
+
+    const retried = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: body("gateway-retry"),
+    });
+    expect(retried.status).toBe(201);
+    const retriedConnection = (await retried.json()) as { connection: { id: string } };
+    expect(retriedConnection.connection.id).toBe(firstConnection.connection.id);
+    expect(
+      (
+        await loadConnectionCredentialForBroker(client.db, settings, {
+          workspaceId: workspace.workspaceId,
+          connectionId: firstConnection.connection.id,
+          providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+          kind: "api_key",
+          allowSubjectOwned: false,
+        })
+      )?.credential,
+    ).toEqual({ apiKey: "gateway-retry" });
+
+    const legacyDuplicate = await createConnection(client.db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+      kind: "api_key",
+      credentialEncrypted: encryptEnvironmentValue(
+        rawKey,
+        JSON.stringify({ apiKey: "legacy-hidden" }),
+      ),
+      metadata: {
+        credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+        credentialLabel: "Vercel AI Gateway",
+      },
+      createdBySubjectId: "subject-a",
+    });
+    expect(legacyDuplicate.id).not.toBe(firstConnection.connection.id);
+
+    const disconnected = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${firstConnection.connection.id}`,
+      { method: "DELETE", headers },
+    );
+    expect(disconnected.status).toBe(200);
+    const gatewayRows = (await listConnectionsMetadata(client.db, workspace.workspaceId, null)).filter(
+      (connection) =>
+        connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
+        connection.kind === "api_key" &&
+        connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+    );
+    expect(gatewayRows.map((connection) => connection.id).sort()).toEqual(
+      [firstConnection.connection.id, legacyDuplicate.id].sort(),
+    );
+    expect(gatewayRows.every((connection) => connection.status === "revoked")).toBe(true);
   });
 
   test("providerDomain is canonicalized on create and update", async () => {

@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
@@ -141,11 +141,16 @@ describe("AI Gateway custom model settings in Chromium", () => {
       await add.click();
       await expectReceipt(mobilePage, { action: "create-model", upstreamModelId: maximumSlug });
       await mobilePage.getByRole("button", { name: `Remove ${maximumSlug}` }).click();
-      const dialog = mobilePage.getByRole("dialog");
-      await dialog
-        .getByRole("heading", { name: `Remove Gateway model “${maximumSlug}”?` })
-        .waitFor();
-      await assertDialogBounded(mobilePage);
+      const expectedTitle = `Remove Gateway model “${maximumSlug}”?`;
+      const dialog = mobilePage.getByRole("dialog", { name: expectedTitle, exact: true });
+      await dialog.waitFor();
+      await dialog.getByRole("heading", { name: expectedTitle, exact: true }).waitFor();
+      await assertDialogBounded(mobilePage, dialog);
+      const dialogAxe = await new AxeBuilder({ page: mobilePage })
+        .include('[role="dialog"]')
+        .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+        .analyze();
+      expect(dialogAxe.violations).toEqual([]);
       await dialog.getByRole("button", { name: "Cancel" }).click();
     } finally {
       await mobileContext.close();
@@ -186,19 +191,27 @@ async function waitForAriaLabelFocus(page: Page, ariaLabel: string): Promise<voi
   );
 }
 
-async function assertDialogBounded(page: Page): Promise<void> {
-  const bounds = await page.getByRole("dialog").evaluate((dialog) => {
-    const rect = dialog.getBoundingClientRect();
+async function assertDialogBounded(page: Page, dialog: Locator): Promise<void> {
+  const bounds = await dialog.evaluate((dialogElement) => {
+    const title = dialogElement.querySelector<HTMLElement>('[data-slot="dialog-title"]');
+    const rect = dialogElement.getBoundingClientRect();
     return {
       left: rect.left,
       right: rect.right,
       viewportWidth: document.documentElement.clientWidth,
-      scrollWidth: document.documentElement.scrollWidth,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      dialogClientWidth: dialogElement.clientWidth,
+      dialogScrollWidth: dialogElement.scrollWidth,
+      titleClientWidth: title?.clientWidth ?? -1,
+      titleScrollWidth: title?.scrollWidth ?? -1,
     };
   });
   expect(bounds.left).toBeGreaterThanOrEqual(0);
   expect(bounds.right).toBeLessThanOrEqual(bounds.viewportWidth + 1);
-  expect(bounds.scrollWidth).toBeLessThanOrEqual(bounds.viewportWidth + 1);
+  expect(bounds.documentScrollWidth).toBeLessThanOrEqual(bounds.viewportWidth + 1);
+  expect(bounds.dialogScrollWidth).toBeLessThanOrEqual(bounds.dialogClientWidth + 1);
+  expect(bounds.titleClientWidth).toBeGreaterThan(0);
+  expect(bounds.titleScrollWidth).toBeLessThanOrEqual(bounds.titleClientWidth + 1);
 }
 
 async function assertAccessibleAndBounded(page: Page): Promise<void> {

@@ -17,6 +17,16 @@ export const DeploymentProfileId = z.enum([
 ]);
 export type DeploymentProfileId = z.infer<typeof DeploymentProfileId>;
 
+const MANAGED_SAAS_PRODUCTION_PROFILES = [
+  "azure-managed",
+  "aws-managed",
+  "gcp-managed",
+] as const satisfies readonly DeploymentProfileId[];
+
+function supportsManagedSaasProduction(profile: DeploymentProfileId): boolean {
+  return MANAGED_SAAS_PRODUCTION_PROFILES.some((candidate) => candidate === profile);
+}
+
 export const ProductOverlayId = z.enum(["none", "managed-saas-staging", "managed-saas-production"]);
 export type ProductOverlayId = z.infer<typeof ProductOverlayId>;
 
@@ -403,6 +413,7 @@ export type BackupSpec = z.infer<typeof BackupSpec>;
 export const DeploymentContract = z
   .object({
     profile: DeploymentProfileId,
+    productOverlay: ProductOverlayId.default("none"),
     runtime: RuntimeSpec,
     database: DatabaseSpec,
     temporal: TemporalSpec,
@@ -461,6 +472,17 @@ export const DeploymentContract = z
         code: "custom",
         path: ["runtime", "platform"],
         message: "Preview profiles require Kubernetes runtime",
+      });
+    }
+    if (
+      contract.productOverlay === "managed-saas-production" &&
+      !supportsManagedSaasProduction(contract.profile)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["productOverlay"],
+        message:
+          "managed-saas-production is supported only for azure-managed, aws-managed, and gcp-managed profiles",
       });
     }
     if (contract.ingress.enabled && contract.access.mode === "disabled") {
@@ -559,8 +581,13 @@ export function applyProductOverlay(
   overlay: ProductOverlayId,
   env: Record<string, string | undefined> = process.env,
 ): DeploymentContract {
+  if (overlay === "managed-saas-production" && !supportsManagedSaasProduction(contract.profile)) {
+    throw new Error(
+      "managed-saas-production is supported only for azure-managed, aws-managed, and gcp-managed profiles",
+    );
+  }
   if (overlay === "none") {
-    return parseDeploymentContract(contract);
+    return parseDeploymentContract({ ...contract, productOverlay: "none" });
   }
   const publicBaseUrl =
     overlay === "managed-saas-staging"
@@ -573,6 +600,7 @@ export function applyProductOverlay(
         "https://app.opengeni.ai");
   return parseDeploymentContract({
     ...contract,
+    productOverlay: overlay,
     access: {
       mode: "externalGateway",
       allowUnauthenticatedHealth: true,
@@ -1586,6 +1614,11 @@ export function stackPlanFor(
   productOverlay: ProductOverlayId = "none",
   env: Record<string, string | undefined> = process.env,
 ): DeploymentStackPlan {
+  if (contract.productOverlay !== productOverlay) {
+    throw new Error(
+      `deployment contract overlay ${contract.productOverlay} does not match requested overlay ${productOverlay}`,
+    );
+  }
   const terraformRoot = terraformRootFor(contract);
   const helmValuesFile = helmValuesFileFor(contract);
   const platformDependencies = platformDependencyPlans(contract);
@@ -1621,6 +1654,9 @@ export function generateRuntimeArtifacts(
   terraformOutputs: TerraformOutputs,
   env: Record<string, string | undefined> = process.env,
 ): DeploymentRuntimeArtifacts {
+  if (contract.productOverlay === "managed-saas-production") {
+    validatedImageDigests(env, "managed production promotion");
+  }
   const helmSetValues = terraformOutputObject(terraformOutputs, "helm_set_values");
   addGeneratedImageValues(helmSetValues, env.OPENGENI_IMAGE_TAG ?? "latest", env);
   addRuntimeConfigHelmValues(helmSetValues, contract, env);

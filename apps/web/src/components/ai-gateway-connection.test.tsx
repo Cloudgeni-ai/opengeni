@@ -393,6 +393,55 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
+  test("reconciles an outcome-unknown create before enabling another retry", async () => {
+    let resolveInitialModels:
+      | ((value: { models: WorkspaceGatewayCustomModel[] }) => void)
+      | undefined;
+    let connectionCommitted = false;
+    let modelReadCount = 0;
+    listConnections.mockImplementation(async () =>
+      connectionCommitted ? [gatewayConnection()] : [],
+    );
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => {
+      modelReadCount += 1;
+      if (modelReadCount > 1) return { models: [] };
+      return await new Promise<{ models: WorkspaceGatewayCustomModel[] }>((resolve) => {
+        resolveInitialModels = resolve;
+      });
+    });
+    createConnection.mockImplementation(async () => {
+      connectionCommitted = true;
+      throw new Error("response lost after commit");
+    });
+    const { container, root } = await renderCard();
+
+    try {
+      const keyInput = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway key"]',
+      )!;
+      await setInputValue(keyInput, "fixture-key");
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Connect"))
+          ?.click();
+        await flush();
+      });
+      expect(container.textContent).toContain("Connected");
+      expect(container.textContent).toContain("Disconnect");
+      expect(createConnection).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        resolveInitialModels?.({ models: [] });
+        await flush();
+      });
+      expect(container.textContent).toContain("Connected");
+      expect(createConnection).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("suppresses a completed mutation after switching workspaces", async () => {
     let resolveWorkspaceACreate: ((value: WorkspaceGatewayCustomModel) => void) | undefined;
     createWorkspaceGatewayCustomModel.mockImplementation(async (workspaceId, request) => {
@@ -714,8 +763,9 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(input.value).toBe("");
       expect(document.activeElement).toBe(input);
       expect(input.className).toContain("text-base");
-      expect(input.className).toContain("sm:text-xs");
-      expect(input.className).toContain("pointer-coarse:text-base");
+      expect(input.className).toContain("md:text-base");
+      expect(input.className).toContain("lg:text-xs");
+      expect(input.className).not.toContain("sm:text-xs");
     } finally {
       await act(async () => root.unmount());
       container.remove();

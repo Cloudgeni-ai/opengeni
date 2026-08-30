@@ -983,6 +983,7 @@ describe("deployment contract", () => {
     const deployCommands = plan.deployCommands.join("\n");
 
     expect(contract.product.publicBaseUrl).toBe("https://app.opengeni.ai");
+    expect(contract.productOverlay).toBe("managed-saas-production");
     expect(contract.access.mode).toBe("externalGateway");
     expect(contract.product.accessMode).toBe("managed");
     expect(contract.product.billingMode).toBe("stripe");
@@ -1091,6 +1092,28 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain(
       `digest: "${maintenanceImageDigests.OPENGENI_MIGRATIONS_IMAGE_DIGEST}"`,
     );
+  });
+
+  test("rejects a mismatched production promotion receipt at the runtime artifact boundary", () => {
+    for (const profile of ["azure-managed", "aws-managed", "gcp-managed"] as const) {
+      const contract = contractForProfile(profile, "managed-saas-production");
+      expect(() => generateRuntimeArtifacts(contract, {}, testImageDigests)).toThrow(
+        "OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST because migrations run from the API image",
+      );
+    }
+  });
+
+  test("rejects managed production overlays for profiles without registry promotion support", () => {
+    for (const profile of [
+      "azure-existing-services",
+      "aws-existing-services",
+      "gcp-existing-services",
+      "single-node-kubernetes",
+    ] as const) {
+      expect(() => contractForProfile(profile, "managed-saas-production")).toThrow(
+        "managed-saas-production is supported only for azure-managed, aws-managed, and gcp-managed profiles",
+      );
+    }
   });
 
   test("does not require legacy Azure api-version for Azure OpenAI v1 base URLs", () => {
