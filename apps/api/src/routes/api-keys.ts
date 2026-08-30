@@ -7,16 +7,23 @@ import {
 } from "@opengeni/contracts";
 import {
   createApiKey,
+  createOrganizationApiKey as createOrganizationApiKeyRecord,
   listApiKeys,
   listOrganizationApiKeys,
+  OrganizationApiKeyLimitExceededError,
   revokeApiKey,
   revokeOrganizationApiKey,
 } from "@opengeni/db";
+import { configuredStaticUsageLimits } from "@opengeni/config";
 import { zValidator } from "@hono/zod-validator";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { requireAccessContext, requireAccessGrant } from "@opengeni/core";
+import {
+  accountScopedApiKeyWorkspaceAuthority,
+  requireAccessContext,
+  requireAccessGrant,
+} from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 
 export const organizationApiKeyPermissions: Permission[] = [
@@ -75,7 +82,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/organizations/:organizationId/api-keys", async (c) => {
     const organizationId = c.req.param("organizationId");
     const context = await requireAccessContext(c, deps);
-    requireAccountPermission(context, organizationId, "api_keys:manage");
+    requireOrganizationApiKeyControlPermission(context, organizationId);
     return c.json({ apiKeys: await listOrganizationApiKeys(deps.db, organizationId) });
   });
 
@@ -85,32 +92,35 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       const organizationId = c.req.param("organizationId");
       const context = await requireAccessContext(c, deps);
-      requireAccountPermission(context, organizationId, "api_keys:manage");
-      await requireLimit(deps, {
-        accountId: organizationId,
-        action: "api_key:create",
-        quantity: 1,
-      });
+      requireOrganizationApiKeyControlPermission(context, organizationId);
       const body = c.req.valid("json");
       const token = generateApiKeyToken();
-      const apiKey = await createApiKey(deps.db, {
-        accountId: organizationId,
-        workspaceId: null,
-        name: body.name,
-        description: body.description ?? null,
-        prefix: token.slice(0, 14),
-        keyHash: await sha256Hex(token),
-        permissions: organizationApiKeyPermissions,
-        expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
-      });
-      return c.json(CreateApiKeyResponse.parse({ apiKey, token }), 201);
+      try {
+        const apiKey = await createOrganizationApiKeyRecord(deps.db, {
+          accountId: organizationId,
+          name: body.name,
+          description: body.description ?? null,
+          prefix: token.slice(0, 14),
+          keyHash: await sha256Hex(token),
+          permissions: organizationApiKeyPermissions,
+          expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
+          maxActiveKeys: organizationApiKeyLimit(deps),
+          rotationSourceApiKeyId: authenticatedApiKeyId(context),
+        });
+        return c.json(CreateApiKeyResponse.parse({ apiKey, token }), 201);
+      } catch (error) {
+        if (error instanceof OrganizationApiKeyLimitExceededError) {
+          throw new HTTPException(429, { message: error.message });
+        }
+        throw error;
+      }
     },
   );
 
   app.delete("/v1/organizations/:organizationId/api-keys/:apiKeyId", async (c) => {
     const organizationId = c.req.param("organizationId");
     const context = await requireAccessContext(c, deps);
-    requireAccountPermission(context, organizationId, "api_keys:manage");
+    requireOrganizationApiKeyControlPermission(context, organizationId);
     const apiKey = await revokeOrganizationApiKey(deps.db, organizationId, c.req.param("apiKeyId"));
     if (!apiKey) {
       throw new HTTPException(404, { message: "API key not found" });
@@ -135,8 +145,18 @@ function requireAccountPermission(
 
 function ensureDelegablePermissions(grantPermissions: Permission[], requested: Permission[]): void {
   if (grantPermissions.includes("workspace:admin")) {
+    const literalOnlyPermissions = new Set<Permission>([
+      "account:read",
+      "account:admin",
+      "members:manage",
+      "workspace:create",
+      "billing:read",
+      "billing:manage",
+      "secrets:read",
+    ]);
     const highTrustMissing = requested.filter(
-      (permission) => permission === "secrets:read" && !grantPermissions.includes("secrets:read"),
+      (permission) =>
+        literalOnlyPermissions.has(permission) && !grantPermissions.includes(permission),
     );
     if (highTrustMissing.length === 0) return;
     throw new HTTPException(403, {
@@ -149,6 +169,35 @@ function ensureDelegablePermissions(grantPermissions: Permission[], requested: P
       message: `cannot delegate missing permissions: ${missing.join(", ")}`,
     });
   }
+}
+
+function requireOrganizationApiKeyControlPermission(
+  context: AccessContext,
+  organizationId: string,
+): void {
+  requireAccountPermission(context, organizationId, "api_keys:manage");
+  if (!context.subjectId.startsWith("api_key:")) return;
+  const authority = accountScopedApiKeyWorkspaceAuthority(context);
+  if (
+    !authority ||
+    authority.accountId !== organizationId ||
+    !authority.permissions.includes("api_keys:manage")
+  ) {
+    throw new HTTPException(403, { message: "organization API key authority required" });
+  }
+}
+
+function authenticatedApiKeyId(context: AccessContext): string | null {
+  return context.subjectId.startsWith("api_key:")
+    ? context.subjectId.slice("api_key:".length)
+    : null;
+}
+
+function organizationApiKeyLimit(deps: ApiRouteDeps): number | null {
+  if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
+    return null;
+  }
+  return configuredStaticUsageLimits(deps.settings).maxApiKeysPerWorkspace ?? null;
 }
 
 function generateApiKeyToken(): string {

@@ -41,12 +41,19 @@ a default fallback. Persist the returned opaque workspace ID and pass the exact
 product-selected Skills inline in `CreateSessionRequest.skills` for every
 product-created session; there is no organization-wide Skill inheritance.
 
+If the selected shape is a workspace API key, configure one pre-provisioned
+workspace ID and never call `ensureWorkspace` or an organization API-key route.
+The credential is valid only for that exact workspace. If the selected shape is
+a delegated token, use only the account/workspace and permissions frozen into
+the host-issued token; do not substitute organization-key behavior.
+
 ## Required workflow
 
 1. Authenticate the product user and resolve the allowed product tenant.
 2. Load the server-held credential; never return it to the browser.
-3. Resolve or ensure the tenant's OpenGeni workspace with the stable external
-   source/id pair.
+3. For an organization key, resolve or ensure the tenant's workspace with the
+   stable external source/id pair. For a workspace key, load and verify the
+   configured pre-provisioned workspace ID instead.
 4. Apply explicit workspace settings through installed SDK methods.
 5. Create sessions with a stable idempotency key and product-owned inline
    Skills.

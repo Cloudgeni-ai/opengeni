@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessContext, Workspace } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
+import type { Settings } from "@opengeni/config";
 import {
   createApiKey,
   createDb,
@@ -24,11 +25,11 @@ import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
+let managedAuth: ApiRouteDeps["managedAuth"];
 let userId = "";
 let accountId = "";
 let personalWorkspaceId = "";
 let accountAdminToken = "";
-let apiDeps: ApiRouteDeps | null = null;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const externalAdminUrl = process.env.OPENGENI_ORG_TENANCY_POSTGRES_ADMIN_URL;
 const externalAppUrl = process.env.OPENGENI_ORG_TENANCY_POSTGRES_APP_URL;
@@ -88,27 +89,21 @@ beforeAll(async () => {
       ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
     )`;
 
-  app = new Hono();
-  apiDeps = {
-    db: client.db,
-    settings: testSettings({ productAccessMode: "managed" }),
-    managedAuth: {
-      api: {
-        getSession: async (input: { headers: Headers }) =>
-          input.headers.get("cookie")
-            ? {
-                headers: new Headers(),
-                response: {
-                  session: { id: authSessionId },
-                  user: { id: userId, email, name: "Personal workspace owner" },
-                },
-              }
-            : { headers: new Headers(), response: null },
-      },
-    } as never,
-  } as ApiRouteDeps;
-  registerApiKeyRoutes(app, apiDeps);
-  registerWorkspaceRoutes(app, apiDeps);
+  managedAuth = {
+    api: {
+      getSession: async (input: { headers: Headers }) =>
+        input.headers.get("cookie")
+          ? {
+              headers: new Headers(),
+              response: {
+                session: { id: authSessionId },
+                user: { id: userId, email, name: "Personal workspace owner" },
+              },
+            }
+          : { headers: new Headers(), response: null },
+    },
+  } as never;
+  app = createTestApp();
 }, 180_000);
 
 afterAll(async () => {
@@ -121,6 +116,19 @@ afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
 }, 60_000);
+
+function createTestApp(overrides: Partial<Settings> = {}): Hono {
+  if (!client) throw new Error("database unavailable");
+  const registered = new Hono();
+  const deps = {
+    db: client.db,
+    settings: testSettings({ productAccessMode: "managed", ...overrides }),
+    managedAuth,
+  } as ApiRouteDeps;
+  registerApiKeyRoutes(registered, deps);
+  registerWorkspaceRoutes(registered, deps);
+  return registered;
+}
 
 describe("managed personal workspace access", () => {
   test("projects only the owning managed human and preserves the legacy default", async () => {
@@ -199,6 +207,33 @@ describe("managed personal workspace access", () => {
       accountId,
       name: "External tenant workspace",
     });
+
+    const compatibilityOrganizationToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const compatibilityWorkspaceToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const compatibilityRows = await shared.admin<Array<{ id: string; credentialKind: string }>>`
+      insert into api_keys (
+        account_id, workspace_id, name, prefix, key_hash, permissions
+      ) values (
+        ${accountId}, null, 'Previous-version organization key',
+        ${compatibilityOrganizationToken.slice(0, 14)},
+        ${await sha256Hex(compatibilityOrganizationToken)},
+        ${shared.admin.json(organizationApiKeyPermissions)}::jsonb
+      ), (
+        ${accountId}, ${sharedWorkspace.id}, 'Previous-version workspace key',
+        ${compatibilityWorkspaceToken.slice(0, 14)},
+        ${await sha256Hex(compatibilityWorkspaceToken)},
+        '["workspace:read"]'::jsonb
+      )
+      returning id, credential_kind as "credentialKind"`;
+    expect(compatibilityRows.map(({ credentialKind }) => credentialKind)).toEqual([
+      "organization",
+      "workspace",
+    ]);
+    await shared.admin`
+      delete from api_keys
+      where id = ${compatibilityRows[0]!.id}
+         or id = ${compatibilityRows[1]!.id}`;
+
     expect(
       (
         await app.request(`http://x/v1/workspaces/${sharedWorkspace.id}`, {
@@ -212,6 +247,38 @@ describe("managed personal workspace access", () => {
     expect(legacyAccountInventory.status).toBe(200);
     expect(await legacyAccountInventory.json()).toEqual([]);
 
+    const legacyWideToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createApiKey(client.db, {
+      accountId,
+      workspaceId: null,
+      name: "Legacy account key with workspace-shaped permissions",
+      prefix: legacyWideToken.slice(0, 14),
+      keyHash: await sha256Hex(legacyWideToken),
+      permissions: organizationApiKeyPermissions,
+    });
+    const legacyWideHeaders = { authorization: `Bearer ${legacyWideToken}` };
+    expect(
+      (
+        await app.request(`http://x/v1/workspaces/${sharedWorkspace.id}`, {
+          headers: legacyWideHeaders,
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      await (
+        await app.request("http://x/v1/workspaces", {
+          headers: legacyWideHeaders,
+        })
+      ).json(),
+    ).toEqual([]);
+    expect(
+      (
+        await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
+          headers: legacyWideHeaders,
+        })
+      ).status,
+    ).toBe(403);
+
     const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
     await createApiKey(client.db, {
       accountId,
@@ -220,10 +287,13 @@ describe("managed personal workspace access", () => {
       prefix: token.slice(0, 14),
       keyHash: await sha256Hex(token),
       permissions: organizationApiKeyPermissions,
+      credentialKind: "organization",
     });
     const headers = { authorization: `Bearer ${token}` };
 
-    const accessResponse = await app.request("http://x/v1/access/me", { headers });
+    const accessResponse = await app.request("http://x/v1/access/me", {
+      headers,
+    });
     expect(accessResponse.status).toBe(200);
     const keyAccess = (await accessResponse.json()) as AccessContext;
     expect(keyAccess.workspaceGrants).toEqual([]);
@@ -233,7 +303,9 @@ describe("managed personal workspace access", () => {
       "api_keys:manage",
     ]);
 
-    const listResponse = await app.request("http://x/v1/workspaces", { headers });
+    const listResponse = await app.request("http://x/v1/workspaces", {
+      headers,
+    });
     expect(listResponse.status).toBe(200);
     const workspaces = (await listResponse.json()) as Workspace[];
     expect(workspaces.map((workspace) => workspace.id)).toContain(sharedWorkspace.id);
@@ -260,10 +332,26 @@ describe("managed personal workspace access", () => {
       {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({ name: "forbidden", permissions: ["workspace:read"] }),
+        body: JSON.stringify({
+          name: "forbidden",
+          permissions: ["workspace:read"],
+        }),
       },
     );
     expect(personalKeyResponse.status).toBe(403);
+
+    const billingKeyResponse = await app.request(
+      `http://x/v1/workspaces/${sharedWorkspace.id}/api-keys`,
+      {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "forbidden billing key",
+          permissions: ["billing:manage"],
+        }),
+      },
+    );
+    expect(billingKeyResponse.status).toBe(403);
 
     const firstEnsure = await app.request("http://x/v1/workspaces/external", {
       method: "PUT",
@@ -277,7 +365,10 @@ describe("managed personal workspace access", () => {
       }),
     });
     expect(firstEnsure.status).toBe(201);
-    const firstBody = (await firstEnsure.json()) as { workspace: Workspace; created: boolean };
+    const firstBody = (await firstEnsure.json()) as {
+      workspace: Workspace;
+      created: boolean;
+    };
     expect(firstBody.created).toBe(true);
     expect(firstBody.workspace).toMatchObject({
       accountId,
@@ -298,7 +389,10 @@ describe("managed personal workspace access", () => {
       }),
     });
     expect(replayEnsure.status).toBe(200);
-    const replayBody = (await replayEnsure.json()) as { workspace: Workspace; created: boolean };
+    const replayBody = (await replayEnsure.json()) as {
+      workspace: Workspace;
+      created: boolean;
+    };
     expect(replayBody.created).toBe(false);
     expect(replayBody.workspace.id).toBe(firstBody.workspace.id);
     expect(replayBody.workspace.name).toBe("Tenant one");
@@ -311,14 +405,9 @@ describe("managed personal workspace access", () => {
     expect(membershipCount).toEqual({ count: 0 });
 
     const workspaceCount = await countWorkspacesForAccount(client.db, accountId);
-    const limitedApp = new Hono();
-    registerWorkspaceRoutes(limitedApp, {
-      ...apiDeps!,
-      settings: testSettings({
-        productAccessMode: "managed",
-        usageLimitsMode: "static",
-        staticUsageLimitsJson: JSON.stringify({ maxWorkspacesPerAccount: workspaceCount }),
-      }),
+    const limitedApp = createTestApp({
+      usageLimitsMode: "static",
+      staticUsageLimitsJson: JSON.stringify({ maxWorkspacesPerAccount: workspaceCount }),
     });
 
     const replayAtLimit = await limitedApp.request("http://x/v1/workspaces/external", {
@@ -356,8 +445,14 @@ describe("managed personal workspace access", () => {
 
     const createdResponse = await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
       method: "POST",
-      headers: { cookie: "session=present", "content-type": "application/json" },
-      body: JSON.stringify({ name: "Primary integration", description: "External product" }),
+      headers: {
+        cookie: "session=present",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "Primary integration",
+        description: "External product",
+      }),
     });
     expect(createdResponse.status).toBe(201);
     const created = (await createdResponse.json()) as {
@@ -386,7 +481,9 @@ describe("managed personal workspace access", () => {
       headers: { authorization: `Bearer ${created.token}` },
     });
     expect(listResponse.status).toBe(200);
-    const listed = (await listResponse.json()) as { apiKeys: Array<{ id: string }> };
+    const listed = (await listResponse.json()) as {
+      apiKeys: Array<{ id: string }>;
+    };
     expect(listed.apiKeys.map((key) => key.id)).toContain(created.apiKey.id);
     expect(listed.apiKeys.map((key) => key.id)).not.toContain(workspaceKey.id);
 
@@ -405,16 +502,24 @@ describe("managed personal workspace access", () => {
 
     const wrongScopeDelete = await app.request(
       `http://x/v1/organizations/${accountId}/api-keys/${workspaceKey.id}`,
-      { method: "DELETE", headers: { authorization: `Bearer ${created.token}` } },
+      {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${created.token}` },
+      },
     );
     expect(wrongScopeDelete.status).toBe(404);
 
     const revokeResponse = await app.request(
       `http://x/v1/organizations/${accountId}/api-keys/${created.apiKey.id}`,
-      { method: "DELETE", headers: { authorization: `Bearer ${created.token}` } },
+      {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${created.token}` },
+      },
     );
     expect(revokeResponse.status).toBe(200);
-    expect(await revokeResponse.json()).toMatchObject({ id: created.apiKey.id });
+    expect(await revokeResponse.json()).toMatchObject({
+      id: created.apiKey.id,
+    });
     expect(
       (
         await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
@@ -422,6 +527,117 @@ describe("managed personal workspace access", () => {
         })
       ).status,
     ).toBe(401);
+  });
+
+  test("external workspace provisioning enforces the cap atomically and replays at the cap", async () => {
+    if (!shared || !client) return;
+
+    const [{ count: existingCount } = { count: 0 }] = await shared.admin<
+      Array<{ count: number }>
+    >`select count(*)::int as count from workspaces where account_id = ${accountId}`;
+    const limitedApp = createTestApp({
+      usageLimitsMode: "static",
+      staticUsageLimitsJson: JSON.stringify({
+        maxWorkspacesPerAccount: existingCount + 1,
+      }),
+    });
+    const externalSource = `workspace-limit-${crypto.randomUUID()}`;
+    const requests = ["tenant-a", "tenant-b"].map((externalId) =>
+      limitedApp.request("http://x/v1/workspaces/external", {
+        method: "PUT",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          accountId,
+          externalSource,
+          externalId,
+          name: externalId,
+        }),
+      }),
+    );
+    const responses = await Promise.all(requests);
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 429]);
+
+    const createdResponse = responses.find((response) => response.status === 201)!;
+    const created = (await createdResponse.json()) as { workspace: Workspace };
+    const replay = await limitedApp.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: {
+        cookie: "session=present",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        accountId,
+        externalSource,
+        externalId: created.workspace.externalId,
+        name: "stale replay name",
+      }),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      created: false,
+      workspace: { id: created.workspace.id },
+    });
+  });
+
+  test("organization key creation serializes the cap and permits one authenticated rotation overlap", async () => {
+    if (!shared || !client) return;
+
+    await shared.admin`
+      update api_keys
+      set revoked_at = now(), updated_at = now()
+      where account_id = ${accountId}
+        and credential_kind = 'organization'
+        and revoked_at is null`;
+    const limitedApp = createTestApp({
+      usageLimitsMode: "static",
+      staticUsageLimitsJson: JSON.stringify({ maxApiKeysPerWorkspace: 1 }),
+    });
+    const createWithCookie = (name: string) =>
+      limitedApp.request(`http://x/v1/organizations/${accountId}/api-keys`, {
+        method: "POST",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name }),
+      });
+    const firstAttempts = await Promise.all([
+      createWithCookie("Concurrent primary A"),
+      createWithCookie("Concurrent primary B"),
+    ]);
+    expect(firstAttempts.map((response) => response.status).sort()).toEqual([201, 429]);
+    const primary = (await firstAttempts.find((response) => response.status === 201)!.json()) as {
+      token: string;
+    };
+
+    const replacement = await limitedApp.request(
+      `http://x/v1/organizations/${accountId}/api-keys`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${primary.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name: "Overlap replacement" }),
+      },
+    );
+    expect(replacement.status).toBe(201);
+
+    const secondOverlap = await limitedApp.request(
+      `http://x/v1/organizations/${accountId}/api-keys`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${primary.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name: "Forbidden second overlap" }),
+      },
+    );
+    expect(secondOverlap.status).toBe(429);
   });
 });
 

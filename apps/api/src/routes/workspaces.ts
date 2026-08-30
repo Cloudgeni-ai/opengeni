@@ -51,6 +51,7 @@ import {
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
   WorkspaceExternalIdentityConflictError,
+  WorkspaceLimitExceededError,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
@@ -81,6 +82,7 @@ import {
   CODEX_REALTIME_MODEL_ID,
   SUPERGROK_REALTIME_MODEL_ID,
   canonicalizeConfiguredModelId,
+  configuredStaticUsageLimits,
   type Settings,
 } from "@opengeni/config";
 
@@ -192,6 +194,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(payload.agentInstructions !== undefined
           ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
           : {}),
+        maxWorkspacesPerAccount: externalWorkspaceLimit(deps),
       });
       const response = EnsureWorkspaceResponse.parse(result);
       return result.created ? c.json(response, 201) : c.json(response);
@@ -200,6 +203,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw new HTTPException(409, {
           message: "external workspace identity is already in use",
         });
+      }
+      if (error instanceof WorkspaceLimitExceededError) {
+        throw new HTTPException(429, { message: error.message });
       }
       throw error;
     }
@@ -697,6 +703,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     return c.body(null, 204);
   });
+}
+
+function externalWorkspaceLimit(deps: ApiRouteDeps): number | null {
+  if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
+    return null;
+  }
+  return configuredStaticUsageLimits(deps.settings).maxWorkspacesPerAccount ?? null;
 }
 
 async function listWorkspacePeople(

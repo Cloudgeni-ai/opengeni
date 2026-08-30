@@ -55,6 +55,8 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
   const headingId = useId();
   const createTriggerRef = useRef<HTMLButtonElement | null>(null);
   const revokeTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const keyListHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const createDialogContentRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(true);
   const readSequenceRef = useRef(0);
   const mutationSequenceRef = useRef(0);
@@ -122,8 +124,14 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
 
   function setCreateDialogOpen(open: boolean) {
     if (busyAction === "create") return;
+    if (!open && createdToken) return;
     setCreateKeyOpen(open);
     if (!open) resetCreateDialog();
+  }
+
+  function closeCreatedTokenDialog() {
+    setCreateKeyOpen(false);
+    resetCreateDialog();
   }
 
   async function createKey() {
@@ -271,7 +279,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
           <ScopeStep
             icon={<KeyRoundIcon aria-hidden="true" className="size-3.5" />}
             title="Organization credential"
-            detail="Organization-level billing and governance"
+            detail="Workspace provisioning, administration, and API-key management"
           />
           <ArrowRightIcon
             aria-hidden="true"
@@ -315,17 +323,29 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
         </div>
 
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-xs font-medium text-fg-muted">Keys</h3>
+          <h3
+            ref={keyListHeadingRef}
+            tabIndex={-1}
+            className="text-xs font-medium text-fg-muted outline-none focus-visible:ring-2 focus-visible:ring-brand"
+          >
+            Keys
+          </h3>
           <span className="text-2xs text-fg-subtle tabular-nums" aria-live="polite">
-            {!apiKeysLoaded
-              ? "Loading…"
-              : activeApiKeyCount === 0
-                ? "No active keys"
-                : `${activeApiKeyCount} active`}
+            {!props.canManage || (apiKeysError && apiKeys.length === 0)
+              ? "Unavailable"
+              : !apiKeysLoaded
+                ? "Loading…"
+                : activeApiKeyCount === 0
+                  ? "No active keys"
+                  : `${activeApiKeyCount} active`}
           </span>
         </div>
 
-        {apiKeysError && apiKeys.length === 0 ? (
+        {!props.canManage ? (
+          <Notice tone="info" title="API key management unavailable">
+            <p>You don&apos;t have permission to view or manage organization API keys.</p>
+          </Notice>
+        ) : apiKeysError && apiKeys.length === 0 ? (
           <LoadErrorState
             title="Couldn't load organization API keys"
             error={apiKeysError}
@@ -443,12 +463,6 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
             </ul>
           </div>
         )}
-
-        {!props.canManage ? (
-          <p className="text-xs leading-5 text-fg-subtle">
-            You don&apos;t have permission to manage organization API keys.
-          </p>
-        ) : null}
       </section>
 
       <section aria-labelledby={`${headingId}-quick-start`} className="grid min-w-0 gap-3">
@@ -493,9 +507,23 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
 
       <Dialog open={createKeyOpen} onOpenChange={setCreateDialogOpen}>
         <DialogContent
+          ref={createDialogContentRef}
+          tabIndex={-1}
+          showCloseButton={!createdToken}
           className="max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden overscroll-contain sm:max-h-[85vh] sm:max-w-2xl"
           onOpenAutoFocus={(event) => {
-            if (window.matchMedia("(max-width: 639px)").matches) event.preventDefault();
+            if (!window.matchMedia("(max-width: 639px)").matches) return;
+            event.preventDefault();
+            requestAnimationFrame(() => createDialogContentRef.current?.focus());
+          }}
+          onEscapeKeyDown={(event) => {
+            if (createdToken) event.preventDefault();
+          }}
+          onPointerDownOutside={(event) => {
+            if (createdToken) event.preventDefault();
+          }}
+          onInteractOutside={(event) => {
+            if (createdToken) event.preventDefault();
           }}
           onCloseAutoFocus={(event) => {
             if (!createTriggerRef.current?.isConnected) return;
@@ -537,7 +565,6 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
               <DialogFooter>
                 <Button
                   type="button"
-                  variant="secondary"
                   onClick={() => void copyText(createdToken, "token", "API key")}
                 >
                   {copiedTarget === "token" ? (
@@ -547,8 +574,8 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
                   )}
                   {copiedTarget === "token" ? "Copied" : "Copy API key"}
                 </Button>
-                <Button type="button" onClick={() => setCreateDialogOpen(false)}>
-                  Done
+                <Button type="button" variant="secondary" onClick={closeCreatedTokenDialog}>
+                  I&apos;ve stored this key
                 </Button>
               </DialogFooter>
             </>
@@ -638,6 +665,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
         confirmLabel="Revoke key"
         cancelAutoFocus
         restoreFocusRef={revokeTriggerRef}
+        restoreFocusFallbackRef={keyListHeadingRef}
         onConfirm={() => (revokingKey ? revokeKey(revokingKey) : false)}
       />
     </div>

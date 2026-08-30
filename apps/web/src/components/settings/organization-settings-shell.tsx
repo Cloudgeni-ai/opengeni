@@ -87,8 +87,6 @@ export function OrganizationSettingsShell({
   return (
     <div
       data-workspace-scroll-owner="self-managed"
-      tabIndex={0}
-      aria-label="Organization settings page"
       className="h-dvh overflow-x-hidden overflow-y-auto overscroll-y-contain bg-bg text-fg lg:grid lg:min-h-0 lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden"
     >
       <a

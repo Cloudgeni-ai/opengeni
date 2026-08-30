@@ -4,6 +4,7 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
 
+import { destructiveActionFocusTarget } from "@/components/ui/confirm-dialog";
 import type { ApiKey } from "@/types";
 
 const toastSuccess = mock((_message: string) => undefined);
@@ -33,6 +34,7 @@ mock.module("@/components/ui/dialog", () => ({
 }));
 
 mock.module("@/components/ui/confirm-dialog", () => ({
+  destructiveActionFocusTarget,
   ConfirmDialog: ({
     open,
     title,
@@ -172,7 +174,7 @@ describe("organization API keys section", () => {
     expect(container.textContent).toContain("API key copied.");
     expect(dialog.textContent).toContain("Copied");
 
-    await act(async () => button(dialog, "Done").click());
+    await act(async () => button(dialog, "I've stored this key").click());
     expect(container.textContent).not.toContain("og_secret_full_value");
 
     await act(async () => root.unmount());
@@ -220,6 +222,65 @@ describe("organization API keys section", () => {
         'button[aria-label="Revoke organization API key Deployment automation"]',
       )?.disabled,
     ).toBe(true);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("does not present a permission-denied list as an empty organization", async () => {
+    const listApiKeys = mock(async () => [key()]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationApiKeysSection
+          organizationId="22222222-2222-4222-8222-222222222222"
+          canManage={false}
+          listApiKeys={listApiKeys}
+          createApiKey={async () => ({ apiKey: key(), token: "unused" })}
+          deleteApiKey={async () => key()}
+        />,
+      );
+    });
+    await flush();
+
+    expect(listApiKeys).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("API key management unavailable");
+    expect(container.textContent).toContain("Unavailable");
+    expect(container.textContent).not.toContain("No organization API keys yet");
+    expect(container.textContent).not.toContain("No active keys");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("announces a failed initial read without claiming there are no keys", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationApiKeysSection
+          organizationId="22222222-2222-4222-8222-222222222222"
+          canManage
+          listApiKeys={async () => {
+            throw new Error("service unavailable");
+          }}
+          createApiKey={async () => ({ apiKey: key(), token: "unused" })}
+          deleteApiKey={async () => key()}
+        />,
+      );
+    });
+    await flush();
+
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Couldn't load organization API keys");
+    expect(container.textContent).toContain("Unavailable");
+    expect(container.textContent).not.toContain("No organization API keys yet");
+    expect(container.textContent).not.toContain("No active keys");
 
     await act(async () => root.unmount());
     container.remove();
