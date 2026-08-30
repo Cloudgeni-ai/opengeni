@@ -383,6 +383,21 @@ describe("embedded worker lifecycle contract", () => {
       "organization_recovery_policies",
       "organization_recovery_policy_heads",
     ];
+    const appLifecycleTables = [
+      "app_build_files",
+      "app_builds",
+      "app_gc_claims",
+      "app_launches",
+      "app_lifecycle_operations",
+      "app_object_tombstones",
+      "app_previews",
+      "app_publications",
+      "app_releases",
+      "app_source_revisions",
+      "app_tool_calls",
+      "app_tool_policy_revisions",
+      "apps",
+    ];
     const catalogResults: unknown[] = [
       [
         {
@@ -480,6 +495,7 @@ describe("embedded worker lifecycle contract", () => {
           "canonical_human_identity_subjects",
           "canonical_human_login_bindings",
           "canonical_human_identity_operations",
+          ...appLifecycleTables,
           ...managedAuthSessionSetTables,
           ...organizationRecoveryTables,
           "organization_user_setup_deliveries",
@@ -633,6 +649,7 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        ...appLifecycleTables,
         ...managedAuthSessionSetTables,
         ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
@@ -644,6 +661,7 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        ...appLifecycleTables,
         ...managedAuthSessionSetTables,
         ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
