@@ -118,6 +118,9 @@ mode continues to govern derived Skills and instruction proposals, not the
 shared agent Memory mechanism. Autonomous may activate an eligible Skill or
 instruction through the destination-owned lifecycle; Review first leaves the
 proposal inactive for human review; Off creates no durable derived change.
+Organization identity is separate again: its own organization-owner policy
+uses Off, Review first, and Autonomous modes for `company_profile_propose`, and
+cannot be changed or widened by a workspace administrator.
 
 Destination ownership remains:
 
@@ -131,7 +134,8 @@ Destination ownership remains:
 The controller deliberately does not implement:
 
 - Memory mutation through the learning controller (agent Memory writes use the
-  separate `memoryEnabled` gate) or company-profile mutation;
+  separate `memoryEnabled` gate) or company-profile mutation (agent profile
+  changes use the separate organization-owner policy);
 - Personal or Organization scope expansion;
 - explicit session command/tool integration;
 - runtime prompt composition or automatic snapshot installation;

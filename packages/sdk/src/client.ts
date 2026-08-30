@@ -511,6 +511,7 @@ import type {
 } from "./workspace-learning";
 import type {
   ActivateCompanyProfileRevisionRequest,
+  CompanyProfileAgentPolicy,
   CompanyProfileDiffRequest,
   CompanyProfileDiffResponse,
   CompanyProfileListOptions,
@@ -519,6 +520,7 @@ import type {
   CompanyProfileRevision,
   RollbackCompanyProfileRequest,
   UpdateCompanyProfileRequest,
+  UpdateCompanyProfileAgentPolicyRequest,
 } from "./company-profile";
 import type {
   WorkspaceStateExportResponse,
@@ -4697,6 +4699,24 @@ export class OpenGeniClient {
     return await this.requestJson<CompanyProfileRevision>(
       "GET",
       `/v1/workspaces/${workspaceId}/company-profile/revisions/${encodeURIComponent(revisionId)}`,
+    );
+  }
+
+  async getCompanyProfileAgentPolicy(workspaceId: string): Promise<CompanyProfileAgentPolicy> {
+    return await this.requestJson<CompanyProfileAgentPolicy>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-profile/agent-policy`,
+    );
+  }
+
+  async updateCompanyProfileAgentPolicy(
+    workspaceId: string,
+    request: UpdateCompanyProfileAgentPolicyRequest,
+  ): Promise<CompanyProfileAgentPolicy> {
+    return await this.requestJson<CompanyProfileAgentPolicy>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/company-profile/agent-policy`,
+      request,
     );
   }
 

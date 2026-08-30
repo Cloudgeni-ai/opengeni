@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   ActivateCompanyProfileRevisionRequest,
+  CompanyProfileAgentPolicy,
   CompanyProfileConflictResponse,
   CompanyProfileDiffRequest,
   CompanyProfileDiffResponse,
@@ -11,6 +12,7 @@ import {
   CompanyProfileRevision,
   RollbackCompanyProfileRequest,
   UpdateCompanyProfileRequest,
+  UpdateCompanyProfileAgentPolicyRequest,
 } from "@opengeni/contracts";
 import {
   requireAccessGrant,
@@ -20,15 +22,18 @@ import {
 } from "@opengeni/core";
 import {
   activateCompanyProfileRevision,
+  CompanyProfileAgentPolicyError,
   CompanyProfileConflictError,
   CompanyProfileInvalidOperationError,
   CompanyProfileNotFoundError,
   CompanyProfileOperationReuseError,
   diffCompanyProfileRevisions,
   getCompanyProfileRevision,
+  getCompanyProfileAgentPolicy,
   listCompanyProfile,
   rollbackCompanyProfileRevision,
   updateCompanyProfile,
+  updateCompanyProfileAgentPolicy,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -84,6 +89,15 @@ function profileError(context: Context, error: unknown): Response {
   if (error instanceof CompanyProfileInvalidOperationError) {
     return context.json({ code: "INVALID_COMPANY_PROFILE_OPERATION", message: error.message }, 422);
   }
+  if (error instanceof CompanyProfileAgentPolicyError) {
+    if (error.code === "authority_unavailable") {
+      throw new HTTPException(403, { message: error.message });
+    }
+    if (error.code === "policy_conflict" || error.code === "operation_reused") {
+      throw new HTTPException(409, { message: error.message });
+    }
+    throw new HTTPException(422, { message: error.message });
+  }
   throw error;
 }
 
@@ -96,6 +110,56 @@ function revisionId(context: Context): string {
 
 export function registerCompanyProfileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const base = "/v1/workspaces/:workspaceId/company-profile";
+
+  app.get(`${base}/agent-policy`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    requireDirectAccountAdmin(access);
+    try {
+      return context.json(
+        CompanyProfileAgentPolicy.parse(
+          await getCompanyProfileAgentPolicy(deps.db, {
+            accountId: access.grant.accountId,
+            workspaceId,
+            actorSubjectId: access.grant.subjectId,
+          }),
+        ),
+      );
+    } catch (error) {
+      return profileError(context, error);
+    }
+  });
+
+  app.patch(`${base}/agent-policy`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const access = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
+    requireDirectAccountAdmin(access);
+    const request = await parseBody(context, UpdateCompanyProfileAgentPolicyRequest);
+    try {
+      return context.json(
+        CompanyProfileAgentPolicy.parse(
+          await updateCompanyProfileAgentPolicy(deps.db, {
+            accountId: access.grant.accountId,
+            workspaceId,
+            actorSubjectId: access.grant.subjectId,
+            ...request,
+          }),
+        ),
+      );
+    } catch (error) {
+      return profileError(context, error);
+    }
+  });
 
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");

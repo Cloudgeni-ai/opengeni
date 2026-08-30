@@ -16,6 +16,7 @@ notes plus governed Knowledge and Ways-of-working proposals.
 | Destination               | Purpose                                                         | Authority                                                                | Model access                                                                                                                     | Current status                                                                                                                                |
 | ------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workspace Memory          | Agent-retained facts, decisions, incidents, fixes, and outcomes | Canonical workspace Memory gate                                           | `memory_search`; never standing prompt context                                                                                    | `memory_save` and `memory_correct` write active Memory autonomously whenever workspace Memory is enabled                                      |
+| Organization identity     | Two stable statements: who the organization is and why it exists | Company-profile head plus separate organization-owner agent policy         | Always composed in root-session governance context                                                                                | Direct owner administration, or explicit owner-initiated agent administration in Off, Review first, or Autonomous mode                         |
 | Scoped Knowledge evidence | Inferred or sourced facts and normalized claims                 | Documents/scoped-knowledge authority                                     | Permission-first Document retrieval where surfaced; normalized claims are governance evidence, not a standalone retrieval corpus | Workspace-local claim proposal/correction and rooted Task-note promotion use the append-only review/relation lifecycle                        |
 | Workspace instructions    | Minimal, always-on workspace rules                              | Existing instruction-policy heads                                        | Bounded body is always composed                                                                                                  | Workspace-local proposals and rooted Task-note promotion; Autonomous may activate eligible changes, Review first keeps drafts inactive, Off blocks |
 | Skills                    | Reusable conditional how-to guidance                            | Existing preference-registry heads                                       | Bounded descriptors by default; full bodies on demand                                                                            | Workspace-local proposals and rooted Task-note promotion; Autonomous may activate eligible changes, Review first keeps drafts inactive, Off blocks |
@@ -32,9 +33,11 @@ the rule.
 
 The router must preserve the selected destination's provenance and may propose
 promotion, but it must not convert an agent observation into active company
-policy or a preference. Personal and organization cross-workspace routing stay
-inactive until their tenancy authorities are activated; workspace-local task
-notes do not widen those scopes.
+policy, organization identity, or a preference. Organization identity changes
+use only the explicit `company_profile_propose` path and its separate
+organization-owner policy. Personal and organization cross-workspace routing
+stay inactive until their tenancy authorities are activated; workspace-local
+task notes do not widen those scopes.
 
 ## Governed workspace proposals
 
