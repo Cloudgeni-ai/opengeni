@@ -49,6 +49,7 @@ export function ManagedAuthPanel(props: {
   const [formError, setFormError] = useState<string | null>(null);
   const [formActionMode, setFormActionMode] = useState<ManagedAuthMode | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [verificationEmail, setVerificationEmail] = useState<string | null>(null);
 
   function selectMode(nextMode: ManagedAuthMode) {
     setMode(nextMode);
@@ -56,12 +57,14 @@ export function ManagedAuthPanel(props: {
     setFormError(null);
     setFormActionMode(null);
     setSuccessMessage(null);
+    setVerificationEmail(null);
   }
 
   function updateField(field: ManagedAuthField, value: string) {
     if (field === "name") setName(value);
     if (field === "email") setEmail(value);
     if (field === "password") setPassword(value);
+    if (field === "email") setVerificationEmail(null);
     setFieldErrors((current) => {
       if (!current[field]) return current;
       const next = { ...current };
@@ -80,11 +83,13 @@ export function ManagedAuthPanel(props: {
     setFormError(null);
     setFormActionMode(null);
     setSuccessMessage(null);
+    setVerificationEmail(null);
     if (Object.keys(validationErrors).length > 0) return;
     setBusy(true);
     try {
       await props.onSubmit(mode, { ...input, name: input.name || input.email });
       if (mode === "signup") {
+        if (emailVerificationRequired) setVerificationEmail(input.email);
         setSuccessMessage(
           emailVerificationRequired
             ? `We sent a verification link to ${input.email}.`
@@ -96,13 +101,17 @@ export function ManagedAuthPanel(props: {
       setFieldErrors(failure.fields);
       setFormError(failure.message);
       setFormActionMode(failure.switchTo);
+      if (emailVerificationRequired && failure.canResendVerification) {
+        setVerificationEmail(input.email);
+      }
     } finally {
       setBusy(false);
     }
   }
 
   async function resendVerification() {
-    const normalizedEmail = email.trim();
+    const normalizedEmail = verificationEmail;
+    if (!normalizedEmail) return;
     const validationErrors = validateManagedAuthInput("signin", {
       name: "",
       email: normalizedEmail,
@@ -145,6 +154,26 @@ export function ManagedAuthPanel(props: {
     }
   }
 
+  const formInteractionBusy = busy || resendBusy || socialBusy !== null;
+  const resendVerificationControl = verificationEmail ? (
+    <div className="mt-2">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        disabled={resendBusy || busy || socialBusy !== null}
+        onClick={() => void resendVerification()}
+      >
+        {resendBusy ? (
+          <Loader2Icon className="size-4 animate-spin" />
+        ) : (
+          <RefreshCwIcon className="size-4" />
+        )}
+        Resend verification email
+      </Button>
+    </div>
+  ) : null;
+
   return (
     <section
       className={
@@ -184,6 +213,7 @@ export function ManagedAuthPanel(props: {
               type="button"
               size="sm"
               variant={mode === "signin" ? "secondary" : "ghost"}
+              disabled={formInteractionBusy}
               onClick={() => selectMode("signin")}
             >
               Sign in
@@ -192,6 +222,7 @@ export function ManagedAuthPanel(props: {
               type="button"
               size="sm"
               variant={mode === "signup" ? "secondary" : "ghost"}
+              disabled={formInteractionBusy}
               onClick={() => selectMode("signup")}
             >
               Sign up
@@ -215,6 +246,7 @@ export function ManagedAuthPanel(props: {
             <Input
               id="managed-auth-name"
               value={name}
+              disabled={formInteractionBusy}
               onChange={(event) => updateField("name", event.target.value)}
               autoComplete="name"
               className="mt-2"
@@ -238,6 +270,7 @@ export function ManagedAuthPanel(props: {
             id="managed-auth-email"
             type="email"
             value={email}
+            disabled={formInteractionBusy}
             onChange={(event) => updateField("email", event.target.value)}
             autoComplete="email"
             className="mt-2"
@@ -261,6 +294,7 @@ export function ManagedAuthPanel(props: {
             id="managed-auth-password"
             type="password"
             value={password}
+            disabled={formInteractionBusy}
             onChange={(event) => updateField("password", event.target.value)}
             autoComplete={mode === "signin" ? "current-password" : "new-password"}
             className="mt-2"
@@ -290,6 +324,7 @@ export function ManagedAuthPanel(props: {
                   type="button"
                   variant="ghost"
                   size="sm"
+                  disabled={formInteractionBusy}
                   onClick={() => selectMode(formActionMode)}
                 >
                   {formActionMode === "signin" ? "Sign in" : "Sign up"}
@@ -298,6 +333,7 @@ export function ManagedAuthPanel(props: {
             }
           >
             {formError}
+            {resendVerificationControl}
           </Notice>
         ) : null}
         {successMessage ? (
@@ -307,9 +343,10 @@ export function ManagedAuthPanel(props: {
             className="mt-4"
           >
             {successMessage}
+            {resendVerificationControl}
           </Notice>
         ) : null}
-        <Button type="submit" className="mt-4 w-full" disabled={busy || socialBusy !== null}>
+        <Button type="submit" className="mt-4 w-full" disabled={formInteractionBusy}>
           {busy ? (
             <Loader2Icon className="size-4 animate-spin" />
           ) : (
@@ -323,22 +360,6 @@ export function ManagedAuthPanel(props: {
               ? "We'll email you a link before you can sign in."
               : "This local stack signs you in immediately; no verification email is sent."}
           </p>
-        ) : null}
-        {emailVerificationRequired ? (
-          <Button
-            type="button"
-            variant="ghost"
-            className="mt-2 w-full"
-            disabled={resendBusy || busy || socialBusy !== null}
-            onClick={() => void resendVerification()}
-          >
-            {resendBusy ? (
-              <Loader2Icon className="size-4 animate-spin" />
-            ) : (
-              <RefreshCwIcon className="size-4" />
-            )}
-            Resend verification email
-          </Button>
         ) : null}
       </form>
     </section>
