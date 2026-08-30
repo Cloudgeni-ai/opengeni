@@ -19,8 +19,7 @@ const sessionTenancyFenceMigrationName = "0345_tenant_scoped_session_tenancy_fen
 const orderedVariableSetRuntimeAuthorityMigrationName =
   "0372_ordered_variable_set_runtime_authority.sql";
 const sessionEventCursorMigrationName = "0374_session_event_cursors.sql";
-const sessionEventRawLaneActivationMigrationName =
-  "0379_session_event_raw_lane_activation.sql";
+const sessionEventRawLaneActivationMigrationName = "0379_session_event_raw_lane_activation.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",

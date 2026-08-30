@@ -34,8 +34,7 @@ const personalGitHubRepositorySelectionMigrationName =
   "0315_personal_github_repository_selection.sql";
 const sessionTenancyFenceMigrationName = "0345_tenant_scoped_session_tenancy_fence.sql";
 const sessionEventCursorMigrationName = "0374_session_event_cursors.sql";
-const sessionEventRawLaneActivationMigrationName =
-  "0379_session_event_raw_lane_activation.sql";
+const sessionEventRawLaneActivationMigrationName = "0379_session_event_raw_lane_activation.sql";
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
