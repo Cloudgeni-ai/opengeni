@@ -1379,6 +1379,7 @@ export async function runTurnStreamAttempt(
               usage: { usage: aggregateUsage },
               normalizedUsage: normalizedAggregateUsage,
               ...(billing ? { billingPath: billing.billingPath } : {}),
+              ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
               servingAccountHash: aggregateAccountCtx.servingAccountHash,
               accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
               emittedSourceKeys: emittedModelUsageSourceKeys,

@@ -282,6 +282,7 @@ export async function processModelResponseTerminalEvent(input: {
         usage: responseUsage,
         normalizedUsage,
         ...(billing ? { billingPath: billing.billingPath } : {}),
+        ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
@@ -426,6 +427,7 @@ export async function processCompactionModelUsageEvent(input: {
         usage: input.usage,
         normalizedUsage,
         ...(billing ? { billingPath: billing.billingPath } : {}),
+        ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
@@ -469,6 +471,8 @@ export async function emitModelCallUsage(input: {
   normalizedUsage?: ModelCallUsageNormalization;
   /** Accepted billing authority persisted for Insights repair after a soft fact-write failure. */
   billingPath?: ModelUsageBillingRecord["billingPath"];
+  /** Validated Gateway endpoint provider persisted for exact Insights repair. */
+  upstreamProvider?: string;
   // Prompt-cache research dimensions (log-only; NEVER on a metric label or a
   // durable event). The opaque serving-account tag and whether it changed since
   // the session's previous call — the account-switch hypothesis for cache misses.
@@ -501,6 +505,7 @@ export async function emitModelCallUsage(input: {
           model: input.model,
           sourceKey: input.sourceKey,
           ...(input.billingPath ? { billingPath: input.billingPath } : {}),
+          ...(input.upstreamProvider ? { upstreamProvider: input.upstreamProvider } : {}),
           ...telemetry,
         },
       },

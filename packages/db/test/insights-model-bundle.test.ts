@@ -471,7 +471,8 @@ describe("Workspace Insights model bundle", () => {
         'agent.model.usage',
         ${shared.admin.json({
           sourceKey,
-          provider: "openai",
+          provider: "workspace-gateway",
+          upstreamProvider: "anthropic",
           providerApi: "responses",
           model: "free-deployment-model",
           billingPath: "external",
@@ -497,6 +498,7 @@ describe("Workspace Insights model bundle", () => {
         ${shared.admin.json({
           sourceKey: secondSourceKey,
           provider: "openai",
+          upstreamProvider: "../../not-a-provider",
           providerApi: "responses",
           model: "free-deployment-model",
           billingPath: "external",
@@ -518,6 +520,7 @@ describe("Workspace Insights model bundle", () => {
     const rows = await shared.admin<
       Array<{
         sourceKey: string;
+        provider: string;
         billingPath: string;
         pricedCostMicros: number;
         totalTokens: number | null;
@@ -525,6 +528,7 @@ describe("Workspace Insights model bundle", () => {
     >`
       select
         source_key as "sourceKey",
+        provider,
         billing_path as "billingPath",
         priced_cost_micros::int as "pricedCostMicros",
         total_tokens::int as "totalTokens"
@@ -533,9 +537,16 @@ describe("Workspace Insights model bundle", () => {
         and turn_id in (${turnId}, ${secondTurnId})
       order by source_key`;
     expect(Array.from(rows)).toEqual([
-      { sourceKey, billingPath: "external", pricedCostMicros: 0, totalTokens: 1500 },
+      {
+        sourceKey,
+        provider: "anthropic",
+        billingPath: "external",
+        pricedCostMicros: 0,
+        totalTokens: 1500,
+      },
       {
         sourceKey: secondSourceKey,
+        provider: "openai",
         billingPath: "external",
         pricedCostMicros: 0,
         totalTokens: 300,

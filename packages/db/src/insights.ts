@@ -1159,6 +1159,11 @@ export async function backfillModelCallFactsFromSessionEvents(
         const providerApi = typeof payload.providerApi === "string" ? payload.providerApi : null;
         const model = typeof payload.model === "string" ? payload.model : null;
         if (!sourceKey || !provider || !providerApi || !model) continue;
+        const upstreamProvider =
+          typeof payload.upstreamProvider === "string" &&
+          /^[a-z0-9][a-z0-9-]{0,63}$/.test(payload.upstreamProvider)
+            ? payload.upstreamProvider
+            : null;
         const durableBillingPath =
           payload.billingPath === "external" || payload.billingPath === "opengeni_credits"
             ? payload.billingPath
@@ -1248,7 +1253,7 @@ export async function backfillModelCallFactsFromSessionEvents(
             turnId: event.turnId,
             turnAttemptId: event.turnAttemptId,
             sourceKey,
-            provider,
+            provider: upstreamProvider ?? provider,
             providerApi,
             model,
             billingPath,

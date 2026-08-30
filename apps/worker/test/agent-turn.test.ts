@@ -1754,7 +1754,7 @@ describe("production model-response usage callback authority", () => {
     }
   });
 
-  test("settles unpinned workspace Gateway terminal usage as external audit data", async () => {
+  test("persists unpinned workspace Gateway endpoint authority before a soft fact-write failure", async () => {
     const upstreamModelId = "anthropic/claude-sonnet-4.6";
     const model = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${upstreamModelId}`;
     const settings = withWorkspaceGatewayCredential(
@@ -1777,6 +1777,7 @@ describe("production model-response usage callback authority", () => {
       },
     } as any);
     const usageRows: Array<Record<string, unknown>> = [];
+    const eventPayloads: Array<Record<string, unknown>> = [];
     const facts: Array<Record<string, unknown>> = [];
     const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
       async (_db, input) => {
@@ -1786,7 +1787,7 @@ describe("production model-response usage callback authority", () => {
     const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(
       async (_db, input) => {
         facts.push(input as unknown as Record<string, unknown>);
-        return undefined as never;
+        throw new Error("fact writer unavailable");
       },
     );
     const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
@@ -1804,11 +1805,14 @@ describe("production model-response usage callback authority", () => {
         observability: createObservability(settings, { component: "worker" }),
         publish: (async (batch: any[]) => ({
           accepted: true,
-          events: batch.map((entry) => ({
-            ...entry,
-            id: crypto.randomUUID(),
-            turnAssociation: "current" as const,
-          })),
+          events: batch.map((entry) => {
+            eventPayloads.push(entry.payload as Record<string, unknown>);
+            return {
+              ...entry,
+              id: crypto.randomUUID(),
+              turnAssociation: "current" as const,
+            };
+          }),
         })) as any,
         accountId: "acct-1",
         workspaceId: "ws-1",
@@ -1838,6 +1842,13 @@ describe("production model-response usage callback authority", () => {
       });
       expect(usageRows).toEqual([
         expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
+      ]);
+      expect(eventPayloads).toEqual([
+        expect.objectContaining({
+          provider: WORKSPACE_GATEWAY_PROVIDER_ID,
+          upstreamProvider: "anthropic",
+          billingPath: "external",
+        }),
       ]);
       expect(facts).toEqual([
         expect.objectContaining({
