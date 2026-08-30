@@ -112,6 +112,7 @@ async function execute(command: string): Promise<{ exitCode: number; output: str
 describe("build-once rig provider image runtime", () => {
   test("publishes cold-boot proof only after the exact image marker and checks pass", async () => {
     const commands: string[] = [];
+    const surfaceBindings: Array<Record<string, unknown>> = [];
     const runOwnedSandbox: RigProviderImageColdBootDependencies["runOwnedSandbox"] = async <T>(
       input,
       run,
@@ -166,6 +167,16 @@ describe("build-once rig provider image runtime", () => {
       },
       {
         runOwnedSandbox,
+        runSurfaceValidation: async (input) => {
+          surfaceBindings.push({
+            sandboxGroupId: input.sandboxGroupId,
+            rigVersionId: input.rigVersionId,
+            instanceId: input.established.instanceId,
+            leaseId: input.ownership.leaseId,
+            leaseEpoch: input.ownership.leaseEpoch,
+          });
+          return {} as never;
+        },
         now: () => new Date("2026-08-10T00:00:00.500Z"),
       },
     );
@@ -174,6 +185,15 @@ describe("build-once rig provider image runtime", () => {
     expect(commands[0]).toBe(`test -f '/var/opengeni/rig-setup-content-${"a".repeat(64)}.done'`);
     expect(commands.some((command) => command.includes("opengeni-browserd-up"))).toBe(true);
     expect(commands.some((command) => command.includes("opengeni-terminal-up"))).toBe(true);
+    expect(surfaceBindings).toEqual([
+      {
+        sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+        rigVersionId: VERSION_ID,
+        instanceId: "sb-cold-boot",
+        leaseId: "lease-cold-boot",
+        leaseEpoch: 2,
+      },
+    ]);
     expect(commands.at(-2)).toBe("bash --version");
     expect(commands.at(-1)).toBe("git --version");
   });

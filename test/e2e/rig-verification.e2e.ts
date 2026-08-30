@@ -96,6 +96,20 @@ describe("real Docker rig verification e2e", () => {
     }
     expect(verified.status).toBe("merged");
     expect(verified.verification?.passed).toBe(true);
+    expect(verified.verification?.platformSurfaceValidation).toMatchObject({
+      version: 1,
+      binding: {
+        rigVersionId: rig.activeVersion!.id,
+      },
+      terminal: {
+        status: "passed",
+        cwd: "/workspace",
+        uid: 0,
+        bunVersion: "1.4.0",
+        interactive: true,
+      },
+      browser: { status: "passed" },
+    });
     expect(verified.resultVersionId).toBeString();
 
     const promotedRig = await getRig(db.db, workspaceId, rig.id);

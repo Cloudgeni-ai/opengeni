@@ -160,9 +160,8 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       );
       return true;
     } catch (error) {
-      // Creation already committed. The rig remains fully usable through its
-      // runtime setup fallback and can be re-verified explicitly; never turn a
-      // successful create into an unretryable 5xx because Temporal was down.
+      // Creation already committed, but the version remains inactive. Preserve
+      // the deterministic retry target without mistaking dispatch for proof.
       deps.observability?.warn("initial rig provider-image verification start failed", {
         workspaceId,
         versionId,
@@ -195,10 +194,10 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rig = await createRigForApi({ db }, grant, payload, {
       allowOrganization,
     });
-    if (rig.activeVersion) {
-      const started = await tryStartInitialVersionVerification(workspaceId, rig.activeVersion.id);
-      if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
-    }
+    const [initialVersion] = await listRigVersionsForApi({ db }, workspaceId, rig.id);
+    if (!initialVersion) throw new Error("initial rig version was not persisted");
+    const started = await tryStartInitialVersionVerification(workspaceId, initialVersion.id);
+    if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
     return c.json(rig, 201);
   });
 
@@ -259,6 +258,18 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const started = await tryStartInitialVersionVerification(rig.workspaceId, version.id);
     if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
     return c.json(version, 201);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions/:versionId/verify", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { rig } = await requireRigMutation(c, workspaceId, "rigs:use");
+    const versionId = c.req.param("versionId");
+    const versions = await listRigVersionsForApi({ db }, rig.workspaceId, rig.id);
+    if (!versions.some((version) => version.id === versionId)) {
+      throw new HTTPException(404, { message: "rig version not found" });
+    }
+    await startVersionVerification(rig.workspaceId, versionId);
+    return c.json({ ok: true, versionId }, 202);
   });
 
   // Rollback / promote-activate: flips which existing version is active.

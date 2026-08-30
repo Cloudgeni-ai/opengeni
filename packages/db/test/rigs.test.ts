@@ -14,6 +14,7 @@ import {
   claimSandboxCheckpointArtifactsForGc,
   countRigs,
   countSessionsUsingRig,
+  completeRigVersionVerification,
   createDb,
   createRig,
   createRigChange,
@@ -23,6 +24,7 @@ import {
   deleteRig,
   deleteRigIfNoActiveSessions,
   finalizeRigVersionProviderImageBuild,
+  failRigVersionVerification,
   getRig,
   getRigByName,
   getRigChange,
@@ -137,6 +139,37 @@ function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProvide
           }
         : null,
     ...overrides,
+  };
+}
+
+function surfaceReceipt(versionId: string) {
+  return {
+    version: 1 as const,
+    checkedAt: "2026-08-30T12:00:00.000Z",
+    binding: {
+      leaseId: "11111111-2222-4333-8444-555555555555",
+      sandboxGroupId: versionId,
+      leaseEpoch: 2,
+      workspaceGeneration: 1,
+      instanceId: "sandbox-test",
+      backendId: "modal",
+      rigVersionId: versionId,
+    },
+    terminal: {
+      status: "passed" as const,
+      cwd: "/workspace" as const,
+      uid: 0 as const,
+      bunVersion: "1.4.0" as const,
+      interactive: true as const,
+    },
+    browser: {
+      status: "passed" as const,
+      browserSessionId: "22222222-3333-4444-8555-666666666666",
+      controllerGeneration: "rig-test",
+      targetId: "page-1",
+      observedTargetGeneration: "page-generation-1",
+    },
+    computer: { status: "disabled" as const },
   };
 }
 
@@ -323,6 +356,105 @@ describe("rig CRUD lifecycle", () => {
 });
 
 describe("rig version invariants", () => {
+  test("pending initial/direct versions activate only after an exact receipt", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "verified-activation",
+      initialVerification: {
+        status: "pending",
+        expectedActiveVersionId: null,
+        requestedAt: "2026-08-30T12:00:00.000Z",
+      },
+      activateInitialVersion: false,
+    });
+    expect(rig.activeVersion).toBeNull();
+    const [v1] = await listRigVersions(db, ws.workspaceId, rig.id);
+    expect(v1?.active).toBe(false);
+
+    const initial = await completeRigVersionVerification(db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: v1!.id,
+      receipt: surfaceReceipt(v1!.id),
+    });
+    expect(initial).toMatchObject({ activated: true, stale: false });
+    expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(v1!.id);
+
+    const v2 = await createRigVersion(
+      db,
+      ws.workspaceId,
+      rig.id,
+      { setupScript: "echo v2" },
+      {
+        verification: {
+          status: "pending",
+          expectedActiveVersionId: v1!.id,
+          requestedAt: "2026-08-30T12:01:00.000Z",
+        },
+      },
+    );
+    await failRigVersionVerification(db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: v2.id,
+      error: "browser unsupported",
+    });
+    expect((await getRigVersionById(db, ws.workspaceId, v2.id))?.active).toBe(false);
+    expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(v1!.id);
+
+    const direct = await completeRigVersionVerification(db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: v2.id,
+      receipt: surfaceReceipt(v2.id),
+    });
+    expect(direct).toMatchObject({ activated: true, stale: false });
+    expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(v2.id);
+  });
+
+  test("a passing receipt stays inactive when the active-version CAS is stale", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "stale-verified-activation",
+    });
+    const v1 = rig.activeVersion!;
+    const pending = await createRigVersion(
+      db,
+      ws.workspaceId,
+      rig.id,
+      { setupScript: "echo pending" },
+      {
+        verification: {
+          status: "pending",
+          expectedActiveVersionId: v1.id,
+          requestedAt: "2026-08-30T12:00:00.000Z",
+        },
+      },
+    );
+    const newer = await createRigVersion(
+      db,
+      ws.workspaceId,
+      rig.id,
+      { setupScript: "echo newer" },
+      { activate: true },
+    );
+    const completed = await completeRigVersionVerification(db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: pending.id,
+      receipt: surfaceReceipt(pending.id),
+    });
+    expect(completed).toMatchObject({ activated: false, stale: true });
+    expect((await getRigVersionById(db, ws.workspaceId, pending.id))?.active).toBe(false);
+    expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(newer.id);
+  });
+
   test("createRigVersion mints strictly-monotonic versions under concurrency", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

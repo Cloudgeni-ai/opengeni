@@ -979,6 +979,15 @@ Rigs layer versioned setup and checks on the deployment-owned platform sandbox
 base; they cannot replace that base image. A verified provider-native Rig image
 is only a physical cold-create optimization and never changes the logical lease
 image, workspace archive, session snapshot, or credential authority.
+Initial and manager-authored direct versions are inserted inactive. Their
+verification worker uses one exact leased provider session to prove the
+interactive root Terminal, a real headed BrowserSession, and, when deployment
+policy enables it, a real ComputerSession with native image evidence and a
+benign action. The receipt is fenced to lease epoch, workspace generation,
+provider instance, and Rig version. Activation persists that receipt and flips
+the version in one active-version-CAS transaction; deferred dispatch, enabled
+surface `unsupported`, binding drift, invalid evidence, and cleanup failure all
+leave the version inactive.
 
 Sandbox snapshots and provider-native checkpoints are recovery artifacts, not
 session history. Capturing a workspace requires proof that no unaccounted writer

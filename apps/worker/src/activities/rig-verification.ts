@@ -23,9 +23,11 @@ import {
   acquireLease,
   beginRigChangeVerificationAttempt,
   claimRigVersionProviderImageBuild,
+  completeRigVersionVerification,
   commitWarmingToWarm,
   failWarmingToCold,
   finalizeRigVersionProviderImageBuild,
+  failRigVersionVerification,
   getRig,
   getRigChange,
   getRigVersionById,
@@ -62,6 +64,7 @@ import type { ControlActivityServices } from "./types";
 import { rigProviderImageSourceImage } from "./sandbox-images";
 import { resolveWorkspacePackRuntime, type WorkspacePackRuntime } from "./packs";
 import { currentActivityContext } from "./streaming";
+import { runRigPlatformSurfaceValidation } from "./rig-platform-surface-validation";
 
 type RigSetupHook = typeof import("@opengeni/runtime").runRigSetupHook;
 let rigSetupHookPromise: Promise<RigSetupHook> | null = null;
@@ -98,9 +101,6 @@ export type RigPlatformCheckResult = CommandResult & RigCheck;
 export function rigPlatformChecksForSettings(
   settings: ControlActivityServices["settings"],
 ): RigCheck[] {
-  const backend = settings.sandboxBackend as SandboxBackend;
-  if (!rigProviderImageSourceImage(settings, backend)) return [];
-
   const checks: RigCheck[] = [
     {
       name: "opengeni-platform-browser",
@@ -923,11 +923,13 @@ function rigProviderImageContentMarker(
 
 export type RigProviderImageColdBootDependencies = {
   runOwnedSandbox: typeof runWithOwnedRigVerificationSandbox;
+  runSurfaceValidation: typeof runRigPlatformSurfaceValidation;
   now: () => Date;
 };
 
 const defaultRigProviderImageColdBootDependencies: RigProviderImageColdBootDependencies = {
   runOwnedSandbox: runWithOwnedRigVerificationSandbox,
+  runSurfaceValidation: runRigPlatformSurfaceValidation,
   now: () => new Date(),
 };
 
@@ -991,6 +993,16 @@ export async function verifyRigProviderImageColdBoot(
           );
         }
       }
+      await dependencies.runSurfaceValidation({
+        settings: input.settings,
+        db: input.db,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.buildRequestId,
+        rigVersionId: input.rigVersionId,
+        established,
+        commandRunner: runContext.commandRunner,
+        ownership: runContext.ownership,
+      });
       for (const check of input.checks) {
         const result = await runCommand(
           established.session as TurnSandboxCommandSession,
@@ -1460,6 +1472,16 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 runContext.commandRunner,
               );
               verification.platformCheckResults = platformCheckResults;
+              verification.platformSurfaceValidation = await runRigPlatformSurfaceValidation({
+                settings: runSettings,
+                db,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: change.id,
+                rigVersionId: candidateVersion.id,
+                established,
+                commandRunner: runContext.commandRunner,
+                ownership: runContext.ownership,
+              });
               const checkResults = await runRigChecks(
                 established.session as TurnSandboxCommandSession,
                 candidateVersion.checks,
@@ -1622,6 +1644,16 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 settings.rigSetupTimeoutMs,
                 runContext.commandRunner,
               );
+              const platformSurfaceValidation = await runRigPlatformSurfaceValidation({
+                settings: runSettings,
+                db,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: version.id,
+                rigVersionId: version.id,
+                established,
+                commandRunner: runContext.commandRunner,
+                ownership: runContext.ownership,
+              });
               const checkResults = await runRigChecks(
                 established.session as TurnSandboxCommandSession,
                 version.checks,
@@ -1647,6 +1679,22 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     signal: runContext.signal,
                   })
                 : null;
+              const activation = passed
+                ? await completeRigVersionVerification(db, {
+                    workspaceId: input.workspaceId,
+                    rigId: rig.id,
+                    versionId: version.id,
+                    receipt: platformSurfaceValidation,
+                  })
+                : null;
+              if (!passed) {
+                await failRigVersionVerification(db, {
+                  workspaceId: input.workspaceId,
+                  rigId: rig.id,
+                  versionId: version.id,
+                  error: "one or more mandatory Rig checks failed",
+                });
+              }
               await recordRigAuditEvent(db, {
                 grant,
                 action: passed ? "rig.verification.passed" : "rig.verification.failed",
@@ -1657,16 +1705,34 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   finishedAt: new Date().toISOString(),
                   passed,
                   platformCheckResults,
+                  platformSurfaceValidation,
                   checkResults,
                   providerImage,
+                  activated: activation?.activated ?? false,
+                  stale: activation?.stale ?? false,
                 },
               });
+              if (activation?.activated) {
+                await recordRigAuditEvent(db, {
+                  grant,
+                  action: "rig.version.activated",
+                  rigId: rig.id,
+                  metadata: {
+                    versionId: version.id,
+                    version: version.version,
+                    verification: true,
+                  },
+                });
+              }
               return {
                 versionId: version.id,
                 passed,
                 platformCheckResults,
+                platformSurfaceValidation,
                 checkResults,
                 providerImage,
+                activated: activation?.activated ?? false,
+                stale: activation?.stale ?? false,
               };
             },
           );
@@ -1676,6 +1742,12 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           // re-run instead of staying stale, symmetric to verifyRigChange. Then
           // rethrow so the Temporal activity still surfaces the failure.
           const detail = error instanceof Error ? error.message : String(error);
+          await failRigVersionVerification(db, {
+            workspaceId: input.workspaceId,
+            rigId: rig.id,
+            versionId: version.id,
+            error: detail,
+          }).catch(() => undefined);
           await recordRigAuditEvent(db, {
             grant,
             action: "rig.verification.failed",

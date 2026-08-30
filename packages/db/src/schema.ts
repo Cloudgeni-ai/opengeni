@@ -11,6 +11,7 @@ import type {
   McpServerConnectionRef,
   ModelContextContributionSummary,
   RigProviderImages,
+  RigPlatformSurfaceValidationReceipt,
   SessionMcpApprovalPolicy,
   SessionGoalChangeKind,
   SessionGoalMutationPolicy,
@@ -67,6 +68,26 @@ const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
 const opengeniPrivateSchema = pgSchema("opengeni_private");
 
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
+
+export type RigVersionVerificationState =
+  | { status: "unverified" }
+  | {
+      status: "pending";
+      expectedActiveVersionId: string | null;
+      requestedAt: string;
+    }
+  | {
+      status: "passed";
+      expectedActiveVersionId: string | null;
+      verifiedAt: string;
+      receipt: RigPlatformSurfaceValidationReceipt;
+    }
+  | {
+      status: "failed";
+      expectedActiveVersionId: string | null;
+      verifiedAt: string;
+      error: string;
+    };
 
 export type ConnectorActionPolicySnapshotEntry = {
   id: string;
@@ -12474,6 +12495,13 @@ export const rigVersions = pgTable(
     // it never contains credentials, variable values, repositories, archives,
     // session state, or process state.
     providerImages: jsonb("provider_images").$type<RigProviderImages>().notNull().default({}),
+    // Operational fail-closed activation state. Definition content stays
+    // immutable; only an exact platform-surface receipt can move a pending
+    // initial/direct version to passed and therefore make it activatable.
+    verification: jsonb("verification")
+      .$type<RigVersionVerificationState>()
+      .notNull()
+      .default({ status: "unverified" }),
     createdBy: text("created_by"),
     active: boolean("active").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
