@@ -36,6 +36,7 @@ import {
   listRigVersions,
   listRigs,
   markSandboxCheckpointArtifactDeletePending,
+  nestedPostgresSqlState,
   registerSandboxCheckpointArtifact,
   RigActiveVersionChangedError,
   RigChangeTransitionError,
@@ -603,8 +604,9 @@ describe("rig version invariants", () => {
       for each row execute function opengeni_test_fail_rig_verification_audit();
     `);
     try {
-      await expect(
-        completeRigVersionVerification(db, {
+      let completionFailure: unknown;
+      try {
+        await completeRigVersionVerification(db, {
           workspaceId: ws.workspaceId,
           rigId: rig.id,
           versionId: candidate.id,
@@ -618,8 +620,12 @@ describe("rig version invariants", () => {
               passed: true,
             },
           },
-        }),
-      ).rejects.toThrow("synthetic Rig verification audit failure");
+        });
+      } catch (error) {
+        completionFailure = error;
+      }
+      expect(completionFailure).toBeInstanceOf(Error);
+      expect(nestedPostgresSqlState(completionFailure)).toBe("P0001");
 
       expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(originalActiveId);
       const afterRollback = await shared!.admin<
