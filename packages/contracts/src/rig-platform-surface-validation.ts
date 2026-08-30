@@ -73,3 +73,22 @@ export const RigPlatformSurfaceValidationReceipt = z
 export type RigPlatformSurfaceValidationReceipt = z.infer<
   typeof RigPlatformSurfaceValidationReceipt
 >;
+
+/** Server trust-boundary projection for a change whose platform receipt may be
+ * used for promotion. The public RigChange verification bag stays open-ended;
+ * promotion code must parse this strict projection before trusting the receipt. */
+export const RigChangePlatformSurfaceValidationTarget = z
+  .object({
+    id: z.string().uuid(),
+    baseVersionId: z.string().uuid(),
+    verification: z
+      .object({
+        passed: z.literal(true),
+        platformSurfaceValidation: RigPlatformSurfaceValidationReceipt,
+      })
+      .passthrough(),
+  })
+  .passthrough();
+export type RigChangePlatformSurfaceValidationTarget = z.infer<
+  typeof RigChangePlatformSurfaceValidationTarget
+>;

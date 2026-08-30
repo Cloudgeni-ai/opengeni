@@ -19,7 +19,6 @@ import {
   SessionGoalStatus,
   SessionStatus,
 } from "./session-topology-primitives";
-import type { RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptValue } from "./rig-platform-surface-validation";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -8106,9 +8105,7 @@ export const RigChangeVerification = z
     checkResults: z.array(RigCheckResult).optional(),
   })
   .passthrough();
-export type RigChangeVerification = z.infer<typeof RigChangeVerification> & {
-  platformSurfaceValidation?: RigPlatformSurfaceValidationReceiptValue;
-};
+export type RigChangeVerification = z.infer<typeof RigChangeVerification>;
 
 export const RigChange = z.object({
   id: z.string().uuid(),

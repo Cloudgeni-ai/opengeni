@@ -11,7 +11,10 @@ import {
   RigVersion,
   UpdateRigRequest,
 } from "../src/index";
-import { RigPlatformSurfaceValidationReceipt } from "../src/rig-platform-surface-validation";
+import {
+  RigChangePlatformSurfaceValidationTarget,
+  RigPlatformSurfaceValidationReceipt,
+} from "../src/rig-platform-surface-validation";
 
 describe("rig contracts", () => {
   test("RigCheck requires a non-empty name and command", () => {
@@ -138,6 +141,33 @@ describe("rig contracts", () => {
     ).toBe(false);
     expect(
       RigPlatformSurfaceValidationReceipt.safeParse({ ...receipt, unexpected: true }).success,
+    ).toBe(false);
+
+    const change = {
+      id: "44444444-5555-4666-8777-888888888888",
+      rigId: "55555555-6666-4777-8888-999999999999",
+      baseVersionId: receipt.binding.rigVersionId,
+      kind: "setup_append",
+      payload: { command: "true" },
+      status: "proposed",
+      proposedBy: "session:test",
+      verification: { passed: true, platformSurfaceValidation: receipt },
+      resultVersionId: null,
+      createdAt: receipt.checkedAt,
+      updatedAt: receipt.checkedAt,
+    };
+    expect(RigChangePlatformSurfaceValidationTarget.safeParse(change).success).toBe(true);
+    expect(
+      RigChangePlatformSurfaceValidationTarget.safeParse({
+        ...change,
+        verification: {
+          passed: true,
+          platformSurfaceValidation: {
+            ...receipt,
+            terminal: { ...receipt.terminal, bunVersion: "1.4.1" },
+          },
+        },
+      }).success,
     ).toBe(false);
   });
 

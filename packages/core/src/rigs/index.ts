@@ -4,7 +4,7 @@
 // the raw RLS-scoped persistence lives in @opengeni/db. M4 adds verification /
 // auto-merge / promotion on top of the change substrate created here.
 
-import { RigPlatformSurfaceValidationReceipt } from "@opengeni/contracts/rig-platform-surface-validation";
+import { RigChangePlatformSurfaceValidationTarget } from "@opengeni/contracts/rig-platform-surface-validation";
 import type {
   AccessGrant,
   CreateRigRequest,
@@ -424,23 +424,22 @@ function requirePlatformSurfaceValidation(change: RigChange) {
       message: "rig change must pass verification before promote",
     });
   }
-  const parsed = RigPlatformSurfaceValidationReceipt.safeParse(
-    change.verification.platformSurfaceValidation,
-  );
+  const parsed = RigChangePlatformSurfaceValidationTarget.safeParse(change);
   if (!parsed.success) {
     throw new HTTPException(422, {
       message: "rig change has no exact passing platform-surface validation receipt",
     });
   }
+  const receipt = parsed.data.verification.platformSurfaceValidation;
   if (
-    parsed.data.binding.sandboxGroupId !== change.id ||
-    parsed.data.binding.rigVersionId !== change.baseVersionId
+    receipt.binding.sandboxGroupId !== change.id ||
+    receipt.binding.rigVersionId !== change.baseVersionId
   ) {
     throw new HTTPException(422, {
       message: "rig change platform-surface receipt targets another verification sandbox",
     });
   }
-  return parsed.data;
+  return receipt;
 }
 
 async function promoteChangeWithActiveCas(
