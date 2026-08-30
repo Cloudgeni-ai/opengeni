@@ -24,6 +24,13 @@ data:
               static_configs:
                 - targets:
                     - {{ include "opengeni.fullname" . }}-api:{{ .Values.api.service.port }}
+            {{- if and .Values.appHost.enabled ((.Values.observability).metrics).enabled }}
+            - job_name: opengeni-app-host
+              metrics_path: {{ ((.Values.observability).metrics).path }}
+              static_configs:
+                - targets:
+                    - {{ include "opengeni.fullname" . }}-app-host:{{ .Values.appHost.metricsPort }}
+            {{- end }}
     processors:
       batch: {}
       memory_limiter:

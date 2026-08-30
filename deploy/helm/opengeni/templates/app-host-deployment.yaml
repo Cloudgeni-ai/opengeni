@@ -65,11 +65,19 @@ spec:
           ports:
             - name: http
               containerPort: {{ $appHost.containerPort }}
+            {{- if ((.Values.observability).metrics).enabled }}
+            - name: metrics
+              containerPort: {{ $appHost.metricsPort }}
+            {{- end }}
           env:
             - name: OPENGENI_APP_HOST_HOST
               value: 0.0.0.0
             - name: OPENGENI_APP_HOST_PORT
               value: {{ $appHost.containerPort | quote }}
+            - name: OPENGENI_APP_HOST_METRICS_PORT
+              value: {{ $appHost.metricsPort | quote }}
+            - name: OPENGENI_APP_HOST_METRICS_PATH
+              value: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
             - name: OPENGENI_APP_HOST_RESOLVER_URL
               value: {{ $resolverUrl | quote }}
             - name: OPENGENI_APP_HOST_RESOLVER_TIMEOUT_MS
@@ -87,6 +95,10 @@ spec:
               value: {{ index .Values.config "OPENGENI_ENVIRONMENT" | quote }}
             - name: OPENGENI_DEPLOYMENT_REVISION
               value: {{ index .Values.config "OPENGENI_DEPLOYMENT_REVISION" | quote }}
+            - name: OPENGENI_OBSERVABILITY_STRUCTURED_LOGS
+              value: {{ .Values.observability.structuredLogs | quote }}
+            - name: OPENGENI_OBSERVABILITY_METRICS_ENABLED
+              value: {{ ((.Values.observability).metrics).enabled | quote }}
             - name: OPENGENI_SANDBOX_BACKEND
               value: none
             {{- if or .Values.garage.enabled .Values.minio.enabled }}

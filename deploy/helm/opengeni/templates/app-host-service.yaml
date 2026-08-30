@@ -6,6 +6,12 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: app-host
+  {{- if ((.Values.observability).metrics).enabled }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
+    prometheus.io/port: {{ .Values.appHost.metricsPort | quote }}
+  {{- end }}
 spec:
   type: {{ .Values.appHost.service.type }}
   ports:
@@ -13,6 +19,12 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    {{- if ((.Values.observability).metrics).enabled }}
+    - port: {{ .Values.appHost.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+    {{- end }}
   selector:
     {{- include "opengeni.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: app-host

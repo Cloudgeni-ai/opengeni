@@ -25,6 +25,24 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.appHost.containerPort }}
+    {{- if and ((.Values.observability).metrics).enabled (or ((.Values.observability).collector).enabled .Values.networkPolicy.monitoring) }}
+    - from:
+        {{- if ((.Values.observability).collector).enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: otel-collector
+        {{- end }}
+        {{- with .Values.networkPolicy.monitoring }}
+        - namespaceSelector:
+            {{- toYaml .namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .podSelector | nindent 12 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.appHost.metricsPort }}
+    {{- end }}
   {{- if .Values.networkPolicy.egress.enabled }}
   egress:
     {{- if .Values.api.enabled }}

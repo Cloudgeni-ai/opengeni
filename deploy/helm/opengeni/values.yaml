@@ -271,6 +271,9 @@ appHost:
     - bun
     - apps/app-host/dist/process/process.js
   containerPort: 8080
+  # Internal-only Prometheus listener. The Apps ingress targets only service.port;
+  # ServiceMonitor/collector traffic uses this separate port.
+  metricsPort: 9090
   resolverUrl: ""
   resolverTimeoutMs: 2000
   frameAncestors: []
@@ -291,9 +294,11 @@ appHost:
       memory: 512Mi
   podSecurityContext:
     runAsNonRoot: true
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
   securityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
@@ -1240,7 +1245,7 @@ observability:
     enabled: true
     path: /metrics
   serviceMonitor:
-    # Optional Prometheus Operator ServiceMonitors for api/worker/relay. The
+    # Optional Prometheus Operator ServiceMonitors for api/worker/relay/app-host. The
     # template is also guarded on monitoring.coreos.com/v1 being installed.
     enabled: false
     interval: 30s

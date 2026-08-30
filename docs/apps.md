@@ -163,6 +163,18 @@ provider. `appHost.credentialsSecret` may select a dedicated Secret; only the
 named keys are projected, never the complete Secret. Rotate the resolver key
 on both the API adapter and app-host pods as one deployment operation.
 
+Prometheus metrics use a separate internal listener (`appHost.metricsPort`,
+default `9090`). The app-host ServiceMonitor and optional chart collector scrape
+that named port; the public Apps Ingress targets only `appHost.service.port`.
+When NetworkPolicy is enabled, configure `networkPolicy.monitoring` for an
+external Prometheus namespace/pod selector. The chart admits its own optional
+collector explicitly. Do not add a public ingress route for `/metrics`.
+
+App-host HTTP metrics deliberately collapse launch URLs to the fixed route
+label `/.opengeni/launch/:token/:path` and non-contract paths to `/other`.
+Labels never contain an App id, workspace id, launch token or digest, hostname,
+release-relative path, object key, provider version, or error text.
+
 When NetworkPolicy egress isolation is enabled, the chart allows the in-chart
 API and selected Garage/MinIO fixture. Operators must add
 `networkPolicy.egress.rules` for cluster DNS, an external resolver URL, or
@@ -210,6 +222,8 @@ Before enabling public traffic, verify:
   rejected before object storage is touched;
 - replaying a signed staging PUT after finalization does not change bytes served
   from the frozen launch key;
+- the app-host ServiceMonitor is healthy on the internal metrics port while the
+  public Apps origin does not expose `/metrics`;
 - the app-host pod has no database, model, browser, deployment-access, or broad
   runtime Secret environment; and
 - storage IAM cannot list, write, overwrite, or delete objects.

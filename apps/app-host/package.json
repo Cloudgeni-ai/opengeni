@@ -13,6 +13,7 @@
   "dependencies": {
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/observability": "workspace:*",
     "@opengeni/storage": "workspace:*"
   },
   "devDependencies": {
