@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import type {
+  AppBuildManifest,
   AppRuntimeToolCallResponse,
   PrepareAppBuildResponse,
   WorkspaceAppDetailResponse,
@@ -49,6 +50,8 @@ import {
   settleAppToolCall,
   unpublishWorkspaceApp,
   updateWorkspaceApp,
+  type AppBuildFrozenFileReceipt,
+  type AppBuildStoragePlan,
   type Database,
 } from "@opengeni/db";
 import { createImmutableRawObjectReader, type ObjectStorage } from "@opengeni/storage";
@@ -365,6 +368,7 @@ export function createDatabaseAppsApplication(input: {
     },
 
     async prepareBuild({ authority, appId, request }) {
+      const manifestBytes = verifiedAppBuildManifestBytes(request.manifest, request.manifestSha256);
       const objectStore = storage();
       const buildId = stableUuid("build", authority.workspaceId, request.idempotencyKey);
       const fileObjects = request.manifest.files.map((file) => {
@@ -410,11 +414,6 @@ export function createDatabaseAppsApplication(input: {
           idempotencyKey: request.idempotencyKey,
         }),
       );
-      const manifestBytes = new TextEncoder().encode(JSON.stringify(request.manifest));
-      const actualManifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
-      if (actualManifestSha256 !== request.manifestSha256) {
-        throw new HTTPException(422, { message: "App build manifest digest does not match" });
-      }
       if (!objectStore.putObjectIfAbsent) {
         throw new HTTPException(503, {
           message: "Apps immutable manifest storage is not supported by this provider",
@@ -483,6 +482,23 @@ export function createDatabaseAppsApplication(input: {
           buildId,
         }),
       );
+      const preflight = preflightAppBuildCompletion(plan, request.expectedManifestSha256);
+      if (preflight.kind === "replay") {
+        return await appPersistence(() =>
+          completeAppBuild(input.db, {
+            accountId: authority.accountId,
+            workspaceId: authority.workspaceId,
+            actorSubjectId: authority.subjectId,
+            appId,
+            buildId,
+            expectedManifestSha256: request.expectedManifestSha256,
+            frozenFiles: preflight.frozenFiles,
+            manifestVersionToken: preflight.manifestVersionToken,
+            receiptDigest: preflight.receiptDigest,
+            idempotencyKey: request.idempotencyKey,
+          }),
+        );
+      }
       const frozen = await freezeAppBuildObjects({
         ...immutablePorts(objectStore),
         workspaceId: authority.workspaceId,
@@ -994,6 +1010,58 @@ export function assertAppSourceCompletionIdentity(
       message: "App source upload identity changed",
     });
   }
+}
+
+export function verifiedAppBuildManifestBytes(
+  manifest: AppBuildManifest,
+  expectedManifestSha256: string,
+): Uint8Array {
+  const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
+  const actualManifestSha256 = createHash("sha256").update(manifestBytes).digest("hex");
+  if (actualManifestSha256 !== expectedManifestSha256) {
+    throw new HTTPException(422, { message: "App build manifest digest does not match" });
+  }
+  return manifestBytes;
+}
+
+type AppBuildCompletionPreflight =
+  | Readonly<{ kind: "verify" }>
+  | Readonly<{
+      kind: "replay";
+      frozenFiles: AppBuildFrozenFileReceipt[];
+      manifestVersionToken: string;
+      receiptDigest: string;
+    }>;
+
+export function preflightAppBuildCompletion(
+  plan: Pick<AppBuildStoragePlan, "build" | "files" | "manifestVersionToken">,
+  expectedManifestSha256: string,
+): AppBuildCompletionPreflight {
+  if (plan.build.manifestSha256 !== expectedManifestSha256) {
+    throw new HTTPException(409, { message: "App build manifest changed" });
+  }
+  if (["queued", "running", "uploading", "verifying"].includes(plan.build.status)) {
+    return { kind: "verify" };
+  }
+  if (plan.build.status !== "succeeded") {
+    throw new HTTPException(422, { message: "App build is already settled" });
+  }
+  if (
+    !plan.manifestVersionToken ||
+    !plan.build.receiptDigest ||
+    plan.files.some((file) => !file.frozenVersionToken)
+  ) {
+    throw new HTTPException(422, { message: "Completed App build receipts are incomplete" });
+  }
+  return {
+    kind: "replay",
+    frozenFiles: plan.files.map((file) => ({
+      fileId: file.id,
+      frozenVersionToken: file.frozenVersionToken!,
+    })),
+    manifestVersionToken: plan.manifestVersionToken,
+    receiptDigest: plan.build.receiptDigest,
+  };
 }
 
 function equalDigest(actual: string, expected: string): boolean {
