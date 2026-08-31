@@ -1,5 +1,21 @@
 # @opengeni/db
 
+## 3.7.2
+
+### Patch Changes
+
+- 3a7fe2f: Reconcile retained-process terminal settlement races without leaving completed routes pinned.
+- 4fb337b: Reconcile stale Codex quota cooldowns from authoritative live usage without clearing generic rate limits or concurrently newer refusals.
+- 478f572: Harden organization API keys with explicit credential provenance, fail-closed revocation of ambiguous legacy account keys, bounded delegation, atomic organization-key and workspace limits, and safer rotation and one-time-secret UI behavior.
+- 5b9acd1: Make session attention monotonic across rapid navigation and nested trees. Failed sessions now remain red only until the viewer or their parent agent acknowledges the latest event, while historical failure lifecycle state remains intact.
+- Updated dependencies [59b286a]
+- Updated dependencies [4fb337b]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+  - @opengeni/codemode@0.4.22
+
 ## 3.7.1
 
 ### Patch Changes

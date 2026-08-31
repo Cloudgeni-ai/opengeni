@@ -8,6 +8,8 @@ export type SessionBranchPage = {
   channelGenerations: ReadonlyMap<string, number>;
   nextCursor: string | null;
   loading: boolean;
+  /** Whether this load cycle may paint loading or retry feedback in the tree. */
+  feedbackVisible: boolean;
   failed: boolean;
   stale: boolean;
   requestId: number | null;
@@ -75,6 +77,7 @@ export function upsertSessionBranchChild(
     channelGenerations: page?.channelGenerations ?? new Map(),
     nextCursor: page?.nextCursor ?? null,
     loading: page?.loading ?? false,
+    feedbackVisible: page?.feedbackVisible ?? false,
     failed: page?.failed ?? false,
     stale: page?.stale ?? false,
     requestId: page?.requestId ?? null,
@@ -88,6 +91,7 @@ export function beginSessionBranchRequest(
   parentSessionId: string,
   requestId: number,
   cursor?: string,
+  options: { feedbackVisible?: boolean | undefined } = {},
 ): ReadonlyMap<string, SessionBranchPage> {
   const previous = pages.get(parentSessionId);
   return new Map(pages).set(parentSessionId, {
@@ -95,6 +99,7 @@ export function beginSessionBranchRequest(
     channelGenerations: previous?.channelGenerations ?? new Map(),
     nextCursor: previous?.nextCursor ?? null,
     loading: true,
+    feedbackVisible: options.feedbackVisible ?? true,
     failed: false,
     stale: false,
     requestId,
@@ -109,7 +114,7 @@ export function commitSessionBranchPage(
   input: { sessions: readonly Session[]; nextCursor: string | null },
   options: {
     append?: boolean;
-    preserve?: readonly Session[];
+    preserve?: readonly Session[] | undefined;
     requestId?: number;
     readGeneration?: number;
   } = {},
@@ -147,6 +152,7 @@ export function commitSessionBranchPage(
     channelGenerations,
     nextCursor: input.nextCursor,
     loading: false,
+    feedbackVisible: false,
     failed: false,
     stale: false,
     requestId: null,
@@ -167,7 +173,7 @@ export function authoritativeSessionBranchChannels(
   return evidence;
 }
 
-/** Fail only the still-current request and retain its exact retry cursor. */
+/** Fail only the still-current request and expose its exact retry cursor. */
 export function failSessionBranchRequest(
   pages: ReadonlyMap<string, SessionBranchPage>,
   parentSessionId: string,
@@ -178,10 +184,19 @@ export function failSessionBranchRequest(
   return new Map(pages).set(parentSessionId, {
     ...previous,
     loading: false,
+    // Background hydration may suppress transient loading feedback, but a
+    // failure must become actionable instead of leaving the branch silently
+    // incomplete for the rest of the active route.
+    feedbackVisible: true,
     failed: true,
     stale: false,
     requestId: null,
   });
+}
+
+/** A fresh cached page already owns the active child's parent branch. */
+export function sessionBranchNeedsHydration(page: SessionBranchPage | undefined): boolean {
+  return page === undefined || page.failed || page.stale;
 }
 
 /** Decide whether a changed parent summary can be acknowledged right now. */

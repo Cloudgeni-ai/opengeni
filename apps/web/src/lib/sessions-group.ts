@@ -470,6 +470,28 @@ export function sessionCreatorOptions(sessions: Session[]): SessionCreatorOption
   return [...sessionCreatorLabelMap(sessions)].map(([value, label]) => ({ value, label }));
 }
 
+/** Drop a flat-search creator selection that is not valid for hierarchical browse roots. */
+export function normalizeSessionBrowseCreator(
+  creator: string | null,
+  creatorLabels: ReadonlyMap<string, string>,
+  hierarchical: boolean,
+): string | null {
+  if (!hierarchical || !creator || creatorLabels.has(creator)) return creator;
+  return null;
+}
+
+/** Count matching rows in flat search, or matching workstream roots in hierarchical browse. */
+export function sessionBrowseResultCount(
+  sessions: readonly Session[],
+  hierarchical: boolean,
+): number {
+  if (!hierarchical) return sessions.length;
+  const loadedIds = new Set(sessions.map((session) => session.id));
+  return sessions.filter(
+    (session) => !session.parentSessionId || !loadedIds.has(session.parentSessionId),
+  ).length;
+}
+
 function browseTimestamp(session: Session, field: SessionBrowseDateField): number {
   if (field === "activity") return sessionActivityTime(session);
   const created = Date.parse(session.createdAt);
@@ -482,6 +504,8 @@ export function filterSessionsForBrowse(
     creator: string | null;
     dateField: SessionBrowseDateField;
     dateRange: SessionBrowseDateRange;
+    /** Filter whole loaded workstreams by their root instead of orphaning descendants. */
+    hierarchical?: boolean;
     now?: Date;
   },
 ): Session[] {
@@ -495,16 +519,43 @@ export function filterSessionsForBrowse(
         : options.dateRange === "month"
           ? startOfToday - 29 * 24 * 60 * 60 * 1000
           : null;
-  return sessions.filter(
-    (session) =>
-      (!options.creator || sessionCreatorKey(session) === options.creator) &&
-      (threshold === null || browseTimestamp(session, options.dateField) >= threshold),
-  );
+  const matches = (session: Session): boolean =>
+    (!options.creator || sessionCreatorKey(session) === options.creator) &&
+    (threshold === null || browseTimestamp(session, options.dateField) >= threshold);
+  if (!options.hierarchical) return sessions.filter(matches);
+
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const rootById = new Map<string, Session>();
+  const hierarchyRoot = (session: Session): Session => {
+    const cached = rootById.get(session.id);
+    if (cached) return cached;
+
+    const path: Session[] = [];
+    const seen = new Set<string>();
+    let current = session;
+    while (current.parentSessionId) {
+      if (seen.has(current.id)) {
+        // A pathological cycle has no meaningful root. Fall back to direct
+        // row filtering so every member stays independently reachable.
+        return session;
+      }
+      seen.add(current.id);
+      path.push(current);
+      const parent = byId.get(current.parentSessionId);
+      if (!parent) break;
+      current = parent;
+    }
+    rootById.set(current.id, current);
+    for (const member of path) rootById.set(member.id, current);
+    return current;
+  };
+
+  return sessions.filter((session) => matches(hierarchyRoot(session)));
 }
 
-/** Flat browse projection used only when the operator selects custom grouping. */
-export function groupSessionsForBrowse(
-  sessions: Session[],
+/** Regroup already-built workstream roots without flattening their descendants. */
+export function groupSessionForestForBrowse(
+  forest: SessionForest,
   groupBy: Exclude<SessionBrowseGroupBy, "activity">,
   options: {
     now?: Date;
@@ -512,17 +563,17 @@ export function groupSessionsForBrowse(
   } = {},
 ): SessionForest {
   const now = options.now ?? new Date();
-  const running = sessions
-    .filter(isEffectivelyRunning)
-    .sort(compareSessionActivity)
-    .map((session) => ({ session, children: [], hasActiveDescendant: false }));
-  const rest = sessions.filter((session) => !isEffectivelyRunning(session));
+  const roots = forestRoots(forest);
+  const running = roots
+    .filter(nodeIsActive)
+    .sort((left, right) => compareSessionActivity(left.session, right.session));
+  const rest = roots.filter((node) => !nodeIsActive(node));
   if (groupBy === "created") {
-    const buckets = new Map<SessionRecencyGroup, Session[]>();
-    for (const session of rest) {
-      const group = recencyGroupFor(browseTimestamp(session, "created"), now);
+    const buckets = new Map<SessionRecencyGroup, SessionTreeNode[]>();
+    for (const node of rest) {
+      const group = recencyGroupFor(browseTimestamp(node.session, "created"), now);
       const list = buckets.get(group) ?? [];
-      list.push(session);
+      list.push(node);
       buckets.set(group, list);
     }
     return {
@@ -542,27 +593,28 @@ export function groupSessionsForBrowse(
           {
             group: `created:${group}`,
             label,
-            sessions: list
-              .sort(
-                (left, right) =>
-                  browseTimestamp(right, "created") - browseTimestamp(left, "created"),
-              )
-              .map((session) => ({ session, children: [], hasActiveDescendant: false })),
+            sessions: list.sort(
+              (left, right) =>
+                browseTimestamp(right.session, "created") -
+                  browseTimestamp(left.session, "created") ||
+                right.session.id.localeCompare(left.session.id),
+            ),
           },
         ];
       }),
     };
   }
 
-  const creatorLabels = options.creatorLabels ?? sessionCreatorLabelMap(sessions);
-  const creators = new Map<string, { label: string; sessions: Session[] }>();
-  for (const session of rest) {
-    const key = sessionCreatorKey(session);
+  const creatorLabels =
+    options.creatorLabels ?? sessionCreatorLabelMap(roots.map((node) => node.session));
+  const creators = new Map<string, { label: string; sessions: SessionTreeNode[] }>();
+  for (const node of rest) {
+    const key = sessionCreatorKey(node.session);
     const bucket = creators.get(key) ?? {
-      label: creatorLabels.get(key) ?? sessionCreatorLabel(session),
+      label: creatorLabels.get(key) ?? sessionCreatorLabel(node.session),
       sessions: [],
     };
-    bucket.sessions.push(session);
+    bucket.sessions.push(node);
     creators.set(key, bucket);
   }
   return {
@@ -572,13 +624,23 @@ export function groupSessionsForBrowse(
       .map(([key, bucket]) => ({
         group: `creator:${key}`,
         label: bucket.label,
-        sessions: bucket.sessions.sort(compareSessionActivity).map((session) => ({
-          session,
-          children: [],
-          hasActiveDescendant: false,
-        })),
+        sessions: bucket.sessions.sort((left, right) =>
+          compareSessionActivity(left.session, right.session),
+        ),
       })),
   };
+}
+
+/** Build and regroup a loaded session set while preserving its lineage tree. */
+export function groupSessionsForBrowse(
+  sessions: Session[],
+  groupBy: Exclude<SessionBrowseGroupBy, "activity">,
+  options: {
+    now?: Date;
+    creatorLabels?: ReadonlyMap<string, string>;
+  } = {},
+): SessionForest {
+  return groupSessionForestForBrowse(buildRailForest(sessions, options.now), groupBy, options);
 }
 
 export type PinnedRailSections = {
@@ -915,11 +977,9 @@ function forestRoots(forest: SessionForest): SessionTreeNode[] {
  * Rows as the rail will actually render them.
  *
  * Hierarchy mode nests spawned sessions under their parent, so lineage stays.
- * Search results and browse groupings are deliberately flat - a partial match
- * set is not a tree, and a browse bucket is a list - so every row there IS
- * top-level and must say so. Both flat consumers (`buildPinnedRailSections`
- * and `groupSessionsForBrowse`) read this one projection; a row that renders at
- * the top level while still naming an absent parent is the bug this prevents.
+ * Search results are deliberately flat because a partial match set is not a
+ * tree, so every result there IS top-level and must say so. A row that renders
+ * at the top level while still naming an absent parent is the bug this prevents.
  */
 export function projectRailSessions(sessions: Session[], hierarchyMode: boolean): Session[] {
   return hierarchyMode

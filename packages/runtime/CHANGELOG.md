@@ -1,5 +1,22 @@
 # @opengeni/runtime
 
+## 2.0.1
+
+### Patch Changes
+
+- 59b286a: Add optional Modal CPU and memory reservations and preserve them through sandbox creation, exact resume, and snapshot replacement.
+- 3a7fe2f: Reconcile retained-process terminal settlement races without leaving completed routes pinned.
+- 7e67729: Prevent parent agents from duplicating delegated work. Child creation now requires an independent integration plan, and `session_wait` can ignore messages, goal/progress events, maintenance turns, and continuation segments until a child produces a result-bearing final turn or blocks.
+- 9b844c8: Recover Modal command starts that fail on task-router DNS before connecting, while leaving generic unavailable, HTTP-status-bearing, mixed-tool, and sandbox-shutdown failures non-retryable.
+- Updated dependencies [59b286a]
+- Updated dependencies [4fb337b]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+  - @opengeni/sdk@3.3.2
+  - @opengeni/codemode@0.4.22
+
 ## 2.0.0
 
 ### Major Changes

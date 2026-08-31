@@ -5,26 +5,150 @@
 import { useChannels, useWorkspaceSessions } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import { ChevronRightIcon } from "lucide-react";
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { toast } from "sonner";
 
+import { isApiErrorStatus } from "@/api";
 import { CreatorMonogram } from "@/components/creator-monogram";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { useAppContext } from "@/context";
 import { buildPriorityFeed, formatAgentMinutes, type PriorityEntry } from "@/lib/priority-feed";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { sessionDisplayTitle } from "@/lib/session-rename";
+import {
+  notifySessionListChanged,
+  subscribeToWorkspaceSessionListChanges,
+} from "@/lib/session-list-invalidation";
 import { relativeTimeLabel } from "@/lib/sessions-group";
+import { sessionDescendantCountText } from "@/lib/session-tree-count";
 import { cn } from "@/lib/utils";
+import type { Session } from "@/types";
+
+type PendingStop = {
+  session: Session;
+  clientEventId: string;
+};
+
+type BrokenActions = {
+  canControl: boolean;
+  dismissing: ReadonlySet<string>;
+  onDismiss: (session: Session) => Promise<void>;
+  onRequestStop: (session: Session, trigger: HTMLButtonElement) => void;
+};
 
 export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
+  const context = useAppContext();
   const { sessions, nextCursor, loading, error, refresh } = useWorkspaceSessions({
     limit: 50,
     parentSessionId: null,
     pollIntervalMs: 15_000,
   });
+  const [locallyHidden, setLocallyHidden] = useState<ReadonlySet<string>>(() => new Set());
+  const [dismissing, setDismissing] = useState<ReadonlySet<string>>(() => new Set());
+  const [pendingStop, setPendingStop] = useState<PendingStop | null>(null);
+  const stopTriggerRef = useRef<HTMLElement | null>(null);
+  const stopFocusFallbackRef = useRef<HTMLHeadingElement | null>(null);
+  const canControl = hasWorkspacePermission(context.accessContext, workspaceId, "sessions:control");
+  useEffect(
+    () =>
+      subscribeToWorkspaceSessionListChanges(workspaceId, (invalidation) => {
+        if (invalidation.archived !== undefined) {
+          setLocallyHidden((current) => {
+            const next = new Set(current);
+            if (invalidation.archived) next.add(invalidation.sessionId);
+            else next.delete(invalidation.sessionId);
+            return next;
+          });
+        }
+        void refresh();
+      }),
+    [refresh, workspaceId],
+  );
+  useEffect(() => {
+    const listedIds = new Set(sessions.map((session) => session.id));
+    setLocallyHidden((current) => {
+      const next = new Set([...current].filter((sessionId) => !listedIds.has(sessionId)));
+      if (next.size === current.size) return current;
+      return next;
+    });
+  }, [sessions]);
   const { channels } = useChannels({ pollIntervalMs: 60_000 });
   const channelNames = useMemo(
     () => new Map(channels.map((channel) => [channel.id, channel.name])),
     [channels],
   );
-  const feed = useMemo(() => buildPriorityFeed(sessions), [sessions]);
+  const visibleSessions = useMemo(
+    () => sessions.filter((session) => !locallyHidden.has(session.id)),
+    [locallyHidden, sessions],
+  );
+  const feed = useMemo(() => buildPriorityFeed(visibleSessions), [visibleSessions]);
+  const dismissBroken = useCallback(
+    async (session: Session): Promise<void> => {
+      if (dismissing.has(session.id)) return;
+      setDismissing((current) => new Set(current).add(session.id));
+      try {
+        const updated = await context.client.updateSessionArchive(workspaceId, session.id, {
+          archived: true,
+          expectedVersion: session.archiveVersion ?? 0,
+        });
+        setLocallyHidden((current) => new Set(current).add(session.id));
+        notifySessionListChanged({
+          workspaceId,
+          sessionId: session.id,
+          archived: updated.archived,
+        });
+        toast.success("Removed from For you", {
+          description: "You can restore it from Archived.",
+        });
+      } catch (dismissError) {
+        toast.error("Couldn't dismiss the workstream.", {
+          description: dismissError instanceof Error ? dismissError.message : String(dismissError),
+        });
+        void refresh();
+      } finally {
+        setDismissing((current) => {
+          const next = new Set(current);
+          next.delete(session.id);
+          return next;
+        });
+      }
+    },
+    [context.client, dismissing, refresh, workspaceId],
+  );
+  const stopBroken = useCallback(async (): Promise<boolean> => {
+    if (!pendingStop) return false;
+    const { session, clientEventId } = pendingStop;
+    try {
+      await context.client.cancelSession(workspaceId, session.id, {
+        clientEventId,
+        reason: "Stopped from For you",
+        expectedControlEtag: session.effectiveControl.controlEtag,
+      });
+      // Closing autofocus can run before React removes the hidden row. Clear
+      // the doomed opener explicitly so the dialog selects the stable heading
+      // instead of briefly focusing a node that is about to disconnect.
+      stopTriggerRef.current = null;
+      setLocallyHidden((current) => new Set(current).add(session.id));
+      notifySessionListChanged({ workspaceId, sessionId: session.id });
+      toast.success("Workstream stopped");
+      return true;
+    } catch (stopError) {
+      toast.error("Couldn't stop the workstream.", {
+        description: stopError instanceof Error ? stopError.message : String(stopError),
+      });
+      if (isApiErrorStatus(stopError, 409)) {
+        await refresh();
+        setPendingStop(null);
+      } else {
+        void refresh();
+      }
+      return false;
+    }
+  }, [context.client, pendingStop, refresh, workspaceId]);
+  const requestStop = useCallback((session: Session, trigger: HTMLButtonElement) => {
+    stopTriggerRef.current = trigger;
+    setPendingStop({ session, clientEventId: crypto.randomUUID() });
+  }, []);
   // The date caption changes once a day; don't rebuild the Intl formatter on
   // every 15s poll re-render.
   const today = useMemo(
@@ -46,7 +170,13 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
     <div data-workspace-scroll-owner="self-managed" className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl px-6 pb-16 pt-8">
         <header className="flex items-baseline gap-3 pb-6">
-          <h1 className="text-lg font-semibold tracking-[-0.01em]">For you</h1>
+          <h1
+            ref={stopFocusFallbackRef}
+            tabIndex={-1}
+            className="text-lg font-semibold tracking-[-0.01em]"
+          >
+            For you
+          </h1>
           <span className="ml-auto font-mono text-2xs text-fg-subtle">
             sorted by agent-time lost
           </span>
@@ -94,6 +224,12 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
                   entries={feed.broken}
                   workspaceId={workspaceId}
                   channelNames={channelNames}
+                  brokenActions={{
+                    canControl,
+                    dismissing,
+                    onDismiss: dismissBroken,
+                    onRequestStop: requestStop,
+                  }}
                 />
                 <PriorityTierSection
                   title="Recently finished"
@@ -145,8 +281,34 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
           </>
         )}
       </div>
+      <ConfirmDialog
+        open={pendingStop !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingStop(null);
+        }}
+        title={<>Stop “{pendingStop ? sessionDisplayTitle(pendingStop.session) : ""}”?</>}
+        description={stopDescription(pendingStop?.session ?? null)}
+        confirmLabel="Stop workstream"
+        cancelAutoFocus
+        restoreFocusRef={stopTriggerRef}
+        restoreFocusFallbackRef={stopFocusFallbackRef}
+        onConfirm={stopBroken}
+      />
     </div>
   );
+}
+
+function stopDescription(session: Session | null): string {
+  const descendants = session?.treeStats?.totalDescendants ?? 0;
+  const truncated = session?.treeStats?.truncated ?? false;
+  const formattedDescendants = sessionDescendantCountText(descendants, false);
+  return descendants > 0
+    ? `This permanently stops the workstream and ${
+        truncated ? `at least ${formattedDescendants}` : `its ${formattedDescendants}`
+      } spawned session${
+        descendants === 1 && !truncated ? "" : "s"
+      }. You won't be able to continue them.`
+    : "This permanently stops the workstream. You won't be able to continue it.";
 }
 
 function PriorityTierSection(props: {
@@ -155,6 +317,7 @@ function PriorityTierSection(props: {
   entries: PriorityEntry[];
   workspaceId: string;
   channelNames: ReadonlyMap<string, string>;
+  brokenActions?: BrokenActions;
 }) {
   if (props.entries.length === 0) return null;
   return (
@@ -176,6 +339,7 @@ function PriorityTierSection(props: {
             first={index === 0}
             workspaceId={props.workspaceId}
             channelNames={props.channelNames}
+            brokenActions={props.brokenActions}
           />
         ))}
       </div>
@@ -227,6 +391,7 @@ function PriorityRow(props: {
   first: boolean;
   workspaceId: string;
   channelNames: ReadonlyMap<string, string>;
+  brokenActions?: BrokenActions;
 }) {
   const { entry } = props;
   const session = entry.session;
@@ -271,14 +436,36 @@ function PriorityRow(props: {
           />
           {entry.reason}
         </p>
-        <div className="flex gap-4 pt-0.5">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-0.5">
           <Link
             to="/workspaces/$workspaceId/sessions/$sessionId"
             params={{ workspaceId: props.workspaceId, sessionId: session.id }}
-            className="text-xs font-medium text-brand hover:underline"
+            className="inline-flex min-h-7 items-center text-xs font-medium text-brand hover:underline pointer-coarse:min-h-11"
           >
             Open session
           </Link>
+          {entry.tier === "broken" && props.brokenActions?.canControl ? (
+            <button
+              type="button"
+              className="inline-flex min-h-7 items-center text-xs font-medium text-status-failed hover:underline pointer-coarse:min-h-11"
+              onClick={(event: MouseEvent<HTMLButtonElement>) =>
+                props.brokenActions?.onRequestStop(session, event.currentTarget)
+              }
+            >
+              Stop workstream
+            </button>
+          ) : null}
+          {entry.tier === "broken" && props.brokenActions ? (
+            <button
+              type="button"
+              className="inline-flex min-h-7 items-center text-xs font-medium text-fg-subtle hover:text-fg-muted hover:underline disabled:cursor-wait disabled:opacity-50 pointer-coarse:min-h-11"
+              title="Remove from For you and move to Archived"
+              disabled={props.brokenActions.dismissing.has(session.id)}
+              onClick={() => void props.brokenActions?.onDismiss(session)}
+            >
+              {props.brokenActions.dismissing.has(session.id) ? "Dismissing…" : "Dismiss"}
+            </button>
+          ) : null}
         </div>
       </div>
       <div className="grid w-32 shrink-0 gap-0.5 pt-0.5 text-right">
