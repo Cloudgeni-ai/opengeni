@@ -11,7 +11,6 @@ const legacyBrowserUnusedMethods = [
   "addDocument",
   "advanceExternalBrowserAuthRun",
   "applyGoalRevision",
-  "cancelSession",
   "captureComputerTarget",
   "codexAccountUsage",
   "codexDisconnect",
