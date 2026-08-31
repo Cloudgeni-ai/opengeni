@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
@@ -17,7 +18,15 @@ describe("native Svelte Mission Control demo", () => {
     await mkdir(evidenceRoot, { recursive: true });
     const port = await freePort();
     baseUrl = `http://127.0.0.1:${port}`;
-    browser = await chromium.launch({ executablePath: "/usr/local/bin/chromium", headless: true });
+    const configuredChromium =
+      process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? process.env.OPENGENI_BROWSER_BIN;
+    const sandboxChromium = "/usr/local/bin/chromium";
+    const executablePath =
+      configuredChromium ?? (existsSync(sandboxChromium) ? sandboxChromium : undefined);
+    browser = await chromium.launch({
+      headless: true,
+      ...(executablePath ? { executablePath } : {}),
+    });
     demo = await startProcess(
       [
         "bun",
