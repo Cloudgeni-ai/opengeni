@@ -165,7 +165,7 @@ describe("session control surface architecture", () => {
     expect(list).toContain("const projected = serverSessions.find");
     const paginationKey = list.match(/const paginationKey = sessionPageKey\([\s\S]*?\n  \);/)?.[0];
     expect(paginationKey).toContain("rail.workspaceId");
-    expect(paginationKey).toContain('hierarchyMode ? "tree" : "browse"');
+    expect(paginationKey).toContain('hierarchyMode ? "tree" : "search"');
     expect(paginationKey).not.toContain("pinOverrides");
     expect(paginationKey).not.toContain("serverSessions");
   });
@@ -260,11 +260,18 @@ describe("session control surface architecture", () => {
 
   test("keeps the loaded creator picker identifiable and reachable", async () => {
     const list = await source("components/rail/session-list.tsx");
-    expect(list).toContain("sessionCreatorLabelMap(allSessions)");
+    expect(list).toContain("const creatorSessions = useMemo");
+    expect(list).toContain("sessionCreatorLabelMap(creatorSessions)");
+    expect(list).toContain("const activeBrowseCreator = normalizeSessionBrowseCreator(");
+    expect(list).toContain("creator: activeBrowseCreator");
+    expect(list).toContain('browseCreatorOrigin.current !== "search"');
+    expect(list).toContain("updateSearchDraft(event.target.value)");
+    expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
     expect(list).toContain(
       'className="max-h-(--radix-dropdown-menu-content-available-height) w-52 overflow-x-hidden overflow-y-auto"',
     );
+    expect(list).toContain("sessionBrowseResultCount(browseSessions, hierarchyMode)");
   });
 
   test("the retired client-side queue model is gone", async () => {
