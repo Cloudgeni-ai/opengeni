@@ -15,7 +15,7 @@ async function applyFile(sql: postgres.Sql, file: string): Promise<void> {
 }
 
 async function applyContinuabilityProjectionRepair(sql: postgres.Sql): Promise<void> {
-  await applyFile(sql, "0383_continuability_projection_performance.sql");
+  await applyFile(sql, "0384_continuability_projection_performance.sql");
 }
 
 async function withPreMegaDatabase(

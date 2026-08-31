@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const migrationUrl = new URL(
-  "../drizzle/0383_continuability_projection_performance.sql",
+  "../drizzle/0384_continuability_projection_performance.sql",
   import.meta.url,
 );
 
-describe("0383 continuability projection performance migration", () => {
+describe("0384 continuability projection performance migration", () => {
   test("is a rolling, result-compatible indexed classification repair", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");

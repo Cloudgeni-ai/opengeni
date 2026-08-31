@@ -729,6 +729,10 @@ boundaries. Provider subscription pools such as Codex or SuperGrok add their
 own credential and capacity authority without changing the logical-turn model.
 Codex may resolve to a workspace pool or an organization pool inherited by a
 shared workspace; the resolved pool remains one complete allocator boundary.
+Provider-refusal cooldowns carry separate provenance and revision authority so
+fresh usage repairs only an older quota refusal, never generic backpressure or
+a concurrently newer refusal. All-capped admission and durable capacity waits
+run that reconciliation through bounded control-plane refreshes.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),
