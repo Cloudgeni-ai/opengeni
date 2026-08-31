@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildCodexUsageWindowFromCache,
+  codexUsageConfirmsQuotaAvailable,
   CODEX_FIVE_HOUR_WINDOW_SECONDS,
   CODEX_WEEKLY_WINDOW_SECONDS,
   normalizeCodexUsage,
@@ -197,5 +198,44 @@ describe("buildCodexUsageWindowFromCache", () => {
 
   test("null used_percent ⇒ null window (no cached usage yet)", () => {
     expect(buildCodexUsageWindowFromCache(null, null, CODEX_WEEKLY_WINDOW_SECONDS)).toBeNull();
+  });
+});
+
+describe("codexUsageConfirmsQuotaAvailable", () => {
+  test("accepts an authoritative open base allowance", () => {
+    expect(codexUsageConfirmsQuotaAvailable(normalizeCodexUsage(200, liveBody()))).toBe(true);
+  });
+
+  test("rejects limit responses, missing allowance data, and capped additional limits", () => {
+    expect(
+      codexUsageConfirmsQuotaAvailable(
+        normalizeCodexUsage(200, {
+          ...liveBody(),
+          rate_limit: { ...(liveBody().rate_limit as object), limit_reached: true },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      codexUsageConfirmsQuotaAvailable(
+        normalizeCodexUsage(200, { plan_type: "plus", rate_limit: {} }),
+      ),
+    ).toBe(false);
+    expect(
+      codexUsageConfirmsQuotaAvailable(
+        normalizeCodexUsage(
+          200,
+          liveBody({
+            additional_limits: [
+              {
+                limit_name: "special-model",
+                metered_feature: "codex_special",
+                primary_window: { used_percent: 100, limit_window_seconds: 18000 },
+                secondary_window: null,
+              },
+            ],
+          }),
+        ),
+      ),
+    ).toBe(false);
   });
 });
