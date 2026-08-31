@@ -44,6 +44,8 @@ BEGIN
 END
 $function$;
 
+REVOKE ALL ON FUNCTION opengeni_private.codex_cooldown_revision_guard() FROM PUBLIC;
+
 CREATE TRIGGER codex_cooldown_revision_guard
   BEFORE UPDATE OF exhausted_until, exhausted_kind, exhausted_revision
   ON "codex_subscription_credentials"
