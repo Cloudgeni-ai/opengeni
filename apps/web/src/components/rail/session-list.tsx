@@ -163,6 +163,7 @@ import { railRowCreator } from "@/lib/creator-initials";
 import { formatWaitingSince } from "@/lib/format";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
+import { notifySessionListChanged } from "@/lib/session-list-invalidation";
 import {
   authoritativeSessionBranchChannels,
   beginSessionBranchRequest,
@@ -1345,6 +1346,11 @@ export function SessionList() {
               }
             : current,
         );
+        notifySessionListChanged({
+          workspaceId: rail.workspaceId,
+          sessionId: session.id,
+          archived: updated.archived,
+        });
         toast.success(archived ? "Chat archived" : "Chat restored");
         await refreshSessionPages();
       } catch (archiveError) {
