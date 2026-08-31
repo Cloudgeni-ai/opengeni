@@ -67,6 +67,14 @@ fn launchd_loaded_program_matches(output: &str, binary_path: &Path) -> bool {
     })
 }
 
+fn launchd_enable_args(target: &str) -> [&str; 2] {
+    ["enable", target]
+}
+
+fn enable_launchd_label(target: &str) -> Result<(), String> {
+    run_tool("launchctl", &launchd_enable_args(target))
+}
+
 /// Idempotently installs, enables, and starts the ordinary background service.
 pub fn ensure_running(args: &StartArgs) -> Result<(), String> {
     install(&ServiceInstallArgs {
@@ -648,6 +656,11 @@ fn install_launchd(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
     let uid = unsafe_uid();
     let domain = format!("gui/{uid}");
     let target = format!("{domain}/{}", service::ids::LAUNCHD_LABEL);
+    // `launchctl disable` persists outside the plist and survives both bootout
+    // and rewriting the LaunchAgent. Re-enable the exact label before deciding
+    // whether to keep, reload, or bootstrap it; otherwise bootstrap fails with
+    // the opaque exit status 5 on a previously disabled installation.
+    enable_launchd_label(&target)?;
     let loaded_definition = capture("launchctl", &["print", &target]).ok();
     let loaded_program_matches = loaded_definition
         .as_deref()
@@ -870,6 +883,9 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
             let domain = format!("gui/{uid}");
             let target = format!("gui/{uid}/{}", service::ids::LAUNCHD_LABEL);
             if action == "start" {
+                // A persistent launchd override can outlive the plist. `start`
+                // promises to enable the service, so clear that override first.
+                enable_launchd_label(&target)?;
                 if capture("launchctl", &["print", &target]).is_ok() {
                     run_tool("launchctl", &["kickstart", &target])?;
                 } else {
@@ -1094,6 +1110,15 @@ mod tests {
             "gui/501/ai.opengeni.agent = {\n\tprogram = /tmp/old/opengeni-agent\n}\n",
             expected,
         ));
+    }
+
+    #[test]
+    fn launchd_enable_target_uses_the_full_service_domain() {
+        let target = format!("gui/501/{}", service::ids::LAUNCHD_LABEL);
+        assert_eq!(
+            launchd_enable_args(&target),
+            ["enable", "gui/501/ai.opengeni.agent"]
+        );
     }
 
     #[test]
