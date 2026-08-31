@@ -505,6 +505,7 @@ export async function runTurnStreamAttempt(
       resolvedModel?.provider.kind === "codex-subscription" ||
       resolvedModel?.provider.kind === "xai-subscription";
     let fallbackProviderRequestStartedAt: number | null = null;
+    let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
       await checkpointHistoryBeforeProviderDispatch(historySink);
       if (
@@ -552,6 +553,7 @@ export async function runTurnStreamAttempt(
           },
         ]);
         fallbackProviderRequestStartedAt = performance.now();
+        fallbackProviderRequestLifecycleStartedAt = fallbackProviderRequestStartedAt;
       } catch (error) {
         auditOutcome = "failed";
         throw error;
@@ -925,6 +927,31 @@ export async function runTurnStreamAttempt(
           ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
         });
         if (responseResult.status === "processed") {
+          if (
+            !providerPublishesNativeRequestEvents &&
+            fallbackProviderRequestLifecycleStartedAt !== null
+          ) {
+            const durationMs = Math.max(
+              0,
+              performance.now() - fallbackProviderRequestLifecycleStartedAt,
+            );
+            fallbackProviderRequestLifecycleStartedAt = null;
+            await eventing.publish!([
+              {
+                type: "agent.model.request",
+                payload: {
+                  phase: "completed",
+                  provider: streamProvider,
+                  durationMs: Math.round(durationMs),
+                  turnId: activeTurnId,
+                  attemptId: input.attemptId,
+                  dispatchId,
+                  executionGeneration: attempt.executionGeneration,
+                },
+              },
+            ]);
+            attempt.providerRecoveryCount = 0;
+          }
           const rawStreamHistory = (eventing.stream.state as { history?: unknown[] }).history;
           if (Array.isArray(rawStreamHistory)) {
             // The completed image item is normally retained from its own
@@ -1207,9 +1234,13 @@ export async function runTurnStreamAttempt(
         }
       }
     } catch (error) {
-      if (fallbackProviderRequestStartedAt !== null) {
-        const durationMs = Math.max(0, performance.now() - fallbackProviderRequestStartedAt);
+      if (fallbackProviderRequestLifecycleStartedAt !== null) {
+        const durationMs = Math.max(
+          0,
+          performance.now() - fallbackProviderRequestLifecycleStartedAt,
+        );
         fallbackProviderRequestStartedAt = null;
+        fallbackProviderRequestLifecycleStartedAt = null;
         await eventing.publish!([
           {
             type: "agent.model.request",

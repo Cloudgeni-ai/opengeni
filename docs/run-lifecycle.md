@@ -499,11 +499,17 @@ catalog identity.
 
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
-turn's durable provider-recovery count rather than unrelated execution attempts.
+turn's durable consecutive provider-recovery count rather than unrelated
+execution attempts. A fenced current-attempt `agent.model.request` completion
+atomically clears that durable count with its event; only after the commit does
+the worker clear its in-memory copy. Failed requests and late/zombie completion
+events cannot reset the streak. Successful inference between transient outages
+therefore starts the next outage at the first backoff step instead of consuming
+a lifetime budget for a long-running turn.
 An explicit provider retry hint is a lower bound. Rate limits use the provider's
 `Retry-After` when present and otherwise wait 60 s; other retryable classes keep
 their existing pacing. Automatic same-turn provider/MCP recovery is finite: five
-replacement attempts may be scheduled, and a sixth retryable failure settles the
+consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
 exhaustion evidence. This is an infrastructure retry budget, not a goal,
 continuation, model-call, or run-length cap; a later human/API prompt may retry as

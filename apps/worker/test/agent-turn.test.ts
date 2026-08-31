@@ -96,6 +96,7 @@ import {
   persistOrSignalSessionAttemptQuiescence,
   preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
+  providerRecoveryCountAfterModelRequestPhase,
   providerRecoveryCountFromMetadata,
   providerRetryAfterMs,
   providerRecoveryResult,
@@ -5256,6 +5257,9 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountFromMetadata({})).toBe(0);
     expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: 3 })).toBe(3);
     expect(providerRecoveryCountFromMetadata({ providerRecoveryCount: -1 })).toBe(0);
+    expect(providerRecoveryCountAfterModelRequestPhase(4, "failed")).toBe(4);
+    expect(providerRecoveryCountAfterModelRequestPhase(4, "first_byte")).toBe(4);
+    expect(providerRecoveryCountAfterModelRequestPhase(4, "completed")).toBe(0);
   });
 
   test("classifies only definitive marked SuperGrok account refusals for rotation", () => {
