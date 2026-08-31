@@ -83,6 +83,7 @@ type HarnessOptions = {
   readinessResult?: unknown;
   markError?: Error;
   failError?: Error;
+  reconcileError?: Error;
   controllerFactory?: RigVerificationOwnershipDependencies["createCancellationController"];
 };
 
@@ -198,6 +199,42 @@ function harness(options: HarnessOptions = {}) {
       expect(target?.instanceId).toBe("sb-verifier");
       return options.terminateResult ?? true;
     },
+    attachTrustedSurface: async (input) => {
+      events.push("attach-surface");
+      expect(input).toMatchObject({
+        backend: "modal",
+        instanceId: "sb-verifier",
+        providerImage: settings.modalImageRef,
+        leaseId: "lease-1",
+        leaseEpoch: 8,
+        sandboxGroupId: GROUP_ID,
+        rigVersionId: VERSION_ID,
+      });
+      Object.defineProperty(input.session as object, "trustedRigPlatformSurface", {
+        value: {
+          binding: {
+            authority: "deployment_control_plane",
+            backendId: "modal",
+            instanceId: "sb-verifier",
+            providerImage: settings.modalImageRef!,
+            providerImageId: "im-platform-base",
+            leaseId: "lease-1",
+            leaseEpoch: 8,
+            workspaceGeneration: 0,
+            sandboxGroupId: GROUP_ID,
+            rigVersionId: VERSION_ID,
+          },
+        },
+        configurable: false,
+        writable: false,
+      });
+      return true;
+    },
+    reconcileProviderImageBuilds: async () => {
+      events.push("reconcile-provider-images");
+      if (options.reconcileError) throw options.reconcileError;
+      return 0;
+    },
     createCancellationController: options.controllerFactory ?? defaultControllerFactory,
   } as unknown as RigVerificationOwnershipDependencies;
 
@@ -267,7 +304,7 @@ describe("rig verification canonical lease ownership", () => {
         return "passed";
       }),
     ).resolves.toBe("passed");
-    expect(state.events.slice(0, 8)).toEqual([
+    expect(state.events.slice(0, 9)).toEqual([
       "acquire",
       "establish:start",
       "record",
@@ -275,9 +312,15 @@ describe("rig verification canonical lease ownership", () => {
       "establish:return",
       "readiness",
       "commit",
+      "attach-surface",
       "run",
     ]);
-    expect(state.events.indexOf("quiesce")).toBeLessThan(state.events.indexOf("terminate"));
+    expect(state.events.indexOf("quiesce")).toBeLessThan(
+      state.events.indexOf("reconcile-provider-images"),
+    );
+    expect(state.events.indexOf("reconcile-provider-images")).toBeLessThan(
+      state.events.indexOf("terminate"),
+    );
     expect(state.markEpochs).toEqual([8]);
     expect(state.failEpochs).toEqual([7]);
     expect(state.releaseGrace).toEqual([1]);
@@ -338,6 +381,20 @@ describe("rig verification canonical lease ownership", () => {
     expect(state.events).not.toContain("fail-warming");
     expect(state.events.at(-1)).toBe("release");
     expect(state.releaseGrace).toEqual([1]);
+  });
+
+  test("an ambiguous provider-image build prevents source termination and leaves it to the reaper", async () => {
+    const state = harness({ reconcileError: new Error("snapshot request still ambiguous") });
+    await expect(state.run(async () => true)).resolves.toBe(true);
+    expect(state.events).toContain("reconcile-provider-images");
+    expect(state.events).not.toContain("terminate");
+    expect(state.events).not.toContain("mark-warm-lost");
+    expect(state.events.at(-1)).toBe("release");
+    expect(state.warnings).toEqual([
+      expect.objectContaining({
+        context: expect.objectContaining({ operation: "provider_image_build_reconciliation" }),
+      }),
+    ]);
   });
 
   test("DB cleanup failures cannot suppress provider termination or holder release", async () => {

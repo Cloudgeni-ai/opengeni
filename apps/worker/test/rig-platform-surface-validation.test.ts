@@ -413,6 +413,12 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
         mode === "trusted_image_mismatch"
           ? "example.invalid/opengeni:other"
           : "example.invalid/opengeni:test",
+      providerImageId: "im-trusted-platform-image",
+      leaseId: LEASE_ID,
+      leaseEpoch: 8,
+      workspaceGeneration: 3,
+      sandboxGroupId: GROUP_ID,
+      rigVersionId: VERSION_ID,
     },
     runTerminalProbe: async (options: { timeoutMs: number; signal?: AbortSignal }) => {
       events.push("terminal:command");

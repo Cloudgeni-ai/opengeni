@@ -43,12 +43,18 @@ type ExecCapableSession = {
     workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<ExecResultLike>;
   execCommand?: (args: {
     cmd: string;
     workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<string>;
 };
 
@@ -64,6 +70,7 @@ export type EnsureBrowserControlServerOptions = {
   adminTokenFile: string;
   allowedOrigins?: readonly string[];
   signal?: AbortSignal;
+  deadlineAtMs?: number;
 };
 
 export type EnsureBrowserControlServerResult = {
@@ -115,12 +122,18 @@ export async function ensureBrowserControlServer(
         workdir: PLACEMENT_CONTROLLER_WORKDIR,
         yieldTimeMs: timeoutMs,
         maxOutputTokens: 4_000,
+        timeoutMs,
+        ...(options.deadlineAtMs === undefined ? {} : { deadlineAtMs: options.deadlineAtMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
     : await target.execCommand!({
         cmd,
         workdir: PLACEMENT_CONTROLLER_WORKDIR,
         yieldTimeMs: timeoutMs,
         maxOutputTokens: 4_000,
+        timeoutMs,
+        ...(options.deadlineAtMs === undefined ? {} : { deadlineAtMs: options.deadlineAtMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
   const output = outputOf(result);
   options.signal?.throwIfAborted();

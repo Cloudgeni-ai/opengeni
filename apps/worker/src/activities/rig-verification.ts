@@ -23,12 +23,14 @@ import {
 } from "@opengeni/core";
 import {
   acquireLease,
+  beginRigProviderImageCleanupObligation,
   claimRigVersionProviderImageBuild,
   completeRigVersionVerification,
   commitWarmingToWarm,
   failWarmingToCold,
   finalizeRigVersionProviderImageBuild,
   failRigVersionVerification,
+  failRigProviderImageCleanupObligationBuild,
   getRig,
   getRigChange,
   getRigVersionById,
@@ -37,17 +39,18 @@ import {
   markWarmLeaseInstanceLost,
   markSandboxCheckpointArtifactDeletePending,
   recordWarmingSandboxCreated,
+  recordRigProviderImageCleanupObject,
   registerSandboxCheckpointArtifact,
   releaseLeaseHolder,
+  settleRigProviderImageCleanupObligation,
   touchLeaseHolder,
   updateRigChangeStatusForVerificationAttempt,
-  SandboxCheckpointArtifactRegistrationConflictError,
   type Database,
 } from "@opengeni/db";
 import {
+  attachProviderTrustedRigPlatformSurface,
   buildImmutableProviderImage,
   createTurnToolCancellationController,
-  deleteModalCheckpointSnapshot,
   describeNativeSnapshotArchive,
   encodeNativeSnapshotRef,
   establishSandboxSessionFromEnvelope,
@@ -55,10 +58,12 @@ import {
   sandboxCommandOutput,
   serializeEstablishedSandboxEnvelope,
   providerSupportsImmutableImageBuild,
+  resolveModalCheckpointProviderBindingForSession,
   tagModalSandbox,
   terminateManagedSandboxSession,
   verifySandboxExecReadiness,
   type EstablishedSandboxSession,
+  type BrowserControlPlacementSession,
   type TurnSandboxCommandArgs,
   type TurnSandboxCommandSession,
 } from "@opengeni/runtime/sandbox";
@@ -68,6 +73,7 @@ import { rigProviderImageSourceImage } from "./sandbox-images";
 import { resolveWorkspacePackRuntime, type WorkspacePackRuntime } from "./packs";
 import { currentActivityContext } from "./streaming";
 import { runRigPlatformSurfaceValidation } from "./rig-platform-surface-validation";
+import { reconcileRigProviderImageCleanupObligationsForSource } from "./rig-provider-image-cleanup";
 
 type RigSetupHook = typeof import("@opengeni/runtime").runRigSetupHook;
 let rigSetupHookPromise: Promise<RigSetupHook> | null = null;
@@ -421,6 +427,8 @@ export type RigVerificationOwnershipDependencies = {
   serialize: typeof serializeEstablishedSandboxEnvelope;
   tag: typeof tagModalSandbox;
   terminate: typeof terminateThrowaway;
+  attachTrustedSurface: typeof attachProviderTrustedRigPlatformSurface;
+  reconcileProviderImageBuilds: typeof reconcileRigProviderImageCleanupObligationsForSource;
   createCancellationController: typeof createTurnToolCancellationController;
 };
 
@@ -436,6 +444,8 @@ const defaultOwnershipDependencies: RigVerificationOwnershipDependencies = {
   serialize: serializeEstablishedSandboxEnvelope,
   tag: tagModalSandbox,
   terminate: terminateThrowaway,
+  attachTrustedSurface: attachProviderTrustedRigPlatformSurface,
+  reconcileProviderImageBuilds: reconcileRigProviderImageCleanupObligationsForSource,
   createCancellationController: createTurnToolCancellationController,
 };
 
@@ -502,6 +512,9 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     rigVersionId: string;
     sessionIdPrefix: string;
     holderId: string;
+    /** Immutable deployment image used by the provider-owned validation
+     * sidecar when the verifier itself cold-boots a derived Rig image. */
+    trustedProviderImageId?: string;
     lifecycle?: RigVerificationActivityLifecycle;
   },
   run: (
@@ -526,6 +539,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
   let acquired = false;
   let ownsWarmingEpoch = false;
   let expectedEpoch: number | null = null;
+  let committedLeaseId: string | null = null;
   let holderLivenessTimer: ReturnType<typeof setInterval> | null = null;
   let establishmentSettled = false;
   let establishmentPromise: Promise<EstablishedSandboxSession> | null = null;
@@ -734,6 +748,28 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     if (!committed.committed || !committed.lease) {
       throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, "fenced");
     }
+    committedLeaseId = committed.lease.id;
+    const providerImage = requiredRigVerificationProviderImage(input.settings);
+    const trustedSurfaceAttached = await dependencies.attachTrustedSurface({
+      backend: established.backendId as SandboxBackend,
+      settings: input.settings,
+      session: established.session,
+      instanceId: established.instanceId,
+      providerImage,
+      ...(input.trustedProviderImageId
+        ? { trustedProviderImageId: input.trustedProviderImageId }
+        : {}),
+      leaseId: committed.lease.id,
+      leaseEpoch: committed.lease.leaseEpoch,
+      workspaceGeneration: committed.lease.workspaceGeneration,
+      sandboxGroupId: input.sandboxGroupId,
+      rigVersionId: input.rigVersionId,
+    });
+    if (!trustedSurfaceAttached) {
+      throw new Error(
+        `sandbox backend ${established.backendId} has no deployment-owned Rig platform validation authority`,
+      );
+    }
     const result = await run(established, {
       signal,
       commandRunner,
@@ -793,6 +829,21 @@ export async function runWithOwnedRigVerificationSandbox<T>(
           });
         }
         return true;
+      }
+      try {
+        if (!committedLeaseId) return await terminateAndClear(cleanupTarget);
+        await dependencies.reconcileProviderImageBuilds({
+          db: input.db,
+          settings: input.settings,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sourceLeaseId: committedLeaseId,
+          sourceInstanceId: cleanupTarget.instanceId,
+          timeoutMs: cleanupWaitMs(input.lifecycle),
+        });
+      } catch (error) {
+        warnCleanupFailure("provider_image_build_reconciliation", cleanupTarget.instanceId, error);
+        return false;
       }
       return await terminateAndClear(cleanupTarget);
     });
@@ -961,6 +1012,15 @@ function requiredRigVerificationProviderImage(
   return image;
 }
 
+function trustedProviderImageId(established: EstablishedSandboxSession): string {
+  const imageId = (established.session as BrowserControlPlacementSession).trustedRigPlatformSurface
+    ?.binding.providerImageId;
+  if (!imageId) {
+    throw new Error("Rig verification has no immutable trusted platform image binding");
+  }
+  return imageId;
+}
+
 function rigProviderImageContentMarker(
   contentHash: string,
   markerRoot = "/var/opengeni",
@@ -1004,6 +1064,7 @@ export async function verifyRigProviderImageColdBoot(
     imageId: string;
     contentHash: string;
     checks: RigProviderImageDefinition["checks"];
+    trustedProviderImageId: string;
     lifecycle: RigVerificationActivityLifecycle;
   },
   dependencies: RigProviderImageColdBootDependencies = defaultRigProviderImageColdBootDependencies,
@@ -1031,6 +1092,7 @@ export async function verifyRigProviderImageColdBoot(
         attemptId: input.verificationAttemptId,
         executionGeneration: input.verificationExecutionGeneration,
       }),
+      trustedProviderImageId: input.trustedProviderImageId,
       lifecycle: input.lifecycle,
     },
     async (established, runContext) => {
@@ -1104,10 +1166,18 @@ export async function buildVerifiedRigProviderImage(
   },
   dependencies: {
     buildImmutableProviderImage: typeof buildImmutableProviderImage;
-    deleteModalCheckpointSnapshot: typeof deleteModalCheckpointSnapshot;
+    resolveProviderBinding: typeof resolveModalCheckpointProviderBindingForSession;
+    beginCleanupObligation: typeof beginRigProviderImageCleanupObligation;
+    recordCleanupObject: typeof recordRigProviderImageCleanupObject;
+    settleCleanupObligation: typeof settleRigProviderImageCleanupObligation;
+    failCleanupBuild: typeof failRigProviderImageCleanupObligationBuild;
   } = {
     buildImmutableProviderImage,
-    deleteModalCheckpointSnapshot,
+    resolveProviderBinding: resolveModalCheckpointProviderBindingForSession,
+    beginCleanupObligation: beginRigProviderImageCleanupObligation,
+    recordCleanupObject: recordRigProviderImageCleanupObject,
+    settleCleanupObligation: settleRigProviderImageCleanupObligation,
+    failCleanupBuild: failRigProviderImageCleanupObligationBuild,
   },
 ): Promise<RigProviderImage> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
@@ -1225,10 +1295,8 @@ export async function buildVerifiedRigProviderImage(
   }
 
   throwIfAborted(input.signal);
-  let builtIdentity: {
-    imageId: string;
-    providerBindingKey: string;
-  } | null = null;
+  let cleanupObligation: Awaited<ReturnType<typeof beginRigProviderImageCleanupObligation>> | null =
+    null;
   let artifactId: string | null = null;
   let coldBootValidatedAt: string | null = null;
   try {
@@ -1244,6 +1312,24 @@ export async function buildVerifiedRigProviderImage(
       1,
       Math.min(input.settings.sandboxSnapshotTimeoutMs, remainingWorkMs),
     );
+    if (backend === "modal") {
+      const providerBinding = await dependencies.resolveProviderBinding(
+        input.settings,
+        input.established.session,
+      );
+      cleanupObligation = await dependencies.beginCleanupObligation(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.target.id,
+        sourceLeaseId: input.ownership.leaseId,
+        sourceLeaseEpoch: input.ownership.leaseEpoch,
+        sourceInstanceId: input.ownership.instanceId,
+        sourceWorkspaceGeneration: input.ownership.workspaceGeneration,
+        providerBindingKey: providerBinding.key,
+        providerBinding: providerBinding.binding,
+        buildRequestId: building.buildRequestId,
+      });
+    }
     const buildPromise = dependencies.buildImmutableProviderImage({
       backend,
       settings: input.settings,
@@ -1251,36 +1337,58 @@ export async function buildVerifiedRigProviderImage(
       requestId: building.buildRequestId,
       timeoutMs: buildTimeoutMs,
     });
-    let buildAccepted = false;
+    let providerBuildRejected = false;
+    const trackedBuildPromise = buildPromise.then(
+      (result) => {
+        if (
+          backend === "modal" &&
+          cleanupObligation &&
+          result?.imageId &&
+          result.providerBindingKey === cleanupObligation.providerBindingKey
+        ) {
+          void dependencies
+            .recordCleanupObject(input.db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              obligationId: cleanupObligation.id,
+              buildRequestId: cleanupObligation.buildRequestId,
+              providerBindingKey: cleanupObligation.providerBindingKey,
+              objectId: result.imageId,
+            })
+            .catch(() => false);
+        }
+        return result;
+      },
+      (error) => {
+        providerBuildRejected = true;
+        throw error;
+      },
+    );
+    void trackedBuildPromise.catch(() => undefined);
     const deadlineSignal =
       input.lifecycle.workDeadlineAtMs == null
         ? input.signal
         : AbortSignal.any([input.signal, AbortSignal.timeout(buildTimeoutMs)]);
     let built: Awaited<ReturnType<typeof buildImmutableProviderImage>>;
     try {
-      built = await waitForAbortable(buildPromise, deadlineSignal);
-      buildAccepted = true;
+      built = await waitForAbortable(trackedBuildPromise, deadlineSignal);
     } catch (error) {
+      if (providerBuildRejected && cleanupObligation?.state === "building") {
+        await dependencies
+          .failCleanupBuild(input.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            obligationId: cleanupObligation.id,
+            buildRequestId: cleanupObligation.buildRequestId,
+            providerBindingKey: cleanupObligation.providerBindingKey,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          .catch(() => false);
+      }
       if (!input.signal.aborted && deadlineSignal.aborted) {
         throw new RigProviderImageBuildDeadlineError();
       }
       throw error;
-    } finally {
-      if (!buildAccepted && backend === "modal") {
-        void buildPromise
-          .then(async (late) => {
-            if (late?.imageId && late.providerBindingKey) {
-              await dependencies
-                .deleteModalCheckpointSnapshot(
-                  input.settings,
-                  late.providerBindingKey,
-                  late.imageId,
-                )
-                .catch(() => "not_found" as const);
-            }
-          })
-          .catch(() => undefined);
-      }
     }
     if (!built || (!built.imageId && !built.imageDigest)) {
       throw new Error("provider image builder returned no immutable image identity");
@@ -1289,10 +1397,20 @@ export async function buildVerifiedRigProviderImage(
       if (!built.imageId || !built.providerBindingKey || !built.providerBinding) {
         throw new Error("Modal provider image build returned incomplete ownership identity");
       }
-      builtIdentity = {
-        imageId: built.imageId,
-        providerBindingKey: built.providerBindingKey,
-      };
+      if (!cleanupObligation || cleanupObligation.providerBindingKey !== built.providerBindingKey) {
+        throw new Error("Modal provider image build returned another provider binding");
+      }
+      const objectRecorded = await dependencies.recordCleanupObject(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        obligationId: cleanupObligation.id,
+        buildRequestId: cleanupObligation.buildRequestId,
+        providerBindingKey: cleanupObligation.providerBindingKey,
+        objectId: built.imageId,
+      });
+      if (!objectRecorded) {
+        throw new Error("Modal provider image build could not persist its exact image id");
+      }
       const archiveBytes = encodeNativeSnapshotRef({
         provider: "modal_snapshot_filesystem",
         snapshotId: built.imageId,
@@ -1317,6 +1435,15 @@ export async function buildVerifiedRigProviderImage(
         registrationIdentity: "provider_object",
       });
       artifactId = artifact.id;
+      const obligationSettled = await dependencies.settleCleanupObligation(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        obligationId: cleanupObligation.id,
+        objectId: built.imageId,
+      });
+      if (!obligationSettled) {
+        throw new Error("Modal provider image cleanup ownership could not be transferred");
+      }
 
       // A snapshot receipt is not proof that the artifact can cold-start. Boot
       // a second, independently owned sandbox from the exact image before it
@@ -1335,6 +1462,7 @@ export async function buildVerifiedRigProviderImage(
         imageId: built.imageId,
         contentHash,
         checks: input.definition.checks,
+        trustedProviderImageId: trustedProviderImageId(input.established),
         lifecycle: input.lifecycle,
       });
     }
@@ -1379,18 +1507,6 @@ export async function buildVerifiedRigProviderImage(
         artifactId,
         reason: "rig_provider_image_build_failed",
       }).catch(() => false);
-    } else if (
-      backend === "modal" &&
-      builtIdentity &&
-      !(error instanceof SandboxCheckpointArtifactRegistrationConflictError)
-    ) {
-      await dependencies
-        .deleteModalCheckpointSnapshot(
-          input.settings,
-          builtIdentity.providerBindingKey,
-          builtIdentity.imageId,
-        )
-        .catch(() => "not_found" as const);
     }
     const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
     return await finalize({

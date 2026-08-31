@@ -90,6 +90,7 @@ import {
   startTestMcpServer,
   startTestServices,
   testSettings,
+  testRigSurfaceReceipt,
   waitFor,
   type TestServices,
 } from "@opengeni/testing";
@@ -104,37 +105,6 @@ import {
   searchDocuments,
 } from "../../packages/documents/src";
 import { submitTestHumanPrompt } from "./helpers/session-control";
-
-function rigSurfaceReceipt(versionId: string) {
-  return {
-    version: 2 as const,
-    checkedAt: "2026-08-30T12:00:00.000Z",
-    binding: {
-      leaseId: "11111111-2222-4333-8444-555555555555",
-      sandboxGroupId: versionId,
-      leaseEpoch: 2,
-      workspaceGeneration: 1,
-      instanceId: "sandbox-test",
-      backendId: "modal",
-      rigVersionId: versionId,
-    },
-    terminal: {
-      status: "passed" as const,
-      cwd: "/workspace" as const,
-      uid: 0 as const,
-      bunVersion: "1.4.0" as const,
-      interactive: true as const,
-    },
-    browser: {
-      status: "passed" as const,
-      browserSessionId: "22222222-3333-4444-8555-666666666666",
-      controllerGeneration: "integration-test",
-      targetId: "page-1",
-      observedTargetGeneration: "page-generation-1",
-    },
-    computer: { status: "disabled" as const },
-  };
-}
 
 async function setSessionStatus(
   db: Database,
@@ -4242,7 +4212,7 @@ describe("API component integration", () => {
         versionId: version!.id,
         attemptId: attempt.attemptId,
         executionGeneration: attempt.executionGeneration,
-        receipt: rigSurfaceReceipt(version!.id),
+        receipt: testRigSurfaceReceipt(version!.id),
       });
       expect(activation).toMatchObject({ activated: true, stale: false });
     };

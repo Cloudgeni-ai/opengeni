@@ -112,32 +112,57 @@ export type BrowserControlPlacementSession = {
     workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    tty?: boolean;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<ExecResultLike | string>;
   execCommand?: (args: {
     cmd: string;
     workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    tty?: boolean;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<string>;
-  readFile?: (args: { path: string; maxBytes?: number }) => Promise<string | Uint8Array>;
+  readFile?: (args: {
+    path: string;
+    maxBytes?: number;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+  }) => Promise<string | Uint8Array>;
   writeFile?: (args: {
     path: string;
     content: string | Uint8Array;
     createParents?: boolean;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<unknown>;
   writePlacementPrivate?: (args: {
     path: string;
     content: string | Uint8Array;
     createParents?: boolean;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<unknown>;
-  deletePlacementPrivate?: (path: string) => Promise<void>;
   writeStdin?: (args: {
     sessionId: number;
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<string>;
-  resolveExposedPort?: (port: number) => Promise<ExposedPortEndpoint>;
+  resolveExposedPort?: (
+    port: number,
+    options?: { timeoutMs?: number; deadlineAtMs?: number; signal?: AbortSignal },
+  ) => Promise<ExposedPortEndpoint>;
   /** Signed OpenSandbox Channel B must host-fetch. Never fall through to in-box curl. */
   requireHostFetchController?: boolean;
   runtimeMetrics?: {
@@ -148,6 +173,7 @@ export type BrowserControlPlacementSession = {
   };
   ensureBrowserControl?: (
     request: BrowserControlEnsureRequest,
+    options?: { timeoutMs?: number; deadlineAtMs?: number; signal?: AbortSignal },
   ) => Promise<BrowserControlEnsureResponse>;
   openBrowserFrames?: (
     request: BrowserFramesOpenRequest,
@@ -155,7 +181,14 @@ export type BrowserControlPlacementSession = {
   openComputerFrames?: (
     request: ComputerFramesOpenRequest,
   ) => Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }>;
-  finalizeOpStreamOps?: () => Promise<void>;
+  finalizeOpStreamOps?: (options?: {
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+  }) => Promise<void>;
+  /** Physically cancel an exec whose provider start/retained process has not
+   * settled yet. Provisioning waits for this cancellation before cleanup. */
+  cancelPendingExecCommand?: () => Promise<void>;
   /**
    * Provider/deployment-owned validation authority. Rig setup executes as root
    * inside the placement and therefore cannot be allowed to install, replace,
@@ -376,6 +409,12 @@ export type TrustedRigPlatformSurfaceBinding = {
   backendId: string;
   instanceId: string;
   providerImage: string;
+  providerImageId: string;
+  leaseId: string;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  sandboxGroupId: string;
+  rigVersionId: string;
 };
 
 export type TrustedRigPlatformSurfaceOperation = {
@@ -489,6 +528,13 @@ function provisionOperationBudget(
   };
 }
 
+function cleanupProvisionOperationBudget(
+  input: ProvisionBrowserControlClientInput,
+): ProvisionOperationBudget {
+  const timeoutMs = Math.max(1, Math.min(15_000, boundedTimeout(input.timeoutMs ?? 60_000)));
+  return { deadlineAtMs: Date.now() + timeoutMs };
+}
+
 function remainingProvisionOperationMs(budget: ProvisionOperationBudget): number {
   budget.signal?.throwIfAborted();
   const remaining = Math.floor(budget.deadlineAtMs - Date.now());
@@ -500,33 +546,55 @@ function remainingProvisionOperationMs(budget: ProvisionOperationBudget): number
 
 async function awaitProvisionOperation<T>(
   budget: ProvisionOperationBudget,
-  operation: (timeoutMs: number) => Promise<T>,
+  operation: (options: {
+    timeoutMs: number;
+    deadlineAtMs: number;
+    signal: AbortSignal;
+  }) => Promise<T>,
+  cancel?: () => Promise<void>,
 ): Promise<T> {
   const timeoutMs = remainingProvisionOperationMs(budget);
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let removeAbortListener = (): void => undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(
-          new BrowserControlTransportError("browser controller provisioning deadline was reached"),
-        ),
+  const deadlineError = new BrowserControlTransportError(
+    "browser controller provisioning deadline was reached",
+  );
+  timer = setTimeout(() => controller.abort(deadlineError), timeoutMs);
+  if (budget.signal) {
+    const onAbort = (): void =>
+      controller.abort(budget.signal?.reason ?? new Error("operation aborted"));
+    removeAbortListener = () => budget.signal?.removeEventListener("abort", onAbort);
+    budget.signal.addEventListener("abort", onAbort, { once: true });
+  }
+  const operationPromise = Promise.resolve().then(() =>
+    operation({
       timeoutMs,
-    );
-  });
-  const cancellation = budget.signal
-    ? new Promise<never>((_resolve, reject) => {
-        const onAbort = (): void => reject(budget.signal?.reason ?? new Error("operation aborted"));
-        removeAbortListener = () => budget.signal?.removeEventListener("abort", onAbort);
-        budget.signal?.addEventListener("abort", onAbort, { once: true });
-      })
-    : null;
+      deadlineAtMs: budget.deadlineAtMs,
+      signal: controller.signal,
+    }),
+  );
   try {
-    return await Promise.race([
-      operation(timeoutMs),
-      timeout,
-      ...(cancellation ? [cancellation] : []),
+    const winner = await Promise.race([
+      operationPromise.then(
+        (value) => ({ kind: "completed" as const, value }),
+        (error) => ({ kind: "failed" as const, error }),
+      ),
+      new Promise<{ kind: "aborted"; reason: unknown }>((resolve) => {
+        const onAbort = (): void =>
+          resolve({ kind: "aborted", reason: controller.signal.reason ?? deadlineError });
+        if (controller.signal.aborted) onAbort();
+        else controller.signal.addEventListener("abort", onAbort, { once: true });
+      }),
     ]);
+    if (winner.kind === "completed") return winner.value;
+    if (winner.kind === "failed") throw winner.error;
+
+    // Abort the provider operation, then wait until its exact promise settles
+    // before any authority-file or sidecar cleanup may begin.
+    await cancel?.().catch(() => undefined);
+    await operationPromise.catch(() => undefined);
+    throw winner.reason;
   } finally {
     if (timer) clearTimeout(timer);
     removeAbortListener();
@@ -550,13 +618,16 @@ export async function provisionBrowserControlClient(
     }
     const ensured = await awaitProvisionOperation(
       budget,
-      async () =>
-        await session.ensureBrowserControl!({
-          scopeId: input.nativeAuthority!.scopeId,
-          scopeGeneration: input.nativeAuthority!.scopeGeneration,
-          adminToken,
-          allowedOrigins: [...(input.allowedOrigins ?? [])],
-        }),
+      async (options) =>
+        await session.ensureBrowserControl!(
+          {
+            scopeId: input.nativeAuthority!.scopeId,
+            scopeGeneration: input.nativeAuthority!.scopeGeneration,
+            adminToken,
+            allowedOrigins: [...(input.allowedOrigins ?? [])],
+          },
+          options,
+        ),
     );
     const port = boundedPort(ensured.port);
     nativeControllerPorts.set(nativeControllerKey(input.nativeAuthority), port);
@@ -602,14 +673,16 @@ export async function provisionBrowserControlClient(
     );
     const server = await awaitProvisionOperation(
       budget,
-      async (timeoutMs) =>
+      async ({ timeoutMs, deadlineAtMs, signal }) =>
         await ensureBrowserControlServer(session, {
           adminTokenFile,
           ...(input.allowedOrigins ? { allowedOrigins: input.allowedOrigins } : {}),
           ...(input.port === undefined ? {} : { port: input.port }),
           timeoutMs,
-          ...(input.signal === undefined ? {} : { signal: input.signal }),
+          deadlineAtMs,
+          signal,
         }),
+      session.cancelPendingExecCommand?.bind(session),
     );
     const client = new BrowserControlClient(session, {
       adminToken,
@@ -621,20 +694,22 @@ export async function provisionBrowserControlClient(
     if (input.allowedOrigins && input.allowedOrigins.length > 0) {
       await awaitProvisionOperation(
         budget,
-        async (timeoutMs) =>
+        async ({ timeoutMs, signal }) =>
           await client.addAllowedOrigins(input.allowedOrigins!, {
             timeoutMs,
-            ...(input.signal ? { signal: input.signal } : {}),
+            signal,
           }),
       );
     }
     return { client, server };
   } finally {
-    await runBestEffort(session, `rm -f -- ${shellQuote(temporaryTokenFile)}`, budget);
+    const cleanupBudget = cleanupProvisionOperationBudget(input);
+    await runBestEffort(session, `rm -f -- ${shellQuote(temporaryTokenFile)}`, cleanupBudget);
     if (session.finalizeOpStreamOps) {
-      await awaitProvisionOperation(budget, async () => await session.finalizeOpStreamOps!()).catch(
-        () => undefined,
-      );
+      await awaitProvisionOperation(
+        cleanupBudget,
+        async (options) => await session.finalizeOpStreamOps!(options),
+      ).catch(() => undefined);
     }
   }
 }
@@ -1477,12 +1552,18 @@ export class BrowserControlClient {
     const key = nativeControllerKey(this.nativeAuthority);
     const cached = nativeControllerPorts.get(key);
     if (cached !== undefined) return cached;
-    const ensured = await this.session.ensureBrowserControl({
-      scopeId: this.nativeAuthority.scopeId,
-      scopeGeneration: this.nativeAuthority.scopeGeneration,
-      adminToken: this.adminToken,
-      allowedOrigins: [],
-    });
+    const ensured = await this.session.ensureBrowserControl(
+      {
+        scopeId: this.nativeAuthority.scopeId,
+        scopeGeneration: this.nativeAuthority.scopeGeneration,
+        adminToken: this.adminToken,
+        allowedOrigins: [],
+      },
+      {
+        timeoutMs: this.timeoutMs,
+        ...(this.signal ? { signal: this.signal } : {}),
+      },
+    );
     const port = boundedPort(ensured.port);
     nativeControllerPorts.set(key, port);
     return port;
@@ -2760,7 +2841,7 @@ async function writePrivateFile(
     if (budget) {
       await awaitProvisionOperation(
         budget,
-        async () => await session.writePlacementPrivate!(input),
+        async (options) => await session.writePlacementPrivate!({ ...input, ...options }),
       );
     } else {
       await session.writePlacementPrivate(input);
@@ -2770,7 +2851,10 @@ async function writePrivateFile(
   if (session.writeFile) {
     try {
       if (budget) {
-        await awaitProvisionOperation(budget, async () => await session.writeFile!(input));
+        await awaitProvisionOperation(
+          budget,
+          async (options) => await session.writeFile!({ ...input, ...options }),
+        );
       } else {
         await session.writeFile(input);
       }
@@ -2827,21 +2911,29 @@ async function writePrivateFile(
     `chmod 0600 -- ${shellQuote(path)};`,
     `printf '%s\n' ${shellQuote(COMMAND_OK)}`,
   ].join(" ");
-  const start = async () =>
+  const start = async (options?: {
+    signal: AbortSignal;
+    deadlineAtMs: number;
+    timeoutMs: number;
+  }) =>
     session.exec
       ? await session.exec({
           cmd: command,
           workdir: placementControllerWorkdir(session),
           yieldTimeMs: Math.min(250, budget ? remainingProvisionOperationMs(budget) : 250),
           maxOutputTokens: 2_000,
+          ...(options ?? {}),
         })
       : await session.execCommand!({
           cmd: command,
           workdir: placementControllerWorkdir(session),
           yieldTimeMs: Math.min(250, budget ? remainingProvisionOperationMs(budget) : 250),
           maxOutputTokens: 2_000,
+          ...(options ?? {}),
         });
-  const started = budget ? await awaitProvisionOperation(budget, start) : await start();
+  const started = budget
+    ? await awaitProvisionOperation(budget, start, session.cancelPendingExecCommand?.bind(session))
+    : await start();
   const startedSessionId =
     typeof started === "string"
       ? (() => {
@@ -2856,15 +2948,23 @@ async function writePrivateFile(
       "browser private file transport did not yield an input session",
     );
   }
-  const write = async (remainingMs = boundedTimeout(timeoutMs)) =>
+  const write = async (
+    remainingMs = boundedTimeout(timeoutMs),
+    options?: { signal: AbortSignal; deadlineAtMs: number; timeoutMs: number },
+  ) =>
     await session.writeStdin!({
       sessionId: startedSessionId,
       chars: payload,
       yieldTimeMs: remainingMs,
       maxOutputTokens: 2_000,
+      ...(options ?? {}),
     });
   const output = budget
-    ? await awaitProvisionOperation(budget, async (remainingMs) => await write(remainingMs))
+    ? await awaitProvisionOperation(
+        budget,
+        async (options) => await write(options.timeoutMs, options),
+        session.cancelPendingExecCommand?.bind(session),
+      )
     : await write();
   const terminal = parseExecResponseBanner(output);
   if (
@@ -2883,22 +2983,31 @@ async function runChecked(
   timeoutMs = 60_000,
   budget?: ProvisionOperationBudget,
 ): Promise<void> {
-  const run = async (remainingMs = boundedTimeout(timeoutMs)) =>
+  const run = async (
+    remainingMs = boundedTimeout(timeoutMs),
+    options?: { signal: AbortSignal; deadlineAtMs: number; timeoutMs: number },
+  ) =>
     session.exec
       ? await session.exec({
           cmd: command,
           workdir: placementControllerWorkdir(session),
           yieldTimeMs: remainingMs,
           maxOutputTokens: 2_000,
+          ...(options ?? {}),
         })
       : await session.execCommand!({
           cmd: command,
           workdir: placementControllerWorkdir(session),
           yieldTimeMs: remainingMs,
           maxOutputTokens: 2_000,
+          ...(options ?? {}),
         });
   const result = budget
-    ? await awaitProvisionOperation(budget, async (remainingMs) => await run(remainingMs))
+    ? await awaitProvisionOperation(
+        budget,
+        async (options) => await run(options.timeoutMs, options),
+        session.cancelPendingExecCommand?.bind(session),
+      )
     : await run();
   const output = commandOutput(result);
   const exitCode = typeof result === "object" && result ? result.exitCode : undefined;
@@ -2913,13 +3022,17 @@ async function runBestEffort(
   budget?: ProvisionOperationBudget,
 ): Promise<void> {
   try {
-    const run = async (timeoutMs = 15_000) => {
+    const run = async (
+      timeoutMs = 15_000,
+      options?: { signal: AbortSignal; deadlineAtMs: number; timeoutMs: number },
+    ) => {
       if (session.exec) {
         await session.exec({
           cmd: command,
           workdir: placementControllerWorkdir(session),
           yieldTimeMs: timeoutMs,
           maxOutputTokens: 100,
+          ...(options ?? {}),
         });
       } else if (session.execCommand) {
         await session.execCommand({
@@ -2927,13 +3040,15 @@ async function runBestEffort(
           workdir: placementControllerWorkdir(session),
           yieldTimeMs: timeoutMs,
           maxOutputTokens: 100,
+          ...(options ?? {}),
         });
       }
     };
     if (budget) {
       await awaitProvisionOperation(
         budget,
-        async (remainingMs) => await run(Math.min(15_000, remainingMs)),
+        async (options) => await run(Math.min(15_000, options.timeoutMs), options),
+        session.cancelPendingExecCommand?.bind(session),
       );
     } else {
       await run();

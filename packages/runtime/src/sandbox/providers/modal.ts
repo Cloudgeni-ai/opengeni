@@ -14,9 +14,11 @@ import {
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { SandboxConfigError } from "../errors";
+import { createModalTrustedRigPlatformSurface } from "./modal-trusted-rig-platform-surface";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   providerWorkspacePersistence,
+  type ProviderImmutableImageBuildResult,
   type ProviderRegistration,
 } from "./types";
 
@@ -664,6 +666,7 @@ export const modalProvider: ProviderRegistration = {
       snapshotHandle.detach?.();
     }
   },
+  createTrustedRigPlatformSurface: createModalTrustedRigPlatformSurface,
   descriptor: CAPABILITY_DESCRIPTORS.modal,
   validateCredentials(settings) {
     // both-or-neither (preserves existing validation at config validateSettings).
@@ -1024,6 +1027,56 @@ export async function resolveModalCheckpointProviderBindingForLiveSandbox(
     }
     return canonicalModalCheckpointProviderBinding(binding)!;
   } finally {
+    modal.close();
+  }
+}
+
+/** Resume/discover one caller-idempotent filesystem snapshot from the exact
+ * historical sandbox. This is the worker-restart recovery path for durable Rig
+ * provider-image cleanup obligations; the persisted provider binding is checked
+ * before the request is retried. */
+export async function recoverModalImmutableProviderImageBuild(
+  settings: Settings,
+  input: {
+    sandboxId: string;
+    requestId: string;
+    timeoutMs: number;
+    expectedProviderBindingKey: string;
+  },
+  createClient: (settings: Settings) => Promise<ModalClientLike> = createModalClient,
+): Promise<ProviderImmutableImageBuildResult> {
+  if (!input.sandboxId || !input.requestId || input.timeoutMs < 1) {
+    throw new Error("Modal provider image recovery identity is invalid");
+  }
+  const modal = await createClient(settings);
+  let sandbox: Awaited<ReturnType<ModalClientLike["sandboxes"]["fromId"]>> | null = null;
+  try {
+    const binding = canonicalModalCheckpointProviderBinding(
+      await modalCheckpointProviderBindingForClient(settings, modal),
+    )!;
+    if (binding.key !== input.expectedProviderBindingKey) {
+      throw new Error("Modal provider image recovery credential binding changed");
+    }
+    sandbox = await modal.sandboxes.fromId(input.sandboxId);
+    const image = await sandbox.snapshotFilesystem({
+      snapshotId: input.requestId,
+      timeoutMs: input.timeoutMs,
+      ttlMs: null,
+    });
+    const imageId = image.imageId;
+    if (!imageId) {
+      throw new Error("Modal provider image recovery returned no immutable image id");
+    }
+    return {
+      provider: "modal",
+      backend: "modal",
+      imageId,
+      imageDigest: null,
+      providerBindingKey: binding.key,
+      providerBinding: binding.binding,
+    };
+  } finally {
+    sandbox?.detach();
     modal.close();
   }
 }

@@ -24,6 +24,7 @@ import {
   appendSessionEventToSandboxGroup,
   bindRetainedProcessProviderIdentity,
   claimWorkspaceArchiveCapture,
+  claimRigProviderImageCleanupObligationsForGc,
   claimSandboxCheckpointArtifactsForGc,
   claimTerminalRetainedProcesses,
   countActiveRetainedProcessesByOwnerState,
@@ -54,6 +55,7 @@ import {
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
   settleSandboxCheckpointArtifactGc,
+  settleRigProviderImageCleanupObligationGc,
   rlsContextForWorkspace,
   settleRetainedProcess,
   type MeterableWarmLease,
@@ -126,6 +128,7 @@ import { CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES } from "../concurrency";
 import { assertSandboxDrainInputTiming, sandboxDrainTiming } from "../sandbox-reaper-timeout";
 import type { ControlActivityServices as ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
+import { reconcileRigProviderImageCleanupObligationsForSource } from "./rig-provider-image-cleanup";
 import {
   recordCreditBalanceGauges,
   recordCreditMicros,
@@ -969,13 +972,63 @@ async function gcSandboxCheckpointArtifacts(
       });
     }
   });
+  const providerImageClaims = await claimRigProviderImageCleanupObligationsForGc(db, {
+    claimId,
+    limit: CHECKPOINT_GC_LIMIT,
+    claimTtlMs: CHECKPOINT_GC_CLAIM_TTL_MS,
+  });
+  recordSandboxCheckpointArtifactOutcome(observability, "claimed", providerImageClaims.length);
+  await forEachWithConcurrency(
+    providerImageClaims,
+    SANDBOX_MAINTENANCE_ITEM_CONCURRENCY,
+    async (claim) => {
+      try {
+        if (claim.providerBackend !== "modal") {
+          throw new Error(
+            `Unsupported Rig provider image cleanup backend ${claim.providerBackend}`,
+          );
+        }
+        await deleteModalCheckpointSnapshot(settings, claim.providerBindingKey, claim.objectId);
+        const settled = await settleRigProviderImageCleanupObligationGc(db, {
+          obligationId: claim.id,
+          claimId,
+          deleted: true,
+          retryAfterMs: 1_000,
+        });
+        if (settled) {
+          deleted += 1;
+          recordSandboxCheckpointArtifactOutcome(observability, "deleted");
+        }
+      } catch (error) {
+        failed += 1;
+        recordSandboxCheckpointArtifactOutcome(observability, "delete_failed");
+        const retryAfterMs = Math.min(
+          6 * 60 * 60_000,
+          5_000 * 2 ** Math.min(claim.deleteAttempts, 17),
+        );
+        await settleRigProviderImageCleanupObligationGc(db, {
+          obligationId: claim.id,
+          claimId,
+          deleted: false,
+          error: error instanceof Error ? error.message : String(error),
+          retryAfterMs,
+        }).catch(() => false);
+        observability.warn("sandbox reaper: Rig provider image cleanup failed", {
+          obligationId: claim.id,
+          providerBackend: claim.providerBackend,
+          attempt: claim.deleteAttempts,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+  );
   const pruned = await pruneDeletedSandboxCheckpointArtifacts(
     db,
     CHECKPOINT_TOMBSTONE_RETENTION_MS,
     CHECKPOINT_TOMBSTONE_PRUNE_LIMIT,
   );
   recordSandboxCheckpointArtifactOutcome(observability, "tombstone_pruned", pruned);
-  return { claimed: claims.length, deleted, failed };
+  return { claimed: claims.length + providerImageClaims.length, deleted, failed };
 }
 
 async function adoptLegacyModalCheckpointReceipts(
@@ -2597,6 +2650,17 @@ async function terminateDrainableBox(
   // lease draining for a later sweep (NEVER terminate a box whose files we
   // could not capture). A persist CAS miss means the box was re-armed and left
   // running, so the cold commit is skipped.
+  if (backend === "modal" && lease.instanceId) {
+    await reconcileRigProviderImageCleanupObligationsForSource({
+      db,
+      settings,
+      accountId,
+      workspaceId: row.workspaceId,
+      sourceLeaseId: lease.id,
+      sourceInstanceId: lease.instanceId,
+      timeoutMs: captureTimeoutMs,
+    });
+  }
   const termination: ProviderTerminationOutcome | boolean = providerMissingBeforeCapture
     ? { terminated: true, providerMissingBeforeCapture: true }
     : await terminateBox(

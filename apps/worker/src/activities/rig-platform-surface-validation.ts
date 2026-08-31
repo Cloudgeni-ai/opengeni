@@ -141,7 +141,13 @@ function trustedSurface(input: RigPlatformSurfaceValidationInput): TrustedRigPla
     surface.binding.authority !== "deployment_control_plane" ||
     surface.binding.backendId !== input.established.backendId ||
     surface.binding.instanceId !== input.established.instanceId ||
-    surface.binding.providerImage !== input.providerImage
+    surface.binding.providerImage !== input.providerImage ||
+    !surface.binding.providerImageId ||
+    surface.binding.leaseId !== input.ownership.leaseId ||
+    surface.binding.leaseEpoch !== input.ownership.leaseEpoch ||
+    surface.binding.workspaceGeneration !== input.ownership.workspaceGeneration ||
+    surface.binding.sandboxGroupId !== input.sandboxGroupId ||
+    surface.binding.rigVersionId !== input.rigVersionId
   ) {
     throw validationError("the deployment-owned validation authority has another provider binding");
   }

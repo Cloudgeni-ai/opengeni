@@ -8485,6 +8485,117 @@ export const sandboxCheckpointArtifacts = pgTable(
   }),
 );
 
+export const rigProviderImageCleanupObligationStateValues = [
+  "building",
+  "build_failed",
+  "delete_pending",
+  "deleting",
+  "delete_failed",
+  "settled",
+  "deleted",
+] as const;
+
+/**
+ * Durable pre-creation ownership for Modal Rig provider-image requests. The
+ * caller-owned build request id is persisted before snapshotFilesystem starts,
+ * so a replacement worker can resume/discover the exact provider operation and
+ * hand any unpublished image to GC without the original promise surviving.
+ */
+export const rigProviderImageCleanupObligations = pgTable(
+  "rig_provider_image_cleanup_obligations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    sourceLeaseId: uuid("source_lease_id").notNull(),
+    sourceLeaseEpoch: integer("source_lease_epoch").notNull(),
+    sourceInstanceId: text("source_instance_id").notNull(),
+    sourceWorkspaceGeneration: integer("source_workspace_generation").notNull(),
+    providerBackend: text("provider_backend").notNull(),
+    providerBindingKey: text("provider_binding_key").notNull(),
+    providerBinding: jsonb("provider_binding").$type<Record<string, unknown>>().notNull(),
+    buildRequestId: text("build_request_id").notNull(),
+    objectId: text("object_id"),
+    state: text("state", { enum: rigProviderImageCleanupObligationStateValues })
+      .notNull()
+      .default("building"),
+    deleteAfter: timestamp("delete_after", { withTimezone: true }),
+    deleteAttempts: integer("delete_attempts").notNull().default(0),
+    deleteClaimId: uuid("delete_claim_id"),
+    deleteClaimedAt: timestamp("delete_claimed_at", { withTimezone: true }),
+    lastDeleteError: text("last_delete_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    objectRecordedAt: timestamp("object_recorded_at", { withTimezone: true }),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    request: uniqueIndex("rig_provider_image_cleanup_obligations_request_uq").on(
+      table.providerBackend,
+      table.providerBindingKey,
+      table.buildRequestId,
+      table.sourceInstanceId,
+    ),
+    source: index("rig_provider_image_cleanup_obligations_source_idx").on(
+      table.workspaceId,
+      table.sourceLeaseId,
+      table.sourceInstanceId,
+    ),
+    gc: index("rig_provider_image_cleanup_obligations_gc_idx")
+      .on(table.deleteAfter, table.createdAt, table.id)
+      .where(sql`${table.state} in ('delete_pending', 'delete_failed', 'deleting')`),
+    sourceValid: check(
+      "rig_provider_image_cleanup_obligations_source_check",
+      sql`${table.sourceLeaseEpoch} >= 0
+        and ${table.sourceWorkspaceGeneration} >= 0
+        and octet_length(${table.sourceInstanceId}) between 1 and 512
+        and octet_length(${table.buildRequestId}) between 1 and 256`,
+    ),
+    providerValid: check(
+      "rig_provider_image_cleanup_obligations_provider_check",
+      sql`${table.providerBackend} = 'modal'
+        and octet_length(${table.providerBindingKey}) between 1 and 1024
+        and jsonb_typeof(${table.providerBinding}) = 'object'
+        and ${table.providerBindingKey}::jsonb = ${table.providerBinding}
+        and ${table.providerBindingKey} = format(
+          '{"version":1,"serverUrl":%s,"workspaceName":%s,"environment":%s}',
+          to_jsonb(${table.providerBinding} ->> 'serverUrl')::text,
+          to_jsonb(${table.providerBinding} ->> 'workspaceName')::text,
+          to_jsonb(${table.providerBinding} ->> 'environment')::text
+        )
+        and ${table.providerBinding} = jsonb_build_object(
+          'version', 1,
+          'serverUrl', ${table.providerBinding} ->> 'serverUrl',
+          'workspaceName', ${table.providerBinding} ->> 'workspaceName',
+          'environment', ${table.providerBinding} ->> 'environment'
+        )
+        and coalesce(octet_length(${table.providerBinding} ->> 'serverUrl'), 0) > 0
+        and coalesce(octet_length(${table.providerBinding} ->> 'workspaceName'), 0) > 0
+        and ${table.providerBinding} ->> 'environment' is not null
+        and (${table.objectId} is null or octet_length(${table.objectId}) between 1 and 1024)`,
+    ),
+    stateValid: check(
+      "rig_provider_image_cleanup_obligations_state_check",
+      sql`${table.state} in (
+        'building', 'build_failed', 'delete_pending', 'deleting', 'delete_failed', 'settled', 'deleted'
+      )
+      and ((${table.state} in ('building', 'build_failed') and ${table.objectId} is null)
+        or (${table.state} not in ('building', 'build_failed') and ${table.objectId} is not null))`,
+    ),
+    deleteClaimValid: check(
+      "rig_provider_image_cleanup_obligations_delete_claim_check",
+      sql`(${table.state} = 'deleting'
+          and ${table.deleteClaimId} is not null
+          and ${table.deleteClaimedAt} is not null)
+        or (${table.state} <> 'deleting'
+          and ${table.deleteClaimId} is null
+          and ${table.deleteClaimedAt} is null)`,
+    ),
+  }),
+);
+
 // The 4 liveness states of the singleton lease. Exported so the query layer and
 // the stateless resume-by-id path share one source of truth for the domain.
 export const sandboxLeaseLivenessValues = ["cold", "warming", "warm", "draining"] as const;

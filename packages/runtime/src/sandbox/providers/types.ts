@@ -7,6 +7,7 @@
 import type { Settings } from "@opengeni/config";
 import type { CapabilityDescriptor, SandboxBackend } from "@opengeni/contracts";
 import type { RuntimeMetricsHooks } from "../../metrics";
+import type { TrustedRigPlatformSurface } from "../browser-control-client";
 
 export interface ProviderConstructionContext {
   settings: Settings;
@@ -43,6 +44,19 @@ export type ProviderImmutableImageBuildInput = {
 export type ProviderExpirationRenewalInput = {
   settings: Settings;
   instanceId: string;
+};
+
+export type ProviderTrustedRigPlatformSurfaceInput = {
+  settings: Settings;
+  session: unknown;
+  instanceId: string;
+  providerImage: string;
+  trustedProviderImageId?: string;
+  leaseId: string;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  sandboxGroupId: string;
+  rigVersionId: string;
 };
 
 /**
@@ -150,6 +164,11 @@ export interface ProviderRegistration {
   buildImmutableImage?(
     input: ProviderImmutableImageBuildInput,
   ): Promise<ProviderImmutableImageBuildResult>;
+  /** Construct a provider/control-plane-owned validation authority for one
+   * exact committed verifier lease. Omission is an explicit fail-closed signal. */
+  createTrustedRigPlatformSurface?(
+    input: ProviderTrustedRigPlatformSurfaceInput,
+  ): Promise<TrustedRigPlatformSurface>;
   /** Refresh a renewable provider expiration for one exact live instance.
    * Omission means the provider has no renewable TTL contract. */
   renewExpiration?(input: ProviderExpirationRenewalInput): Promise<void>;

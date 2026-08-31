@@ -27,6 +27,7 @@ import { selfhostedProvider } from "./selfhosted";
 import type {
   ProviderImmutableImageBuildResult,
   ProviderRegistration,
+  ProviderTrustedRigPlatformSurfaceInput,
   ProviderWorkspaceCapturePolicy,
 } from "./types";
 import { vercelProvider } from "./vercel";
@@ -154,6 +155,13 @@ export function assertProviderRegistryInvariants(): void {
     if (capturePolicy?.strategy === "portable_tar" && capturePolicy.liveInstance !== "preserved") {
       throw new Error(`Provider "${backend}" portable tar capture must preserve its instance`);
     }
+    const trustedRigSurfaceSupported =
+      typeof registration.createTrustedRigPlatformSurface === "function";
+    if (trustedRigSurfaceSupported !== (backend === "modal" || backend === "docker")) {
+      throw new Error(
+        `Provider "${backend}" has an unexpected trusted Rig platform surface posture`,
+      );
+    }
   }
 }
 
@@ -244,6 +252,43 @@ export async function buildImmutableProviderImage(input: {
   });
 }
 
+export async function attachProviderTrustedRigPlatformSurface(
+  input: ProviderTrustedRigPlatformSurfaceInput & { backend: SandboxBackend },
+): Promise<boolean> {
+  const create = PROVIDER_REGISTRY[input.backend].createTrustedRigPlatformSurface;
+  if (!create) return false;
+  if (!input.session || typeof input.session !== "object") {
+    throw new Error("trusted Rig platform surface requires a provider session object");
+  }
+  const session = input.session as Record<string, unknown>;
+  if (Object.getOwnPropertyDescriptor(session, "trustedRigPlatformSurface")) {
+    throw new Error("provider session already defines a Rig platform surface authority");
+  }
+  const surface = await create(input);
+  const binding = surface.binding;
+  if (
+    binding.authority !== "deployment_control_plane" ||
+    binding.backendId !== input.backend ||
+    binding.instanceId !== input.instanceId ||
+    binding.providerImage !== input.providerImage ||
+    !binding.providerImageId ||
+    binding.leaseId !== input.leaseId ||
+    binding.leaseEpoch !== input.leaseEpoch ||
+    binding.workspaceGeneration !== input.workspaceGeneration ||
+    binding.sandboxGroupId !== input.sandboxGroupId ||
+    binding.rigVersionId !== input.rigVersionId
+  ) {
+    throw new Error("provider returned a trusted Rig platform surface for another binding");
+  }
+  Object.defineProperty(session, "trustedRigPlatformSurface", {
+    value: surface,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return true;
+}
+
 // Boot-validate the registry once at module load: the descriptor-table self-
 // test PLUS the descriptor.backendId === SDK client.backendId assertion (the
 // deferred-from-P0.1 invariant). The SDK client constructors are pure option-
@@ -258,6 +303,7 @@ export type {
   ProviderExactResumeMode,
   ProviderImmutableImageBuildInput,
   ProviderImmutableImageBuildResult,
+  ProviderTrustedRigPlatformSurfaceInput,
   ProviderExpirationRenewalInput,
   ProviderWorkspaceCapturePolicy,
   ProviderWorkspaceCaptureTakeover,

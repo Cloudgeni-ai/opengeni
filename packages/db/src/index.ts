@@ -49577,6 +49577,348 @@ export type SandboxCheckpointArtifactRegistration = {
   objectId: string;
 };
 
+export type RigProviderImageCleanupObligationState =
+  | "building"
+  | "build_failed"
+  | "delete_pending"
+  | "deleting"
+  | "delete_failed"
+  | "settled"
+  | "deleted";
+
+export type RigProviderImageCleanupObligation = {
+  id: string;
+  state: RigProviderImageCleanupObligationState;
+  buildRequestId: string;
+  objectId: string | null;
+  providerBindingKey: string;
+  providerBinding: Record<string, unknown>;
+  sourceLeaseId: string;
+  sourceInstanceId: string;
+};
+
+export class RigProviderImageCleanupObligationConflictError extends Error {
+  readonly name = "RigProviderImageCleanupObligationConflictError";
+}
+
+export async function beginRigProviderImageCleanupObligation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    sourceLeaseId: string;
+    sourceLeaseEpoch: number;
+    sourceInstanceId: string;
+    sourceWorkspaceGeneration: number;
+    providerBindingKey: string;
+    providerBinding: Record<string, unknown>;
+    buildRequestId: string;
+  },
+): Promise<RigProviderImageCleanupObligation> {
+  const providerIdentity = canonicalModalCheckpointProviderBinding(input.providerBinding);
+  if (!providerIdentity || providerIdentity.key !== input.providerBindingKey) {
+    throw new Error("Modal Rig provider image cleanup binding is invalid");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`
+        insert into rig_provider_image_cleanup_obligations (
+          account_id, workspace_id, sandbox_group_id, source_lease_id,
+          source_lease_epoch, source_instance_id, source_workspace_generation,
+          provider_backend, provider_binding_key, provider_binding, build_request_id
+        ) values (
+          ${input.accountId}, ${input.workspaceId}, ${input.sandboxGroupId},
+          ${input.sourceLeaseId}, ${input.sourceLeaseEpoch}, ${input.sourceInstanceId},
+          ${input.sourceWorkspaceGeneration}, 'modal', ${providerIdentity.key},
+          ${JSON.stringify(providerIdentity.binding)}::jsonb, ${input.buildRequestId}
+        )
+        on conflict (
+          provider_backend, provider_binding_key, build_request_id, source_instance_id
+        ) do update set
+          state = case
+            when rig_provider_image_cleanup_obligations.state = 'build_failed'
+              then 'building'
+            else rig_provider_image_cleanup_obligations.state
+          end,
+          last_delete_error = case
+            when rig_provider_image_cleanup_obligations.state = 'build_failed'
+              then null
+            else rig_provider_image_cleanup_obligations.last_delete_error
+          end,
+          updated_at = now()
+      `);
+      const row = (
+        await scopedDb.execute<{
+          id: string;
+          account_id: string;
+          workspace_id: string;
+          sandbox_group_id: string;
+          source_lease_id: string;
+          source_lease_epoch: number | string;
+          source_instance_id: string;
+          source_workspace_generation: number | string;
+          provider_binding_key: string;
+          provider_binding: Record<string, unknown>;
+          build_request_id: string;
+          object_id: string | null;
+          state: RigProviderImageCleanupObligationState;
+        }>(sql`
+          select id, account_id, workspace_id, sandbox_group_id, source_lease_id,
+            source_lease_epoch, source_instance_id, source_workspace_generation,
+            provider_binding_key, provider_binding,
+            build_request_id, object_id, state
+          from rig_provider_image_cleanup_obligations
+          where provider_backend = 'modal'
+            and provider_binding_key = ${providerIdentity.key}
+            and build_request_id = ${input.buildRequestId}
+            and source_instance_id = ${input.sourceInstanceId}
+          limit 1
+        `)
+      )[0];
+      if (
+        !row ||
+        row.account_id !== input.accountId ||
+        row.workspace_id !== input.workspaceId ||
+        row.sandbox_group_id !== input.sandboxGroupId ||
+        row.source_lease_id !== input.sourceLeaseId ||
+        Number(row.source_lease_epoch) !== input.sourceLeaseEpoch ||
+        row.source_instance_id !== input.sourceInstanceId ||
+        Number(row.source_workspace_generation) !== input.sourceWorkspaceGeneration ||
+        canonicalModalCheckpointProviderBinding(row.provider_binding)?.key !== providerIdentity.key
+      ) {
+        throw new RigProviderImageCleanupObligationConflictError(
+          "Modal Rig provider image cleanup request identity collision",
+        );
+      }
+      return {
+        id: row.id,
+        state: row.state,
+        buildRequestId: row.build_request_id,
+        objectId: row.object_id,
+        providerBindingKey: row.provider_binding_key,
+        providerBinding: row.provider_binding,
+        sourceLeaseId: row.source_lease_id,
+        sourceInstanceId: row.source_instance_id,
+      };
+    },
+  );
+}
+
+export async function failRigProviderImageCleanupObligationBuild(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    obligationId: string;
+    buildRequestId: string;
+    providerBindingKey: string;
+    error?: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update rig_provider_image_cleanup_obligations set
+          state = 'build_failed',
+          last_delete_error = ${input.error?.slice(0, 4000) ?? null},
+          updated_at = now()
+        where id = ${input.obligationId}
+          and build_request_id = ${input.buildRequestId}
+          and provider_binding_key = ${input.providerBindingKey}
+          and state = 'building'
+          and object_id is null
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
+export async function recordRigProviderImageCleanupObject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    obligationId: string;
+    buildRequestId: string;
+    providerBindingKey: string;
+    objectId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update rig_provider_image_cleanup_obligations set
+          object_id = ${input.objectId},
+          state = case when state = 'settled' then state else 'delete_pending' end,
+          delete_after = case when state = 'settled' then null else now() + interval '5 minutes' end,
+          object_recorded_at = coalesce(object_recorded_at, now()),
+          delete_claim_id = null,
+          delete_claimed_at = null,
+          last_delete_error = null,
+          updated_at = now()
+        where id = ${input.obligationId}
+          and build_request_id = ${input.buildRequestId}
+          and provider_binding_key = ${input.providerBindingKey}
+          and state <> 'deleted'
+          and (object_id is null or object_id = ${input.objectId})
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
+export async function settleRigProviderImageCleanupObligation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    obligationId: string;
+    objectId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update rig_provider_image_cleanup_obligations set
+          state = 'settled', delete_after = null, delete_claim_id = null,
+          delete_claimed_at = null, last_delete_error = null,
+          settled_at = coalesce(settled_at, now()), updated_at = now()
+        where id = ${input.obligationId}
+          and object_id = ${input.objectId}
+          and state in ('delete_pending', 'delete_failed', 'deleting', 'settled')
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
+export async function listBuildingRigProviderImageCleanupObligationsForSource(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sourceLeaseId: string;
+    sourceInstanceId: string;
+  },
+): Promise<RigProviderImageCleanupObligation[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{
+        id: string;
+        state: RigProviderImageCleanupObligationState;
+        build_request_id: string;
+        object_id: string | null;
+        provider_binding_key: string;
+        provider_binding: Record<string, unknown>;
+        source_lease_id: string;
+        source_instance_id: string;
+      }>(sql`
+        select id, state, build_request_id, object_id, provider_binding_key,
+          provider_binding, source_lease_id, source_instance_id
+        from rig_provider_image_cleanup_obligations
+        where source_lease_id = ${input.sourceLeaseId}
+          and source_instance_id = ${input.sourceInstanceId}
+          and state = 'building'
+        order by created_at, id
+      `);
+      return rows.map(
+        (row: {
+          id: string;
+          state: RigProviderImageCleanupObligationState;
+          build_request_id: string;
+          object_id: string | null;
+          provider_binding_key: string;
+          provider_binding: Record<string, unknown>;
+          source_lease_id: string;
+          source_instance_id: string;
+        }) => ({
+          id: row.id,
+          state: row.state,
+          buildRequestId: row.build_request_id,
+          objectId: row.object_id,
+          providerBindingKey: row.provider_binding_key,
+          providerBinding: row.provider_binding,
+          sourceLeaseId: row.source_lease_id,
+          sourceInstanceId: row.source_instance_id,
+        }),
+      );
+    },
+  );
+}
+
+export type RigProviderImageCleanupGcClaim = {
+  id: string;
+  providerBackend: string;
+  providerBindingKey: string;
+  providerBinding: Record<string, unknown>;
+  buildRequestId: string;
+  objectId: string;
+  deleteAttempts: number;
+};
+
+export async function claimRigProviderImageCleanupObligationsForGc(
+  db: Database,
+  input: { claimId: string; limit: number; claimTtlMs: number },
+): Promise<RigProviderImageCleanupGcClaim[]> {
+  const rows = await rawRows<{
+    id: string;
+    provider_backend: string;
+    provider_binding_key: string;
+    provider_binding: Record<string, unknown>;
+    build_request_id: string;
+    object_id: string;
+    delete_attempts: number | string;
+  }>(
+    db,
+    sql`select * from opengeni_private.claim_rig_provider_image_cleanup_obligations(
+      ${input.claimId}::uuid, ${input.limit}, ${input.claimTtlMs}
+    )`,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    providerBackend: row.provider_backend,
+    providerBindingKey: row.provider_binding_key,
+    providerBinding: row.provider_binding,
+    buildRequestId: row.build_request_id,
+    objectId: row.object_id,
+    deleteAttempts: Number(row.delete_attempts),
+  }));
+}
+
+export async function settleRigProviderImageCleanupObligationGc(
+  db: Database,
+  input: {
+    obligationId: string;
+    claimId: string;
+    deleted: boolean;
+    error?: string | null;
+    retryAfterMs: number;
+  },
+): Promise<boolean> {
+  const rows = await rawRows<{ settled: boolean }>(
+    db,
+    sql`select opengeni_private.settle_rig_provider_image_cleanup_obligation(
+      ${input.obligationId}::uuid, ${input.claimId}::uuid, ${input.deleted},
+      ${input.error?.slice(0, 4000) ?? null}, ${input.retryAfterMs}
+    ) as settled`,
+  );
+  return rows[0]?.settled === true;
+}
+
 export class SandboxCheckpointArtifactRegistrationConflictError extends Error {
   readonly name = "SandboxCheckpointArtifactRegistrationConflictError";
 }
@@ -49786,8 +50128,28 @@ export async function registerSandboxCheckpointArtifact(
               where id = ${row.id}
                 and state in ('delete_pending', 'delete_failed')
             `);
+            await scopedDb.execute(sql`
+              update rig_provider_image_cleanup_obligations set
+                state = 'settled', delete_after = null, delete_claim_id = null,
+                delete_claimed_at = null, last_delete_error = null,
+                settled_at = coalesce(settled_at, now()), updated_at = now()
+              where provider_backend = 'modal'
+                and provider_binding_key = ${providerIdentity.key}
+                and object_id = ${verified.descriptor.snapshotId}
+                and state in ('delete_pending', 'delete_failed', 'deleting', 'settled')
+            `);
             return { id: row.id, state: "candidate", objectId: row.object_id };
           }
+          await scopedDb.execute(sql`
+            update rig_provider_image_cleanup_obligations set
+              state = 'settled', delete_after = null, delete_claim_id = null,
+              delete_claimed_at = null, last_delete_error = null,
+              settled_at = coalesce(settled_at, now()), updated_at = now()
+            where provider_backend = 'modal'
+              and provider_binding_key = ${providerIdentity.key}
+              and object_id = ${verified.descriptor.snapshotId}
+              and state in ('delete_pending', 'delete_failed', 'deleting', 'settled')
+          `);
           return { id: row.id, state: row.state, objectId: row.object_id };
         },
       );

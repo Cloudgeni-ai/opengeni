@@ -507,6 +507,7 @@ describe("rig route permission matrix", () => {
       where workspace_id = ${ws.workspaceId}
         and action = 'rig.version.verification.requested'
         and metadata ->> 'versionId' = ${version.id}
+        and metadata ->> 'attemptId' = ${attemptId}
       order by occurred_at asc
     `;
     expect(audits).toHaveLength(1);
@@ -666,6 +667,7 @@ describe("rig route permission matrix", () => {
       where workspace_id = ${ws.workspaceId}
         and action = 'rig.version.verification.requested'
         and metadata ->> 'versionId' = ${activeVersion.id}
+        and metadata ->> 'attemptId' = ${failedDispatches[0]!.attemptId}
       order by occurred_at asc
     `;
     expect(audits).toHaveLength(1);

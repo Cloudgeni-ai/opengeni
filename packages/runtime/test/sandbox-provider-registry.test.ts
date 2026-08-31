@@ -86,6 +86,14 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
     }
   });
 
+  test("trusted Rig platform validation is production-backed only for isolated providers", () => {
+    for (const backend of SandboxBackend.options) {
+      const supported =
+        typeof PROVIDER_REGISTRY[backend].createTrustedRigPlatformSurface === "function";
+      expect(supported).toBe(backend === "modal" || backend === "docker");
+    }
+  });
+
   test("renewal metrics classify one exact OpenSandbox throttle without changing failure semantics", async () => {
     const original = PROVIDER_REGISTRY.opensandbox.renewExpiration;
     const renewals: Array<{ backend: string; outcome: "completed" | "failed" }> = [];

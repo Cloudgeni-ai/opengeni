@@ -112,8 +112,21 @@ async function execute(command: string): Promise<{ exitCode: number; output: str
 }
 
 describe("build-once rig provider image runtime", () => {
-  test("caps and aborts a hung immutable image build at the remaining work deadline", async () => {
+  test("persists cleanup ownership before a timed-out build and records its late image", async () => {
     let providerTimeoutMs = 0;
+    let resolveBuild:
+      | ((value: {
+          provider: "modal";
+          backend: "modal";
+          imageId: string;
+          imageDigest: null;
+          providerBindingKey: string;
+          providerBinding: Record<string, unknown>;
+        }) => void)
+      | null = null;
+    const events: string[] = [];
+    const recorded: string[] = [];
+    const providerBinding = JSON.parse(PROVIDER_BINDING_KEY) as Record<string, unknown>;
     const startedAt = Date.now();
     await expect(
       buildVerifiedRigProviderImage(
@@ -149,17 +162,64 @@ describe("build-once rig provider image runtime", () => {
           signal: new AbortController().signal,
         },
         {
-          buildImmutableProviderImage: async (input) => {
-            providerTimeoutMs = input.timeoutMs;
-            return await new Promise(() => undefined);
+          resolveProviderBinding: async () => ({
+            key: PROVIDER_BINDING_KEY,
+            binding: providerBinding as never,
+          }),
+          beginCleanupObligation: async () => {
+            events.push("obligation");
+            return {
+              id: "77777777-7777-4777-8777-777777777777",
+              state: "building",
+              buildRequestId: rigProviderImageBuildRequestId({
+                targetId: VERSION_ID,
+                backend: "modal",
+                contentHash: rigProviderImageContentHash({
+                  backend: "modal",
+                  sourceImage: PLATFORM_IMAGE,
+                  definition: version(),
+                }),
+              }),
+              objectId: null,
+              providerBindingKey: PROVIDER_BINDING_KEY,
+              providerBinding,
+              sourceLeaseId: "66666666-6666-4666-8666-666666666666",
+              sourceInstanceId: "sandbox-build",
+            };
           },
-          deleteModalCheckpointSnapshot: async () => "not_found",
+          buildImmutableProviderImage: async (input) => {
+            events.push("build");
+            providerTimeoutMs = input.timeoutMs;
+            return await new Promise((resolve) => {
+              resolveBuild = resolve;
+            });
+          },
+          recordCleanupObject: async (_db, input) => {
+            recorded.push(input.objectId);
+            return true;
+          },
+          settleCleanupObligation: async () => true,
+          failCleanupBuild: async () => true,
         },
       ),
     ).rejects.toBeInstanceOf(RigProviderImageBuildDeadlineError);
     expect(providerTimeoutMs).toBeGreaterThan(0);
     expect(providerTimeoutMs).toBeLessThanOrEqual(40);
     expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(events).toEqual(["obligation", "build"]);
+
+    resolveBuild?.({
+      provider: "modal",
+      backend: "modal",
+      imageId: "im-late-build",
+      imageDigest: null,
+      providerBindingKey: PROVIDER_BINDING_KEY,
+      providerBinding,
+    });
+    for (let attempt = 0; attempt < 100 && recorded.length === 0; attempt += 1) {
+      await Bun.sleep(1);
+    }
+    expect(recorded).toEqual(["im-late-build"]);
   });
 
   test("publishes cold-boot proof only after the exact image marker and checks pass", async () => {

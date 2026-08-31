@@ -100,6 +100,7 @@ export {
 } from "./errors";
 export {
   PROVIDER_REGISTRY,
+  attachProviderTrustedRigPlatformSurface,
   assertProviderRegistryInvariants,
   buildImmutableProviderImage,
   isProviderApiThrottleError,
@@ -112,10 +113,12 @@ export {
   type ProviderExactResumeMode,
   type ProviderImmutableImageBuildInput,
   type ProviderImmutableImageBuildResult,
+  type ProviderTrustedRigPlatformSurfaceInput,
   type ProviderExpirationRenewalInput,
   type ProviderWorkspaceCapturePolicy,
   type ProviderWorkspaceCaptureTakeover,
 } from "./providers";
+export { recoverModalImmutableProviderImageBuild } from "./providers/modal";
 export {
   classifyProviderSandboxFailure,
   isProviderSandboxGoneDuringRoutedOperation,
