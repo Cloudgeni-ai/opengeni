@@ -6,6 +6,55 @@ const rigId = "22222222-2222-4222-8222-222222222222";
 const versionId = "33333333-3333-4333-8333-333333333333";
 
 describe("Rig verification recovery SDK", () => {
+  test("sends the explicit replacement-version CAS without rewriting null", async () => {
+    const requests: Request[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (input, init) => {
+        requests.push(new Request(input, init));
+        return new Response(
+          JSON.stringify({
+            id: versionId,
+            rigId,
+            version: 2,
+            image: null,
+            setupScript: null,
+            checks: [],
+            credentialHooks: [],
+            defaultVariableSetIds: [],
+            changelog: null,
+            providerImages: {},
+            createdBy: "user:m",
+            active: false,
+            verificationStatus: "pending",
+            createdAt: "2026-08-31T12:00:00.000Z",
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch,
+    });
+
+    await client.createRigVersion(workspaceId, rigId, {
+      expectedActiveVersionId: null,
+      setupScript: null,
+      checks: [],
+      credentialHooks: [],
+      defaultVariableSetIds: [],
+    });
+
+    expect(requests[0]?.method).toBe("POST");
+    expect(requests[0]?.url).toBe(
+      `https://api.example.test/v1/workspaces/${workspaceId}/rigs/${rigId}/versions`,
+    );
+    expect(await requests[0]!.json()).toEqual({
+      expectedActiveVersionId: null,
+      setupScript: null,
+      checks: [],
+      credentialHooks: [],
+      defaultVariableSetIds: [],
+    });
+  });
+
   test("keeps manager exact selection separate from use-authorized deferred recovery", async () => {
     const requests: Request[] = [];
     const client = new OpenGeniClient({

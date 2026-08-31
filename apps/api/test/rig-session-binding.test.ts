@@ -10,6 +10,7 @@ import {
 } from "@opengeni/testing";
 import {
   createDb,
+  createRig as createInactiveRig,
   createSession,
   createVariableSet,
   getSession,
@@ -261,6 +262,25 @@ describe("M3 rig binding: freeze at create", () => {
     });
     expect(s.rigId).toBeNull();
     expect(s.rigVersionId).toBeNull();
+  }, 60_000);
+
+  test("an inherited inactive workspace default fails instead of silently creating a rig-less session", async () => {
+    if (!available) return;
+    const bus = new MemoryEventBus();
+    const { accountId, workspaceId } = await freshWorkspace();
+    const rig = await createInactiveRig(db, {
+      accountId,
+      workspaceId,
+      name: "inactive-default",
+      activateInitialVersion: false,
+    });
+    await admin`update workspaces set default_rig_id = ${rig.id} where id = ${workspaceId}`;
+
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "must not silently lose the default rig",
+      }),
+    ).rejects.toThrow(/has no active version to bind/u);
   }, 60_000);
 
   test("an explicit unknown rigId is a 422", async () => {

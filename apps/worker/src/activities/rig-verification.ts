@@ -22,7 +22,6 @@ import {
 } from "@opengeni/core";
 import {
   acquireLease,
-  beginRigChangeVerificationAttempt,
   claimRigVersionProviderImageBuild,
   completeRigVersionVerification,
   commitWarmingToWarm,
@@ -32,6 +31,7 @@ import {
   getRig,
   getRigChange,
   getRigVersionById,
+  isCurrentRigChangeVerificationAttempt,
   isCurrentRigVersionVerificationAttempt,
   markWarmLeaseInstanceLost,
   markSandboxCheckpointArtifactDeletePending,
@@ -39,7 +39,7 @@ import {
   registerSandboxCheckpointArtifact,
   releaseLeaseHolder,
   touchLeaseHolder,
-  updateRigChangeStatus,
+  updateRigChangeStatusForVerificationAttempt,
   SandboxCheckpointArtifactRegistrationConflictError,
   type Database,
 } from "@opengeni/db";
@@ -83,7 +83,7 @@ type SandboxLifecycleCommandRunner = (
 ) => Promise<unknown>;
 
 export type RigVerificationWorkflowInput =
-  | { workspaceId: string; changeId: string; versionId?: never }
+  | { workspaceId: string; changeId: string; attemptId: string; versionId?: never }
   | { workspaceId: string; versionId: string; attemptId: string; changeId?: never };
 
 type CommandResult = {
@@ -194,6 +194,8 @@ export class RigVerificationActivityDeadlineError extends Error {
 
 export type RigVerificationActivityLifecycle = {
   signal: AbortSignal;
+  /** Absolute boundary for verifier work; cleanup begins when this is reached. */
+  workDeadlineAtMs: number | null;
   /** Absolute wall-clock boundary before which immediate cleanup may wait. */
   cleanupDeadlineAtMs: number | null;
   dispose(): void;
@@ -249,6 +251,8 @@ export function createRigVerificationActivityLifecycle(
     reserveMs === null ? 0 : Math.min(30_000, Math.max(1, Math.floor(reserveMs / 4)));
   const cleanupDeadlineAtMs =
     serverDeadlineAtMs === null ? null : serverDeadlineAtMs - serverReportingMarginMs;
+  const workDeadlineAtMs =
+    serverDeadlineAtMs === null || reserveMs === null ? null : serverDeadlineAtMs - reserveMs;
 
   let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   if (reserveMs !== null && startToCloseTimeoutMs !== undefined && !controller.signal.aborted) {
@@ -297,6 +301,7 @@ export function createRigVerificationActivityLifecycle(
 
   return {
     signal: controller.signal,
+    workDeadlineAtMs,
     cleanupDeadlineAtMs,
     dispose: () => {
       temporalSignal?.removeEventListener("abort", forwardTemporalCancellation);
@@ -1006,6 +1011,7 @@ export async function verifyRigProviderImageColdBoot(
         established,
         commandRunner: runContext.commandRunner,
         ownership: runContext.ownership,
+        lifecycle: input.lifecycle,
       });
       for (const check of input.checks) {
         const result = await runCommand(
@@ -1373,7 +1379,7 @@ export async function handleRigVersionVerificationActivityFailure(input: {
 
 export function createRigVerificationActivities(services: () => Promise<ControlActivityServices>) {
   return {
-    verifyRigChange: (input: { workspaceId: string; changeId: string }) =>
+    verifyRigChange: (input: { workspaceId: string; changeId: string; attemptId: string }) =>
       withRigVerificationActivityLifecycle(async (lifecycle) => {
         const { settings, db, observability } = await services();
         throwIfAborted(lifecycle.signal);
@@ -1382,20 +1388,37 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           input.workspaceId,
           input.changeId,
         );
+        if (
+          !(await isCurrentRigChangeVerificationAttempt(db, {
+            workspaceId: input.workspaceId,
+            changeId: change.id,
+            attemptId: input.attemptId,
+          }))
+        ) {
+          throw new Error(`Rig change verification attempt is stale: ${input.attemptId}`);
+        }
         const grant = systemGrant(rig);
         const startedAt = new Date().toISOString();
-        await beginRigChangeVerificationAttempt(db, input.workspaceId, change.id, {
-          startedAt,
-          allowAlreadyVerifying: true,
-        });
         await recordRigAuditEvent(db, {
           grant,
           action: "rig.verification.started",
           rigId: rig.id,
-          metadata: { changeId: change.id },
+          metadata: { changeId: change.id, attemptId: input.attemptId },
         });
 
-        const verification: Record<string, unknown> = { startedAt, checkResults: [] };
+        const verification: Record<string, unknown> = {
+          attemptId: input.attemptId,
+          startedAt,
+          checkResults: [],
+        };
+        const settle = async (status: RigChange["status"]) =>
+          await updateRigChangeStatusForVerificationAttempt(
+            db,
+            input.workspaceId,
+            change.id,
+            input.attemptId,
+            { status, verification },
+          );
         try {
           const candidateVersion = candidateVersionForChange(baseVersion, change);
           const providerImageDefinition = providerImageDefinitionForChange(
@@ -1455,10 +1478,8 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 if (commandResult.exitCode !== 0) {
                   verification.finishedAt = new Date().toISOString();
                   verification.passed = false;
-                  const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
-                    status: "rejected",
-                    verification,
-                  });
+                  const settlement = await settle("rejected");
+                  if (!settlement.applied) return settlement.change;
                   await recordRigAuditEvent(db, {
                     grant,
                     action: "rig.verification.failed",
@@ -1471,7 +1492,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     rigId: rig.id,
                     metadata: { changeId: change.id },
                   });
-                  return updated;
+                  return settlement.change;
                 }
               }
               const markerResult = await runCommand(
@@ -1501,6 +1522,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 established,
                 commandRunner: runContext.commandRunner,
                 ownership: runContext.ownership,
+                lifecycle,
               });
               const checkResults = await runRigChecks(
                 established.session as TurnSandboxCommandSession,
@@ -1536,10 +1558,8 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 // `verifying` keeps beginRigChangeVerificationAttempt blocking a
                 // concurrent /verify — resetting to `proposed` would reopen that race
                 // (a second run could reject a change whose first verification passed).
-                await updateRigChangeStatus(db, input.workspaceId, change.id, {
-                  status: "verifying",
-                  verification,
-                });
+                const settlement = await settle("verifying");
+                if (!settlement.applied) return settlement.change;
                 const { change: merged } = await promoteSetupAppendChange({ db }, grant, rig, {
                   ...change,
                   verification,
@@ -1552,10 +1572,8 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 });
                 return merged;
               }
-              const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
-                status: classified.status,
-                verification,
-              });
+              const settlement = await settle(classified.status);
+              if (!settlement.applied) return settlement.change;
               await recordRigAuditEvent(db, {
                 grant,
                 action: passed ? "rig.verification.passed" : "rig.verification.failed",
@@ -1570,31 +1588,30 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   metadata: { changeId: change.id },
                 });
               }
-              return updated;
+              return settlement.change;
             },
           );
         } catch (error) {
           verification.finishedAt = new Date().toISOString();
           verification.passed = false;
           verification.error = error instanceof Error ? error.message : String(error);
-          const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
-            status: "failed",
-            verification,
-          });
-          await recordRigAuditEvent(db, {
-            grant,
-            action: "rig.verification.failed",
-            rigId: rig.id,
-            metadata: { changeId: change.id, status: "failed" },
-          });
-          await recordRigAuditEvent(db, {
-            grant,
-            action: "rig.change.failed",
-            rigId: rig.id,
-            metadata: { changeId: change.id },
-          });
+          const settlement = await settle("failed");
+          if (settlement.applied) {
+            await recordRigAuditEvent(db, {
+              grant,
+              action: "rig.verification.failed",
+              rigId: rig.id,
+              metadata: { changeId: change.id, status: "failed", attemptId: input.attemptId },
+            });
+            await recordRigAuditEvent(db, {
+              grant,
+              action: "rig.change.failed",
+              rigId: rig.id,
+              metadata: { changeId: change.id, attemptId: input.attemptId },
+            });
+          }
           if (lifecycle.signal.aborted) throw abortReason(lifecycle.signal);
-          return updated;
+          return settlement.change;
         }
       }),
 
@@ -1684,6 +1701,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 established,
                 commandRunner: runContext.commandRunner,
                 ownership: runContext.ownership,
+                lifecycle,
               });
               const checkResults = await runRigChecks(
                 established.session as TurnSandboxCommandSession,

@@ -1,4 +1,5 @@
 import type {
+  CreateRigVersionRequest,
   CreateRigRequest,
   ProposeRigChangeRequest,
   Rig,
@@ -149,6 +150,7 @@ export type UseRigResult = {
   update: (request: UpdateRigRequest) => Promise<Rig | null>;
   remove: () => Promise<boolean>;
   activateVersion: (versionId: string) => Promise<RigVersion | null>;
+  createVersion: (request: CreateRigVersionRequest) => Promise<RigVersion | null>;
   proposeChange: (request: ProposeRigChangeRequest) => Promise<RigChange | null>;
   /** Re-run verification for a change (asynchronous — poll for the outcome). */
   verifyChange: (changeId: string) => Promise<RigChange | null>;
@@ -210,6 +212,15 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
     [client, workspaceId, rigId, run, refresh],
   );
 
+  const createVersion = useCallback(
+    async (request: CreateRigVersionRequest): Promise<RigVersion | null> => {
+      const result = await run(() => client.createRigVersion(workspaceId, rigId, request));
+      if (result) await refresh();
+      return result;
+    },
+    [client, workspaceId, rigId, run, refresh],
+  );
+
   const proposeChange = useCallback(
     async (request: ProposeRigChangeRequest): Promise<RigChange | null> => {
       const result = await run(() => client.proposeRigChange(workspaceId, rigId, request));
@@ -266,6 +277,7 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
     update,
     remove,
     activateVersion,
+    createVersion,
     proposeChange,
     verifyChange,
     promoteChange,
@@ -283,7 +295,7 @@ export type UseRigVersionsOptions = ClientOverride & {
 };
 
 export type UseRigVersionsResult = {
-  versions: RigVersion[];
+  versions: RigVersion[] | null;
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
@@ -304,7 +316,7 @@ export function useRigVersions(
     enabled: options.enabled,
   });
   return {
-    versions: state.data ?? [],
+    versions: state.data,
     loading: state.loading,
     error: state.error,
     refresh: state.refresh,

@@ -161,6 +161,7 @@ describe("build-once rig provider image runtime", () => {
         ],
         lifecycle: {
           signal: new AbortController().signal,
+          workDeadlineAtMs: null,
           cleanupDeadlineAtMs: null,
           dispose: () => undefined,
         },

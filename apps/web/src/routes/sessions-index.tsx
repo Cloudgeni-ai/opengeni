@@ -110,6 +110,7 @@ import {
 import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { selectableSessionRigs } from "@/lib/rig-selectability";
 import {
   isPersonalAttachmentConflict,
   newSessionFixedResourceCatalogFailed,
@@ -305,9 +306,7 @@ function SessionsIndexRouteContent({
     : [];
   const personalResourceEligibilitySettled =
     personalWorkspace || personalOwnerScope === null || tenancyCapabilities !== null;
-  const selectableRigs = rigs.rigs.filter(
-    (rig) => rig.scope !== "user" || personalResourcesAvailable,
-  );
+  const selectableRigs = selectableSessionRigs(rigs.rigs, personalResourcesAvailable);
   const selectedRig = selectableRigs.find((candidate) => candidate.id === draft.rigId);
   const selectedRigDefaultVariableSetIds = selectedRig?.activeVersion?.defaultVariableSetIds ?? [];
   const selectedRigDefaultVariableSetIdsKey = selectedRigDefaultVariableSetIds.join("\u0000");

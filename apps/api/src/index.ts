@@ -260,8 +260,8 @@ export async function createTemporalWorkflowClient(
       if (!targetId) {
         throw new Error("rig verification requires changeId or versionId");
       }
-      if (versionId && !attemptId) {
-        throw new Error("rig version verification requires an attemptId");
+      if (!attemptId) {
+        throw new Error("rig verification requires an attemptId");
       }
       try {
         await temporal.workflow.start("rigVerificationWorkflow", {
@@ -274,7 +274,7 @@ export async function createTemporalWorkflowClient(
           args: [
             {
               workspaceId,
-              ...(changeId ? { changeId } : {}),
+              ...(changeId ? { changeId, attemptId } : {}),
               ...(versionId ? { versionId, attemptId } : {}),
             },
           ],

@@ -419,8 +419,10 @@ describe("rig route permission matrix", () => {
     expect(initialCall.workflowId).toBe(
       `rig-verification-version-${initialVersion!.id}-attempt-${initialCall.attemptId}`,
     );
-    expect((calls[1] as { workflowId: string }).workflowId).toBe(
-      `rig-verification-change-${change.id}-attempt-1`,
+    const firstChangeCall = calls[1] as { attemptId: string; workflowId: string };
+    expect(firstChangeCall.attemptId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(firstChangeCall.workflowId).toBe(
+      `rig-verification-change-${change.id}-attempt-${firstChangeCall.attemptId}`,
     );
 
     await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
@@ -435,8 +437,10 @@ describe("rig route permission matrix", () => {
     const retryBody = await retry.json();
     expect(retryBody.status).toBe("verifying");
     expect(calls).toHaveLength(3);
-    expect((calls[2] as { workflowId: string }).workflowId).toBe(
-      `rig-verification-change-${change.id}-attempt-2`,
+    const retryCall = calls[2] as { attemptId: string; workflowId: string };
+    expect(retryCall.attemptId).not.toBe(firstChangeCall.attemptId);
+    expect(retryCall.workflowId).toBe(
+      `rig-verification-change-${change.id}-attempt-${retryCall.attemptId}`,
     );
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("verifying");
 
@@ -446,9 +450,7 @@ describe("rig route permission matrix", () => {
     });
     expect(duplicate.status).toBe(202);
     expect(calls).toHaveLength(4);
-    expect((calls[3] as { workflowId: string }).workflowId).toBe(
-      `rig-verification-change-${change.id}-attempt-2`,
-    );
+    expect(calls[3]).toEqual(retryCall);
   });
 
   test("repeated version verification requests reuse one in-flight attempt", async () => {
@@ -474,23 +476,44 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "version-single-flight" }),
     });
     const rig = await created.json();
-    const [version] = await listRigVersions(client.db, ws.workspaceId, rig.id);
-    expect(version).toBeDefined();
+    const version = await createRigVersion(client.db, ws.workspaceId, rig.id, {
+      setupScript: "echo historical",
+    });
 
-    const endpoint = `${base}/${rig.id}/versions/${version!.id}/verify`;
+    const endpoint = `${base}/${rig.id}/versions/${version.id}/verify`;
     const first = await http.request(endpoint, { method: "POST", headers: manage });
     const second = await http.request(endpoint, { method: "POST", headers: manage });
     expect(first.status).toBe(202);
     expect(second.status).toBe(202);
-    expect((await first.json()).versionId).toBe(version!.id);
-    expect((await second.json()).versionId).toBe(version!.id);
+    expect((await first.json()).versionId).toBe(version.id);
+    expect((await second.json()).versionId).toBe(version.id);
     expect(calls).toHaveLength(3);
-    const attemptId = calls[0]!.attemptId;
+    const attemptId = calls[1]!.attemptId;
     expect(attemptId).toMatch(/^[0-9a-f-]{36}$/u);
-    expect(new Set(calls.map((call) => call.workflowId))).toEqual(
-      new Set([`rig-verification-version-${version!.id}-attempt-${attemptId}`]),
+    expect(new Set(calls.slice(1).map((call) => call.workflowId))).toEqual(
+      new Set([`rig-verification-version-${version.id}-attempt-${attemptId}`]),
     );
-    expect(calls.every((call) => call.attemptId === attemptId)).toBe(true);
+    expect(calls.slice(1).every((call) => call.attemptId === attemptId)).toBe(true);
+    const audits = await shared!.admin<
+      Array<{ subject_id: string | null; metadata: Record<string, unknown> }>
+    >`
+      select subject_id, metadata from audit_events
+      where workspace_id = ${ws.workspaceId}
+        and action = 'rig.version.verification.requested'
+        and metadata ->> 'versionId' = ${version.id}
+      order by occurred_at asc
+    `;
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      subject_id: "user:m",
+      metadata: {
+        rigId: rig.id,
+        versionId: version.id,
+        version: version.version,
+        attemptId,
+        expectedActiveVersionId: null,
+      },
+    });
   });
 
   test("exact-version dispatch outage returns committed pending truth and reuses one attempt", async () => {
@@ -1000,6 +1023,56 @@ describe("rig route permission matrix", () => {
     );
   });
 
+  test("managers can recover a Rig with no active version only through an explicit null CAS", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: unknown[] = [];
+    const http = appWithWorkflow(calls);
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "replacement-recovery", setupScript: "echo initial" }),
+    });
+    const rig = await created.json();
+    const [initial] = await listRigVersions(client.db, ws.workspaceId, rig.id);
+    expect(initial).toBeDefined();
+
+    const implicit = await http.request(`${base}/${rig.id}/versions`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ baseVersionId: initial!.id }),
+    });
+    expect(implicit.status).toBe(422);
+
+    const replacement = await http.request(`${base}/${rig.id}/versions`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({
+        baseVersionId: initial!.id,
+        expectedActiveVersionId: null,
+        changelog: "recover from failed initial verification",
+      }),
+    });
+    expect(replacement.status).toBe(201);
+    expect(await replacement.json()).toMatchObject({ active: false, setupScript: "echo initial" });
+
+    await activateInitialVersion(ws.workspaceId, rig.id);
+    const stale = await http.request(`${base}/${rig.id}/versions`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({
+        expectedActiveVersionId: null,
+        setupScript: null,
+        checks: [],
+        credentialHooks: [],
+        defaultVariableSetIds: [],
+      }),
+    });
+    expect(stale.status).toBe(409);
+  });
+
   test("workspace default rig setter is rigs:manage gated, validates rigId, and clears", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -1027,6 +1100,14 @@ describe("rig route permission matrix", () => {
     });
     expect(invalid.status).toBe(422);
 
+    const inactive = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: manage,
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(inactive.status).toBe(422);
+
+    await activateInitialVersion(ws.workspaceId, rig.id);
     const set = await app().request(`${base}/default-rig`, {
       method: "PUT",
       headers: manage,

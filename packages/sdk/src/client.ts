@@ -218,6 +218,7 @@ import type {
   ResolveVariableSetAttachmentsRequest,
   ResolveVariableSetAttachmentsResponse,
   CreateRigRequest,
+  CreateRigVersionRequest,
   CreateWorkspaceRequest,
   EnsureWorkspaceRequest,
   EnsureWorkspaceResponse,
@@ -5300,6 +5301,19 @@ export class OpenGeniClient {
     return await this.requestJson<RigVersion[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions`,
+    );
+  }
+
+  /** Create an inactive manager-authored version and start its verification. */
+  async createRigVersion(
+    workspaceId: string,
+    rigId: string,
+    request: CreateRigVersionRequest,
+  ): Promise<RigVersion> {
+    return await this.requestJson<RigVersion>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions`,
+      request,
     );
   }
 

@@ -2871,6 +2871,7 @@ export type FirstPartyMcpToolName =
   | "rig_get"
   | "rig_propose_change"
   | "rig_verify"
+  | "rig_create_version"
   | "rig_promote"
   | "sessions_list"
   | "session_get"
@@ -5177,6 +5178,8 @@ export type RigCheckResult = {
 };
 
 export type RigChangeVerification = {
+  attemptId?: string | undefined;
+  attempt?: number | undefined;
   startedAt?: string | undefined;
   finishedAt?: string | undefined;
   log?: string | undefined;
@@ -5227,6 +5230,11 @@ export type RigDefinitionEditPayload = {
   credentialHooks?: string[] | undefined;
   defaultVariableSetIds?: string[] | undefined;
   changelog?: string | null | undefined;
+};
+
+export type CreateRigVersionRequest = RigDefinitionEditPayload & {
+  baseVersionId?: string | undefined;
+  expectedActiveVersionId?: string | null | undefined;
 };
 
 export type ProposeRigChangeRequest =

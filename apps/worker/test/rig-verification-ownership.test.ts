@@ -355,6 +355,7 @@ describe("rig verification canonical lease ownership", () => {
     const abort = new AbortController();
     const lifecycle: RigVerificationActivityLifecycle = {
       signal: abort.signal,
+      workDeadlineAtMs: null,
       cleanupDeadlineAtMs: null,
       dispose: () => undefined,
     };

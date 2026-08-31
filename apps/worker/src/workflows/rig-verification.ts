@@ -18,6 +18,7 @@ export async function rigVerificationWorkflow(input: RigVerificationWorkflowInpu
     await rigVerificationActivities.verifyRigChange({
       workspaceId: input.workspaceId,
       changeId: input.changeId,
+      attemptId: input.attemptId,
     });
     return;
   }

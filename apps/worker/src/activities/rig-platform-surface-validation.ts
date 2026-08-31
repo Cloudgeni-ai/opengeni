@@ -20,6 +20,7 @@ import {
   tearDownBrowserControlServer,
   validateComputerControlFrameEvidence,
   type BrowserControlClient,
+  type BrowserControlRequestOptions,
   type BrowserControlPlacementSession,
   type ComputerControlFrame,
   type EstablishedSandboxSession,
@@ -58,7 +59,7 @@ export type RigPlatformSurfaceValidationDependencies = {
     session: BrowserControlPlacementSession,
     input: Parameters<typeof provisionBrowserControlClient>[1],
   ) => Promise<{ client: SurfaceController }>;
-  tearDownController: (session: unknown) => Promise<void>;
+  tearDownController: (session: unknown, options?: BrowserControlRequestOptions) => Promise<void>;
   randomUUID: () => string;
   checkedAt: () => string;
   inspectImage: (data: Uint8Array) => Promise<{
@@ -72,7 +73,8 @@ const defaultDependencies: RigPlatformSurfaceValidationDependencies = {
   readLease,
   provisionController: async (session, input) =>
     await provisionBrowserControlClient(session, input),
-  tearDownController: async (session) => await tearDownBrowserControlServer(session),
+  tearDownController: async (session, options) =>
+    await tearDownBrowserControlServer(session, options),
   randomUUID,
   checkedAt: () => new Date().toISOString(),
   inspectImage: async (data) => {
@@ -98,6 +100,11 @@ export type RigPlatformSurfaceValidationInput = {
     leaseEpoch: number;
     workspaceGeneration: number;
     instanceId: string;
+  };
+  lifecycle?: {
+    signal: AbortSignal;
+    workDeadlineAtMs: number | null;
+    cleanupDeadlineAtMs: number | null;
   };
 };
 
@@ -184,13 +191,47 @@ function assertBrowserObservationBinding(
   }
 }
 
-function assertDeterministicBrowserTarget(target: BrowserTarget): void {
+function normalizedTargetUrl(value: string): string {
+  try {
+    return new URL(value).href;
+  } catch {
+    throw validationError("browser returned an invalid target URL");
+  }
+}
+
+function assertDeterministicBrowserTarget(target: BrowserTarget, expectedUrl: string): void {
   if (
-    !target.url.startsWith("data:text/html,") ||
+    normalizedTargetUrl(target.url) !== normalizedTargetUrl(expectedUrl) ||
     target.title !== "OpenGeni Rig Surface Validation"
   ) {
     throw validationError("browser did not observe the deterministic validation target");
   }
+}
+
+function remainingWorkMs(input: RigPlatformSurfaceValidationInput): number {
+  input.lifecycle?.signal.throwIfAborted();
+  const remaining =
+    input.lifecycle?.workDeadlineAtMs == null
+      ? input.settings.rigSetupTimeoutMs
+      : input.lifecycle.workDeadlineAtMs - Date.now();
+  if (remaining <= 0) throw validationError("the verifier work deadline was reached");
+  return Math.max(1, Math.min(input.settings.rigSetupTimeoutMs, Math.floor(remaining)));
+}
+
+function workOptions(input: RigPlatformSurfaceValidationInput): BrowserControlRequestOptions {
+  return {
+    timeoutMs: remainingWorkMs(input),
+    ...(input.lifecycle ? { signal: input.lifecycle.signal } : {}),
+  };
+}
+
+function cleanupOptions(input: RigPlatformSurfaceValidationInput): BrowserControlRequestOptions {
+  const timeoutMs =
+    input.lifecycle?.cleanupDeadlineAtMs == null
+      ? Math.min(15_000, input.settings.rigSetupTimeoutMs)
+      : Math.min(15_000, input.lifecycle.cleanupDeadlineAtMs - Date.now());
+  if (timeoutMs <= 0) throw validationError("the verifier cleanup deadline was reached");
+  return { timeoutMs: Math.max(1, Math.floor(timeoutMs)) };
 }
 
 function assertComputerTargetBinding(
@@ -297,7 +338,7 @@ async function endBrowserSession(
 ): Promise<void> {
   try {
     await assertExactBinding(input, dependencies);
-    await controller.endSession(session, { removeState: true });
+    await controller.endSession(session, { removeState: true, ...cleanupOptions(input) });
     await assertExactBinding(input, dependencies);
   } catch (error) {
     throw cleanupFailure(primary, error);
@@ -313,7 +354,10 @@ async function endComputerSession(
 ): Promise<void> {
   try {
     await assertExactBinding(input, dependencies);
-    await controller.endComputerSession(session, { removeState: true });
+    await controller.endComputerSession(session, {
+      removeState: true,
+      ...cleanupOptions(input),
+    });
     await assertExactBinding(input, dependencies);
   } catch (error) {
     throw cleanupFailure(primary, error);
@@ -339,7 +383,7 @@ async function validateTerminal(
     workdir: "/workspace",
     runAs: "root",
     tty: true,
-    yieldTimeMs: input.settings.rigSetupTimeoutMs,
+    yieldTimeMs: remainingWorkMs(input),
     maxOutputTokens: 4_000,
   });
   await assertExactBinding(input, dependencies);
@@ -375,15 +419,18 @@ async function validateBrowser(
   let primary: unknown;
   try {
     await assertExactBinding(input, dependencies);
-    session = await controller.createSession({
-      browserSessionId,
-      controllerGeneration: generation,
-      tokenGeneration: input.ownership.leaseEpoch,
-      controlToken,
-      viewToken,
-      headed: true,
-      initialUrl: SURFACE_TARGET_URL,
-    });
+    session = await controller.createSession(
+      {
+        browserSessionId,
+        controllerGeneration: generation,
+        tokenGeneration: input.ownership.leaseEpoch,
+        controlToken,
+        viewToken,
+        headed: true,
+        initialUrl: SURFACE_TARGET_URL,
+      },
+      workOptions(input),
+    );
     if (
       session.browserSessionId !== browserSessionId ||
       session.controllerGeneration !== generation
@@ -391,28 +438,46 @@ async function validateBrowser(
       throw validationError("browser creation returned another session/controller binding");
     }
     assertBrowserObservationBinding(session.observation, session);
-    assertDeterministicBrowserTarget(session.observation.target);
+    assertDeterministicBrowserTarget(session.observation.target, SURFACE_TARGET_URL);
     const client: BrowserSessionClient = controller.sessionClient({
       reference: session,
       controlToken,
       viewToken,
     });
     await assertExactBinding(input, dependencies);
-    const initialTargets = await client.listTargets();
+    const initialTargets = await client.listTargets(workOptions(input));
     await assertExactBinding(input, dependencies);
     if (initialTargets.length < 1) throw validationError("browser returned no real targets");
     initialTargets.forEach((target) => assertBrowserTargetBinding(target, session!));
-    const opened = await client.openTarget(`${SURFACE_TARGET_URL}%23opened`);
+    const requestedOpenedUrl = `${SURFACE_TARGET_URL}#opened`;
+    const initialTargetIds = new Set(initialTargets.map((target) => target.id));
+    const initialTargetBindings = new Set(
+      initialTargets.map((target) => `${target.id}\0${target.targetGeneration}`),
+    );
+    const opened = await client.openTarget(requestedOpenedUrl, workOptions(input));
     await assertExactBinding(input, dependencies);
     assertBrowserObservationBinding(opened, session);
-    assertDeterministicBrowserTarget(opened.target);
-    const targets = await client.listTargets();
+    assertDeterministicBrowserTarget(opened.target, requestedOpenedUrl);
+    if (
+      initialTargetIds.has(opened.target.id) ||
+      initialTargetBindings.has(`${opened.target.id}\0${opened.target.targetGeneration}`)
+    ) {
+      throw validationError("browser openTarget did not create a new target identity");
+    }
+    const targets = await client.listTargets(workOptions(input));
     await assertExactBinding(input, dependencies);
-    if (!targets.some((target) => target.id === opened.target.id)) {
+    if (
+      !targets.some(
+        (target) =>
+          target.id === opened.target.id &&
+          target.targetGeneration === opened.target.targetGeneration &&
+          normalizedTargetUrl(target.url) === normalizedTargetUrl(requestedOpenedUrl),
+      )
+    ) {
       throw validationError("browser did not list the target it opened");
     }
     targets.forEach((target) => assertBrowserTargetBinding(target, session!));
-    const observed = await client.observe(opened.target.id);
+    const observed = await client.observe(opened.target.id, workOptions(input));
     await assertExactBinding(input, dependencies);
     assertBrowserObservationBinding(
       observed,
@@ -420,7 +485,7 @@ async function validateBrowser(
       opened.target.id,
       opened.target.targetGeneration,
     );
-    assertDeterministicBrowserTarget(observed.target);
+    assertDeterministicBrowserTarget(observed.target, requestedOpenedUrl);
     return {
       status: "passed",
       browserSessionId,
@@ -475,13 +540,16 @@ async function validateComputer(
   let primary: unknown;
   try {
     await assertExactBinding(input, dependencies);
-    session = await controller.createComputerSession({
-      computerSessionId,
-      controllerGeneration: generation,
-      tokenGeneration: input.ownership.leaseEpoch,
-      controlToken,
-      viewToken,
-    });
+    session = await controller.createComputerSession(
+      {
+        computerSessionId,
+        controllerGeneration: generation,
+        tokenGeneration: input.ownership.leaseEpoch,
+        controlToken,
+        viewToken,
+      },
+      workOptions(input),
+    );
     if (
       session.computerSessionId !== computerSessionId ||
       session.controllerGeneration !== generation
@@ -494,12 +562,12 @@ async function validateComputer(
       controlToken,
       viewToken,
     });
-    const targets = await client.listTargets();
+    const targets = await client.listTargets(workOptions(input));
     await assertExactBinding(input, dependencies);
     targets.forEach((target) => assertComputerTargetBinding(target, session!));
     const target = targets.find((candidate) => candidate.kind === "screen");
     if (!target) throw validationError("computer returned no real screen target");
-    const observation = await client.observe(target.id);
+    const observation = await client.observe(target.id, workOptions(input));
     await assertExactBinding(input, dependencies);
     assertComputerObservationBinding(observation, session, target.id, target.targetGeneration);
     if (
@@ -510,40 +578,48 @@ async function validateComputer(
     ) {
       throw validationError("computer screen observation lacks a usable native frame/bounds");
     }
-    const frame = await client.capture(target.id, {
-      format: "png",
-      maxWidth: 1280,
-      maxHeight: 800,
-    });
+    const frame = await client.capture(
+      target.id,
+      {
+        format: "png",
+        maxWidth: 1280,
+        maxHeight: 800,
+      },
+      workOptions(input),
+    );
     await assertExactBinding(input, dependencies);
     const evidence = await validateComputerFrame(frame, session, target, observation, dependencies);
     const operationId = dependencies.randomUUID();
-    const receipt = await client.action({
-      protocolVersion: 1,
-      operationId,
-      computerSessionId,
-      controllerGeneration: generation,
-      targetId: target.id,
-      expectedTargetGeneration: target.targetGeneration,
-      expectedObservationId: observation.observationId,
-      expectedFrameId: observation.frameId,
-      actor: { kind: "system", subjectId: "rig-platform-surface-validation" },
-      action: {
-        type: "pointer",
-        frameId: observation.frameId,
-        action: "move",
-        x: Math.floor(
-          target.bounds.x + Math.min(target.bounds.width - 1, Math.max(0, target.bounds.width / 2)),
-        ),
-        y: Math.floor(
-          target.bounds.y +
-            Math.min(target.bounds.height - 1, Math.max(0, target.bounds.height / 2)),
-        ),
+    const receipt = await client.action(
+      {
+        protocolVersion: 1,
+        operationId,
+        computerSessionId,
+        controllerGeneration: generation,
+        targetId: target.id,
+        expectedTargetGeneration: target.targetGeneration,
+        expectedObservationId: observation.observationId,
+        expectedFrameId: observation.frameId,
+        actor: { kind: "system", subjectId: "rig-platform-surface-validation" },
+        action: {
+          type: "pointer",
+          frameId: observation.frameId,
+          action: "move",
+          x: Math.floor(
+            target.bounds.x +
+              Math.min(target.bounds.width - 1, Math.max(0, target.bounds.width / 2)),
+          ),
+          y: Math.floor(
+            target.bounds.y +
+              Math.min(target.bounds.height - 1, Math.max(0, target.bounds.height / 2)),
+          ),
+        },
       },
-    });
+      workOptions(input),
+    );
     await assertExactBinding(input, dependencies);
     assertCompletedAction(receipt, session, target, operationId);
-    const settledObservation = await client.observe(target.id);
+    const settledObservation = await client.observe(target.id, workOptions(input));
     await assertExactBinding(input, dependencies);
     assertComputerObservationBinding(
       settledObservation,
@@ -582,7 +658,7 @@ export async function runRigPlatformSurfaceValidation(
         {
           adminToken,
           allowedOrigins: [],
-          timeoutMs: input.settings.rigSetupTimeoutMs,
+          ...workOptions(input),
         },
       )
     ).client;
@@ -615,7 +691,7 @@ export async function runRigPlatformSurfaceValidation(
   if (controllerProvisionAttempted) {
     try {
       await assertExactBinding(input, dependencies);
-      await dependencies.tearDownController(input.established.session);
+      await dependencies.tearDownController(input.established.session, cleanupOptions(input));
       await assertExactBinding(input, dependencies);
     } catch (error) {
       cleanup = error;

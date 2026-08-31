@@ -1008,6 +1008,7 @@ export type {
   UpdateRigRequest,
   RigSetupAppendPayload,
   RigDefinitionEditPayload,
+  CreateRigVersionRequest,
   ProposeRigChangeRequest,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,

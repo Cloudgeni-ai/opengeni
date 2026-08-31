@@ -2,7 +2,7 @@
 -- Newly authored initial/direct Rig versions stay inactive until the worker
 -- publishes an exact native platform-surface validation receipt.
 -- This is a one-way writer-protocol cutover: stop every API, control worker,
--- and turn worker before applying it, and never restart a pre-0384 image. Old
+-- and turn worker before applying it, and never restart a pre-0386 image. Old
 -- writers create/activate versions without the mandatory receipt state.
 
 SET LOCAL lock_timeout = '5s';
@@ -17,14 +17,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0384 Rig verification activation requires an explicit application database role list'
+      '0386 Rig verification activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0384 Rig verification activation received a malformed application database role list'
+      '0386 Rig verification activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -43,7 +43,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0384 Rig verification activation received an invalid application database role list'
+      '0386 Rig verification activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -55,7 +55,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0384 Rig verification activation requires all configured OpenGeni application database sessions to be stopped'
+      '0386 Rig verification activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -80,7 +80,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0384 Rig verification activation requires all configured OpenGeni application database sessions to be stopped'
+      '0386 Rig verification activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -90,19 +90,14 @@ ALTER TABLE rig_versions
   ADD COLUMN verification jsonb NOT NULL DEFAULT '{"status":"unverified"}'::jsonb;
 
 -- Version-1 provider-image proof predates exact Browser/Computer target
--- binding. Remove only that optimization proof so the new runtime falls back
--- to logical-image + setup until it publishes current proof.
+-- binding. Remove the complete ready artifact reference, not only its proof,
+-- so global checkpoint GC can collect the now-untrusted provider artifact.
 ALTER TABLE rig_versions NO FORCE ROW LEVEL SECURITY;
 UPDATE rig_versions
 SET provider_images = (
   SELECT coalesce(
-    jsonb_object_agg(
-      image.key,
-      CASE
-        WHEN image.value -> 'coldBootValidation' ->> 'version' = '1'
-          THEN image.value - 'coldBootValidation'
-        ELSE image.value
-      END
+    jsonb_object_agg(image.key, image.value) FILTER (
+      WHERE image.value -> 'coldBootValidation' ->> 'version' IS DISTINCT FROM '1'
     ),
     '{}'::jsonb
   )
@@ -114,6 +109,12 @@ WHERE EXISTS (
   WHERE image.value -> 'coldBootValidation' ->> 'version' = '1'
 );
 ALTER TABLE rig_versions FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE rig_changes NO FORCE ROW LEVEL SECURITY;
+UPDATE rig_changes
+SET verification = verification - 'providerImage'
+WHERE verification #>> '{providerImage,coldBootValidation,version}' = '1';
+ALTER TABLE rig_changes FORCE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION opengeni_private.reject_obsolete_rig_provider_image_proof()
 RETURNS trigger

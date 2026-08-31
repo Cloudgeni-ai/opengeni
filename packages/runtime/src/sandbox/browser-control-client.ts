@@ -354,6 +354,7 @@ export type ProvisionBrowserControlClientInput = {
   allowedOrigins?: readonly string[];
   port?: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
   /** Native connected-machine sidecar authority. Ignored by image-backed
    * placements, whose browserd is already supervised inside the sandbox image. */
   nativeAuthority?: {
@@ -365,6 +366,11 @@ export type ProvisionBrowserControlClientInput = {
 export type ProvisionBrowserControlClientResult = {
   client: BrowserControlClient;
   server: EnsureBrowserControlServerResult;
+};
+
+export type BrowserControlRequestOptions = {
+  timeoutMs?: number;
+  signal?: AbortSignal;
 };
 
 export class BrowserControlTransportError extends Error {
@@ -405,6 +411,7 @@ export async function provisionBrowserControlClient(
   session: BrowserControlPlacementSession,
   input: ProvisionBrowserControlClientInput,
 ): Promise<ProvisionBrowserControlClientResult> {
+  input.signal?.throwIfAborted();
   requirePlacementProvisioningSurface(session);
   const adminToken = requireToken(input.adminToken, "browser controller admin token");
   if (session.ensureBrowserControl) {
@@ -427,6 +434,7 @@ export async function provisionBrowserControlClient(
         port,
         nativeAuthority: input.nativeAuthority,
         ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       }),
       server: { port, marker: `agent:${ensured.sidecarGeneration}` },
     };
@@ -462,12 +470,14 @@ export async function provisionBrowserControlClient(
       ...(input.allowedOrigins ? { allowedOrigins: input.allowedOrigins } : {}),
       ...(input.port === undefined ? {} : { port: input.port }),
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
     const client = new BrowserControlClient(session, {
       adminToken,
       port: server.port,
       ...(input.nativeAuthority ? { nativeAuthority: input.nativeAuthority } : {}),
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
     if (input.allowedOrigins && input.allowedOrigins.length > 0) {
       await client.addAllowedOrigins(input.allowedOrigins);
@@ -484,6 +494,7 @@ export class BrowserControlClient {
   private readonly session: BrowserControlPlacementSession;
   private readonly adminToken: string;
   private readonly timeoutMs: number;
+  private readonly signal: AbortSignal | undefined;
   private readonly nativeAuthority: { scopeId: string; scopeGeneration: string } | undefined;
 
   constructor(
@@ -492,6 +503,7 @@ export class BrowserControlClient {
       adminToken: string;
       port?: number;
       timeoutMs?: number;
+      signal?: AbortSignal;
       nativeAuthority?: { scopeId: string; scopeGeneration: string };
     },
   ) {
@@ -500,6 +512,7 @@ export class BrowserControlClient {
     this.adminToken = requireToken(options.adminToken, "browser controller admin token");
     this.port = boundedPort(options.port ?? BROWSER_CONTROL_PORT);
     this.timeoutMs = boundedTimeout(options.timeoutMs ?? 60_000);
+    this.signal = options.signal;
     this.nativeAuthority = options.nativeAuthority;
   }
 
@@ -520,7 +533,10 @@ export class BrowserControlClient {
     return data.origins.map((origin) => normalizeOrigin(origin));
   }
 
-  async createSession(input: CreatePlacementBrowserSessionInput): Promise<PlacementBrowserSession> {
+  async createSession(
+    input: CreatePlacementBrowserSessionInput,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<PlacementBrowserSession> {
     const reference = parseReference(input);
     const restore = input.restore ? browserStateRestoreRequest(input.restore) : null;
     let data: unknown;
@@ -545,7 +561,14 @@ export class BrowserControlClient {
             : {}),
           ...(restore ? { restore: restore.wire } : {}),
         },
-        ...(restore ? { timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS } : {}),
+        ...(restore
+          ? {
+              timeoutMs: Math.min(BROWSER_STATE_TRANSFER_TIMEOUT_MS, options.timeoutMs ?? Infinity),
+            }
+          : options.timeoutMs === undefined
+            ? {}
+            : { timeoutMs: options.timeoutMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
     } finally {
       restore?.dataKey.fill(0);
@@ -569,6 +592,7 @@ export class BrowserControlClient {
 
   async createComputerSession(
     input: CreatePlacementComputerSessionInput,
+    options: BrowserControlRequestOptions = {},
   ): Promise<PlacementComputerSession> {
     const reference = parseComputerReference(input);
     const data = await this.requestJson({
@@ -581,6 +605,7 @@ export class BrowserControlClient {
         controlToken: requireToken(input.controlToken, "computer control token"),
         viewToken: requireToken(input.viewToken, "computer view token"),
       },
+      ...options,
     });
     if (!isRecord(data) || !Array.isArray(data.targets)) {
       throw new BrowserControlProtocolError(
@@ -615,7 +640,7 @@ export class BrowserControlClient {
 
   async endSession(
     reference: PlacementBrowserSessionReference,
-    options: { removeState: boolean },
+    options: { removeState: boolean } & BrowserControlRequestOptions,
   ): Promise<void> {
     const binding = parseReference(reference);
     const data = await this.requestJson({
@@ -626,6 +651,8 @@ export class BrowserControlClient {
         controllerGeneration: binding.controllerGeneration,
         removeState: options.removeState,
       },
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
     if (!isRecord(data) || data.ended !== true) {
       throw new BrowserControlProtocolError("browser controller returned malformed end receipt");
@@ -634,7 +661,7 @@ export class BrowserControlClient {
 
   async endComputerSession(
     reference: PlacementComputerSessionReference,
-    options: { removeState: boolean },
+    options: { removeState: boolean } & BrowserControlRequestOptions,
   ): Promise<void> {
     const binding = parseComputerReference(reference);
     const data = await this.requestJson({
@@ -645,6 +672,8 @@ export class BrowserControlClient {
         controllerGeneration: binding.controllerGeneration,
         removeState: options.removeState,
       },
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
     if (!isRecord(data) || data.ended !== true) {
       throw new BrowserControlProtocolError(
@@ -936,6 +965,7 @@ export class BrowserControlClient {
     token: string;
     body?: unknown;
     timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<unknown> {
     return await this.requestJson(input);
   }
@@ -946,6 +976,7 @@ export class BrowserControlClient {
     token: string;
     expectedFrameEvidence: ExpectedComputerFrameEvidence;
     timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<ComputerControlFrame> {
     return await this.requestBytes(input);
   }
@@ -957,9 +988,12 @@ export class BrowserControlClient {
       token: string;
       body?: unknown;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
     retryNativeEndpoint = true,
   ): Promise<unknown> {
+    const requestSignal = input.signal ?? this.signal;
+    requestSignal?.throwIfAborted();
     // Image-backed placements expose browserd through the provider tunnel. Use
     // that actual data plane for control too: one authenticated HTTP request,
     // instead of materializing files and starting curl through the sandbox exec
@@ -988,7 +1022,7 @@ export class BrowserControlClient {
           try {
             return await requestExposedController(
               endpoint,
-              input,
+              { ...input, ...(requestSignal ? { signal: requestSignal } : {}) },
               this.timeoutMs,
               this.session.runtimeMetrics,
             );
@@ -1097,6 +1131,7 @@ export class BrowserControlClient {
       if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
         throw new BrowserControlProtocolError("browser controller response is too large");
       }
+      requestSignal?.throwIfAborted();
       return parseEnvelope(responseText, status);
     } catch (error) {
       if (
@@ -1130,9 +1165,12 @@ export class BrowserControlClient {
       token: string;
       expectedFrameEvidence: ExpectedComputerFrameEvidence;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
     retryNativeEndpoint = true,
   ): Promise<ComputerControlFrame> {
+    const requestSignal = input.signal ?? this.signal;
+    requestSignal?.throwIfAborted();
     const requireHostFetch = this.session.requireHostFetchController === true;
     if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
       try {
@@ -1148,7 +1186,11 @@ export class BrowserControlClient {
         }
         if (hostFetchAllowed) {
           try {
-            return await requestExposedControllerBytes(endpoint, input, this.timeoutMs);
+            return await requestExposedControllerBytes(
+              endpoint,
+              { ...input, ...(requestSignal ? { signal: requestSignal } : {}) },
+              this.timeoutMs,
+            );
           } catch (error) {
             if (
               retryNativeEndpoint &&
@@ -1317,11 +1359,12 @@ export class BrowserControlSessionClient {
     this.viewToken = requireToken(input.viewToken, "browser view token");
   }
 
-  async listTargets(): Promise<BrowserTargetValue[]> {
+  async listTargets(options: BrowserControlRequestOptions = {}): Promise<BrowserTargetValue[]> {
     const data = await this.parent.requestForSession({
       method: "GET",
       path: this.path("targets"),
       token: this.viewToken,
+      ...options,
     });
     if (!Array.isArray(data)) {
       throw new BrowserControlProtocolError("browser controller returned malformed targets");
@@ -1388,13 +1431,17 @@ export class BrowserControlSessionClient {
     return receipt;
   }
 
-  async openTarget(url?: string): Promise<BrowserObservationValue> {
+  async openTarget(
+    url?: string,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "POST",
         path: this.path("targets"),
         token: this.controlToken,
         body: url === undefined ? {} : { url: boundedUrl(url) },
+        ...options,
       }),
     );
   }
@@ -1422,12 +1469,16 @@ export class BrowserControlSessionClient {
     return data.map((target) => BrowserTarget.parse(target));
   }
 
-  async observe(targetId: string): Promise<BrowserObservationValue> {
+  async observe(
+    targetId: string,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "GET",
         path: this.targetPath(targetId, "observation"),
         token: this.viewToken,
+        ...options,
       }),
     );
   }
@@ -1606,11 +1657,12 @@ export class ComputerControlSessionClient {
     this.viewToken = requireToken(input.viewToken, "computer view token");
   }
 
-  async listTargets(): Promise<ComputerTargetValue[]> {
+  async listTargets(options: BrowserControlRequestOptions = {}): Promise<ComputerTargetValue[]> {
     const data = await this.parent.requestForSession({
       method: "GET",
       path: this.path("targets"),
       token: this.viewToken,
+      ...options,
     });
     if (!Array.isArray(data)) {
       throw new BrowserControlProtocolError(
@@ -1620,12 +1672,16 @@ export class ComputerControlSessionClient {
     return data.map((target) => ComputerTarget.parse(target));
   }
 
-  async observe(targetId: string): Promise<ComputerObservationValue> {
+  async observe(
+    targetId: string,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<ComputerObservationValue> {
     return ComputerObservation.parse(
       await this.parent.requestForSession({
         method: "GET",
         path: this.targetPath(targetId, "observation"),
         token: this.viewToken,
+        ...options,
       }),
     );
   }
@@ -1638,6 +1694,7 @@ export class ComputerControlSessionClient {
       maxWidth?: number;
       maxHeight?: number;
     } = {},
+    requestOptions: BrowserControlRequestOptions = {},
   ): Promise<ComputerControlFrame> {
     const query = new URLSearchParams();
     if (options.format !== undefined) query.set("format", options.format);
@@ -1654,6 +1711,7 @@ export class ComputerControlSessionClient {
         controllerGeneration: this.reference.controllerGeneration,
         targetId: requireOpaqueId(targetId, "computer target id"),
       },
+      ...requestOptions,
     });
   }
 
@@ -1667,7 +1725,10 @@ export class ComputerControlSessionClient {
     );
   }
 
-  async action(command: ComputerActionCommandValue): Promise<ComputerActionReceiptValue> {
+  async action(
+    command: ComputerActionCommandValue,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<ComputerActionReceiptValue> {
     const parsed = ComputerActionCommand.parse(command);
     if (
       parsed.computerSessionId !== this.reference.computerSessionId ||
@@ -1681,6 +1742,7 @@ export class ComputerControlSessionClient {
         path: this.path("actions"),
         token: this.controlToken,
         body: parsed,
+        ...options,
       }),
     );
   }
@@ -1786,6 +1848,7 @@ async function requestExposedController(
     token: string;
     body?: unknown;
     timeoutMs?: number;
+    signal?: AbortSignal;
   },
   defaultTimeoutMs: number,
   metrics?: {
@@ -1812,7 +1875,7 @@ async function requestExposedController(
     },
     ...(body === undefined ? {} : { body }),
     redirect: "manual",
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: requestAbortSignal(input.signal, timeoutMs),
   });
   const responseText = await response.text();
   if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
@@ -1846,6 +1909,7 @@ async function requestExposedControllerBytes(
     token: string;
     expectedFrameEvidence: ExpectedComputerFrameEvidence;
     timeoutMs?: number;
+    signal?: AbortSignal;
   },
   defaultTimeoutMs: number,
 ): Promise<ComputerControlFrame> {
@@ -1861,7 +1925,7 @@ async function requestExposedControllerBytes(
       accept: "image/jpeg, image/png",
     },
     redirect: "manual",
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: requestAbortSignal(input.signal, timeoutMs),
   });
   if (!response.ok) {
     const responseText = await response.text();
@@ -1878,6 +1942,11 @@ async function requestExposedControllerBytes(
   }
   const data = new Uint8Array(await response.arrayBuffer());
   return computerControlFrame(data, response.headers, input.expectedFrameEvidence);
+}
+
+function requestAbortSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 function computerControlFrame(

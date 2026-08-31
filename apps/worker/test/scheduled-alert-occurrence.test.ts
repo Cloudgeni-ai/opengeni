@@ -1144,9 +1144,11 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       kind: "definition_edit",
       payload: { credentialHooks: ["azure-monitor"] },
     });
+    const attemptId = crypto.randomUUID();
     await updateRigChangeStatus(client.db, workspace.workspaceId, change.id, {
       status: "proposed",
       verification: {
+        attemptId,
         startedAt: "2026-08-14T00:00:00.000Z",
         finishedAt: "2026-08-14T00:01:00.000Z",
         passed: true,
@@ -1161,6 +1163,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       change.id,
       {
         expectedActiveVersionId: rig.activeVersion!.id,
+        expectedVerificationAttemptId: attemptId,
         credentialHooks: ["azure-monitor"],
       },
     );
@@ -1265,9 +1268,11 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       kind: "definition_edit",
       payload: { credentialHooks: ["azure-monitor"] },
     });
+    const attemptId = crypto.randomUUID();
     await updateRigChangeStatus(client.db, personalWorkspace!.id, change.id, {
       status: "proposed",
       verification: {
+        attemptId,
         startedAt: "2026-08-16T20:00:00.000Z",
         finishedAt: "2026-08-16T20:01:00.000Z",
         passed: true,
@@ -1282,6 +1287,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       change.id,
       {
         expectedActiveVersionId: rig.activeVersion!.id,
+        expectedVerificationAttemptId: attemptId,
         credentialHooks: ["azure-monitor"],
       },
     );

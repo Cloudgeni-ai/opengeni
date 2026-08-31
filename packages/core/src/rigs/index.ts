@@ -12,7 +12,7 @@ import {
 import type {
   AccessGrant,
   CreateRigRequest,
-  RigDefinitionEditPayload,
+  CreateRigVersionRequest,
   ProposeRigChangeRequest,
   Rig,
   RigChange,
@@ -38,6 +38,7 @@ import {
   recordAuditEvent,
   revokeScopedRig,
   RigActiveVersionChangedError,
+  RigChangeVerificationAttemptStaleError,
   RigChangeTransitionError,
   RigVersionVerificationRequiredError,
   updateScopedRig,
@@ -463,6 +464,16 @@ function requirePlatformSurfaceValidation(change: RigChange) {
   return parsed.data;
 }
 
+function requireRigChangeVerificationAttemptId(change: RigChange): string {
+  const attemptId = change.verification?.attemptId;
+  if (typeof attemptId !== "string") {
+    throw new HTTPException(422, {
+      message: "rig change has no durable verification attempt identity",
+    });
+  }
+  return attemptId;
+}
+
 async function promoteChangeWithActiveCas(
   deps: RigServices,
   workspaceId: string,
@@ -476,6 +487,11 @@ async function promoteChangeWithActiveCas(
     if (error instanceof RigActiveVersionChangedError) {
       throw new HTTPException(409, {
         message: `rig moved since this change was verified (base ${error.expectedVersionId}, now ${error.actualVersionId ?? "none"}); re-verify before promoting`,
+      });
+    }
+    if (error instanceof RigChangeVerificationAttemptStaleError) {
+      throw new HTTPException(409, {
+        message: "rig change verification was superseded; re-verify before promoting",
       });
     }
     if (error instanceof RigChangeTransitionError) {
@@ -529,6 +545,7 @@ export async function promoteSetupAppendChange(
     change.id,
     {
       expectedActiveVersionId: change.baseVersionId,
+      expectedVerificationAttemptId: requireRigChangeVerificationAttemptId(change),
       ...nextDefinition,
       changelog:
         typeof payload.note === "string" && payload.note.trim()
@@ -615,6 +632,7 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     change.id,
     {
       expectedActiveVersionId: change.baseVersionId,
+      expectedVerificationAttemptId: requireRigChangeVerificationAttemptId(change),
       ...nextDefinition,
       changelog:
         typeof payload.changelog === "string" && payload.changelog.trim()
@@ -655,11 +673,8 @@ export async function createRigVersionForApi(
   deps: RigServices,
   grant: AccessGrant,
   rig: Rig,
-  payload: RigDefinitionEditPayload,
+  payload: CreateRigVersionRequest,
 ): Promise<RigVersion> {
-  if (!rig.activeVersion) {
-    throw new HTTPException(422, { message: "rig has no active version" });
-  }
   assertUniqueCheckNames(payload.checks);
   await assertVariableSetsExist(
     deps.db,
@@ -667,30 +682,85 @@ export async function createRigVersionForApi(
     rig.scope,
     payload.defaultVariableSetIds ?? undefined,
   );
-  const base = rig.activeVersion;
-  const version = await createRigVersion(
-    deps.db,
-    rig.workspaceId,
-    rig.id,
-    {
-      image: null,
-      setupScript: payload.setupScript === undefined ? base.setupScript : payload.setupScript,
-      checks: payload.checks ?? base.checks,
-      credentialHooks: payload.credentialHooks ?? base.credentialHooks,
-      defaultVariableSetIds: payload.defaultVariableSetIds ?? base.defaultVariableSetIds,
-      changelog: payload.changelog ?? "Manager-created version",
-      createdBy: rigActorForGrant(grant),
-    },
-    {
-      activate: false,
-      verification: {
-        status: "pending",
-        attemptId: randomUUID(),
-        expectedActiveVersionId: base.id,
-        requestedAt: new Date().toISOString(),
+  let base: RigVersion | null = rig.activeVersion;
+  let expectedActiveVersionId: string | null;
+  if (rig.activeVersion) {
+    if (payload.baseVersionId && payload.baseVersionId !== rig.activeVersion.id) {
+      throw new HTTPException(422, {
+        message: "a Rig with an active version must inherit from that active version",
+      });
+    }
+    expectedActiveVersionId = rig.activeVersion.id;
+    if (
+      Object.hasOwn(payload, "expectedActiveVersionId") &&
+      payload.expectedActiveVersionId !== expectedActiveVersionId
+    ) {
+      throw new HTTPException(409, { message: "the Rig active version changed" });
+    }
+  } else {
+    if (
+      !Object.hasOwn(payload, "expectedActiveVersionId") ||
+      payload.expectedActiveVersionId !== null
+    ) {
+      throw new HTTPException(422, {
+        message: "replacement versions require expectedActiveVersionId: null",
+      });
+    }
+    expectedActiveVersionId = null;
+    if (payload.baseVersionId) {
+      base = await getRigVersion(deps.db, rig.workspaceId, rig.id, payload.baseVersionId);
+      if (!base) throw new HTTPException(422, { message: "replacement base version not found" });
+      if (base.active) {
+        throw new HTTPException(422, { message: "replacement base version must be inactive" });
+      }
+    } else {
+      const required = [
+        "setupScript",
+        "checks",
+        "credentialHooks",
+        "defaultVariableSetIds",
+      ] as const;
+      const missing = required.filter((field) => !Object.hasOwn(payload, field));
+      if (missing.length > 0) {
+        throw new HTTPException(422, {
+          message: `complete replacement definition required; missing ${missing.join(", ")}`,
+        });
+      }
+    }
+  }
+  let version: RigVersion;
+  try {
+    version = await createRigVersion(
+      deps.db,
+      rig.workspaceId,
+      rig.id,
+      {
+        image: null,
+        setupScript:
+          payload.setupScript === undefined ? (base?.setupScript ?? null) : payload.setupScript,
+        checks: payload.checks ?? base?.checks ?? [],
+        credentialHooks: payload.credentialHooks ?? base?.credentialHooks ?? [],
+        defaultVariableSetIds: payload.defaultVariableSetIds ?? base?.defaultVariableSetIds ?? [],
+        changelog: payload.changelog ?? "Manager-created version",
+        createdBy: rigActorForGrant(grant),
       },
-    },
-  );
+      {
+        activate: false,
+        expectedActiveVersionId,
+        verification: {
+          status: "pending",
+          attemptId: randomUUID(),
+          expectedActiveVersionId,
+          requestedAt: new Date().toISOString(),
+        },
+      },
+    );
+  } catch (error) {
+    if (error instanceof RigActiveVersionChangedError) {
+      throw new HTTPException(409, { message: "the Rig active version changed" });
+    }
+    throw error;
+  }
   await recordRigAuditEvent(deps.db, {
     grant,
     action: "rig.version.verification.requested",

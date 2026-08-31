@@ -62,7 +62,7 @@ describe("release schema contract", () => {
     const contract = await buildSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0384_fail_closed_rig_version_activation.sql",
+        (migration) => migration.path === "0386_fail_closed_rig_version_activation.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
   });
@@ -219,7 +219,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0382_organization_api_key_provenance.sql",
     );
     const failClosedRigVersionActivation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0384_fail_closed_rig_version_activation.sql",
+      (migration) => migration.path === "0386_fail_closed_rig_version_activation.sql",
     );
     const codexCooldownReconciliation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0383_codex_cooldown_reconciliation.sql",
@@ -263,8 +263,8 @@ describe("release schema contract", () => {
       "0382_organization_api_key_provenance.sql",
       "0383_codex_cooldown_reconciliation.sql",
       "0384_codex_cooldown_revision_guard_privileges.sql",
-      "0384_fail_closed_rig_version_activation.sql",
       "0385_connected_machine_legacy_tilde_workdirs.sql",
+      "0386_fail_closed_rig_version_activation.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -307,10 +307,10 @@ describe("release schema contract", () => {
         (failClosedRigVersionActivation ? 1 : 0) +
         (codexCooldownRevisionGuardPrivileges ? 1 : 0) +
         (connectedMachineLegacyTildeWorkdirs ? 1 : 0),
-      latestMigration: connectedMachineLegacyTildeWorkdirs
-        ? "0385_connected_machine_legacy_tilde_workdirs.sql"
-        : failClosedRigVersionActivation
-          ? "0384_fail_closed_rig_version_activation.sql"
+      latestMigration: failClosedRigVersionActivation
+        ? "0386_fail_closed_rig_version_activation.sql"
+        : connectedMachineLegacyTildeWorkdirs
+          ? "0385_connected_machine_legacy_tilde_workdirs.sql"
           : codexCooldownRevisionGuardPrivileges
             ? "0384_codex_cooldown_revision_guard_privileges.sql"
             : codexCooldownReconciliation
@@ -502,8 +502,8 @@ describe("release schema contract", () => {
       "0382_organization_api_key_provenance.sql",
       "0383_codex_cooldown_reconciliation.sql",
       "0384_codex_cooldown_revision_guard_privileges.sql",
-      "0384_fail_closed_rig_version_activation.sql",
       "0385_connected_machine_legacy_tilde_workdirs.sql",
+      "0386_fail_closed_rig_version_activation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -637,7 +637,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0382_organization_api_key_provenance.sql",
     );
     const failClosedRigVersionActivation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0384_fail_closed_rig_version_activation.sql",
+      (migration) => migration.path === "0386_fail_closed_rig_version_activation.sql",
     );
     const codexCooldownReconciliation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0383_codex_cooldown_reconciliation.sql",
@@ -690,10 +690,10 @@ describe("release schema contract", () => {
         (failClosedRigVersionActivation ? 1 : 0) +
         (codexCooldownRevisionGuardPrivileges ? 1 : 0) +
         (connectedMachineLegacyTildeWorkdirs ? 1 : 0),
-      latestMigration: connectedMachineLegacyTildeWorkdirs
-        ? "0385_connected_machine_legacy_tilde_workdirs.sql"
-        : failClosedRigVersionActivation
-          ? "0384_fail_closed_rig_version_activation.sql"
+      latestMigration: failClosedRigVersionActivation
+        ? "0386_fail_closed_rig_version_activation.sql"
+        : connectedMachineLegacyTildeWorkdirs
+          ? "0385_connected_machine_legacy_tilde_workdirs.sql"
           : codexCooldownRevisionGuardPrivileges
             ? "0384_codex_cooldown_revision_guard_privileges.sql"
             : codexCooldownReconciliation

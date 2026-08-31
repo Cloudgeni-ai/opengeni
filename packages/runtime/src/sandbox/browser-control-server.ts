@@ -63,6 +63,7 @@ export type EnsureBrowserControlServerOptions = {
   timeoutMs?: number;
   adminTokenFile: string;
   allowedOrigins?: readonly string[];
+  signal?: AbortSignal;
 };
 
 export type EnsureBrowserControlServerResult = {
@@ -94,6 +95,7 @@ export async function ensureBrowserControlServer(
   session: unknown,
   options: EnsureBrowserControlServerOptions,
 ): Promise<EnsureBrowserControlServerResult> {
+  options.signal?.throwIfAborted();
   const target = session as ExecCapableSession;
   if (typeof target?.exec !== "function" && typeof target?.execCommand !== "function") {
     throw new BrowserControlServerUnsupportedError(
@@ -121,6 +123,7 @@ export async function ensureBrowserControlServer(
         maxOutputTokens: 4_000,
       });
   const output = outputOf(result);
+  options.signal?.throwIfAborted();
   const exitCode = exitCodeOf(result) ?? inferExitCode(output);
   if (exitCode !== 0) throw new BrowserControlServerError(exitCode, output);
   const marker = (output.match(/OPENGENI_BROWSERD_UP[^\n]*/) ?? [""])[0];
@@ -133,23 +136,29 @@ export async function ensureBrowserControlServer(
   return { port, marker };
 }
 
-export async function tearDownBrowserControlServer(session: unknown): Promise<void> {
+export async function tearDownBrowserControlServer(
+  session: unknown,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<void> {
+  options.signal?.throwIfAborted();
   const target = session as ExecCapableSession;
+  const timeoutMs = boundedTimeout(options.timeoutMs ?? 15_000);
   if (target?.exec) {
     await target.exec({
       cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
       workdir: PLACEMENT_CONTROLLER_WORKDIR,
-      yieldTimeMs: 15_000,
+      yieldTimeMs: timeoutMs,
       maxOutputTokens: 4_000,
     });
   } else if (target?.execCommand) {
     await target.execCommand({
       cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
       workdir: PLACEMENT_CONTROLLER_WORKDIR,
-      yieldTimeMs: 15_000,
+      yieldTimeMs: timeoutMs,
       maxOutputTokens: 4_000,
     });
   }
+  options.signal?.throwIfAborted();
 }
 
 function outputOf(result: ExecResultLike | string): string {

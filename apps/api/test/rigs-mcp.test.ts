@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
 import {
   beginRigVersionVerificationAttempt,
+  createRig as createInactiveRig,
   bootstrapWorkspace,
   createDb,
   createRigChange,
@@ -495,8 +496,8 @@ describe("rig MCP tools", () => {
       }),
     );
     const proposed = await callMcpTool<{
-      change: { id: string; status: string };
-      verificationStarted: boolean;
+      resource: { id: string; state: string };
+      facts: { verificationStarted: boolean; verificationAttempt: string };
     }>(server, "rig_propose_change", {
       rigId: rig.id,
       command: "touch /opt/mcp/tool",
@@ -506,20 +507,68 @@ describe("rig MCP tools", () => {
       operation: "rig_propose_change",
       outcome: "created",
       resource: { type: "rig_change", state: "verifying" },
-      facts: { verificationStarted: true, verificationAttempt: 1 },
+      facts: { verificationStarted: true },
     });
+    expect(proposed.facts.verificationAttempt).toMatch(/^[0-9a-f-]{36}$/u);
     expect(JSON.stringify(proposed)).not.toContain("touch /opt/mcp/tool");
     expect(JSON.stringify(proposed)).not.toContain("mcp proposal");
     expect(workflow.rigVerifications).toEqual([
       {
         workspaceId,
         changeId: proposed.resource.id,
-        workflowId: `rig-verification-change-${proposed.resource.id}-attempt-1`,
+        attemptId: proposed.facts.verificationAttempt,
+        workflowId: `rig-verification-change-${proposed.resource.id}-attempt-${proposed.facts.verificationAttempt}`,
       },
     ]);
     const stored = await getRigChange(client.db, workspaceId, proposed.resource.id);
     expect(stored?.kind).toBe("setup_append");
     expect(stored?.proposedBy).toBe(`session:${sessionId}`);
+  });
+
+  test("rig_create_version recovers a Rig with no active version using an explicit null CAS", async () => {
+    if (!available) return;
+    const workflow = new FakeWorkflowClient();
+    const rig = await createInactiveRig(client.db, {
+      accountId,
+      workspaceId,
+      name: `mcp-replacement-${crypto.randomUUID()}`,
+      activateInitialVersion: false,
+    });
+    const server = buildOpenGeniMcpServer(deps(workflow), grant(["rigs:use", "rigs:manage"]));
+
+    await expect(
+      callMcpTool(server, "rig_create_version", {
+        rigId: rig.id,
+        setupScript: null,
+        checks: [],
+        credentialHooks: [],
+        defaultVariableSetIds: [],
+      }),
+    ).rejects.toThrow(/expectedActiveVersionId: null/iu);
+
+    const created = await callMcpTool<{
+      outcome: string;
+      resource: { id: string; state: string };
+      facts: { verificationAttempt: string };
+    }>(server, "rig_create_version", {
+      rigId: rig.id,
+      expectedActiveVersionId: null,
+      setupScript: null,
+      checks: [],
+      credentialHooks: [],
+      defaultVariableSetIds: [],
+    });
+    expect(created).toMatchObject({
+      outcome: "created",
+      resource: { state: "verification_pending" },
+    });
+    expect(created.facts.verificationAttempt).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(workflow.rigVerifications).toContainEqual({
+      workspaceId,
+      versionId: created.resource.id,
+      attemptId: created.facts.verificationAttempt,
+      workflowId: `rig-verification-version-${created.resource.id}-attempt-${created.facts.verificationAttempt}`,
+    });
   });
 
   test("rig_get keeps one bounded active definition and summary-only history", async () => {

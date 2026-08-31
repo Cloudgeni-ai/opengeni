@@ -4,8 +4,9 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { RigOverview } from "@/components/rigs/rig-overview";
+import { RigSetupSection } from "@/components/rigs/rig-setup-section";
 import { deferredRigVerificationView } from "@/lib/rig-status";
-import type { Rig, RigVersion } from "@/types";
+import type { CreateRigVersionRequest, Rig, RigVersion } from "@/types";
 import { RigScopeChip } from "./rigs";
 
 beforeAll(() => {
@@ -53,6 +54,9 @@ describe("Rigs access scope", () => {
             canUse
             mutating={false}
             deferredVerification={deferredRigVerificationView([first])}
+            versionsLoading={false}
+            versionsError={null}
+            onRetryVersions={() => undefined}
             onRecoverDeferred={async () => {
               recoveries += 1;
               return { ok: true, versionId: first.id };
@@ -84,6 +88,9 @@ describe("Rigs access scope", () => {
             canUse
             mutating={false}
             deferredVerification={deferredRigVerificationView([first, second])}
+            versionsLoading={false}
+            versionsError={null}
+            onRetryVersions={() => undefined}
             onRecoverDeferred={async () => {
               recoveries += 1;
               return null;
@@ -101,6 +108,131 @@ describe("Rigs access scope", () => {
         ),
       ).toBe(false);
       expect(recoveries).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps unavailable version history in loading/error state with a retry", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    let retries = 0;
+    try {
+      await act(async () =>
+        root.render(
+          <RigOverview
+            rig={inactiveRig()}
+            changes={[]}
+            variableSetName={() => "Variable set"}
+            canUse
+            mutating={false}
+            deferredVerification={null}
+            versionsLoading
+            versionsError={null}
+            onRetryVersions={() => {
+              retries += 1;
+            }}
+            onRecoverDeferred={async () => null}
+            onVerify={async () => null}
+          />,
+        ),
+      );
+      expect(container.textContent).toContain("Loading version recovery state");
+      expect(container.textContent).not.toContain("no active version");
+
+      await act(async () =>
+        root.render(
+          <RigOverview
+            rig={inactiveRig()}
+            changes={[]}
+            variableSetName={() => "Variable set"}
+            canUse
+            mutating={false}
+            deferredVerification={null}
+            versionsLoading={false}
+            versionsError={new Error("network unavailable")}
+            onRetryVersions={() => {
+              retries += 1;
+            }}
+            onRecoverDeferred={async () => null}
+            onVerify={async () => null}
+          />,
+        ),
+      );
+      expect(container.textContent).toContain("Couldn't load version recovery state");
+      expect(container.textContent).not.toContain("No deferred pending attempt");
+      const retry = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === "Retry",
+      );
+      expect(retry).toBeDefined();
+      await act(async () => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      expect(retries).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("creates a manager replacement from an exact inactive base with a null active-version CAS", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const base = pendingVersion("66666666-6666-4666-8666-666666666666", 7);
+    base.setupScript = "echo historical";
+    base.checks = [{ name: "bun", command: "bun --version" }];
+    const submitted: CreateRigVersionRequest[] = [];
+    try {
+      await act(async () =>
+        root.render(
+          <RigSetupSection
+            activeVersion={null}
+            versions={[base]}
+            versionsLoading={false}
+            versionsError={null}
+            rigScope="workspace"
+            variableSets={[]}
+            canPropose={false}
+            canManage
+            mutating={false}
+            onPropose={async () => null}
+            onProposed={() => undefined}
+            onCreateVersion={async (request) => {
+              submitted.push(request);
+              return { ok: true };
+            }}
+            onRetryVersions={() => undefined}
+          />,
+        ),
+      );
+      expect(container.textContent).toContain("Create a replacement version");
+      expect(container.textContent).toContain("cannot overwrite a version activated");
+
+      const baseSelect = container.querySelector<HTMLSelectElement>("#replacement-rig-base");
+      expect(baseSelect).not.toBeNull();
+      await act(async () => {
+        baseSelect!.value = base.id;
+        baseSelect!.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(container.querySelector<HTMLTextAreaElement>("#replacement-rig-setup")?.disabled).toBe(
+        true,
+      );
+
+      const create = [...container.querySelectorAll("button")].find((candidate) =>
+        candidate.textContent?.includes("Create and verify replacement"),
+      );
+      expect(create).toBeDefined();
+      await act(async () => {
+        create!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+      expect(submitted).toEqual([
+        {
+          expectedActiveVersionId: null,
+          baseVersionId: base.id,
+        },
+      ]);
     } finally {
       await act(async () => root.unmount());
       container.remove();

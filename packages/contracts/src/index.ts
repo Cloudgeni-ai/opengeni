@@ -800,6 +800,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "rig_get",
   "rig_propose_change",
   "rig_verify",
+  "rig_create_version",
   "rig_promote",
   "sessions_list",
   "session_get",
@@ -8110,6 +8111,8 @@ export type RigCheckResult = z.infer<typeof RigCheckResult>;
 export const RigChangeVerification = /* @__PURE__ */ (() =>
   z
     .object({
+      attemptId: z.string().uuid().optional(),
+      attempt: z.number().int().positive().optional(),
       startedAt: z.string().optional(),
       finishedAt: z.string().optional(),
       log: z.string().optional(),
@@ -8229,6 +8232,16 @@ export const RigDefinitionEditPayload = z.object({
   changelog: z.string().max(4096).nullish(),
 });
 export type RigDefinitionEditPayload = z.infer<typeof RigDefinitionEditPayload>;
+
+// Direct manager-authored versions normally inherit from the active version.
+// A Rig with no active version can be recovered only through an explicit
+// fail-closed CAS (`expectedActiveVersionId: null`) plus either an exact
+// historical base or a complete replacement definition.
+export const CreateRigVersionRequest = RigDefinitionEditPayload.extend({
+  baseVersionId: z.string().uuid().optional(),
+  expectedActiveVersionId: z.string().uuid().nullable().optional(),
+});
+export type CreateRigVersionRequest = z.infer<typeof CreateRigVersionRequest>;
 
 export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("setup_append"), payload: RigSetupAppendPayload }),

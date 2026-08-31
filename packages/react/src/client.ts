@@ -77,6 +77,7 @@ export type SessionClientLike = Pick<
   | "updateRig"
   | "deleteRig"
   | "listRigVersions"
+  | "createRigVersion"
   | "recoverDeferredRigVerification"
   | "activateRigVersion"
   | "listRigChanges"

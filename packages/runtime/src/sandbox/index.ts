@@ -279,6 +279,7 @@ export {
   provisionBrowserControlClient,
   validateComputerControlFrameEvidence,
   type BrowserControlPlacementSession,
+  type BrowserControlRequestOptions,
   type BrowserStateDownloadGrant,
   type BrowserStateUploadGrant,
   type BrowserViewGrant,

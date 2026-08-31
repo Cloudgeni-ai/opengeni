@@ -1,7 +1,7 @@
 import {
   CreateRigRequest,
+  CreateRigVersionRequest,
   ProposeRigChangeRequest,
-  RigDefinitionEditPayload,
   UpdateRigRequest,
 } from "@opengeni/contracts";
 import {
@@ -131,13 +131,16 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
-    const attempt =
-      typeof change.verification?.attempt === "number" ? change.verification.attempt : Date.now();
+    const attemptId = change.verification?.attemptId;
+    if (typeof attemptId !== "string") {
+      throw new Error("Rig change verification attempt was not persisted");
+    }
     try {
       await workflowClient.startRigVerification({
         workspaceId,
         changeId,
-        workflowId: `rig-verification-change-${changeId}-attempt-${attempt}`,
+        attemptId,
+        workflowId: `rig-verification-change-${changeId}-attempt-${attemptId}`,
       });
       return { change, started: true };
     } catch (error) {
@@ -147,7 +150,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       deps.observability?.warn("rig change verification start failed", {
         workspaceId,
         changeId,
-        attempt,
+        attemptId,
         error: error instanceof Error ? error.message : String(error),
       });
       return { change, started: false };
@@ -158,6 +161,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     workspaceId: string,
     rigId: string,
     versionId: string,
+    requestingGrant?: { accountId: string; subjectId: string },
   ): Promise<{
     attempt: Awaited<ReturnType<typeof beginRigVersionVerificationAttempt>>;
     started: boolean;
@@ -165,7 +169,17 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const attempt = await beginRigVersionVerificationAttempt(
       db,
       { workspaceId, rigId, versionId },
-      { allowAlreadyPending: true },
+      {
+        allowAlreadyPending: true,
+        ...(requestingGrant
+          ? {
+              audit: {
+                accountId: requestingGrant.accountId,
+                subjectId: requestingGrant.subjectId,
+              },
+            }
+          : {}),
+      },
     );
     try {
       await dispatchVersionVerification(workspaceId, versionId, attempt.attemptId);
@@ -302,7 +316,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
-    const payload = await parseRigRequest(c, RigDefinitionEditPayload, "Rig version request");
+    const payload = await parseRigRequest(c, CreateRigVersionRequest, "Rig version request");
     const version = await createRigVersionForApi({ db }, grant, rig, payload);
     const started = await tryStartInitialVersionVerification(rig.workspaceId, rig.id, version.id);
     if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
@@ -311,13 +325,13 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions/:versionId/verify", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
     const versionId = c.req.param("versionId");
     const versions = await listRigVersionsForApi({ db }, rig.workspaceId, rig.id);
     if (!versions.some((version) => version.id === versionId)) {
       throw new HTTPException(404, { message: "rig version not found" });
     }
-    const verification = await startVersionVerification(rig.workspaceId, rig.id, versionId);
+    const verification = await startVersionVerification(rig.workspaceId, rig.id, versionId, grant);
     if (!verification.started) {
       throw rigVersionDispatchDeferredError(versionId);
     }

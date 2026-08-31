@@ -23,6 +23,8 @@ const BROWSER_SESSION_ID = "55555555-5555-4555-8555-555555555555";
 const COMPUTER_SESSION_ID = "66666666-6666-4666-8666-666666666666";
 const OPERATION_ID = "77777777-7777-4777-8777-777777777777";
 const CHECKED_AT = "2026-08-30T12:00:00.000Z";
+const SURFACE_URL =
+  "data:text/html,<title>OpenGeni Rig Surface Validation</title><main id=opengeni-rig-surface>ready</main>";
 
 type FailureMode =
   | "terminal"
@@ -30,6 +32,9 @@ type FailureMode =
   | "browser_empty_targets"
   | "browser_generation_mismatch"
   | "browser_observed_target_mismatch"
+  | "browser_open_noop"
+  | "browser_open_url_mismatch"
+  | "browser_open_abort"
   | "browser_cleanup"
   | "computer_unsupported"
   | "computer_empty_targets"
@@ -88,7 +93,7 @@ function browserTarget(
     documentGeneration: "document-1",
     kind: "page",
     title: "OpenGeni Rig Surface Validation",
-    url: "data:text/html,<title>OpenGeni Rig Surface Validation</title>",
+    url: SURFACE_URL,
     selected: true,
     attached: true,
     createdAt: CHECKED_AT,
@@ -193,18 +198,25 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
     OPERATION_ID,
   ];
   let generation = "";
+  let browserListCount = 0;
   let computerObservationCount = 0;
+  const lifecycleAbort = new AbortController();
+  const operationOptions: Array<{ stage: string; timeoutMs?: number; signal?: AbortSignal }> = [];
   const image = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
   const imageSha = createHash("sha256").update(image).digest("hex");
 
   const controller = {
-    createSession: async (request: {
-      browserSessionId: string;
-      controllerGeneration: string;
-      headed: boolean;
-      tokenGeneration: number;
-    }) => {
+    createSession: async (
+      request: {
+        browserSessionId: string;
+        controllerGeneration: string;
+        headed: boolean;
+        tokenGeneration: number;
+      },
+      options?: { timeoutMs?: number; signal?: AbortSignal },
+    ) => {
       events.push("browser:create");
+      operationOptions.push({ stage: "browser:create", ...options });
       expect(request.browserSessionId).toBe(BROWSER_SESSION_ID);
       expect(request.headed).toBe(true);
       expect(request.tokenGeneration).toBe(8);
@@ -219,32 +231,67 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       };
     },
     sessionClient: () => ({
-      listTargets: async () => {
+      listTargets: async (options?: { timeoutMs?: number; signal?: AbortSignal }) => {
         events.push("browser:list");
-        return mode === "browser_empty_targets" ? [] : [browserTarget(generation)];
+        operationOptions.push({ stage: "browser:list", ...options });
+        browserListCount += 1;
+        if (mode === "browser_empty_targets") return [];
+        const initial = browserTarget(generation);
+        if (browserListCount === 1) return [initial];
+        return [
+          initial,
+          browserTarget(generation, {
+            id: "page-2",
+            targetGeneration: "target-2",
+            url: `${SURFACE_URL}#opened`,
+          }),
+        ];
       },
-      openTarget: async () => {
+      openTarget: async (_url?: string, options?: { timeoutMs?: number; signal?: AbortSignal }) => {
         events.push("browser:open");
-        return browserObservation(generation);
+        operationOptions.push({ stage: "browser:open", ...options });
+        if (mode === "browser_open_abort") {
+          lifecycleAbort.abort(new Error("surface validation cancelled"));
+        }
+        if (mode === "browser_open_noop") {
+          return browserObservation(generation, { url: `${SURFACE_URL}#opened` });
+        }
+        return browserObservation(generation, {
+          id: "page-2",
+          targetGeneration: "target-2",
+          url:
+            mode === "browser_open_url_mismatch" ? `${SURFACE_URL}#wrong` : `${SURFACE_URL}#opened`,
+        });
       },
-      observe: async () => {
+      observe: async (
+        _targetId: string,
+        options?: { timeoutMs?: number; signal?: AbortSignal },
+      ) => {
         events.push("browser:observe");
+        operationOptions.push({ stage: "browser:observe", ...options });
         return browserObservation(
           generation,
-          mode === "browser_observed_target_mismatch" ? { id: "page-other" } : {},
+          mode === "browser_observed_target_mismatch"
+            ? { id: "page-other", targetGeneration: "target-2", url: `${SURFACE_URL}#opened` }
+            : { id: "page-2", targetGeneration: "target-2", url: `${SURFACE_URL}#opened` },
         );
       },
     }),
-    endSession: async () => {
+    endSession: async (_session: unknown, options?: { timeoutMs?: number }) => {
       events.push("browser:end");
+      operationOptions.push({ stage: "browser:end", ...options });
       if (mode === "browser_cleanup") throw new Error("browser cleanup failed");
     },
-    createComputerSession: async (request: {
-      computerSessionId: string;
-      controllerGeneration: string;
-      tokenGeneration: number;
-    }) => {
+    createComputerSession: async (
+      request: {
+        computerSessionId: string;
+        controllerGeneration: string;
+        tokenGeneration: number;
+      },
+      options?: { timeoutMs?: number; signal?: AbortSignal },
+    ) => {
       events.push("computer:create");
+      operationOptions.push({ stage: "computer:create", ...options });
       expect(request.computerSessionId).toBe(COMPUTER_SESSION_ID);
       expect(request.controllerGeneration).toBe(generation);
       expect(request.tokenGeneration).toBe(8);
@@ -343,13 +390,18 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       readBindings.push(current);
       return current;
     },
-    provisionController: async (session: unknown) => {
+    provisionController: async (
+      session: unknown,
+      options: { timeoutMs?: number; signal?: AbortSignal },
+    ) => {
       events.push("controller:provision");
+      operationOptions.push({ stage: "controller:provision", ...options });
       expect(session).toBe(established.session);
       return { client: controller };
     },
-    tearDownController: async (session: unknown) => {
+    tearDownController: async (session: unknown, options?: { timeoutMs?: number }) => {
       events.push("controller:down");
+      operationOptions.push({ stage: "controller:down", ...options });
       expect(session).toBe(established.session);
       if (mode === "controller_cleanup") throw new Error("controller cleanup failed");
     },
@@ -396,8 +448,17 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       workspaceGeneration: 3,
       instanceId: "sandbox-exact",
     },
+    ...(mode === "browser_open_abort"
+      ? {
+          lifecycle: {
+            signal: lifecycleAbort.signal,
+            workDeadlineAtMs: Date.now() + 30_000,
+            cleanupDeadlineAtMs: Date.now() + 30_000,
+          },
+        }
+      : {}),
   };
-  return { dependencies, input, events, readBindings };
+  return { dependencies, input, events, readBindings, operationOptions, lifecycleAbort };
 }
 
 describe("mandatory Rig platform surface validation", () => {
@@ -456,6 +517,8 @@ describe("mandatory Rig platform surface validation", () => {
     ["browser_empty_targets", "no real targets"],
     ["browser_generation_mismatch", "another session/controller binding"],
     ["browser_observed_target_mismatch", "another requested target binding"],
+    ["browser_open_noop", "did not create a new target identity"],
+    ["browser_open_url_mismatch", "deterministic validation target"],
     ["browser_cleanup", "browser cleanup failed"],
     ["computer_unsupported", "computer unsupported"],
     ["computer_empty_targets", "no real screen target"],
@@ -488,5 +551,39 @@ describe("mandatory Rig platform surface validation", () => {
     );
     expect(state.events).toContain("browser:end");
     expect(state.events).toContain("controller:down");
+  });
+
+  test("activity abort stops further RPC work but still runs bounded cleanup", async () => {
+    const state = harness("browser_open_abort");
+    await expect(runRigPlatformSurfaceValidation(state.input, state.dependencies)).rejects.toThrow(
+      "surface validation cancelled",
+    );
+    expect(state.events).toContain("browser:end");
+    expect(state.events).toContain("controller:down");
+    expect(
+      state.operationOptions
+        .filter((entry) => entry.stage.endsWith(":end") || entry.stage === "controller:down")
+        .every((entry) => typeof entry.timeoutMs === "number" && entry.timeoutMs > 0),
+    ).toBe(true);
+  });
+
+  test("clamps every controller work operation to the remaining activity budget", async () => {
+    const state = harness(undefined, { desktop: true });
+    state.input.lifecycle = {
+      signal: state.lifecycleAbort.signal,
+      workDeadlineAtMs: Date.now() + 2_000,
+      cleanupDeadlineAtMs: Date.now() + 4_000,
+    };
+    await runRigPlatformSurfaceValidation(state.input, state.dependencies);
+    const work = state.operationOptions.filter(
+      (entry) => !entry.stage.endsWith(":end") && entry.stage !== "controller:down",
+    );
+    expect(work.length).toBeGreaterThan(0);
+    expect(
+      work.every(
+        (entry) =>
+          typeof entry.timeoutMs === "number" && entry.timeoutMs > 0 && entry.timeoutMs <= 2_000,
+      ),
+    ).toBe(true);
   });
 });

@@ -26,6 +26,9 @@ export function RigOverview({
   canUse,
   mutating,
   deferredVerification,
+  versionsLoading,
+  versionsError,
+  onRetryVersions,
   onRecoverDeferred,
   onVerify,
 }: {
@@ -34,12 +37,37 @@ export function RigOverview({
   variableSetName: (id: string) => string;
   canUse: boolean;
   mutating: boolean;
-  deferredVerification: DeferredRigVerificationView;
+  deferredVerification: DeferredRigVerificationView | null;
+  versionsLoading: boolean;
+  versionsError: Error | null;
+  onRetryVersions: () => void;
   onRecoverDeferred: () => Promise<unknown>;
   onVerify: () => Promise<{ ok: boolean; versionId: string } | null>;
 }) {
   const active = rig.activeVersion;
   if (!active) {
+    if (versionsError && deferredVerification === null) {
+      return (
+        <Notice
+          tone="failed"
+          title="Couldn't load version recovery state"
+          action={
+            <Button type="button" variant="secondary" size="sm" onClick={onRetryVersions}>
+              Retry
+            </Button>
+          }
+        >
+          OpenGeni couldn't determine whether an inactive version is available to recover.
+        </Notice>
+      );
+    }
+    if (versionsLoading || deferredVerification === null) {
+      return (
+        <Notice tone="muted" title="Loading version recovery state">
+          Checking inactive versions before showing recovery actions.
+        </Notice>
+      );
+    }
     if (deferredVerification.state === "available") {
       return (
         <Notice

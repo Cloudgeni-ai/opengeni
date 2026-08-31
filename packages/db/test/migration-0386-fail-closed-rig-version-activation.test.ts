@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 const migrationUrl = new URL(
-  "../drizzle/0384_fail_closed_rig_version_activation.sql",
+  "../drizzle/0386_fail_closed_rig_version_activation.sql",
   import.meta.url,
 );
 const source = await Bun.file(migrationUrl).text();
 
-describe("migration 0384 fail-closed Rig activation", () => {
+describe("migration 0386 fail-closed Rig activation", () => {
   test("adds operational verification state without backfilling false success", () => {
     expect(source).toMatch(
       /ADD COLUMN verification jsonb NOT NULL DEFAULT '\{"status":"unverified"\}'::jsonb/iu,
@@ -29,11 +29,20 @@ describe("migration 0384 fail-closed Rig activation", () => {
     expect(source).toContain("receipt' ->> 'version' IS DISTINCT FROM '2'");
   });
 
-  test("removes and fences obsolete provider-image proof across the maintenance cutover", () => {
-    expect(source).toContain("THEN image.value - 'coldBootValidation'");
+  test("removes complete obsolete artifact references while preserving current proof", () => {
+    expect(source).toContain("jsonb_object_agg(image.key, image.value) FILTER");
+    expect(source).toContain(
+      "image.value -> 'coldBootValidation' ->> 'version' IS DISTINCT FROM '1'",
+    );
+    expect(source).toContain("SET verification = verification - 'providerImage'");
+    expect(source).toContain("verification #>> '{providerImage,coldBootValidation,version}' = '1'");
     expect(source).toContain("rig_versions_provider_image_proof_trigger");
     expect(source).toContain("rig_versions_provider_image_proof_version_check");
     expect(source).toContain("coldBootValidation' ->> 'version' = '1'");
+    expect(source).not.toMatch(/jsonb_set\([\s\S]*\{coldBootValidation\}[\s\S]*'null'::jsonb/iu);
+    expect(source).not.toContain(
+      "image.value -> 'coldBootValidation' ->> 'version' IS DISTINCT FROM '2'",
+    );
   });
 
   test("retains the scoped creation security boundary", () => {
