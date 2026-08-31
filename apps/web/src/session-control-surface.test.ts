@@ -147,6 +147,9 @@ describe("session control surface architecture", () => {
       "const visible = refreshRequired || currentIds.length > 0 || canAdd",
     );
     expect(establishedPicker).toContain("committedSelection?.sessionId === props.session.id &&");
+    expect(establishedRoute).toContain("const variableSetComposerBlocked =");
+    expect(establishedRoute).toContain("variableSetPickerState.saving ||");
+    expect(establishedRoute).toContain("variableSetComposerBlocked ||");
     expect(establishedPicker).toContain("props.canControl && props.canAttach");
     expect(
       establishedRoute.match(

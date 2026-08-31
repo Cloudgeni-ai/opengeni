@@ -1302,6 +1302,9 @@ function SessionChatPane(props: {
       saving: false,
       committedSelection: null,
     });
+  const variableSetComposerBlocked =
+    variableSetPickerState.saving ||
+    variableSetPickerState.committedSelection?.sessionId === props.session.id;
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -1529,6 +1532,7 @@ function SessionChatPane(props: {
       attachments.hasUnresolved ||
       repositories.error !== null ||
       !composerPolicyValidRef.current ||
+      variableSetComposerBlocked ||
       personalAttachment.requiresDecision ||
       personalAttachment.loading ||
       personalAttachment.refreshing,
