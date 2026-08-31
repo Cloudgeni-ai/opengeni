@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   ImageGenerationReferenceError,
+  readStoredImageReferenceFile,
   resolveImageGenerationReferences,
   resolveImageGenerationReferencesForTool,
 } from "../src/activities/image-generation-references";
@@ -13,6 +14,29 @@ const PNG_1X1 = Uint8Array.from(
 );
 
 describe("image generation references", () => {
+  test("reads stored image references larger than one object page", async () => {
+    const expected = Uint8Array.from({ length: 1024 * 1024 + 7 }, (_, index) => index % 251);
+    const ranges: Array<{ start: number; end: number }> = [];
+    const bytes = await readStoredImageReferenceFile(
+      {
+        getFileRange: async (_file, range) => {
+          ranges.push(range);
+          return expected.slice(range.start, range.end + 1);
+        },
+      },
+      {
+        sizeBytes: expected.byteLength,
+        objectKey: "generated/reference.png",
+      } as never,
+    );
+
+    expect(ranges).toEqual([
+      { start: 0, end: 1024 * 1024 - 1 },
+      { start: 1024 * 1024, end: 1024 * 1024 + 6 },
+    ]);
+    expect(bytes).toEqual(expected);
+  });
+
   test("validates sandbox images and preserves caller order", async () => {
     const paths: string[] = [];
     const references = await resolveImageGenerationReferences({
