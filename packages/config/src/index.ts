@@ -1151,6 +1151,18 @@ const SettingsSchema = z.object({
     .positive()
     .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
     .default(60_000),
+  // A zero-holder drain may need substantially longer than a best-effort
+  // mid-turn/turn-end snapshot for a very large workspace. Keep that provider
+  // budget independent so increasing drain recovery headroom cannot pin an
+  // ordinary turn finalizer for the same duration. Unset preserves the legacy
+  // single-budget behavior. Knob:
+  // OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS.
+  sandboxDrainSnapshotTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
+    .optional(),
   // Begin a controlled snapshot/quiesce/drain/rematerialize transition this far
   // ahead of a finite provider deadline. Modal's 24h creation clock cannot be
   // extended; the logical sandbox outlives it by moving to one successor box.
@@ -2600,6 +2612,7 @@ export function getSettings(): Settings {
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
+    sandboxDrainSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS"),
     sandboxRotationLeadMs: optional("OPENGENI_SANDBOX_ROTATION_LEAD_MS"),
     sandboxRotationBatchSize: optional("OPENGENI_SANDBOX_ROTATION_BATCH_SIZE"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
@@ -2819,10 +2832,23 @@ export function sandboxArchiveCaptureTimeoutMs(
   );
 }
 
-export function sandboxLifecycleTransitionWaitMs(
-  settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxLeaseReaperPeriodMs">,
+/** Provider operation budget used only by zero-holder drain/rotation capture.
+ * Unset preserves the historical shared snapshot budget exactly. */
+export function effectiveSandboxDrainSnapshotTimeoutMs(
+  settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs">,
 ): number {
-  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+  return settings.sandboxDrainSnapshotTimeoutMs ?? settings.sandboxSnapshotTimeoutMs;
+}
+
+export function sandboxLifecycleTransitionWaitMs(
+  settings: Pick<
+    Settings,
+    "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs" | "sandboxLeaseReaperPeriodMs"
+  >,
+): number {
+  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs({
+    sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+  });
   return Math.min(
     SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
     settings.sandboxLeaseReaperPeriodMs +
@@ -5842,11 +5868,46 @@ function validateSettings(settings: Settings): void {
           `more often than the controller-heartbeat horizon.`,
       );
     }
+    if (settings.sandboxDrainSnapshotTimeoutMs !== undefined) {
+      const drainCaptureTimeoutMs = sandboxArchiveCaptureTimeoutMs({
+        sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+      });
+      const requiredTransitionWaitMs =
+        reaperPeriod + drainCaptureTimeoutMs + SANDBOX_LIFECYCLE_RETRY_HANDOFF_GRACE_MS;
+      if (requiredTransitionWaitMs > SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS) {
+        throw new Error(
+          `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS (${settings.sandboxDrainSnapshotTimeoutMs}) ` +
+            `requires a sandbox lifecycle transition wait of ${requiredTransitionWaitMs}ms after ` +
+            `one reaper period and provider settlement, exceeding the ` +
+            `${SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS}ms limit. Lower the drain snapshot timeout ` +
+            `or OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS.`,
+        );
+      }
+    }
+    // A backend rollout does not rewrite or synchronously drain existing
+    // leases. Preserve enough deadline-rotation headroom for historical Modal
+    // leases even when the deployment default has moved to another backend.
+    const rotationLeadMs = settings.sandboxRotationLeadMs;
+    const ordinaryCaptureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+    const drainCaptureTimeoutMs = sandboxArchiveCaptureTimeoutMs({
+      sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+    });
+    const providerDeadlineCaptureTimeoutMs = Math.max(
+      ordinaryCaptureTimeoutMs,
+      drainCaptureTimeoutMs,
+    );
+    if (!(rotationLeadMs > providerDeadlineCaptureTimeoutMs + reaperPeriod)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the ` +
+          `largest durable snapshot or drain capture timeout plus one reaper period ` +
+          `(${providerDeadlineCaptureTimeoutMs + reaperPeriod}), including for persisted Modal ` +
+          `leases after a default-backend rollout.`,
+      );
+    }
     if (settings.sandboxBackend === "modal") {
       const idleGraceMs = settings.sandboxIdleGraceMs;
       const lifecycle = effectiveSandboxLifecycle(settings, "modal");
       const providerLifetimeMs = lifecycle.hardLifetimeMs!;
-      const rotationLeadMs = lifecycle.rotationLeadMs!;
       const idleTimeoutMs = lifecycle.providerIdleTimeoutMs!;
       if (!(idleTimeoutMs <= providerLifetimeMs)) {
         throw new Error(
@@ -5859,13 +5920,6 @@ function validateSettings(settings: Settings): void {
         throw new Error(
           `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must be strictly less than ` +
             `OPENGENI_MODAL_TIMEOUT_SECONDS*1000 (${providerLifetimeMs}).`,
-        );
-      }
-      const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
-      if (!(rotationLeadMs > captureTimeoutMs + reaperPeriod)) {
-        throw new Error(
-          `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the durable capture ` +
-            `timeout plus one reaper period (${captureTimeoutMs + reaperPeriod}).`,
         );
       }
       if (!(viewerTtl < idleTimeoutMs)) {

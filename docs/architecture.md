@@ -380,7 +380,17 @@ that resumes a box receives a non-owned handle and must not terminate it when
 the request ends. Provider create/restore identity is persisted before setup,
 and workspace capture is fenced against every live writer. A provider loss may
 retire only the exact matching instance and must never cause an ambiguous
-operation to be replayed.
+operation to be replayed. Ordinary periodic and turn-end snapshots keep the
+short `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS` provider budget. Zero-holder drain
+and rotation captures may use the independent
+`OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` budget; when unset it inherits the
+ordinary timeout. Deployment admission always reserves provider-deadline
+rotation headroom for the larger configured capture budget plus one reaper
+period, including after the default backend changes because historical Modal
+leases remain durable. A drain timeout therefore cannot outlive the rotation
+window. An explicit drain budget is also admitted only when one reaper period,
+the full durable capture, and retry handoff fit inside the lifecycle transition
+wait ceiling.
 
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
