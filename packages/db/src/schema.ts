@@ -1090,6 +1090,8 @@ export const organizationUserResourceAuthorities = pgTable(
   }),
 );
 
+export type ApiKeyCredentialKind = "workspace" | "organization" | "legacy_account";
+
 export const apiKeys = pgTable(
   "api_keys",
   {
@@ -1102,6 +1104,7 @@ export const apiKeys = pgTable(
     }),
     name: text("name").notNull(),
     description: text("description"),
+    credentialKind: text("credential_kind").$type<ApiKeyCredentialKind>().notNull(),
     prefix: text("prefix").notNull(),
     keyHash: text("key_hash").notNull(),
     permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
@@ -1119,6 +1122,20 @@ export const apiKeys = pgTable(
     descriptionValid: check(
       "api_keys_description_check",
       sql`${table.description} is null or length(${table.description}) between 1 and 500`,
+    ),
+    credentialKindValid: check(
+      "api_keys_credential_kind_check",
+      sql`(
+        ${table.workspaceId} is not null
+        and ${table.credentialKind} = 'workspace'
+      ) or (
+        ${table.workspaceId} is null
+        and ${table.credentialKind} = 'organization'
+      ) or (
+        ${table.workspaceId} is null
+        and ${table.credentialKind} = 'legacy_account'
+        and ${table.revokedAt} is not null
+      )`,
     ),
   }),
 );
@@ -1232,8 +1249,9 @@ export const workspaceVariableSetVariables = pgTable(
   }),
 );
 
-// Per-workspace ChatGPT/Codex subscription credential. One row per connected
-// ChatGPT account within a workspace.
+// Workspace- or organization-owned ChatGPT/Codex subscription credential. One
+// row per connected ChatGPT account in the owning pool. Organization rows have
+// workspace_id = NULL and are selected only for inheriting shared workspaces.
 // access/refresh/id tokens live INSIDE credential_encrypted (v1 AES-256-GCM,
 // same envelope as workspace_variable_set_variables); the other columns are
 // plaintext metadata (header value + UI). RLS-isolated per workspace.
@@ -1244,9 +1262,18 @@ export const codexSubscriptionCredentials = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id").references(() => managedAccounts.id, {
+      onDelete: "cascade",
+    }),
+    authorityScope: text("authority_scope").notNull().default("workspace"),
+    ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
+    organizationUserResourceAuthorityId: uuid("organization_user_resource_authority_id"),
+    organizationUserResourceKind: text("organization_user_resource_kind"),
+    organizationUserResourceAuthorityGeneration: bigint(
+      "organization_user_resource_authority_generation",
+      { mode: "number" },
+    ),
     // Format: v1:<base64 iv>:<base64 ciphertext||gcm-tag>. JSON {access_token, refresh_token, id_token}. Never returned by any API.
     credentialEncrypted: text("credential_encrypted").notNull(),
     chatgptAccountId: text("chatgpt_account_id"), // plaintext ChatGPT-Account-ID header value (non-secret)
@@ -1319,6 +1346,69 @@ export const codexSubscriptionCredentials = pgTable(
     workspaceAccountIdentity: uniqueIndex(
       "codex_subscription_credentials_workspace_account_id_idx",
     ).on(table.workspaceId, table.accountId, table.id),
+    accountIdentity: uniqueIndex("codex_subscription_credentials_account_id_idx").on(
+      table.accountId,
+      table.id,
+    ),
+    organizationAccount: uniqueIndex("codex_subscription_credentials_organization_account_idx")
+      .on(table.organizationId, table.chatgptAccountId)
+      .where(
+        sql`${table.authorityScope} = 'organization' and ${table.chatgptAccountId} is not null`,
+      ),
+    organizationLookup: index("codex_subscription_credentials_organization_lookup_idx")
+      .on(table.organizationId, table.createdAt, table.id)
+      .where(sql`${table.authorityScope} = 'organization'`),
+  }),
+);
+
+export const workspaceCodexSubscriptionPreferences = pgTable(
+  "workspace_codex_subscription_preferences",
+  {
+    workspaceId: uuid("workspace_id")
+      .primaryKey()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    mode: text("mode").notNull().default("automatic"),
+    updatedBySubjectId: text("updated_by_subject_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "workspace_codex_subscription_preferences_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    modeValid: check(
+      "workspace_codex_subscription_preferences_mode_chk",
+      sql`${table.mode} in ('automatic', 'workspace', 'organization', 'disabled')`,
+    ),
+  }),
+);
+
+export const organizationCodexRotationSettings = pgTable(
+  "organization_codex_rotation_settings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    activeCredentialId: uuid("active_credential_id"),
+    rotationEnabled: boolean("rotation_enabled").notNull().default(false),
+    leaseRotationEnabled: boolean("lease_rotation_enabled").notNull().default(false),
+    rotationStrategy: text("rotation_strategy").notNull().default("sharded"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    account: uniqueIndex("organization_codex_rotation_settings_account_idx").on(table.accountId),
+    activeCredential: foreignKey({
+      name: "organization_codex_rotation_settings_active_fk",
+      columns: [table.activeCredentialId],
+      foreignColumns: [codexSubscriptionCredentials.id],
+    }).onDelete("set null"),
   }),
 );
 
@@ -7800,6 +7890,43 @@ export const xaiCapacityWaiters = pgTable(
   }),
 );
 
+export const sessionEventCursors = pgTable(
+  "session_event_cursors",
+  {
+    sessionId: uuid("session_id")
+      .primaryKey()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    lastSequence: integer("last_sequence").notNull().default(0),
+    revision: bigint("revision", { mode: "number" }).notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_event_cursors_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_event_cursors_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    workspaceIdentity: uniqueIndex("session_event_cursors_workspace_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+    ),
+    sequenceValid: check("session_event_cursors_sequence_check", sql`${table.lastSequence} >= 0`),
+    revisionValid: check("session_event_cursors_revision_check", sql`${table.revision} >= 0`),
+  }),
+);
+
 export const sessionEvents = pgTable(
   "session_events",
   {
@@ -8471,6 +8598,29 @@ export const sandboxLeases = pgTable(
     // these remain bare UUIDs here rather than generating a stricter wrong FK.
     currentCheckpointArtifactId: uuid("current_checkpoint_artifact_id"),
     previousCheckpointArtifactId: uuid("previous_checkpoint_artifact_id"),
+
+    // Durable single-flight for immutable machine setup (currently exact rig
+    // setup only). Per-turn credentials, repositories, files, and cloud login
+    // deliberately remain outside this lease-scoped receipt.
+    sharedPreparationLeaseEpoch: integer("shared_preparation_lease_epoch"),
+    sharedPreparationInstanceId: text("shared_preparation_instance_id"),
+    sharedPreparationSpecHash: text("shared_preparation_spec_hash"),
+    sharedPreparationStatus: text("shared_preparation_status", {
+      enum: ["running", "completed", "failed"],
+    }),
+    sharedPreparationClaimId: uuid("shared_preparation_claim_id"),
+    sharedPreparationOwnerAttemptId: uuid("shared_preparation_owner_attempt_id"),
+    sharedPreparationAttempt: integer("shared_preparation_attempt"),
+    sharedPreparationRevision: integer("shared_preparation_revision").notNull().default(0),
+    sharedPreparationStartedAt: timestamp("shared_preparation_started_at", {
+      withTimezone: true,
+    }),
+    sharedPreparationDeadlineAt: timestamp("shared_preparation_deadline_at", {
+      withTimezone: true,
+    }),
+    sharedPreparationSettledAt: timestamp("shared_preparation_settled_at", {
+      withTimezone: true,
+    }),
 
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

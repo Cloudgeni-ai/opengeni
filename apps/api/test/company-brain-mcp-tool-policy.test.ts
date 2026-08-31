@@ -59,10 +59,10 @@ function registeredToolNames(server: unknown): string[] {
 }
 
 describe("Company Brain first-party MCP policy", () => {
-  test("retrieval-only memory tools disclose the preference authority boundary", async () => {
+  test("enabled workspace Memory exposes autonomous agent read and write tools", async () => {
     const server = buildOpenGeniMcpServer(
       deps(),
-      grant([...Permission.options], ["memory_search", "memory_save"]),
+      grant([...Permission.options], ["memory_search", "memory_save", "memory_correct"]),
       { workspaceMemoryEnabled: true, workspaceMemoryPromptMode: "retrieval_only" },
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -72,42 +72,55 @@ describe("Company Brain first-party MCP policy", () => {
     try {
       const tools = (await client.listTools()).tools;
       expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
-        "structured preferences are the only behavioral authority",
+        "All existing Memory kinds are searchable",
       );
-      // Memory V1 writes are retired from the default retrieval-only surface;
-      // explicit user-directed knowledge goes through `remember`.
-      expect(tools.find((tool) => tool.name === "memory_save")).toBeUndefined();
       expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
-        "use `remember`",
+        "historical context, not active instructions",
+      );
+      expect(tools.find((tool) => tool.name === "memory_search")?.description).toContain(
+        "use memory_save autonomously",
+      );
+      expect(tools.find((tool) => tool.name === "memory_save")?.description).toContain(
+        "Autonomously save",
+      );
+      expect(tools.find((tool) => tool.name === "memory_correct")?.description).toContain(
+        "Autonomously correct",
       );
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
   });
 
-  test("Memory V1 writes are not registered even when explicitly selected", async () => {
-    // memory_save/memory_correct are retired. Selecting them by name must not
-    // resurrect them: the retirement is a property of the surface, not of what
-    // a caller happens to ask for.
+  test("enabled workspace Memory honors an explicit autonomous write selection", async () => {
     const server = buildOpenGeniMcpServer(
       deps(),
-      grant([...Permission.options], [
-        "memory_search",
-        "memory_save",
-        "memory_correct",
-      ] as unknown as FirstPartyMcpToolName[]),
+      grant([...Permission.options], ["memory_search", "memory_save", "memory_correct"]),
       { workspaceMemoryEnabled: true, workspaceMemoryPromptMode: "retrieval_only" },
     );
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "memory-retired-writes-test", version: "1" });
+    const client = new Client({ name: "memory-autonomous-writes-test", version: "1" });
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
       const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
-      expect(names).toEqual(["memory_search"]);
+      expect(names).toEqual(["memory_correct", "memory_save", "memory_search"]);
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
+  });
+
+  test("non-agent principals may search but cannot mutate workspace Memory", () => {
+    const selected: FirstPartyMcpToolName[] = ["memory_search", "memory_save", "memory_correct"];
+    const humanGrant = grant([...Permission.options], selected);
+    humanGrant.principalKind = "human";
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), humanGrant, {
+          workspaceMemoryEnabled: true,
+          workspaceMemoryPromptMode: "retrieval_only",
+        }),
+      ),
+    ).toEqual(["memory_search"]);
   });
 
   test("task-tree note tools require exact agent-attempt authority and their own permissions", () => {

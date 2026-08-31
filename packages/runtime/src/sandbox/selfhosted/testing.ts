@@ -207,8 +207,8 @@ export class MockAgentResponder implements ControlRpc {
         // agent registers the channel + captures frames regardless of screen-control
         // consent (`register_desktop` in hub.rs sets `allow_input` from consent and
         // the pump captures anyway) — only INPUT injection is gated. This stub has a
-        // (mock) display and does not model input injection, so desktopEnsure always
-        // succeeds; `consented` only affects the computer-use INPUT plane.
+        // (mock) display and does not model viewer input injection, so
+        // desktopEnsure always succeeds; `consented` only affects interactive control.
         return ok(req.requestId, {
           $case: "desktopEnsure",
           desktopEnsure: {

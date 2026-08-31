@@ -1,9 +1,10 @@
 import {
-  AGENT_AUTHORED_DURABLE_TEXT_STYLE,
   AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+  AGENT_AUTHORED_INSTRUCTION_POLICY_STYLE,
   AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
   AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+  AGENT_AUTHORED_SKILL_STYLE,
   PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS,
   PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS,
   PREFERENCE_REGISTRY_TITLE_MAX_CHARS,
@@ -11,7 +12,7 @@ import {
   type CompanyBrainGovernedWriteAttempt,
 } from "@opengeni/contracts";
 import { createCompanyBrainLearningPolicyRouter } from "@opengeni/core";
-import type { Database } from "@opengeni/db";
+import { PreferenceRegistryStableKeyConflictError, type Database } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 
@@ -66,6 +67,20 @@ export function registerCompanyBrainGovernedWriteTools(
   input: RegisterCompanyBrainGovernedWriteToolsInput,
 ): void {
   const router = input.router ?? createCompanyBrainLearningPolicyRouter({ db: input.db });
+  const writeResult = async (write: () => ReturnType<typeof router.write>) => {
+    try {
+      return input.json(await write());
+    } catch (error) {
+      if (error instanceof PreferenceRegistryStableKeyConflictError) {
+        return input.json({
+          status: "not_proposed",
+          code: "preference_stable_key_conflict",
+          message: error.message,
+        });
+      }
+      throw error;
+    }
+  };
   input.server.registerTool(
     "knowledge_propose",
     {
@@ -75,8 +90,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "propose_knowledge", ...request },
         }),
@@ -93,8 +108,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "correct_knowledge", ...request },
         }),
@@ -111,8 +126,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "promote_task_note_knowledge", ...request },
         }),
@@ -124,9 +139,9 @@ export function registerCompanyBrainGovernedWriteTools(
     "task_note_promote_instruction_policy",
     {
       description:
-        "Atomically promote one still-active note from this exact root task tree into an inactive workspace instruction-policy draft. The note bytes remain exact evidence and draft content. " +
-        `Use this only for a universal always-on rule, never for an incident, fact, decision, outcome, or conditional procedure. Once a human activates the draft, those bytes are composed verbatim into the prompt of every session the target applies to, so a note over ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters is rejected here rather than truncated: write a fresh minimal imperative note instead of promoting a long working note. ` +
-        "The frozen learning policy records a decision receipt, but mandatory policy still requires human activation even under Automatic; this never widens scope.",
+        "Atomically promote one still-active note from this exact root task tree into a workspace instruction-policy proposal. The note bytes remain exact evidence and draft content. " +
+        `Use this only for a universal always-on rule, never for an incident, fact, decision, outcome, or conditional procedure. Once active, those bytes are composed verbatim into the prompt of every session the target applies to, so a note over ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters is rejected here rather than truncated: write a fresh minimal imperative note instead of promoting a long working note. ` +
+        "Off creates nothing; Review first keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt. This never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
         target: WorkspaceInstructionPolicyTarget,
@@ -136,8 +151,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "promote_task_note_instruction_policy", ...request },
         }),
@@ -172,8 +187,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "promote_task_note_preference", ...request },
         }),
@@ -185,9 +200,9 @@ export function registerCompanyBrainGovernedWriteTools(
     "instruction_policy_propose",
     {
       description:
-        "Materialize an evidence-backed inactive workspace instruction-policy draft. " +
-        `Use this only for a minimal universal rule, never for an incident, fact, decision, outcome, or conditional procedure. Once a human activates it, this content is composed verbatim into the prompt of every session the target applies to (every session in this workspace for a global charter or policy, every session bound to the role for a role policy), so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
-        "The frozen learning policy records a decision receipt, but this tool cannot activate mandatory behavior, including when learning mode is Automatic; a human must activate the draft.",
+        "Materialize an evidence-backed workspace instruction-policy proposal. " +
+        `Use this only for a minimal universal rule, never for an incident, fact, decision, outcome, or conditional procedure. Once active, this content is composed verbatim into the prompt of every session the target applies to (every session in this workspace for a global charter or policy, every session bound to the role for a role policy), so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_INSTRUCTION_POLICY_STYLE} ` +
+        "Off creates nothing; Review first keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt.",
       inputSchema: {
         ...evidence,
         target: WorkspaceInstructionPolicyTarget,
@@ -206,8 +221,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "propose_instruction_policy", ...request },
         }),
@@ -220,7 +235,7 @@ export function registerCompanyBrainGovernedWriteTools(
     {
       description:
         "Materialize an evidence-backed workspace Skill proposal in the structured preference authority. Use this only for reusable conditional how-to guidance, never for an incident, fact, decision, outcome, or universal always-on rule. " +
-        `Its short title and description are what get composed into every session prompt; the content is retrieved on demand, so its length is retrieval cost rather than standing prompt cost. Keep the content under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
+        `Its short title and description are what get composed into every session prompt; the content is retrieved on demand, so its length is retrieval cost rather than standing prompt cost. Keep the content under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_SKILL_STYLE} ` +
         "Under Suggest it stays inactive for human review; under Automatic an eligible decision is activated through the governed preference lifecycle with an undoable receipt. It never creates mandatory authority.",
       inputSchema: {
         ...evidence,
@@ -251,8 +266,8 @@ export function registerCompanyBrainGovernedWriteTools(
     },
     async (request) => {
       await input.authorize();
-      return input.json(
-        await router.write({
+      return writeResult(() =>
+        router.write({
           attempt: input.attempt,
           request: { kind: "propose_preference", ...request },
         }),

@@ -510,9 +510,51 @@ function sameTreeStats(a: SessionTreeStats | undefined, b: SessionTreeStats | un
     a.attentionDescendants === b.attentionDescendants &&
     a.pausedDescendants === b.pausedDescendants &&
     a.failedDescendants === b.failedDescendants &&
+    (a.unreadFailedDescendants ?? a.failedDescendants) ===
+      (b.unreadFailedDescendants ?? b.failedDescendants) &&
+    (a.unreadDescendants ?? 0) === (b.unreadDescendants ?? 0) &&
+    (a.activelyWorkingDescendants ?? 0) === (b.activelyWorkingDescendants ?? 0) &&
     (a.attentionSince ?? null) === (b.attentionSince ?? null) &&
     a.truncated === b.truncated
   );
+}
+
+/**
+ * Merge a fresh hierarchy summary without letting an older personal failure
+ * projection resurrect attention the viewer already consumed locally.
+ *
+ * `failedDescendants` is durable lifecycle history, while
+ * `unreadFailedDescendants` is viewer-specific. When the lifecycle count is
+ * unchanged but an incoming page reports more unread failures, the excess may
+ * be a list read that started before the local acknowledgement committed. Keep
+ * the acknowledged failure count, and remove only that stale failure delta
+ * from the broader unread count so genuinely new unrelated unread work still
+ * surfaces.
+ */
+function mergeTreeStats(
+  current: SessionTreeStats | undefined,
+  projected: SessionTreeStats | undefined,
+): SessionTreeStats | undefined {
+  if (!projected || !current) return projected ?? current;
+
+  const currentUnreadFailed = current.unreadFailedDescendants ?? current.failedDescendants;
+  const projectedUnreadFailed = projected.unreadFailedDescendants ?? projected.failedDescendants;
+  if (
+    current.failedDescendants !== projected.failedDescendants ||
+    currentUnreadFailed >= projectedUnreadFailed
+  ) {
+    return projected;
+  }
+
+  const staleFailureDelta = projectedUnreadFailed - currentUnreadFailed;
+  return {
+    ...projected,
+    unreadFailedDescendants: currentUnreadFailed,
+    unreadDescendants: Math.max(
+      current.unreadDescendants ?? 0,
+      (projected.unreadDescendants ?? 0) - staleFailureDelta,
+    ),
+  };
 }
 
 /**
@@ -620,7 +662,8 @@ export function applySessionRailProjection(
   if (sameTreeStats(merged.treeStats, projected.treeStats)) {
     return merged;
   }
-  return projected.treeStats ? { ...merged, treeStats: projected.treeStats } : merged;
+  const treeStats = mergeTreeStats(merged.treeStats, projected.treeStats);
+  return treeStats ? { ...merged, treeStats } : merged;
 }
 
 /**

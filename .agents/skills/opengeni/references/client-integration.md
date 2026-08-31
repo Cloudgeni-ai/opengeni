@@ -4,12 +4,17 @@ Use this when building or explaining a client that consumes OpenGeni as a servic
 
 Canonical source repo: `https://github.com/Cloudgeni-ai/opengeni`.
 
+When the repository is available, `docs/product-integration.md` is the canonical
+external-product contract. This reference should summarize and link to it, not
+invent a second organization-key, workspace-mapping, or Skill-ownership model.
+
 ## First Determine Context
 
 Ask or infer:
 
 - API base URL for the deployed OpenGeni service.
-- Workspace id to operate in, or credentials that can discover/create one through `/v1/access/me` and `/v1/workspaces`.
+- Product tenant identity and its persisted OpenGeni organization-workspace id,
+  or the stable external mapping used by `ensureWorkspace`.
 - Whether the user needs a browser UI, server-side integration, CLI, SDK wrapper, or docs.
 - Whether file upload, repository attachment, MCP tools, approvals, interrupts, or schedules are in scope.
 - Which product access mode the target uses: `local`, `configured`, or `managed`.
@@ -21,7 +26,11 @@ Ask or infer:
 A client should treat OpenGeni as a durable agent-work API:
 
 1. Read client config and capabilities.
-2. Resolve the workspace id from `/v1/access/me`, list/create workspaces if allowed, or use a known workspace id.
+2. For an external product, load the server-held organization API key and call
+   `PUT /v1/workspaces/external` / `ensureWorkspace` with the authenticated
+   product tenant's stable external identity and account id. Persist
+   `result.workspace.id`; `result.created` distinguishes create from idempotent
+   replay, and the workspace's wire kind is `"shared"`.
 3. Create a session with an initial task under `/v1/workspaces/:workspaceId/sessions`.
 4. Subscribe to the workspace-scoped session event stream.
 5. Render events into a timeline/status view.
@@ -55,11 +64,20 @@ If only a deployment is available:
 
 Prefer this shape, adjusted to the current contracts:
 
-1. **Prepare access**: for managed/configured product API access, send `Authorization: Bearer <token>`. For the optional deployment shared-key boundary, send `x-opengeni-access-key: <key>`. Do not conflate these two keys.
+1. **Prepare access**: for a managed external-product integration, send the
+   server-held organization API key as `Authorization: Bearer <token>`. For the
+   optional deployment shared-key boundary, send `x-opengeni-access-key: <key>`.
+   Do not conflate these two keys.
 2. **Fetch config**: get product access mode, default model, allowed models, reasoning efforts, MCP providers, and whether file uploads are enabled.
-3. **Resolve workspace**: call `/v1/access/me` and use `defaultWorkspaceId`, or list/create workspaces through `/v1/workspaces` if the grant allows it.
+3. **Resolve workspace**: external products call `/v1/workspaces/external` with a
+   stable product-tenant mapping. The result must be an organization workspace
+   with wire `kind: "shared"`. Personal workspaces are excluded; never use
+   `/v1/access/me`'s personal/default workspace as a fallback.
 4. **Prepare resources**: upload files under the workspace first; select repository resources from available repo/source picker; select MCP tool providers by id.
-5. **Create session**: send initial message plus selected resources/tools/model and the compute-target choice to `/v1/workspaces/:workspaceId/sessions`. The compute target is either a managed sandbox (optional `sandboxBackend`, plus the `sandbox` placement union `"shared" | "new" | { groupId }`) or an enrolled **Connected Machine** via `targetSandboxId` — plus an optional per-session `workingDir`, which is valid only alongside `targetSandboxId` (`workingDir` alone is a 422). Optionally pass a workspace-scoped `idempotencyKey` so a retried create collapses to one session.
+5. **Create session**: load the Skills selected by the external product and pass
+   them inline in `CreateSessionRequest.skills`, together with the initial
+   message, selected resources/tools/model, and compute-target choice to
+   `/v1/workspaces/:workspaceId/sessions`. The compute target is either a managed sandbox (optional `sandboxBackend`, plus the `sandbox` placement union `"shared" | "new" | { groupId }`) or an enrolled **Connected Machine** via `targetSandboxId` — plus an optional per-session `workingDir`, which is valid only alongside `targetSandboxId` (`workingDir` alone is a 422). Optionally pass a workspace-scoped `idempotencyKey` so a retried create collapses to one session.
 6. **Connect SSE**: stream events from `/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream`. Use the last event sequence as the reconnect cursor.
 7. **Render timeline**: display user messages, agent deltas/completions, reasoning, tool calls, sandbox operations, approvals, status changes, failures, and final output according to current event types.
 8. **Send follow-ups**: post a user message into the existing workspace-scoped session; the API queues another turn.
@@ -132,7 +150,9 @@ Use client-centered language:
 - "Replay the event log after reloads or network drops."
 - "Handle approvals and interrupts as normal API events."
 - "Self-hosted (operator-run) configured deployments can use delegated bearer tokens or the deployment shared-key boundary without Better Auth. This is the deployment topology, not the same thing as a Connected Machine (a user attaching their own compute to a session)."
-- "Managed deployments use Better Auth for browser sign-up and OpenGeni API keys for headless product integration."
+- "Managed deployments use Better Auth for browser sign-up and organization API keys for headless product integration."
+- "External product backends use an organization API key, map tenants to organization workspaces (`kind: \"shared\"`), and exclude Personal workspaces."
+- "The external backend stores Skills and passes selected definitions inline per session; there is no organization-wide Skill registry or Skill inheritance."
 
 Avoid implying clients call Temporal, NATS, Postgres, the worker, or the sandbox directly.
 
@@ -144,6 +164,8 @@ Update this file when:
 - Contracts for sessions, events, resources, tools, files, or scheduled tasks change.
 - SSE replay/reconnect behavior changes.
 - Auth/tenancy is added to the base API.
+- Organization API-key administration, `ensureWorkspace`, organization-workspace
+  mapping, Personal-workspace exclusion, or inline Skill ownership changes.
 - Client config capabilities change.
 - File upload or repository selection flow changes.
 - Compute-target selection (managed sandbox vs Connected Machine), the `targetSandboxId`/`workingDir`/`sandbox`/`idempotencyKey` create fields, active-sandbox swap, machine metrics, or the enrollment flow change.

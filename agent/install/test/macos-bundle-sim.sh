@@ -58,10 +58,19 @@ SH
 cat > "$BIN/xattr" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "${MOCK_XATTR_LOG:-/dev/null}"
+[ -z "${MOCK_XATTR_STDOUT:-}" ] || printf '%s\n' "$MOCK_XATTR_STDOUT"
 exit 0
 SH
 
-chmod 0755 "$BIN/security" "$BIN/codesign" "$BIN/xattr"
+# ditto: expand a prepared fixture bundle for the prebuilt-bundle simulation.
+cat > "$BIN/ditto" <<'SH'
+#!/bin/sh
+dest="$4"
+mkdir -p "$dest"
+cp -R "$MOCK_PREBUILT_APP" "$dest/OpenGeni Agent.app"
+SH
+
+chmod 0755 "$BIN/security" "$BIN/codesign" "$BIN/xattr" "$BIN/ditto"
 PATH="$BIN:$PATH"; export PATH
 
 # --- Load install.sh as a library (skips main) ------------------------------
@@ -274,6 +283,54 @@ if [ "$OPENGENI_AGENT_WAS_UPGRADED" = "0" ]; then
 else
   bad "byte-identical reinstall requested a restart"
 fi
+
+echo "SIM 9: PATH xattr stdout cannot corrupt the prebuilt executable path"
+PREBUILT_APP="$WORK/prebuilt/OpenGeni Agent.app"
+mkdir -p "$PREBUILT_APP/Contents/MacOS" "$PREBUILT_APP/Contents/Helpers"
+for executable in \
+  "$PREBUILT_APP/Contents/MacOS/opengeni-agent" \
+  "$PREBUILT_APP/Contents/Helpers/opengeni-browserd" \
+  "$PREBUILT_APP/Contents/Helpers/agent-browser" \
+  "$PREBUILT_APP/Contents/Helpers/opengeni-computer-native"
+do
+  printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'opengeni-agent 9.9.9'" > "$executable"
+  chmod 0755 "$executable"
+done
+MOCK_PREBUILT_APP="$PREBUILT_APP"; export MOCK_PREBUILT_APP
+MOCK_XATTR_LOG="$WORK/xattr-prebuilt.log"; : > "$MOCK_XATTR_LOG"; export MOCK_XATTR_LOG
+MOCK_XATTR_STDOUT="usage: incompatible xattr implementation"; export MOCK_XATTR_STDOUT
+fetch() {
+  case "$2" in
+    *.sha256) printf '%s  %s\n' fixture "$OPENGENI_APP_BUNDLE_ASSET" > "$2" ;;
+    *.minisig) printf '%s\n' signature > "$2" ;;
+    *) printf '%s\n' archive > "$2" ;;
+  esac
+}
+sha256_of() { printf '%s' fixture; }
+verify_signature() { return 0; }
+asset_url() { printf 'https://example.test/%s' "$1"; }
+# Force the hostile PATH fixture even on macOS CI, where /usr/bin/xattr exists.
+macos_xattr_path() { printf '%s' "$BIN/xattr"; }
+PREBUILT_HOME="$WORK/home-prebuilt"; mkdir -p "$PREBUILT_HOME"
+HOME="$PREBUILT_HOME" install_macos_prebuilt_bundle "$PREBUILT_HOME/bin" \
+  >"$WORK/out-prebuilt" 2>"$WORK/log-prebuilt"
+rc=$?
+if [ "$rc" -eq 0 ] && [ -L "$PREBUILT_HOME/bin/opengeni-agent" ]; then
+  ok "prebuilt bundle installs and links the deterministic executable path"
+else
+  bad "prebuilt bundle did not install cleanly (rc=$rc)"; cat "$WORK/log-prebuilt"
+fi
+if [ ! -s "$WORK/out-prebuilt" ]; then
+  ok "hostile xattr stdout is fully contained"
+else
+  bad "installer helper leaked stdout that could corrupt a captured path"; cat "$WORK/out-prebuilt"
+fi
+if grep -q -- "-cr .*OpenGeni Agent.app" "$MOCK_XATTR_LOG"; then
+  ok "quarantine cleanup still ran through the selected xattr"
+else
+  bad "xattr cleanup was not exercised"; cat "$MOCK_XATTR_LOG"
+fi
+unset MOCK_XATTR_STDOUT
 
 echo ""
 echo "SIM RESULT: $PASS passed, $FAIL failed"

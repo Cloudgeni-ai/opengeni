@@ -180,12 +180,16 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         await execute(transaction()),
       execute: async (query): Promise<Record<string, unknown>[]> => {
         const text = sqlText(query);
+        let appliedTenantContext = false;
         if (text.includes("set_config('opengeni.account_id'")) {
           rls.accountId = ACCOUNT_ID;
-          return [];
+          appliedTenantContext = true;
         }
         if (text.includes("set_config('opengeni.workspace_id'")) {
           rls.workspaceId = WORKSPACE_ID;
+          appliedTenantContext = true;
+        }
+        if (appliedTenantContext) {
           return [];
         }
         if (

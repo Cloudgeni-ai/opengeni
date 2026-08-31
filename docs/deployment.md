@@ -153,6 +153,12 @@ API uses it when serving the installer, so an enrolled machine downloads the
 agent version baked into this deployment and connects back to that same external
 HTTPS origin rather than falling back to either public default.
 
+HTTPS/WSS is the supported private-edge posture. The web bootstrap retains a
+cryptographically random UUID compatibility path so a private HTTP origin can
+render the core workspace UI and useful diagnostics instead of crashing, but
+that fallback does not make HTTP feature-complete: browsers still withhold APIs
+used by voice, clipboard, and encrypted browser-side artifact operations.
+
 For a tailnet-only deployment, `OPENGENI_AUTH_REQUIRED=false` and
 `OPENGENI_PRODUCT_ACCESS_MODE=local` mean there is no shared deployment access
 key; tailnet membership is the outer access boundary. Internal database, NATS,
@@ -198,7 +204,8 @@ kubectl -n opengeni create secret generic opengeni-migrations \
 ```
 
 This bootstrap does not require a model-provider API key. A workspace admin can
-connect a ChatGPT/Codex subscription from workspace settings after the
+connect a ChatGPT/Codex subscription from workspace settings, or connect it once
+from Organization settings → Models for inheritance by shared workspaces, after the
 application starts. If the deployment instead uses API-billed models, add the
 selected provider's credential to `opengeni-runtime` separately. Keep the
 generated directory as a private recovery artifact or move the values into a
@@ -447,6 +454,33 @@ The migration checks the explicit role list before and after exclusive locks on
 organization membership table, `workspaces`, and `workspace_memberships`. A
 live listed session rejects the cutover with SQLSTATE `55000`. After commit,
 never restart a pre-0348 image; remain in maintenance and fix forward.
+
+### Session-event raw-lane cutover (0379)
+
+`0379_session_event_raw_lane_activation.sql` moves accepted raw exact-attempt
+appends off the wide `sessions` row while retaining cursor allocation, exact
+turn/attempt fencing, and semantic state/event atomicity. Old API readers expose
+`sessions.last_sequence`, and old SQL writers allocate from that projection, so
+the cutover is drained rather than rolling:
+
+1. stop every API, control worker, and turn worker using the target database;
+2. supply the exact runtime login list through
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`;
+3. prove those roles have zero other sessions in `pg_stat_activity`;
+4. apply 0379 from the exact new image and require it in `schema_migrations`;
+5. start only that image generation and require readiness before reopening
+   admission.
+
+The migration repeats the role drain before and after exclusive locks on
+`sessions`, `session_event_cursors`, and `session_events`, temporarily opens the
+complete FORCE-RLS inventory to the migration owner, and refuses missing
+cursors, sequence gaps, duplicates, or a session projection ahead of its
+cursor. A deferred constraint keeps that projection from leading after commit.
+For a forward application rollback, set
+`OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false`: the current image keeps cursor
+validation active but restores wide-session locking and raw compatibility
+writes. Do not restart a pre-0379 image after isolated raw traffic until the
+session projection has been synchronized to every cursor under maintenance.
 
 Two operator-visible consequences follow the commit. `POST /v1/organizations`
 becomes the one-time setup entry point rather than an organization factory: a
@@ -2206,6 +2240,14 @@ Service endpoints:
 - API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. The standalone worker reserves a one-connection Postgres probe pool so ordinary activity-pool saturation cannot create false readiness failures. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
+
+API and worker health responses include the non-fatal warning
+`github_app_bot_identity_unavailable` when that process has partial workspace
+GitHub App configuration, cannot derive the App bot identity, and has no
+complete `OPENGENI_GIT_AUTHOR_NAME`/`OPENGENI_GIT_AUTHOR_EMAIL` fallback. Compare
+the warning across API and worker processes: a difference means attach and turn
+startup would declare different stable Git identity environment keys. The
+warning never includes provider credentials and does not change liveness.
 
 Useful settings:
 

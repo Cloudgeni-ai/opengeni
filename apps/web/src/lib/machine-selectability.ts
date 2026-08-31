@@ -12,3 +12,19 @@
 export function isMachineComputeSelectable(state: string): boolean {
   return state === "online" || state === "display_unavailable" || state === "consent_required";
 }
+
+export function resolveSelectableMachineSandboxId(
+  machines: readonly { sandboxId: string; state: string }[],
+  preferredSandboxId: string | null,
+): string | null {
+  if (
+    preferredSandboxId !== null &&
+    machines.some(
+      (machine) =>
+        machine.sandboxId === preferredSandboxId && isMachineComputeSelectable(machine.state),
+    )
+  ) {
+    return preferredSandboxId;
+  }
+  return machines.find((machine) => isMachineComputeSelectable(machine.state))?.sandboxId ?? null;
+}

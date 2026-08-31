@@ -67,6 +67,13 @@ export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
 export type InteractionAttemptToolName = (typeof INTERACTION_ATTEMPT_TOOL_NAMES)[number];
 
+class InteractionExecutionResult<T> {
+  constructor(
+    readonly output: T,
+    readonly additionalContent: AttemptToolResultValue["content"],
+  ) {}
+}
+
 const TOOL_PERMISSION = {
   interaction_discover: "sessions:read",
   browser_open: "sessions:control",
@@ -416,7 +423,7 @@ export function createInteractionAttemptToolDefinitions(
     execute: (
       value: z.output<TInput>,
       context: AttemptToolExecutionContext,
-    ) => Promise<z.input<TOutput>>;
+    ) => Promise<z.input<TOutput> | InteractionExecutionResult<z.input<TOutput>>>;
   }) => {
     if (
       !selected.has(options.name) ||
@@ -924,17 +931,40 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "observe"],
     title: "Observe app or window",
     description:
-      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, and frame identity without taking control.",
+      "Read one ComputerSession app/window/screen target, causal generation, semantic accessibility tree, focus, frame identity, and a bounded current screenshot without taking control.",
     input: ComputerObserveInput,
     output: ComputerObservation,
     readOnly: true,
     idempotent: true,
-    execute: async (value) =>
-      await input.transport.observeComputerTarget(
+    execute: async (value) => {
+      let observation = await input.transport.observeComputerTarget(
         input.workspaceId,
         value.computerSessionId,
         value.targetId,
-      ),
+      );
+      const frame = await input.transport.captureComputerTarget(
+        input.workspaceId,
+        value.computerSessionId,
+        value.targetId,
+      );
+      if (observation.target.targetGeneration !== frame.targetGeneration) {
+        observation = await input.transport.observeComputerTarget(
+          input.workspaceId,
+          value.computerSessionId,
+          value.targetId,
+        );
+      }
+      if (observation.target.targetGeneration !== frame.targetGeneration) {
+        throw new Error("computer target changed while its visual observation was captured");
+      }
+      return new InteractionExecutionResult({ ...observation, frameId: frame.frameId }, [
+        {
+          type: "image",
+          data: Buffer.from(frame.data).toString("base64"),
+          mimeType: frame.mediaType,
+        },
+      ]);
+    },
   });
 
   add({
@@ -1248,13 +1278,19 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
   execute: (
     value: z.output<TInput>,
     context: AttemptToolExecutionContext,
-  ) => Promise<z.input<TOutput>>,
+  ) => Promise<z.input<TOutput> | InteractionExecutionResult<z.input<TOutput>>>,
 ): Promise<AttemptToolResultValue> {
   try {
     const value = inputSchema.parse(raw);
-    const structuredContent = outputSchema.parse(await execute(value, context));
+    const executed = await execute(value, context);
+    const structuredContent = outputSchema.parse(
+      executed instanceof InteractionExecutionResult ? executed.output : executed,
+    );
     const result = {
-      content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
+      content: [
+        { type: "text" as const, text: JSON.stringify(structuredContent) },
+        ...(executed instanceof InteractionExecutionResult ? executed.additionalContent : []),
+      ],
       structuredContent: structuredContent as NonNullable<
         AttemptToolResultValue["structuredContent"]
       >,

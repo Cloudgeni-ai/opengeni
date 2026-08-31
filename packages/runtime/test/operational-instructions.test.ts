@@ -44,4 +44,18 @@ describe("provider-neutral operational instructions", () => {
       );
     }
   });
+
+  test("requires selective child delegation and a terminal-result join", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "only for a concrete, bounded subtask that can run independently",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Do not delegate a scope that you will also perform yourself.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain('waitFor: "completion"');
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "A `goal.completed` event records goal state but is not a terminal child result",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("continuation segment settlements");
+  });
 });

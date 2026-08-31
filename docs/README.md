@@ -6,7 +6,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 
 | Audience | Reads | Notes |
 | --- | --- | --- |
-| Integrator | `README.md`, `packages/sdk/README.md`, framework package READMEs, `docs/framework-ui.md`, `docs/embedding-workbench.md` | Products consuming a standalone OpenGeni deployment; `docs/embedding.md` is only for advanced in-process hosts. |
+| Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, framework package READMEs, `docs/framework-ui.md`, `docs/embedding-workbench.md` | Products consuming a standalone OpenGeni deployment; `docs/embedding.md` is only for advanced in-process hosts. |
 | Maintainer | `CONTRIBUTING.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
 | Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
 | Integration agent | `.agents/skills/opengeni-client/SKILL.md` and its references | Customer-side coding agents choosing and implementing a product integration shape. |
@@ -19,7 +19,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Topic | Current canonical home | Known restatement locations |
 | --- | --- | --- |
 | Architecture & package layout | `docs/architecture.md` | `README.md`, `AGENTS.md`, package READMEs should link or summarize lightly. |
-| Standalone product integration | `packages/sdk/README.md`, `packages/react/README.md` | `docs/embedding-workbench.md` owns the optional workbench; `.agents/skills/opengeni-client/` owns agent guidance. |
+| Standalone product integration, organization keys/workspaces, and external Skill ownership | `docs/product-integration.md` | `README.md`, package READMEs, the Northstar example, and both integration Skills link here; `packages/sdk/README.md` owns typed method details, while `docs/embedding-workbench.md` owns the optional workbench. |
 | Advanced in-process embedding & ports | `docs/embedding.md` | `README.md` and `CONTRIBUTING.md` should not present it as the default customer path. |
 | Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
 | Codex subscription rotation | `docs/codex-subscription-rotation.md` | `docs/run-lifecycle.md`, `docs/architecture.md`, and operator notes should link instead of restating allocator/failure semantics. |
@@ -32,7 +32,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | FORCE-RLS migration backfills | `docs/force-rls-migration-backfills.md` | `AGENTS.md`, `docs/deployment.md`, and migration comments should link instead of restating the owner-only `NO FORCE` window, the guard, or the classification inventory. |
 | Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
 | Pull-request delivery across moving `main` | `AGENTS.md` § Pull-request delivery across moving `main`; hotfix freeze-head admission in `.github/workflows/source-admission.yml` and `scripts/check-source-admission.mjs`; promote/hotfix loop in `CONTRIBUTING.md` § Release / Publishing | `.agents/skills/opengeni/SKILL.md`, the PR template, and `docs/deployment.md` must preserve the same immutable-candidate distinction. Ordinary PRs into `main` do not run source admission. |
-| Client/SDK integration | `packages/sdk/README.md` | `README.md`, `packages/react/README.md`, and customer integration skills should link. |
+| Client/SDK method reference | `packages/sdk/README.md` | `docs/product-integration.md`, `README.md`, framework package READMEs, and customer integration skills should link rather than duplicating volatile signatures. |
 | Framework-neutral session runtime, React compatibility, native Svelte, and shared semantic CSS | `docs/framework-ui.md`, package READMEs | `docs/architecture.md`, `docs/embedding.md`, demos, and release notes should link instead of inventing a second package graph or lifecycle contract. |
 | Composer voice input | `docs/transcription.md` | Architecture, SDK/React docs, and host-app guides should link instead of restating provider selection or microphone lifecycle rules. |
 | Workbench embedding & production acceptance | `docs/embedding-workbench.md`, `docs/workbench-acceptance.md` | Host-app guides should link instead of weakening or restating the live evidence contract. |

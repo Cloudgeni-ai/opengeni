@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import { SandboxBackend, type SessionEventType } from "@opengeni/contracts";
+import type { SessionEventAppendPhaseObservation } from "@opengeni/db";
 import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
@@ -28,6 +29,10 @@ export type TurnTaskQueueStats = {
   oldestBacklogAgeSeconds: number;
   tasksAddRate: number;
   tasksDispatchRate: number;
+};
+export type SessionRecoveryBacklog = {
+  quiescence_missing: number;
+  projection_stale: number;
 };
 
 export type TemporalTurnTaskQueueStats = {
@@ -743,6 +748,88 @@ export function startTurnCapacityMonitor(input: {
   };
 }
 
+export function recordSessionRecoveryBacklogGauges(
+  observability: Observability,
+  counts: SessionRecoveryBacklog,
+): void {
+  for (const state of ["quiescence_missing", "projection_stale"] as const) {
+    observability.setGauge({
+      name: "opengeni_session_recovery_backlog",
+      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state.",
+      labels: { state },
+      value: nonnegativeFinite(counts[state]),
+    });
+  }
+}
+
+export function startSessionRecoveryMonitor(input: {
+  observability: Observability;
+  read: () => Promise<SessionRecoveryBacklog>;
+  intervalMs?: number;
+  now?: () => number;
+}): { close: () => Promise<void> } {
+  const intervalMs = input.intervalMs ?? 60_000;
+  const now = input.now ?? Date.now;
+  const startedAt = now();
+  let lastSuccessAt: number | null = null;
+  let lastReadSucceeded = false;
+  let stopped = false;
+  let running: Promise<void> | null = null;
+  const recordStatus = () => {
+    const observedAt = now();
+    const successAgeMs = observedAt - (lastSuccessAt ?? startedAt);
+    const set = (name: string, help: string, value: number) =>
+      input.observability.setGauge({ name, help, value });
+    set(
+      "opengeni_session_recovery_monitor_last_read_success",
+      "Whether the latest durable session-recovery aggregate read completed successfully.",
+      lastReadSucceeded ? 1 : 0,
+    );
+    set(
+      "opengeni_session_recovery_monitor_last_success_timestamp_seconds",
+      "Unix timestamp of the latest successful durable session-recovery aggregate read, or zero before one succeeds.",
+      lastSuccessAt === null ? 0 : lastSuccessAt / 1_000,
+    );
+    set(
+      "opengeni_session_recovery_monitor_fresh",
+      "Whether durable session-recovery backlog gauges have a successful read within three monitor intervals.",
+      lastReadSucceeded && lastSuccessAt !== null && successAgeMs <= intervalMs * 3 ? 1 : 0,
+    );
+  };
+  const refresh = () => {
+    recordStatus();
+    if (stopped || running) return;
+    running = input
+      .read()
+      .then((counts) => {
+        recordSessionRecoveryBacklogGauges(input.observability, counts);
+        lastSuccessAt = now();
+        lastReadSucceeded = true;
+        recordStatus();
+      })
+      .catch((error) => {
+        lastReadSucceeded = false;
+        recordStatus();
+        input.observability.warn("session recovery monitor: durable aggregate read failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = null;
+      });
+  };
+  refresh();
+  const timer = setInterval(refresh, intervalMs);
+  timer.unref?.();
+  return {
+    close: async () => {
+      stopped = true;
+      clearInterval(timer);
+      await running;
+    },
+  };
+}
+
 export function recordSandboxLeaseGauges(
   observability: Observability,
   counts: Partial<Record<SandboxLeaseLiveness, number>>,
@@ -1416,6 +1503,22 @@ export function recordSandboxLogicalProvision(
   }
 }
 
+export function recordSandboxSharedPreparation(
+  observability: Observability,
+  measurement: {
+    path: "owner" | "joined" | "reused";
+    outcome: "completed" | "failed";
+    durationSeconds: number;
+  },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_sandbox_shared_preparation_duration_seconds",
+    help: "Duration of exact-lease immutable sandbox preparation by durable coordination path and outcome.",
+    labels: { path: measurement.path, outcome: measurement.outcome },
+    value: Math.max(0, measurement.durationSeconds),
+  });
+}
+
 export function recordTurnWorkerPreparationTotal(
   observability: Observability,
   input: {
@@ -1599,6 +1702,36 @@ export function recordSessionEventAppendLatency(
     help: "Duration in seconds of an appendSessionEvents DB write (the durable write path).",
     buckets: STREAM_IO_BUCKETS,
     value: input.durationSeconds,
+  });
+}
+
+export function sessionEventBatchSizeClass(eventCount: number): string {
+  if (!Number.isFinite(eventCount) || eventCount <= 0) return "unknown";
+  if (eventCount === 1) return "1";
+  if (eventCount <= 5) return "2-5";
+  if (eventCount <= 10) return "6-10";
+  if (eventCount <= 25) return "11-25";
+  if (eventCount <= 50) return "26-50";
+  return "51+";
+}
+
+/** Bounded database-phase attribution for exact-attempt event appends. */
+export function recordSessionEventAppendPhase(
+  observability: Observability,
+  observation: SessionEventAppendPhaseObservation,
+): void {
+  observability.observeHistogram({
+    name: "opengeni_session_event_append_phase_seconds",
+    help: "Duration of one bounded database phase in an exact-attempt session event append.",
+    buckets: STREAM_IO_BUCKETS,
+    labels: {
+      path: "turn_attempt",
+      event_class: observation.eventClass,
+      batch_size_class: sessionEventBatchSizeClass(observation.eventCount),
+      phase: observation.phase,
+      outcome: observation.outcome,
+    },
+    value: Math.max(0, observation.durationSeconds),
   });
 }
 

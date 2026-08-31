@@ -296,6 +296,29 @@ export type CompanyProfileMutationResponse = z.infer<typeof CompanyProfileMutati
 export const COMPANY_PROFILE_AGENT_APPROVE_OPTION = "activate" as const;
 export const COMPANY_PROFILE_AGENT_REJECT_OPTION = "skip" as const;
 
+export const CompanyProfileAgentPolicyMode = z.enum(["off", "suggest", "automatic"]);
+export type CompanyProfileAgentPolicyMode = z.infer<typeof CompanyProfileAgentPolicyMode>;
+
+export const CompanyProfileAgentPolicy = z.object({
+  organizationId: z.string().uuid(),
+  mode: CompanyProfileAgentPolicyMode,
+  version: z.number().int().nonnegative(),
+  updatedAt: z.string().datetime({ offset: true }),
+  changed: z.boolean().optional(),
+});
+export type CompanyProfileAgentPolicy = z.infer<typeof CompanyProfileAgentPolicy>;
+
+export const UpdateCompanyProfileAgentPolicyRequest = z
+  .object({
+    mode: CompanyProfileAgentPolicyMode,
+    expectedVersion: z.number().int().nonnegative(),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type UpdateCompanyProfileAgentPolicyRequest = z.infer<
+  typeof UpdateCompanyProfileAgentPolicyRequest
+>;
+
 export const CompanyProfileAgentAttempt = z
   .object({
     accountId: z.string().uuid(),
@@ -328,15 +351,37 @@ export type CompanyProfileAgentHumanInputPrompt = z.infer<
   typeof CompanyProfileAgentHumanInputPrompt
 >;
 
-export const CompanyProfileAgentProposalReceipt = z.object({
+export const CompanyProfileAgentReviewRequiredReceipt = z.object({
   status: z.literal("confirmation_required"),
   operationId: z.string().uuid(),
   proposalReceiptId: z.string().uuid(),
   revision: CompanyProfileRevision,
+  policyMode: z.literal("suggest"),
   humanInput: CompanyProfileAgentHumanInputPrompt,
   confirmWith: z.literal("company_profile_confirm"),
   replayed: z.boolean(),
 });
+export type CompanyProfileAgentReviewRequiredReceipt = z.infer<
+  typeof CompanyProfileAgentReviewRequiredReceipt
+>;
+
+export const CompanyProfileAgentAutomaticActivationReceipt = z.object({
+  status: z.literal("activated"),
+  operationId: z.string().uuid(),
+  proposalReceiptId: z.string().uuid(),
+  automaticActivationReceiptId: z.string().uuid(),
+  policyMode: z.literal("automatic"),
+  mutation: CompanyProfileMutationResponse,
+  replayed: z.boolean(),
+});
+export type CompanyProfileAgentAutomaticActivationReceipt = z.infer<
+  typeof CompanyProfileAgentAutomaticActivationReceipt
+>;
+
+export const CompanyProfileAgentProposalReceipt = z.discriminatedUnion("status", [
+  CompanyProfileAgentReviewRequiredReceipt,
+  CompanyProfileAgentAutomaticActivationReceipt,
+]);
 export type CompanyProfileAgentProposalReceipt = z.infer<typeof CompanyProfileAgentProposalReceipt>;
 
 export const CompanyProfileAgentConfirmRequest = z

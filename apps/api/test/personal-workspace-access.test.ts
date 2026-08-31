@@ -1,9 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessContext, Workspace } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
+import type { Settings } from "@opengeni/config";
 import {
   createApiKey,
   createDb,
+  createWorkspace,
+  countWorkspacesForAccount,
   ensureManagedAccessForUserWithOrganizationMemberships,
   managedPersonalWorkspacePermissions,
   type DbClient,
@@ -16,11 +19,13 @@ import {
 } from "@opengeni/testing";
 import { Hono } from "hono";
 import postgres from "postgres";
+import { registerApiKeyRoutes, organizationApiKeyPermissions } from "../src/routes/api-keys";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
+let managedAuth: ApiRouteDeps["managedAuth"];
 let userId = "";
 let accountId = "";
 let personalWorkspaceId = "";
@@ -84,22 +89,21 @@ beforeAll(async () => {
       ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
     )`;
 
-  app = new Hono();
-  registerWorkspaceRoutes(app, {
-    db: client.db,
-    settings: testSettings({ productAccessMode: "managed" }),
-    managedAuth: {
-      api: {
-        getSession: async () => ({
-          headers: new Headers(),
-          response: {
-            session: { id: authSessionId },
-            user: { id: userId, email, name: "Personal workspace owner" },
-          },
-        }),
-      },
-    } as never,
-  } as ApiRouteDeps);
+  managedAuth = {
+    api: {
+      getSession: async (input: { headers: Headers }) =>
+        input.headers.get("cookie")
+          ? {
+              headers: new Headers(),
+              response: {
+                session: { id: authSessionId },
+                user: { id: userId, email, name: "Personal workspace owner" },
+              },
+            }
+          : { headers: new Headers(), response: null },
+    },
+  } as never;
+  app = createTestApp();
 }, 180_000);
 
 afterAll(async () => {
@@ -112,6 +116,19 @@ afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
 }, 60_000);
+
+function createTestApp(overrides: Partial<Settings> = {}): Hono {
+  if (!client) throw new Error("database unavailable");
+  const registered = new Hono();
+  const deps = {
+    db: client.db,
+    settings: testSettings({ productAccessMode: "managed", ...overrides }),
+    managedAuth,
+  } as ApiRouteDeps;
+  registerApiKeyRoutes(registered, deps);
+  registerWorkspaceRoutes(registered, deps);
+  return registered;
+}
 
 describe("managed personal workspace access", () => {
   test("projects only the owning managed human and preserves the legacy default", async () => {
@@ -169,7 +186,7 @@ describe("managed personal workspace access", () => {
     expect(personalMembershipCount).toEqual({ count: 0 });
 
     accountAdminToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
-    await createApiKey(client.db, {
+    const legacyAccountKey = await createApiKey(client.db, {
       accountId,
       workspaceId: null,
       name: "Account admin without personal access",
@@ -177,10 +194,507 @@ describe("managed personal workspace access", () => {
       keyHash: await sha256Hex(accountAdminToken),
       permissions: ["account:read", "account:admin"],
     });
+    expect(legacyAccountKey.revokedAt).not.toBeNull();
     const denied = await app.request(`http://x/v1/workspaces/${personalWorkspaceId}`, {
       headers: { authorization: `Bearer ${accountAdminToken}` },
     });
-    expect(denied.status).toBe(403);
+    expect(denied.status).toBe(401);
+  });
+
+  test("organization API keys manage shared workspaces while personal workspaces stay excluded", async () => {
+    if (!shared || !client || !app) return;
+
+    const sharedWorkspace = await createWorkspace(client.db, {
+      accountId,
+      name: "External tenant workspace",
+    });
+
+    const compatibilityOrganizationToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const compatibilityWorkspaceToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const compatibilityLegacyToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const compatibilityRows = await shared.admin<
+      Array<{ id: string; credentialKind: string; revokedAt: string | null }>
+    >`
+      insert into api_keys (
+        account_id, workspace_id, name, prefix, key_hash, permissions
+      ) values (
+        ${accountId}, null, 'Previous-version organization key',
+        ${compatibilityOrganizationToken.slice(0, 14)},
+        ${await sha256Hex(compatibilityOrganizationToken)},
+        ${shared.admin.json(organizationApiKeyPermissions)}::jsonb
+      ), (
+        ${accountId}, ${sharedWorkspace.id}, 'Previous-version workspace key',
+        ${compatibilityWorkspaceToken.slice(0, 14)},
+        ${await sha256Hex(compatibilityWorkspaceToken)},
+        '["workspace:read"]'::jsonb
+      ), (
+        ${accountId}, null, 'Previous-version ambiguous account key',
+        ${compatibilityLegacyToken.slice(0, 14)},
+        ${await sha256Hex(compatibilityLegacyToken)},
+        '["account:read"]'::jsonb
+      )
+      returning id, credential_kind as "credentialKind", revoked_at::text as "revokedAt"`;
+    expect(compatibilityRows.map(({ credentialKind }) => credentialKind)).toEqual([
+      "organization",
+      "workspace",
+      "legacy_account",
+    ]);
+    expect(compatibilityRows[0]?.revokedAt).toBeNull();
+    expect(compatibilityRows[1]?.revokedAt).toBeNull();
+    expect(compatibilityRows[2]?.revokedAt).not.toBeNull();
+    await shared.admin`
+      delete from api_keys
+      where id = ${compatibilityRows[0]!.id}
+         or id = ${compatibilityRows[1]!.id}
+         or id = ${compatibilityRows[2]!.id}`;
+
+    expect(
+      (
+        await app.request(`http://x/v1/workspaces/${sharedWorkspace.id}`, {
+          headers: { authorization: `Bearer ${accountAdminToken}` },
+        })
+      ).status,
+    ).toBe(401);
+    const legacyAccountInventory = await app.request("http://x/v1/workspaces", {
+      headers: { authorization: `Bearer ${accountAdminToken}` },
+    });
+    expect(legacyAccountInventory.status).toBe(401);
+
+    const legacyWideToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const legacyWideKey = await createApiKey(client.db, {
+      accountId,
+      workspaceId: null,
+      name: "Legacy account key with workspace-shaped permissions",
+      prefix: legacyWideToken.slice(0, 14),
+      keyHash: await sha256Hex(legacyWideToken),
+      permissions: organizationApiKeyPermissions,
+    });
+    expect(legacyWideKey.revokedAt).not.toBeNull();
+    const legacyWideHeaders = { authorization: `Bearer ${legacyWideToken}` };
+    expect(
+      (
+        await app.request(`http://x/v1/workspaces/${sharedWorkspace.id}`, {
+          headers: legacyWideHeaders,
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await app.request("http://x/v1/workspaces", {
+          headers: legacyWideHeaders,
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
+          headers: legacyWideHeaders,
+        })
+      ).status,
+    ).toBe(401);
+
+    const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createApiKey(client.db, {
+      accountId,
+      workspaceId: null,
+      name: "Organization workspace operator",
+      prefix: token.slice(0, 14),
+      keyHash: await sha256Hex(token),
+      permissions: organizationApiKeyPermissions,
+      credentialKind: "organization",
+    });
+    const headers = { authorization: `Bearer ${token}` };
+
+    const accessResponse = await app.request("http://x/v1/access/me", {
+      headers,
+    });
+    expect(accessResponse.status).toBe(200);
+    const keyAccess = (await accessResponse.json()) as AccessContext;
+    expect(keyAccess.workspaceGrants).toEqual([]);
+    expect(keyAccess.accountGrants[0]?.permissions).toEqual([
+      "account:read",
+      "workspace:create",
+      "api_keys:manage",
+    ]);
+
+    const listResponse = await app.request("http://x/v1/workspaces", {
+      headers,
+    });
+    expect(listResponse.status).toBe(200);
+    const workspaces = (await listResponse.json()) as Workspace[];
+    expect(workspaces.map((workspace) => workspace.id)).toContain(sharedWorkspace.id);
+    expect(workspaces.map((workspace) => workspace.id)).not.toContain(personalWorkspaceId);
+    expect(workspaces.every((workspace) => workspace.kind === "shared")).toBe(true);
+
+    expect(
+      (
+        await app.request(`http://x/v1/workspaces/${sharedWorkspace.id}`, {
+          headers,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app.request(`http://x/v1/workspaces/${personalWorkspaceId}`, {
+          headers,
+        })
+      ).status,
+    ).toBe(403);
+
+    const personalKeyResponse = await app.request(
+      `http://x/v1/workspaces/${personalWorkspaceId}/api-keys`,
+      {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "forbidden",
+          permissions: ["workspace:read"],
+        }),
+      },
+    );
+    expect(personalKeyResponse.status).toBe(403);
+
+    const billingKeyResponse = await app.request(
+      `http://x/v1/workspaces/${sharedWorkspace.id}/api-keys`,
+      {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "forbidden billing key",
+          permissions: ["billing:manage"],
+        }),
+      },
+    );
+    expect(billingKeyResponse.status).toBe(403);
+
+    const firstEnsure = await app.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId,
+        externalSource: "personal-workspace-access-test",
+        externalId: "tenant-1",
+        name: "Tenant one",
+        slug: "tenant-one",
+      }),
+    });
+    expect(firstEnsure.status).toBe(201);
+    const firstBody = (await firstEnsure.json()) as {
+      workspace: Workspace;
+      created: boolean;
+    };
+    expect(firstBody.created).toBe(true);
+    expect(firstBody.workspace).toMatchObject({
+      accountId,
+      kind: "shared",
+      name: "Tenant one",
+      slug: "tenant-one",
+    });
+
+    const replayEnsure = await app.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId,
+        externalSource: "personal-workspace-access-test",
+        externalId: "tenant-1",
+        name: "Stale renamed tenant",
+        slug: "stale-slug",
+      }),
+    });
+    expect(replayEnsure.status).toBe(200);
+    const replayBody = (await replayEnsure.json()) as {
+      workspace: Workspace;
+      created: boolean;
+    };
+    expect(replayBody.created).toBe(false);
+    expect(replayBody.workspace.id).toBe(firstBody.workspace.id);
+    expect(replayBody.workspace.name).toBe("Tenant one");
+    expect(replayBody.workspace.slug).toBe("tenant-one");
+
+    const [membershipCount] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from workspace_memberships
+      where workspace_id = ${firstBody.workspace.id}`;
+    expect(membershipCount).toEqual({ count: 0 });
+
+    const workspaceCount = await countWorkspacesForAccount(client.db, accountId);
+    const limitedApp = createTestApp({
+      usageLimitsMode: "static",
+      staticUsageLimitsJson: JSON.stringify({ maxWorkspacesPerAccount: workspaceCount }),
+    });
+
+    const replayAtLimit = await limitedApp.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId,
+        externalSource: "personal-workspace-access-test",
+        externalId: "tenant-1",
+        name: "Ignored at limit",
+      }),
+    });
+    expect(replayAtLimit.status).toBe(200);
+    expect(await replayAtLimit.json()).toMatchObject({
+      created: false,
+      workspace: { id: firstBody.workspace.id, name: "Tenant one" },
+    });
+
+    const createAtLimit = await limitedApp.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId,
+        externalSource: "personal-workspace-access-test",
+        externalId: "tenant-over-limit",
+        name: "Tenant over limit",
+      }),
+    });
+    expect(createAtLimit.status).toBe(429);
+    expect(await countWorkspacesForAccount(client.db, accountId)).toBe(workspaceCount);
+  });
+
+  test("organization API key routes isolate null-workspace keys and support rotation", async () => {
+    if (!shared || !client || !app) return;
+
+    const createdResponse = await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
+      method: "POST",
+      headers: {
+        cookie: "session=present",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "Primary integration",
+        description: "External product",
+      }),
+    });
+    expect(createdResponse.status).toBe(201);
+    const created = (await createdResponse.json()) as {
+      apiKey: { id: string; workspaceId: string | null; permissions: string[] };
+      token: string;
+    };
+    expect(created.apiKey.workspaceId).toBeNull();
+    expect(created.apiKey.permissions).toEqual(organizationApiKeyPermissions);
+    expect(created.token).toStartWith("ogk_");
+
+    const workspace = await createWorkspace(client.db, {
+      accountId,
+      name: "Workspace-key isolation",
+    });
+    const workspaceToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    const workspaceKey = await createApiKey(client.db, {
+      accountId,
+      workspaceId: workspace.id,
+      name: "Narrow workspace key",
+      prefix: workspaceToken.slice(0, 14),
+      keyHash: await sha256Hex(workspaceToken),
+      permissions: ["workspace:read"],
+    });
+
+    const listResponse = await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
+      headers: { authorization: `Bearer ${created.token}` },
+    });
+    expect(listResponse.status).toBe(200);
+    const listed = (await listResponse.json()) as {
+      apiKeys: Array<{ id: string }>;
+    };
+    expect(listed.apiKeys.map((key) => key.id)).toContain(created.apiKey.id);
+    expect(listed.apiKeys.map((key) => key.id)).not.toContain(workspaceKey.id);
+
+    const replacementResponse = await app.request(
+      `http://x/v1/organizations/${accountId}/api-keys`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${created.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name: "Replacement integration" }),
+      },
+    );
+    expect(replacementResponse.status).toBe(201);
+
+    const wrongScopeDelete = await app.request(
+      `http://x/v1/organizations/${accountId}/api-keys/${workspaceKey.id}`,
+      {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${created.token}` },
+      },
+    );
+    expect(wrongScopeDelete.status).toBe(404);
+
+    const revokeResponse = await app.request(
+      `http://x/v1/organizations/${accountId}/api-keys/${created.apiKey.id}`,
+      {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${created.token}` },
+      },
+    );
+    expect(revokeResponse.status).toBe(200);
+    expect(await revokeResponse.json()).toMatchObject({
+      id: created.apiKey.id,
+    });
+    expect(
+      (
+        await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
+          headers: { authorization: `Bearer ${created.token}` },
+        })
+      ).status,
+    ).toBe(401);
+  });
+
+  test("external workspace provisioning enforces the cap atomically and replays at the cap", async () => {
+    if (!shared || !client) return;
+
+    const [{ count: existingCount } = { count: 0 }] = await shared.admin<
+      Array<{ count: number }>
+    >`select count(*)::int as count from workspaces where account_id = ${accountId}`;
+    const limitedApp = createTestApp({
+      usageLimitsMode: "static",
+      staticUsageLimitsJson: JSON.stringify({
+        maxWorkspacesPerAccount: existingCount + 1,
+      }),
+    });
+    const externalSource = `workspace-limit-${crypto.randomUUID()}`;
+    const requests = ["tenant-a", "tenant-b"].map((externalId) =>
+      limitedApp.request("http://x/v1/workspaces/external", {
+        method: "PUT",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          accountId,
+          externalSource,
+          externalId,
+          name: externalId,
+        }),
+      }),
+    );
+    const responses = await Promise.all(requests);
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 429]);
+
+    const createdResponse = responses.find((response) => response.status === 201)!;
+    const created = (await createdResponse.json()) as { workspace: Workspace };
+    const replay = await limitedApp.request("http://x/v1/workspaces/external", {
+      method: "PUT",
+      headers: {
+        cookie: "session=present",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        accountId,
+        externalSource,
+        externalId: created.workspace.externalId,
+        name: "stale replay name",
+      }),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      created: false,
+      workspace: { id: created.workspace.id },
+    });
+  });
+
+  test("organization keys share one cap across direct and external workspace creation", async () => {
+    if (!shared || !client || !app) return;
+
+    const keyResponse = await app.request(`http://x/v1/organizations/${accountId}/api-keys`, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({ name: "Cross-route workspace provisioner" }),
+    });
+    expect(keyResponse.status).toBe(201);
+    const key = (await keyResponse.json()) as { token: string };
+    const existingCount = await countWorkspacesForAccount(client.db, accountId);
+    const limitedApp = createTestApp({
+      usageLimitsMode: "static",
+      staticUsageLimitsJson: JSON.stringify({
+        maxWorkspacesPerAccount: existingCount + 1,
+      }),
+    });
+    const headers = {
+      authorization: `Bearer ${key.token}`,
+      "content-type": "application/json",
+    };
+    const responses = await Promise.all([
+      limitedApp.request("http://x/v1/workspaces", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ accountId, name: "Direct tenant workspace" }),
+      }),
+      limitedApp.request("http://x/v1/workspaces/external", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({
+          accountId,
+          externalSource: `cross-route-limit-${crypto.randomUUID()}`,
+          externalId: "tenant-1",
+          name: "External tenant workspace",
+        }),
+      }),
+    ]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 429]);
+    expect(await countWorkspacesForAccount(client.db, accountId)).toBe(existingCount + 1);
+  });
+
+  test("organization key creation serializes the cap and permits one authenticated rotation overlap", async () => {
+    if (!shared || !client) return;
+
+    await shared.admin`
+      update api_keys
+      set revoked_at = now(), updated_at = now()
+      where account_id = ${accountId}
+        and credential_kind = 'organization'
+        and revoked_at is null`;
+    const limitedApp = createTestApp({
+      usageLimitsMode: "static",
+      staticUsageLimitsJson: JSON.stringify({ maxApiKeysPerWorkspace: 1 }),
+    });
+    const createWithCookie = (name: string) =>
+      limitedApp.request(`http://x/v1/organizations/${accountId}/api-keys`, {
+        method: "POST",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name }),
+      });
+    const firstAttempts = await Promise.all([
+      createWithCookie("Concurrent primary A"),
+      createWithCookie("Concurrent primary B"),
+    ]);
+    expect(firstAttempts.map((response) => response.status).sort()).toEqual([201, 429]);
+    const primary = (await firstAttempts.find((response) => response.status === 201)!.json()) as {
+      token: string;
+    };
+
+    const replacement = await limitedApp.request(
+      `http://x/v1/organizations/${accountId}/api-keys`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${primary.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name: "Overlap replacement" }),
+      },
+    );
+    expect(replacement.status).toBe(201);
+
+    const secondOverlap = await limitedApp.request(
+      `http://x/v1/organizations/${accountId}/api-keys`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${primary.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name: "Forbidden second overlap" }),
+      },
+    );
+    expect(secondOverlap.status).toBe(429);
   });
 });
 

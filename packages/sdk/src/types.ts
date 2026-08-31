@@ -329,6 +329,7 @@ export type SessionCapabilities = {
     codecs: ("h264-mp4" | "vp9-webm")[];
     reason: CapabilityUnavailableReason | null;
   };
+  /** @deprecated Use the managed ComputerSession interaction tools. */
   ComputerUse: {
     available: boolean;
     readOnly: boolean;
@@ -345,6 +346,7 @@ export type TerminalCapability = SessionCapabilities["Terminal"];
 export type GitCapability = SessionCapabilities["Git"];
 export type DesktopStreamCapability = SessionCapabilities["DesktopStream"];
 export type RecordingCapability = SessionCapabilities["Recording"];
+/** @deprecated Use the managed ComputerSession interaction tools. */
 export type ComputerUseCapability = SessionCapabilities["ComputerUse"];
 
 // ── Stream-surfacing client surface (Phase 5) ───────────────────────────────
@@ -1355,6 +1357,7 @@ export type Session = {
         pausedDescendants: number;
         failedDescendants: number;
         unreadDescendants?: number | undefined;
+        unreadFailedDescendants?: number | undefined;
         activelyWorkingDescendants?: number | undefined;
         /**
          * Earliest moment one of the counted `attentionDescendants` entered
@@ -2624,6 +2627,7 @@ export type ScheduledTaskAgentConfig = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflight | undefined;
@@ -3158,6 +3162,23 @@ export type CodexConnectionStatus = {
   } | null;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
+  source?: WorkspaceCodexSubscriptionSource;
+};
+
+export type WorkspaceCodexSubscriptionMode =
+  | "automatic"
+  | "workspace"
+  | "organization"
+  | "disabled";
+
+export type WorkspaceCodexSubscriptionSource = {
+  accountId: string;
+  workspaceId: string;
+  workspaceKind: "personal" | "shared";
+  mode: WorkspaceCodexSubscriptionMode;
+  effectiveSource: "workspace" | "organization" | "disabled";
+  workspaceAvailable: boolean;
+  organizationAvailable: boolean;
 };
 
 /**
@@ -3207,6 +3228,7 @@ export type CodexUsagePayload = {
 /** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
 export type CodexAccount = {
   id: string;
+  source?: "workspace" | "organization";
   chatgptAccountId?: string | null;
   label?: string | null;
   email?: string | null;
@@ -3319,6 +3341,7 @@ export type CodexRotationSettings = {
 export type CodexAccountsResponse = {
   accounts: CodexAccount[];
   activeAccountId: string | null;
+  source?: WorkspaceCodexSubscriptionSource;
   /** Added by Apps-aware servers; absent on older same-major deployments. */
   apps?: {
     available: boolean;
@@ -3329,6 +3352,8 @@ export type CodexAccountsResponse = {
   };
   settings: CodexRotationSettings;
 };
+
+export type OrganizationCodexAccountsResponse = Omit<CodexAccountsResponse, "apps" | "source">;
 
 export type CodexAppsUpdate = {
   credentialId: string | null;
@@ -3496,6 +3521,7 @@ export type ClientConfig = {
   models: ClientModel[];
   defaultReasoningEffort: ReasoningEffort;
   allowedReasoningEfforts: ReasoningEffort[];
+  defaultSandboxBackend?: SandboxBackend | undefined;
   mcpServers: { id: string; name: string }[];
   /** Deployment defaults and hard maximum for built-in OpenGeni session tools. */
   firstPartyMcpTools?:
@@ -4221,6 +4247,20 @@ export type CreateWorkspaceRequest = {
   agentInstructions?: string | null | undefined;
 };
 
+export type EnsureWorkspaceRequest = {
+  accountId: string;
+  externalSource: string;
+  externalId: string;
+  name: string;
+  slug?: string | undefined;
+  agentInstructions?: string | null | undefined;
+};
+
+export type EnsureWorkspaceResponse = {
+  workspace: Workspace;
+  created: boolean;
+};
+
 export type UpdateWorkspaceRequest = {
   name?: string | undefined;
   slug?: string | null | undefined;
@@ -4253,6 +4293,12 @@ export type CreateApiKeyResponse = {
   apiKey: ApiKey;
   /** The full secret token — shown once at creation, never returned again. */
   token: string;
+};
+
+export type CreateOrganizationApiKeyRequest = {
+  name: string;
+  description?: string | undefined;
+  expiresAt?: string | undefined;
 };
 
 export type ListApiKeysResponse = {
@@ -4797,6 +4843,7 @@ export type ScheduledTaskAgentConfigInput = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  machineTarget?: { targetSandboxId: string; workingDir?: string | undefined } | undefined;
   goal?: GoalSpec | undefined;
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflightInput | undefined;

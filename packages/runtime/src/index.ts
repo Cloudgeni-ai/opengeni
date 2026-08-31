@@ -210,7 +210,6 @@ import {
 } from "./context-compaction";
 import {
   createSandboxClient,
-  desktopCapableBackend,
   isRoutingMutationOutcomeUnknownError,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
@@ -240,11 +239,10 @@ import {
   type TurnToolCancellationFence,
 } from "./sandbox/turn-tool-cancellation";
 import {
-  computerUse,
   withRetainableSessionImageOutputHook,
-  type ComputerToolMode,
   type RetainableSessionImageOutputHook,
-} from "./sandbox-computer";
+} from "./retained-session-image";
+import type { ComputerToolMode } from "./legacy-computer-compat";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import {
   MultiProviderModelProvider,
@@ -399,10 +397,11 @@ export {
   sandboxCommandStdout,
 };
 
-// P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
-// so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
-// alongside the rest of the runtime. NOT part of the agent-loop-free leaf (it
-// imports computerTool from the @openai/agents root).
+export {
+  withRetainableSessionImageOutputHook,
+  type RetainableSessionImageOutputHook,
+  type RetainableSessionImageToolName,
+} from "./retained-session-image";
 export {
   SandboxComputer,
   ComputerUseCapability,
@@ -414,10 +413,8 @@ export {
   type SandboxComputerOptions,
   type ComputerUseArgs,
   type ComputerToolMode,
-  type RetainableSessionImageOutputHook,
-  type RetainableSessionImageToolName,
   type ScreenshotReadErrorCode,
-} from "./sandbox-computer";
+} from "./legacy-computer-compat";
 
 // The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
 // helpers + the config-owned env/port re-exports). Re-exported verbatim so the
@@ -1551,17 +1548,9 @@ export type BuildAgentOptions = {
   supportsImageInput?: boolean;
   /** Exact typed `input_file` MIME allow-list; omitted preserves legacy behavior. */
   inputFileMediaTypes?: readonly string[];
-  // EXPLICIT computer-use tool transport, decided where provider identity is
-  // authoritative (the worker's model resolution — agent-turn.ts). Threaded into
-  // buildAgentCapabilities → computerUse({toolMode}) so tool selection never rests
-  // on the SDK's constructor-name sniff. Omitted means disabled/fail-closed.
+  /** @deprecated Managed ComputerSession tools replace model-bound desktop capability tools. */
   computerToolMode?: ComputerToolMode;
-  /**
-   * Invoked once, immediately before the first real computer action and after
-   * the display is ready. Merely advertising computer-use does not call it.
-   * The worker uses this seam for computer-use-only recording; ordinary
-   * shell/filesystem turns never pay that cost.
-   */
+  /** @deprecated Managed ComputerSession tools replace model-bound desktop readiness hooks. */
   onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
   /** Persist intentional image outputs before the SDK can add them to history. */
   onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
@@ -1786,7 +1775,7 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "When the user explicitly asks you to remember or learn something, use the remember tool when it is available and route it by purpose: lane=knowledge for facts, decisions, incidents, bug fixes, and outcomes that should become searchable Memory; lane=preference (a Skill) for reusable conditional how-to guidance; lane=instruction_policy only for the shortest universal rules every agent must follow. After a confirmed lane=knowledge save, retrieve it later with memory_search. Do not store the same material in multiple authorities.",
+    "When workspace Memory tools are available, use memory_save autonomously for durable facts, decisions, incidents, bug fixes, and confirmed outcomes that future workspace sessions should retrieve, whether the user asked you to remember them or you learned them during work; use memory_correct when an active agent-writable memory is wrong or outdated. Use task_note_save instead for expiring coordination that should be visible only to agents in the current root session tree. Workspace Learning mode does not gate these agent-only Memory writes. Use remember lane=preference for reusable conditional guidance (a Skill), lane=instruction_policy only for the shortest universal rules every agent must follow, and lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge. Do not store the same material in multiple authorities.",
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -2345,10 +2334,6 @@ export function buildOpenGeniAgent(
       ...(options.supportsImageInput !== undefined
         ? { supportsImageInput: options.supportsImageInput }
         : {}),
-      ...(options.computerToolMode !== undefined
-        ? { computerToolMode: options.computerToolMode }
-        : {}),
-      ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
       ...(options.onRetainableSessionImageOutput
         ? {
             onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
@@ -2827,7 +2812,7 @@ function installInteractionInterventionPolicy(agent: ApprovalCapableAgent): void
  * by the server's `<id>__` prefix, then the unprefixed tool name. A tool that
  * needs approval raises a run INTERRUPTION, which the worker turns into
  * `session.requiresAction` and resolves via `user.approvalDecision`
- * (resumeApproval) — the same generic path shell/computer-use approvals use, so
+ * (resumeApproval) — the same generic path other tool approvals use, so
  * no extra plumbing. No-op when no server requests approval, so the default
  * (auto-run everything) is byte-for-byte unchanged.
  *
@@ -2897,18 +2882,15 @@ function applyMcpApprovalPolicy(
  * of the hosted ones, by dropping the model instance the SDK's transport
  * detection keys off. See {@link buildAgentCapabilities} for why (codex routes the
  * OpenAIResponsesModel to the ChatGPT backend, which rejects the hosted
- * `apply_patch` AND `computer_use_preview` tool types). The SDK reads
+ * `apply_patch` tool type). The SDK reads
  * hosted-vs-function ONLY from `_modelInstance` (set via `bindModel`); overriding
  * `bindModel` to discard the instance leaves `_modelInstance` undefined, so
  * `supportsApplyPatchTransport` / `supportsStructuredToolOutputTransport` return
  * false and `tools()` emits the function variants — `apply_patch` + text
- * `view_image` for filesystem, and the `computer_*` function tools + text
- * `computer_screenshot` for computer-use. `bindModel` still returns the capability
+ * `view_image` for filesystem. `bindModel` still returns the capability
  * so the SDK's bind chain (`.bind().bindRunAs().bindModel()`) is preserved.
  */
-function neutralizeStructuredToolTransport(
-  capability: ReturnType<typeof filesystem> | ReturnType<typeof computerUse>,
-): void {
+function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesystem>): void {
   // Use `this` (NOT a captured reference to `capability`): the SandboxAgent binds
   // via `cap.clone().bind(session).bindRunAs(runAs).bindModel(model, instance)` and
   // runs tools() on the object the CHAIN returns. Capability.clone() copies this
@@ -3020,9 +3002,9 @@ export function buildAgentCapabilities(
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
-    // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode).
-    // Omitted/unproven transport fails closed with no computer tools.
+    /** @deprecated Managed ComputerSession tools replace model-bound desktop capability tools. */
     computerToolMode?: ComputerToolMode;
+    /** @deprecated Managed ComputerSession tools replace model-bound desktop readiness hooks. */
     onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
     onRetainableSessionImageOutput?: RetainableSessionImageOutputHook;
     turnCancellationSignal?: AbortSignal;
@@ -3110,39 +3092,6 @@ function buildAgentCapabilitiesFromComposition(
         skillComposition.nativeToolNames,
       ),
     );
-  }
-  // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
-  // scrot), but only when the desktop tier is ON, computer-use is enabled, and the
-  // backend is one whose image carries the X stack (descriptorgate — honest about
-  // which backends are desktop-capable today; headless/dev backends never get the
-  // tool, so a misconfigured non-desktop box can't register a tool that always
-  // fails). The capability's tools() bind to the live externally-owned session at
-  // run time (the SandboxAgent merge); xdotool drives :0 regardless of whether any
-  // viewer is attached, so no pixel-tunnel dependency.
-  if (
-    options.supportsImageInput !== false &&
-    settings.computerUseEnabled &&
-    settings.sandboxDesktopEnabled &&
-    desktopCapableBackend(settings.sandboxBackend)
-  ) {
-    // computer-use is ordinary `computer_*` function tools on a proven visual
-    // transport. Chat-wire and omitted/unproven callers fail closed.
-    //
-    // The worker declares an explicit mode from authoritative provider resolution.
-    // Exported/public callers that omit it are unproven and therefore disabled.
-    const computerCapability = computerUse({
-      dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
-      readOnly: settings.computerUseReadOnly,
-      ...(options.turnCancellationSignal ? { abortSignal: options.turnCancellationSignal } : {}),
-      ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
-      ...(options.onRetainableSessionImageOutput
-        ? {
-            onRetainableSessionImageOutput: options.onRetainableSessionImageOutput,
-          }
-        : {}),
-      toolMode: options.computerToolMode ?? "disabled",
-    });
-    caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
   }
   if (toolCancellation) {
     for (const capability of caps) {
@@ -3353,7 +3302,13 @@ export async function connectMcpServersInBatches(
             ...(options.connectTimeoutMs === undefined
               ? {}
               : { connectTimeoutMs: options.connectTimeoutMs }),
-            connectInParallel: true,
+            // OpenGeni already bounds lifecycle work in batches. The Agents SDK
+            // parallel path additionally starts a detached `void drain()` task;
+            // a best-effort server rejection can escape that task as a process-
+            // level unhandled rejection even though the session records and
+            // degrades the failed server. Keep lifecycle ownership on the
+            // awaited serial path inside each bounded batch.
+            connectInParallel: false,
             strict: options.strict,
           }),
         );
@@ -3713,8 +3668,17 @@ export async function prepareAgentTools(
       }),
   );
   const deferNonEager = options.deferNonEagerUntilToolDemand === true;
-  const eagerEntries = deferNonEager ? servers.filter((entry) => entry.eager) : servers;
-  const deferredEntries = deferNonEager ? servers.filter((entry) => !entry.eager) : [];
+  // Optional/best-effort integrations are never a first-token dependency. An
+  // explicit eager hint may make them available sooner, but when progressive
+  // disclosure is active their connect/list work joins the same shared
+  // preparation promise as every other deferred server. Required eager MCPs
+  // retain their fail-closed pre-inference contract.
+  const eagerEntries = deferNonEager
+    ? servers.filter((entry) => entry.eager && !entry.bestEffort)
+    : servers;
+  const deferredEntries = deferNonEager
+    ? servers.filter((entry) => !entry.eager || entry.bestEffort)
+    : [];
   const eagerRequiredEntries = eagerEntries.filter((entry) => !entry.bestEffort);
   const eagerBestEffortEntries = eagerEntries.filter((entry) => entry.bestEffort);
   const deferredRequiredEntries = deferredEntries.filter((entry) => !entry.bestEffort);
@@ -3782,21 +3746,18 @@ export async function prepareAgentTools(
       connectEntries(required, true, "required_connect"),
       connectEntries(bestEffort, false, "optional_connect"),
     ]);
-    const connectedRequired = requiredResult.status === "fulfilled" ? requiredResult.value : null;
     const connectedBestEffort =
       bestEffortResult.status === "fulfilled" ? bestEffortResult.value : null;
-    const failure =
-      requiredResult.status === "rejected"
-        ? requiredResult.reason
-        : bestEffortResult.status === "rejected"
-          ? bestEffortResult.reason
-          : undefined;
-    if (failure !== undefined) {
+    if (requiredResult.status === "rejected") {
       await connectedBestEffort?.close().catch(() => undefined);
-      await connectedRequired?.close().catch(() => undefined);
-      throw failure;
+      throw requiredResult.reason;
     }
-    return { required: connectedRequired, bestEffort: connectedBestEffort };
+    if (bestEffortResult.status === "rejected") {
+      for (const entry of bestEffort) {
+        if (entry.server instanceof PrefixedMcpServer) entry.server.releaseAggregateBudget();
+      }
+    }
+    return { required: requiredResult.value, bestEffort: connectedBestEffort };
   };
   const connectedEager = await connectEntryGroups(eagerRequiredEntries, eagerBestEffortEntries);
   const connectedEagerRequired = connectedEager.required;
@@ -7150,6 +7111,13 @@ export async function runOwnedSandboxSetup(
     gitCredentialBindingsOverride?: GitCredentialBindingSeed[];
     codemodeTokenSeedOverride?: string;
     commandRunner?: SandboxLifecycleCommandRunner;
+    /** Durable host coordinator for immutable rig setup on one exact managed
+     * sandbox. Turn-private hooks always run after this callback returns. */
+    coordinateSharedRigSetup?: (input: {
+      specHash: string;
+      timeoutMs: number;
+      execute: () => Promise<void>;
+    }) => Promise<"executed" | "reused">;
   },
 ): Promise<void> {
   const { settings, environment } = opts;
@@ -7176,14 +7144,8 @@ export async function runOwnedSandboxSetup(
   const ownedCodemodeTokenSeed = opts.codemodeTokenSeedOverride ?? codemodeTokenSeedForAgent(agent);
   const ownedCodemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
-  const ownedHooks = [
-    // M3: rig setup runs FIRST so any tooling it installs is present for the
-    // credential / repository-clone hooks below; the rig's credential hooks are
-    // unioned into the deployment preparation-profile hooks (deduped by id).
-    // This is the LIVE owned-path execution (the provided session skips the
-    // client create/resume decoration), so the rig hooks MUST be here or a
-    // rig-bound turn would start without ever running the frozen setup script.
-    ...sandboxRigSetupHooksForAgent(agent),
+  const ownedRigSetupHooks = sandboxRigSetupHooksForAgent(agent);
+  const ownedTurnPrivateHooks = [
     ...sandboxArtifactRuntimeHooksForAgent(agent),
     ...unionCredentialHooks(
       sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
@@ -7212,7 +7174,36 @@ export async function runOwnedSandboxSetup(
   // platform must not run setup against it (clone hooks are already empty there;
   // this keeps az login off it too).
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
-    await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
+    if (ownedRigSetupHooks.length > 0 && ownedRigSetup) {
+      const execute = async (): Promise<void> => {
+        await runBeforeAgentStartHooks(setupSession, ownedRigSetupHooks, ownedHookContext);
+      };
+      if (opts.coordinateSharedRigSetup) {
+        const sourceHash =
+          ownedRigSetup.contentHash ??
+          `sha256:${createHash("sha256").update(ownedRigSetup.script, "utf8").digest("hex")}`;
+        const specHash = `sha256:${createHash("sha256")
+          .update(`${ownedRigSetup.versionId}\0${sourceHash}`, "utf8")
+          .digest("hex")}`;
+        const outcome = await opts.coordinateSharedRigSetup({
+          specHash,
+          timeoutMs: ownedRigSetup.timeoutMs,
+          execute,
+        });
+        if (outcome === "reused") {
+          const payload = {
+            rigId: ownedRigSetup.rigId,
+            versionId: ownedRigSetup.versionId,
+            rigName: ownedRigSetup.rigName,
+          };
+          await opts.onRuntimeEvent?.({ type: "rig.setup.started", payload });
+          await opts.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
+        }
+      } else {
+        await execute();
+      }
+    }
+    await runBeforeAgentStartHooks(setupSession, ownedTurnPrivateHooks, ownedHookContext);
   }
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is

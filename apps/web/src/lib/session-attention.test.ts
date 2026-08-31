@@ -3,11 +3,13 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "@/types";
 import {
   applySessionAttentionProjection,
+  applySessionAttentionProjections,
   localSessionDeliveryAttentionCounts,
   latestSessionAttentionProjection,
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
+  shouldProjectActiveSessionRead,
   subscribeToSessionAttentionChanges,
   subscribeToLocalSessionDeliveryAttention,
   updateLocalSessionDeliveryAttention,
@@ -47,6 +49,77 @@ describe("session attention reconciliation", () => {
 
     expect(latestSessionAttentionProjection(newest, delayed)).toBe(newest);
     expect(latestSessionAttentionProjection(delayed, newest)).toBe(newest);
+  });
+
+  test("does not let an equal-coordinate unread projection resurrect a viewed chat", () => {
+    const read = { ...session, unread: false } as Session;
+    const staleUnread = { ...session, unread: true };
+
+    expect(applySessionAttentionProjection(read, staleUnread)).toBe(read);
+    expect(latestSessionAttentionProjection(read, staleUnread)).toBe(read);
+    expect(
+      applySessionAttentionProjection(read, {
+        ...staleUnread,
+        attentionVersion: (session.attentionVersion ?? 0) + 1,
+      }).unread,
+    ).toBe(true);
+  });
+
+  test("projects a viewed failed child through every loaded ancestor", () => {
+    const root = {
+      ...session,
+      id: "root",
+      unread: false,
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 2,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 1,
+        unreadFailedDescendants: 1,
+        unreadDescendants: 2,
+        activelyWorkingDescendants: 0,
+        truncated: false,
+      },
+    } as Session;
+    const parent = {
+      ...root,
+      id: "parent",
+      parentSessionId: root.id,
+      unread: true,
+      treeStats: {
+        ...root.treeStats!,
+        directChildren: 1,
+        totalDescendants: 1,
+        unreadDescendants: 1,
+      },
+    } as Session;
+    const child = {
+      ...session,
+      id: "child",
+      parentSessionId: parent.id,
+      status: "failed",
+    } as Session;
+
+    const projected = applySessionAttentionProjections(
+      [root, parent, child],
+      new Map([
+        [child.id, { ...child, unread: false }],
+        [parent.id, { ...parent, unread: false }],
+      ]),
+    );
+
+    expect(projected.find((candidate) => candidate.id === child.id)?.unread).toBe(false);
+    expect(projected.find((candidate) => candidate.id === parent.id)?.unread).toBe(false);
+    for (const ancestorId of [root.id, parent.id]) {
+      expect(projected.find((candidate) => candidate.id === ancestorId)?.treeStats).toMatchObject({
+        failedDescendants: 1,
+        unreadFailedDescendants: 0,
+        unreadDescendants: 0,
+      });
+    }
   });
 
   test("notifies and unsubscribes same-tab listeners", () => {
@@ -98,7 +171,7 @@ describe("active session read acknowledgement", () => {
     expect(sessionReadProjectionKey(session.id, 21)).not.toBe(acknowledged);
   });
 
-  test("acknowledges the exact unread chat only at the foreground live tip", () => {
+  test("acknowledges the exact unread chat as soon as it is foregrounded", () => {
     expect(
       shouldAcknowledgeActiveSession({
         activeSessionId: session.id,
@@ -106,16 +179,35 @@ describe("active session read acknowledgement", () => {
         session,
         documentVisible: true,
         windowFocused: true,
-        liveTipLoaded: true,
       }),
     ).toBe(true);
   });
 
-  test("does not consume unread state in the background or from a historical window", () => {
+  test("clears and acknowledges the foreground route before its live tip finishes loading", () => {
+    expect(
+      shouldProjectActiveSessionRead({
+        activeSessionId: session.id,
+        workspaceId: session.workspaceId,
+        session,
+        documentVisible: true,
+        windowFocused: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldAcknowledgeActiveSession({
+        activeSessionId: session.id,
+        workspaceId: session.workspaceId,
+        session,
+        documentVisible: true,
+        windowFocused: true,
+      }),
+    ).toBe(true);
+  });
+
+  test("does not consume unread state in the background", () => {
     for (const candidate of [
-      { documentVisible: false, windowFocused: true, liveTipLoaded: true },
-      { documentVisible: true, windowFocused: false, liveTipLoaded: true },
-      { documentVisible: true, windowFocused: true, liveTipLoaded: false },
+      { documentVisible: false, windowFocused: true },
+      { documentVisible: true, windowFocused: false },
     ]) {
       expect(
         shouldAcknowledgeActiveSession({
@@ -150,7 +242,6 @@ describe("active session read acknowledgement", () => {
           ...candidate,
           documentVisible: true,
           windowFocused: true,
-          liveTipLoaded: true,
         }),
       ).toBe(false);
     }

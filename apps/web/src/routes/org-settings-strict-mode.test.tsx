@@ -8,11 +8,15 @@ import * as SonnerPackage from "sonner";
 import * as ReactPackage from "@opengeni/react";
 import * as RouterPackage from "@tanstack/react-router";
 import * as ContextModule from "@/context";
+import type { CompanyProfileAgentPolicy } from "@/types";
 
 const accountId = "account-strict";
 const workspaceId = "workspace-strict";
+const otherAccountId = "account-other";
+const otherWorkspaceId = "workspace-other";
 const timestamp = "2026-08-20T10:00:00.000Z";
 const toastError = mock((_message: string) => undefined);
+let accountRole: "owner" | "admin" = "owner";
 
 const getBilling = mock(async () => ({
   mode: "stripe" as const,
@@ -34,6 +38,52 @@ const createBillingCheckout = mock(async () => {
 const createBillingPortalSession = mock(async () => {
   throw new Error("bounded portal failure");
 });
+const listOrganizationApiKeys = mock(async (_accountId: string) => []);
+const createOrganizationApiKey = mock(async () => {
+  throw new Error("not used");
+});
+const deleteOrganizationApiKey = mock(async () => {
+  throw new Error("not used");
+});
+const listCompanyProfile = mock(async (_workspaceId: string, _options: { limit: number }) => ({
+  current: null,
+  activeRevision: null,
+  revisions: [],
+  activationEvents: [],
+  nextAfterRevision: null,
+}));
+const defaultGetCompanyProfileAgentPolicy = async (
+  _workspaceId: string,
+): Promise<CompanyProfileAgentPolicy> => ({
+  organizationId: accountId,
+  mode: "suggest" as const,
+  version: 0,
+  updatedAt: timestamp,
+});
+const getCompanyProfileAgentPolicy = mock(defaultGetCompanyProfileAgentPolicy);
+const updateCompanyProfileAgentPolicy = mock(
+  async (
+    _workspaceId: string,
+    _request: {
+      mode: "off" | "suggest" | "automatic";
+      expectedVersion: number;
+      operationId: string;
+    },
+  ) => ({
+    organizationId: accountId,
+    mode: "automatic" as const,
+    version: 1,
+    updatedAt: timestamp,
+    changed: true,
+  }),
+);
+const getWorkspaceModelCatalog = mock(async (_workspaceId: string) => ({ models: [] }));
+const useBillingUsage = mock((_options: unknown) => ({
+  loading: false,
+  error: null,
+  usage: [],
+  refresh: async () => undefined,
+}));
 
 const context = {
   client: {
@@ -41,6 +91,13 @@ const context = {
     getBillingEntitlements,
     createBillingCheckout,
     createBillingPortalSession,
+    listOrganizationApiKeys,
+    createOrganizationApiKey,
+    deleteOrganizationApiKey,
+    listCompanyProfile,
+    getCompanyProfileAgentPolicy,
+    updateCompanyProfileAgentPolicy,
+    getWorkspaceModelCatalog,
   } as unknown as OpenGeniBrowserClient,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
@@ -52,8 +109,10 @@ const context = {
       {
         accountId,
         subjectId: "user:strict-owner",
-        role: "owner" as const,
-        permissions: ["billing:read", "billing:manage"],
+        get role(): "owner" | "admin" {
+          return accountRole;
+        },
+        permissions: ["account:admin", "billing:read", "billing:manage", "api_keys:manage"],
       },
     ],
     workspaceGrants: [],
@@ -84,6 +143,11 @@ const context = {
   ],
   managedSelfContext: null,
   accessKeyVersion: 7,
+  model: "openai/gpt-5.6",
+  reasoningEffort: "low" as const,
+  latencyMode: "standard" as const,
+  busy: false,
+  startSession: async () => null,
   handleManagedSignOut: async () => undefined,
   revalidatePrincipalAccess: () => undefined,
 };
@@ -91,12 +155,7 @@ const context = {
 mock.module("@/context", () => ({ ...ContextModule, useAppContext: () => context }));
 mock.module("@opengeni/react", () => ({
   ...ReactPackage,
-  useBillingUsage: () => ({
-    loading: false,
-    error: null,
-    usage: [],
-    refresh: async () => undefined,
-  }),
+  useBillingUsage,
 }));
 mock.module("@tanstack/react-router", () => ({
   ...RouterPackage,
@@ -160,6 +219,10 @@ describe("organization billing StrictMode ownership", () => {
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("$25.00 available");
     expect(container.textContent).toContain("seats");
+    expect(useBillingUsage.mock.calls.at(-1)?.[0]).toEqual({
+      accountId,
+      enabled: true,
+    });
     expect(container.textContent).toContain(
       "View invoices and manage payment information in Stripe.",
     );
@@ -187,5 +250,181 @@ describe("organization billing StrictMode ownership", () => {
 
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  test("loads organization keys with the organization SDK method", async () => {
+    listOrganizationApiKeys.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <OrgSettingsRoute workspaceId={workspaceId} section="developer" />
+        </StrictMode>,
+      );
+    });
+    await flush();
+
+    expect(listOrganizationApiKeys.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(
+      listOrganizationApiKeys.mock.calls.every(([seenAccountId]) => seenAccountId === accountId),
+    ).toBe(true);
+    expect(container.textContent).toContain("Organization API keys");
+    expect(container.textContent).toContain("No organization API keys yet");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("updates the organization-wide agent identity mode with CAS", async () => {
+    getCompanyProfileAgentPolicy.mockClear();
+    updateCompanyProfileAgentPolicy.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <OrgSettingsRoute workspaceId={workspaceId} section="knowledge" />
+        </StrictMode>,
+      );
+    });
+    await flush();
+
+    expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("Agent-managed organization identity");
+    const automatic = container.querySelector<HTMLInputElement>(
+      'input[name="company-profile-agent-policy"][value="automatic"]',
+    );
+    if (!automatic) throw new Error("Missing Autonomous policy option");
+    await act(async () => automatic.click());
+    await act(async () => button(container, "Save autonomy mode").click());
+    await flush();
+
+    expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledTimes(1);
+    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[0]).toBe(workspaceId);
+    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[1]).toMatchObject({
+      mode: "automatic",
+      expectedVersion: 0,
+    });
+    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[1].operationId).toMatch(
+      /^[0-9a-f-]{36}$/,
+    );
+    expect(container.textContent).toContain(
+      "Autonomous organization identity updates are enabled.",
+    );
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("discards an old organization policy load after the route identity changes", async () => {
+    getCompanyProfileAgentPolicy.mockClear();
+    updateCompanyProfileAgentPolicy.mockClear();
+    let resolveOldPolicy!: (value: CompanyProfileAgentPolicy) => void;
+    const oldPolicy = new Promise<CompanyProfileAgentPolicy>((resolve) => {
+      resolveOldPolicy = resolve;
+    });
+    getCompanyProfileAgentPolicy.mockImplementation(async (seenWorkspaceId) => {
+      if (seenWorkspaceId === workspaceId) return await oldPolicy;
+      return {
+        organizationId: otherAccountId,
+        mode: "automatic",
+        version: 7,
+        updatedAt: timestamp,
+      };
+    });
+
+    const workspace = context.workspaces[0]!;
+    const grant = context.accessContext.accountGrants[0]!;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="knowledge" />);
+      });
+      await flush();
+      expect(getCompanyProfileAgentPolicy).toHaveBeenCalledWith(workspaceId);
+
+      workspace.id = otherWorkspaceId;
+      workspace.accountId = otherAccountId;
+      grant.accountId = otherAccountId;
+      context.accessContext.defaultAccountId = otherAccountId;
+      context.accessContext.defaultWorkspaceId = otherWorkspaceId;
+      await act(async () => {
+        root.render(<OrgSettingsRoute workspaceId={otherWorkspaceId} section="knowledge" />);
+      });
+      await flush();
+
+      const selectedMode = () =>
+        container.querySelector<HTMLInputElement>(
+          'input[name="company-profile-agent-policy"]:checked',
+        )?.value;
+      expect(selectedMode()).toBe("automatic");
+
+      await act(async () =>
+        resolveOldPolicy({
+          organizationId: accountId,
+          mode: "suggest",
+          version: 0,
+          updatedAt: timestamp,
+        }),
+      );
+      await flush();
+      expect(selectedMode()).toBe("automatic");
+
+      const off = container.querySelector<HTMLInputElement>(
+        'input[name="company-profile-agent-policy"][value="off"]',
+      );
+      if (!off) throw new Error("Missing Off policy option");
+      await act(async () => off.click());
+      await act(async () => button(container, "Save autonomy mode").click());
+      await flush();
+      expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledWith(
+        otherWorkspaceId,
+        expect.objectContaining({ mode: "off", expectedVersion: 7 }),
+      );
+    } finally {
+      getCompanyProfileAgentPolicy.mockImplementation(defaultGetCompanyProfileAgentPolicy);
+      workspace.id = workspaceId;
+      workspace.accountId = accountId;
+      grant.accountId = accountId;
+      context.accessContext.defaultAccountId = accountId;
+      context.accessContext.defaultWorkspaceId = workspaceId;
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("does not load the owner-only agent identity policy for an account administrator", async () => {
+    getCompanyProfileAgentPolicy.mockClear();
+    accountRole = "admin";
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <OrgSettingsRoute workspaceId={workspaceId} section="knowledge" />
+          </StrictMode>,
+        );
+      });
+      await flush();
+
+      expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
+      expect(container.textContent).not.toContain("Agent-managed organization identity mode");
+      expect(container.textContent).toContain("Agent-managed organization identity is owner-only");
+    } finally {
+      accountRole = "owner";
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 });

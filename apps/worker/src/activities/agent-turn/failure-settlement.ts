@@ -18,7 +18,6 @@ import {
   settleCodexCredentialFailover,
   readLease,
   SandboxLeaseSupersededError,
-  SandboxLeaseTransitionError,
   isSessionEventPersistenceError,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -61,6 +60,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
   isWorkerShutdownCancellation,
+  sandboxLifecycleTransitionDiagnostic,
   sandboxRouteTransitionCode,
   safeErrorDiagnostic,
   classifyXaiCredentialFailure,
@@ -159,20 +159,20 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // recoverable control-plane states, never session failures. The latter is
   // paced briefly; the next acquire waits on the durable claim and resumes
   // immediately when it clears.
-  if (
-    (error instanceof SandboxLeaseSupersededError ||
-      error instanceof SandboxLeaseTransitionError) &&
-    recoveryTurnId
-  ) {
+  const lifecycleTransition = sandboxLifecycleTransitionDiagnostic(error);
+  const leaseControlError =
+    error instanceof SandboxLeaseSupersededError ? error : lifecycleTransition;
+  if (leaseControlError && recoveryTurnId) {
     try {
-      const fencedLease = await readLease(db, input.workspaceId, error.sandboxGroupId).catch(
-        () => null,
-      );
-      const lifecycleTransition = error instanceof SandboxLeaseTransitionError;
+      const fencedLease = await readLease(
+        db,
+        input.workspaceId,
+        leaseControlError.sandboxGroupId,
+      ).catch(() => null);
       const rotationPending =
         fencedLease?.rotationRequestedAt != null ||
-        (lifecycleTransition && error.reason === "rotation_in_progress");
-      const transitionPending = lifecycleTransition || rotationPending;
+        lifecycleTransition?.reason === "rotation_in_progress";
+      const transitionPending = lifecycleTransition !== null || rotationPending;
       const deadlineRotationPending =
         rotationPending && fencedLease?.rotationReason === "provider_deadline";
       const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
@@ -182,20 +182,20 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         attemptId: input.attemptId,
         reason: deadlineRotationPending
           ? "sandbox_deadline_rotation"
-          : lifecycleTransition
+          : lifecycleTransition !== null
             ? "sandbox_lifecycle_transition"
             : "sandbox_lease_superseded",
         ...(transitionPending
           ? {
               detail: {
-                sandboxGroupId: error.sandboxGroupId,
-                leaseEpoch: error.leaseEpoch,
+                sandboxGroupId: leaseControlError.sandboxGroupId,
+                leaseEpoch: leaseControlError.leaseEpoch,
                 ...(rotationPending
                   ? {
                       rotationReason: fencedLease?.rotationReason ?? "operator",
                     }
                   : {}),
-                ...(lifecycleTransition ? { transitionReason: error.reason } : {}),
+                ...(lifecycleTransition ? { transitionReason: lifecycleTransition.reason } : {}),
               },
             }
           : {}),

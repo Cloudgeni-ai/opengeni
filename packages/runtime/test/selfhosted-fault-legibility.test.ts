@@ -174,7 +174,7 @@ describe("G5 — PAYLOAD_TOO_LARGE is a typed, distinguishable fault", () => {
 });
 
 describe("G3-remnant — never-sent retry safety in the pure policy", () => {
-  const NON_READONLY = ["exec", "git", "fsWrite", "fsMove", "desktopInput"];
+  const NON_READONLY = ["exec", "git", "fsWrite", "fsMove"];
 
   test("a never-sent offline fault is retried for ANY op kind (provably not executed)", () => {
     const error = offlineErr(true);

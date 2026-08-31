@@ -1687,6 +1687,65 @@ describe("DB integration", () => {
     expect(saved.memory.id).toBe(curated.id);
   });
 
+  test("autonomous Memory cannot mutate approved reviewed Knowledge", async () => {
+    const grant = await testGrant(dbClient.db);
+    const curated = await createKnowledgeMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      status: "approved",
+      kind: "decision",
+      text: "Production changes require a reviewed rollout plan.",
+    });
+
+    await expect(
+      saveWorkspaceMemory(
+        dbClient.db,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          text: "Production changes may skip the reviewed rollout plan.",
+          kind: "decision",
+          replacesId: curated.id,
+          origin: "agent",
+        },
+        memoryEmbedder,
+      ),
+    ).rejects.toThrow(/Autonomous Memory can replace only active agent-writable records/i);
+
+    await expect(
+      correctWorkspaceMemory(
+        dbClient.db,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          id: curated.id,
+          reason: "agent attempted archival",
+          origin: "agent",
+        },
+        memoryEmbedder,
+      ),
+    ).rejects.toThrow(/Autonomous Memory can archive only active agent-writable records/i);
+
+    await expect(
+      correctWorkspaceMemory(
+        dbClient.db,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          id: curated.id,
+          replacementText: "Production changes never require a rollout plan.",
+          origin: "agent",
+        },
+        memoryEmbedder,
+      ),
+    ).rejects.toThrow(/Autonomous Memory can correct only active agent-writable records/i);
+
+    expect(await getKnowledgeMemory(dbClient.db, grant.workspaceId, curated.id)).toMatchObject({
+      status: "approved",
+      text: "Production changes require a reviewed rollout plan.",
+    });
+  });
+
   test("AC-3: near-duplicate (cosine >= threshold) save is a NOOP", async () => {
     const grant = await testGrant(dbClient.db);
     const embedder = collidingEmbedder("colliding-model-3072");
@@ -2394,16 +2453,15 @@ describe("DB integration", () => {
     // untouched and still reachable through search.
     expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
 
-    // Candidate containment removes the broad block and legacy preference-kind
-    // records only from agent retrieval. The canonical row remains available
-    // through the human/audit search path, so rollback and correction are safe.
+    // Retrieval-only removes the broad block, but all legacy Memory kinds remain
+    // explicitly searchable as non-authoritative historical context.
     await dbClient.db.execute(dbSql`
       update workspaces
       set settings = settings || '{"memoryPromptMode":"retrieval_only"}'::jsonb
       where id = ${grant.workspaceId}::uuid
     `);
     expect(await resolveWorkspaceMemoryBlock(dbClient.db, grant.workspaceId)).toBeNull();
-    const containedAgentSearch = await searchWorkspaceMemories(
+    const agentSearch = await searchWorkspaceMemories(
       dbClient.db,
       grant.workspaceId,
       {
@@ -2414,7 +2472,9 @@ describe("DB integration", () => {
       },
       memoryEmbedder,
     );
-    expect(containedAgentSearch).toEqual([]);
+    expect(agentSearch.map((result) => result.memory.text)).toContain(
+      "Prefer Terraform for infra.",
+    );
     const humanAuditSearch = await searchWorkspaceMemories(
       dbClient.db,
       grant.workspaceId,

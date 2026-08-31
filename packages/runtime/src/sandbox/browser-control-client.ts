@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import {
   BROWSER_CONTROL_MAX_JSON_BYTES,
@@ -27,6 +27,7 @@ import {
   ComputerActionReceipt,
   ComputerClipboard,
   ComputerObservation,
+  COMPUTER_SCREENSHOT_MAX_BYTES,
   ComputerSessionCapabilities,
   ComputerTarget,
   InteractionError,
@@ -80,10 +81,8 @@ import {
 } from "./stream-port";
 
 const CLIENT_ROOT = "/tmp/opengeni-private/browser-control-client";
-// Controller I/O uses absolute paths under /tmp. Never inherit the session
-// working directory: a missing cwd makes spawn fail with ENOENT before curl
-// can talk to the machine-local sidecar.
-const PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
+const MANAGED_PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
+const NATIVE_PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
 export const BROWSER_CONTROL_ADMIN_TOKEN_FILE = "/tmp/opengeni-browserd/authority/admin-token";
 const COMMAND_OK = "OPENGENI_BROWSER_CONTROL_CLIENT_OK";
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
@@ -158,6 +157,50 @@ export type BrowserControlPlacementSession = {
   ) => Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }>;
   finalizeOpStreamOps?: () => Promise<void>;
 };
+
+export type ComputerControlFrame = {
+  data: Uint8Array;
+  mediaType: "image/jpeg" | "image/png";
+  metadataHeader: string;
+  metadata: ComputerControlFrameMetadata;
+};
+
+export type ComputerControlFrameMetadata = {
+  frameId: string;
+  computerSessionId: string;
+  controllerGeneration: string;
+  targetId: string;
+  targetGeneration: string;
+  sequence: number;
+  mediaType: "image/jpeg" | "image/png";
+  width: number;
+  height: number;
+  capturedAt: string;
+  sha256: string;
+};
+
+export type ComputerFrameEvidenceMismatchReason =
+  | "frame_session_mismatch"
+  | "frame_target_mismatch"
+  | "frame_controller_mismatch"
+  | "frame_media_mismatch"
+  | "frame_digest_mismatch";
+
+export type ExpectedComputerFrameEvidence = {
+  computerSessionId: string;
+  controllerGeneration: string;
+  targetId: string;
+};
+
+/** Controller I/O uses absolute private paths under /tmp, so its cwd carries
+ * no data authority. Connected Machines need a native /tmp cwd because their
+ * session directory may disappear; managed sandboxes must use /workspace
+ * because provider exec confines workdir to the workspace root. */
+function placementControllerWorkdir(session: BrowserControlPlacementSession): string {
+  return session.ensureBrowserControl
+    ? NATIVE_PLACEMENT_CONTROLLER_WORKDIR
+    : MANAGED_PLACEMENT_CONTROLLER_WORKDIR;
+}
 
 export type PlacementBrowserSessionReference = {
   browserSessionId: string;
@@ -332,6 +375,12 @@ export class BrowserControlTransportError extends Error {
 export class BrowserControlProtocolError extends Error {
   readonly name = "BrowserControlProtocolError";
   readonly retryable = false;
+}
+
+export class ComputerFrameEvidenceMismatchError extends BrowserControlProtocolError {
+  constructor(readonly reason: ComputerFrameEvidenceMismatchReason) {
+    super("computer frame evidence does not match its request");
+  }
 }
 
 export class BrowserControlRequestError extends Error {
@@ -891,6 +940,16 @@ export class BrowserControlClient {
     return await this.requestJson(input);
   }
 
+  async requestBytesForSession(input: {
+    method: "GET";
+    path: string;
+    token: string;
+    expectedFrameEvidence: ExpectedComputerFrameEvidence;
+    timeoutMs?: number;
+  }): Promise<ComputerControlFrame> {
+    return await this.requestBytes(input);
+  }
+
   private async requestJson(
     input: {
       method: "GET" | "POST" | "PUT" | "DELETE";
@@ -1056,6 +1115,159 @@ export class BrowserControlClient {
         throw error;
       }
       throw new BrowserControlTransportError("browser controller request transport failed", {
+        cause: error,
+      });
+    } finally {
+      await runBestEffort(this.session, `rm -rf -- ${shellQuote(directory)}`);
+      await this.session.finalizeOpStreamOps?.().catch(() => undefined);
+    }
+  }
+
+  private async requestBytes(
+    input: {
+      method: "GET";
+      path: string;
+      token: string;
+      expectedFrameEvidence: ExpectedComputerFrameEvidence;
+      timeoutMs?: number;
+    },
+    retryNativeEndpoint = true,
+  ): Promise<ComputerControlFrame> {
+    const requireHostFetch = this.session.requireHostFetchController === true;
+    if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
+      try {
+        const endpoint = await this.session.resolveExposedPort(this.port);
+        const hostFetchAllowed = exposedPortAllowsHostFetch(endpoint);
+        const canExec = Boolean(this.session.exec || this.session.execCommand);
+        if (!hostFetchAllowed && (requireHostFetch || !canExec)) {
+          throw new BrowserControlTransportError(
+            requireHostFetch
+              ? "signed Channel B cannot use the lifecycle proxy"
+              : "cached browser controller endpoint cannot host-fetch a prefixed proxy",
+          );
+        }
+        if (hostFetchAllowed) {
+          try {
+            return await requestExposedControllerBytes(endpoint, input, this.timeoutMs);
+          } catch (error) {
+            if (
+              retryNativeEndpoint &&
+              !requireHostFetch &&
+              error instanceof BrowserControlTransportError
+            ) {
+              return await this.requestBytes(input, false);
+            }
+            throw error;
+          }
+        }
+      } catch (error) {
+        if (
+          error instanceof BrowserControlRequestError ||
+          error instanceof BrowserControlProtocolError ||
+          error instanceof BrowserControlTransportError ||
+          error instanceof RangeError
+        ) {
+          throw error;
+        }
+        if (requireHostFetch || (!this.session.exec && !this.session.execCommand)) {
+          throw new BrowserControlTransportError(
+            requireHostFetch
+              ? "signed Channel B host-fetch failed"
+              : "cached browser controller endpoint is temporarily unavailable",
+            { cause: error },
+          );
+        }
+      }
+    } else if (requireHostFetch) {
+      throw new BrowserControlTransportError(
+        "signed Channel B requires a host-fetch controller endpoint",
+      );
+    }
+
+    const controllerPort = await this.controllerPort();
+    const directory = `${CLIENT_ROOT}/${randomUUID()}`;
+    const configPath = `${directory}/curl.conf`;
+    const responsePath = `${directory}/response.bin`;
+    const responseHeadersPath = `${directory}/response.headers`;
+    const statusPath = `${directory}/status`;
+    const exitPath = `${directory}/curl-exit`;
+    const token = requireToken(input.token, "browser controller token");
+    const timeoutMs = boundedTimeout(input.timeoutMs ?? this.timeoutMs);
+    const url = localControllerUrl(controllerPort, input.path);
+    try {
+      await runChecked(
+        this.session,
+        `umask 077; install -d -m 0700 -- ${shellQuote(directory)}; printf '%s\n' ${shellQuote(COMMAND_OK)}`,
+        timeoutMs,
+      );
+      await writePrivateFile(
+        this.session,
+        {
+          path: configPath,
+          content: curlConfig({
+            method: input.method,
+            url,
+            token,
+            responsePath,
+            responseHeadersPath,
+            timeoutMs,
+          }),
+          createParents: false,
+        },
+        timeoutMs,
+      );
+      await runChecked(
+        this.session,
+        `chmod 0600 -- ${shellQuote(configPath)}; : > ${shellQuote(statusPath)}; curl --disable --config ${shellQuote(configPath)} > ${shellQuote(statusPath)}; curl_exit=$?; printf '%s' "$curl_exit" > ${shellQuote(exitPath)}; printf '%s\n' ${shellQuote(COMMAND_OK)}`,
+        timeoutMs,
+      );
+      const curlExit = parseUnsignedInteger(
+        await readText(this.session, exitPath, 32, timeoutMs),
+        "curl exit",
+      );
+      if (curlExit !== 0) {
+        throw new BrowserControlTransportError(
+          `browser controller transport failed (curl exit ${curlExit})`,
+        );
+      }
+      const status = parseHttpStatus(await readText(this.session, statusPath, 32, timeoutMs));
+      if (status < 200 || status >= 300) {
+        const responseText = await readText(
+          this.session,
+          responsePath,
+          BROWSER_CONTROL_MAX_JSON_BYTES + 1,
+          timeoutMs,
+        );
+        parseEnvelope(responseText, status);
+        throw new BrowserControlProtocolError("browser controller image response is invalid");
+      }
+      const headers = parseCurlResponseHeaders(
+        await readText(this.session, responseHeadersPath, 64 * 1024, timeoutMs),
+      );
+      const data = await readBytes(
+        this.session,
+        responsePath,
+        COMPUTER_SCREENSHOT_MAX_BYTES,
+        timeoutMs,
+      );
+      return computerControlFrame(data, headers, input.expectedFrameEvidence);
+    } catch (error) {
+      if (
+        error instanceof BrowserControlRequestError ||
+        error instanceof BrowserControlProtocolError ||
+        error instanceof RangeError
+      ) {
+        throw error;
+      }
+      if (error instanceof BrowserControlTransportError) {
+        if (retryNativeEndpoint && this.nativeAuthority && this.session.ensureBrowserControl) {
+          nativeControllerPorts.delete(nativeControllerKey(this.nativeAuthority));
+          await this.controllerPort();
+          return await this.requestBytes(input, false);
+        }
+        throw error;
+      }
+      throw new BrowserControlTransportError("browser controller image transport failed", {
         cause: error,
       });
     } finally {
@@ -1418,6 +1630,33 @@ export class ComputerControlSessionClient {
     );
   }
 
+  async capture(
+    targetId: string,
+    options: {
+      format?: "jpeg" | "png";
+      quality?: number;
+      maxWidth?: number;
+      maxHeight?: number;
+    } = {},
+  ): Promise<ComputerControlFrame> {
+    const query = new URLSearchParams();
+    if (options.format !== undefined) query.set("format", options.format);
+    if (options.quality !== undefined) query.set("quality", String(options.quality));
+    if (options.maxWidth !== undefined) query.set("maxWidth", String(options.maxWidth));
+    if (options.maxHeight !== undefined) query.set("maxHeight", String(options.maxHeight));
+    const suffix = query.size > 0 ? `screenshot?${query}` : "screenshot";
+    return await this.parent.requestBytesForSession({
+      method: "GET",
+      path: this.targetPath(targetId, suffix),
+      token: this.viewToken,
+      expectedFrameEvidence: {
+        computerSessionId: this.reference.computerSessionId,
+        controllerGeneration: this.reference.controllerGeneration,
+        targetId: requireOpaqueId(targetId, "computer target id"),
+      },
+    });
+  }
+
   async readClipboard(): Promise<ComputerClipboardValue> {
     return ComputerClipboard.parse(
       await this.parent.requestForSession({
@@ -1487,6 +1726,7 @@ function curlConfig(input: {
   url: string;
   token: string;
   responsePath: string;
+  responseHeadersPath?: string;
   requestPath?: string;
   timeoutMs: number;
 }): string {
@@ -1507,6 +1747,9 @@ function curlConfig(input: {
         ]
       : []),
     `output = ${curlConfigQuote(input.responsePath)}`,
+    ...(input.responseHeadersPath
+      ? [`dump-header = ${curlConfigQuote(input.responseHeadersPath)}`]
+      : []),
     `write-out = ${curlConfigQuote("%{http_code}")}`,
     "",
   ].join("\n");
@@ -1554,9 +1797,7 @@ async function requestExposedController(
 ): Promise<unknown> {
   const token = requireToken(input.token, "browser controller token");
   const timeoutMs = boundedTimeout(input.timeoutMs ?? defaultTimeoutMs);
-  const streamUrl = new URL(
-    buildStreamUrl({ ...endpoint, path: joinControllerPath(endpoint.path, input.path) }),
-  );
+  const streamUrl = exposedControllerUrl(endpoint, input.path);
   streamUrl.protocol = streamUrl.protocol === "wss:" ? "https:" : "http:";
   const body = input.body === undefined ? undefined : JSON.stringify(input.body);
   if (body !== undefined && Buffer.byteLength(body) > BROWSER_CONTROL_MAX_JSON_BYTES) {
@@ -1595,6 +1836,220 @@ async function requestExposedController(
     throw new BrowserControlTransportError(`browser controller returned HTTP ${response.status}`);
   }
   return parseEnvelope(responseText, response.status);
+}
+
+async function requestExposedControllerBytes(
+  endpoint: ExposedPortEndpoint,
+  input: {
+    method: "GET";
+    path: string;
+    token: string;
+    expectedFrameEvidence: ExpectedComputerFrameEvidence;
+    timeoutMs?: number;
+  },
+  defaultTimeoutMs: number,
+): Promise<ComputerControlFrame> {
+  const token = requireToken(input.token, "browser controller token");
+  const timeoutMs = boundedTimeout(input.timeoutMs ?? defaultTimeoutMs);
+  const streamUrl = exposedControllerUrl(endpoint, input.path);
+  streamUrl.protocol = streamUrl.protocol === "wss:" ? "https:" : "http:";
+  const response = await fetch(streamUrl, {
+    method: input.method,
+    headers: {
+      ...exposedPortHeaders(endpoint),
+      authorization: `Bearer ${token}`,
+      accept: "image/jpeg, image/png",
+    },
+    redirect: "manual",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    const responseText = await response.text();
+    if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
+      throw new BrowserControlProtocolError("browser controller response is too large");
+    }
+    parseEnvelope(responseText, response.status);
+    throw new BrowserControlProtocolError("browser controller image response is invalid");
+  }
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > COMPUTER_SCREENSHOT_MAX_BYTES) {
+    await response.body?.cancel("computer frame exceeds its byte bound").catch(() => undefined);
+    throw new RangeError("computer frame exceeds its byte bound");
+  }
+  const data = new Uint8Array(await response.arrayBuffer());
+  return computerControlFrame(data, response.headers, input.expectedFrameEvidence);
+}
+
+function computerControlFrame(
+  data: Uint8Array,
+  headers: { get(name: string): string | null | undefined },
+  expected: ExpectedComputerFrameEvidence,
+): ComputerControlFrame {
+  if (data.byteLength < 1 || data.byteLength > COMPUTER_SCREENSHOT_MAX_BYTES) {
+    throw new RangeError("computer frame exceeds its byte bound");
+  }
+  const get = (name: string): string | null => headers.get(name.toLowerCase()) ?? null;
+  const mediaType = get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType !== "image/jpeg" && mediaType !== "image/png") {
+    throw new BrowserControlProtocolError("computer frame media type is invalid");
+  }
+  const metadataHeader = get("x-opengeni-computer-frame");
+  if (
+    !metadataHeader ||
+    metadataHeader.length > 32 * 1024 ||
+    !/^[A-Za-z0-9_-]+$/u.test(metadataHeader)
+  ) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  return validateComputerControlFrameEvidence({ data, mediaType, metadataHeader }, expected);
+}
+
+export function validateComputerControlFrameEvidence(
+  frame: Pick<ComputerControlFrame, "data" | "mediaType" | "metadataHeader">,
+  expected: ExpectedComputerFrameEvidence,
+): ComputerControlFrame {
+  const metadata = decodeComputerControlFrameMetadataHeader(frame.metadataHeader);
+  if (metadata.computerSessionId !== expected.computerSessionId) {
+    throw new ComputerFrameEvidenceMismatchError("frame_session_mismatch");
+  }
+  if (metadata.targetId !== expected.targetId) {
+    throw new ComputerFrameEvidenceMismatchError("frame_target_mismatch");
+  }
+  if (metadata.controllerGeneration !== expected.controllerGeneration) {
+    throw new ComputerFrameEvidenceMismatchError("frame_controller_mismatch");
+  }
+  if (metadata.mediaType !== frame.mediaType) {
+    throw new ComputerFrameEvidenceMismatchError("frame_media_mismatch");
+  }
+  const digest = createHash("sha256").update(frame.data).digest("hex");
+  if (metadata.sha256 !== digest) {
+    throw new ComputerFrameEvidenceMismatchError("frame_digest_mismatch");
+  }
+  return { ...frame, metadata };
+}
+
+export function decodeComputerControlFrameMetadataHeader(
+  value: string,
+): ComputerControlFrameMetadata {
+  if (!value || value.length > 32 * 1024 || !/^[A-Za-z0-9_-]+$/u.test(value)) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  } catch {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  if (!isRecord(decoded)) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  const allowed = new Set([
+    "frameId",
+    "computerSessionId",
+    "controllerGeneration",
+    "targetId",
+    "targetGeneration",
+    "sequence",
+    "mediaType",
+    "width",
+    "height",
+    "capturedAt",
+    "sha256",
+  ]);
+  if (Object.keys(decoded).some((key) => !allowed.has(key))) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  for (const key of [
+    "frameId",
+    "computerSessionId",
+    "controllerGeneration",
+    "targetId",
+    "targetGeneration",
+    "mediaType",
+    "capturedAt",
+  ] as const) {
+    const item = decoded[key];
+    const maxBytes = key === "targetId" ? 512 : key === "capturedAt" ? 128 : 256;
+    if (typeof item !== "string" || item.length < 1 || Buffer.byteLength(item) > maxBytes) {
+      throw new BrowserControlProtocolError("computer frame metadata is invalid");
+    }
+  }
+  if (typeof decoded.sha256 !== "string" || !SHA256_PATTERN.test(decoded.sha256)) {
+    throw new ComputerFrameEvidenceMismatchError("frame_digest_mismatch");
+  }
+  if (
+    !Number.isSafeInteger(decoded.sequence) ||
+    Number(decoded.sequence) < 0 ||
+    !boundedComputerFrameDimension(decoded.width, decoded.height)
+  ) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  if (decoded.mediaType !== "image/jpeg" && decoded.mediaType !== "image/png") {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  if (!isUuidString(decoded.computerSessionId)) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  const controllerGeneration = decoded.controllerGeneration;
+  if (
+    typeof controllerGeneration !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(controllerGeneration)
+  ) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  const capturedAt = decoded.capturedAt;
+  if (typeof capturedAt !== "string" || !Number.isFinite(new Date(capturedAt).valueOf())) {
+    throw new BrowserControlProtocolError("computer frame metadata is invalid");
+  }
+  return decoded as ComputerControlFrameMetadata;
+}
+
+function boundedComputerFrameDimension(width: unknown, height: unknown): boolean {
+  return (
+    Number.isSafeInteger(width) &&
+    Number.isSafeInteger(height) &&
+    Number(width) > 0 &&
+    Number(height) > 0 &&
+    Number(width) <= 32_768 &&
+    Number(height) <= 32_768 &&
+    Number(width) * Number(height) <= 100_000_000
+  );
+}
+
+function isUuidString(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
+  );
+}
+
+function exposedControllerUrl(endpoint: ExposedPortEndpoint, requestPath: string): URL {
+  const separator = requestPath.indexOf("?");
+  const path = separator === -1 ? requestPath : requestPath.slice(0, separator);
+  const requestQuery = separator === -1 ? "" : requestPath.slice(separator + 1);
+  const url = new URL(
+    buildStreamUrl({ ...endpoint, path: joinControllerPath(endpoint.path, path) }),
+  );
+  for (const [name, value] of new URLSearchParams(requestQuery)) {
+    url.searchParams.append(name, value);
+  }
+  return url;
+}
+
+function parseCurlResponseHeaders(value: string): Map<string, string> {
+  const headers = new Map<string, string>();
+  for (const line of value.split(/\r?\n/u)) {
+    if (/^HTTP\//u.test(line)) {
+      headers.clear();
+      continue;
+    }
+    const separator = line.indexOf(":");
+    if (separator <= 0) continue;
+    const name = line.slice(0, separator).trim().toLowerCase();
+    const headerValue = line.slice(separator + 1).trim();
+    if (name && headerValue) headers.set(name, headerValue);
+  }
+  return headers;
 }
 
 function looksLikeBrowserControlEnvelope(body: string): boolean {
@@ -2138,13 +2593,13 @@ async function writePrivateFile(
   const started = session.exec
     ? await session.exec({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: 250,
         maxOutputTokens: 2_000,
       })
     : await session.execCommand!({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: 250,
         maxOutputTokens: 2_000,
       });
@@ -2188,13 +2643,13 @@ async function runChecked(
   const result = session.exec
     ? await session.exec({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: bounded,
         maxOutputTokens: 2_000,
       })
     : await session.execCommand!({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: bounded,
         maxOutputTokens: 2_000,
       });
@@ -2213,14 +2668,14 @@ async function runBestEffort(
     if (session.exec) {
       await session.exec({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: 15_000,
         maxOutputTokens: 100,
       });
     } else if (session.execCommand) {
       await session.execCommand({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: 15_000,
         maxOutputTokens: 100,
       });
@@ -2302,6 +2757,63 @@ async function readText(
   return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
 }
 
+async function readBytes(
+  session: BrowserControlPlacementSession,
+  path: string,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<Uint8Array> {
+  const privatePath = absolutePrivatePath(path, "browser private binary response path");
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > COMPUTER_SCREENSHOT_MAX_BYTES) {
+    throw new RangeError("browser private binary response limit is invalid");
+  }
+  const sizeMarker = `OPENGENI_BROWSER_PRIVATE_SIZE_${randomUUID()}`;
+  const sizeOutput = await runPrivateReadCommand(
+    session,
+    [
+      "LC_ALL=C;",
+      `size=$(wc -c < ${shellQuote(privatePath)}) || exit 66;`,
+      `printf '%s%s%s' ${shellQuote(sizeMarker)} "$size" ${shellQuote(sizeMarker)}`,
+    ].join(" "),
+    1_024,
+    timeoutMs,
+  );
+  const size = parseUnsignedInteger(
+    extractMarkedValue(sizeOutput, sizeMarker),
+    "browser private binary response size",
+  );
+  if (size < 1 || size > maxBytes) {
+    throw new RangeError("computer frame exceeds its byte bound");
+  }
+  const chunks: Buffer[] = [];
+  for (let offset = 0; offset < size; offset += PRIVATE_READ_CHUNK_BYTES) {
+    const chunkIndex = Math.floor(offset / PRIVATE_READ_CHUNK_BYTES);
+    const expectedBytes = Math.min(PRIVATE_READ_CHUNK_BYTES, size - offset);
+    const marker = `OPENGENI_BROWSER_PRIVATE_CHUNK_${randomUUID()}`;
+    const output = await runPrivateReadCommand(
+      session,
+      [
+        "LC_ALL=C;",
+        `printf '%s' ${shellQuote(marker)};`,
+        `dd if=${shellQuote(privatePath)} bs=${PRIVATE_READ_CHUNK_BYTES} skip=${chunkIndex} count=1 2>/dev/null | base64 | tr -d '\\r\\n';`,
+        `printf '%s' ${shellQuote(marker)}`,
+      ].join(" "),
+      Math.ceil((expectedBytes * 4) / 3) + 4_096,
+      timeoutMs,
+    );
+    const encoded = extractMarkedValue(output, marker);
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encoded)) {
+      throw new BrowserControlTransportError("browser private binary response encoding is invalid");
+    }
+    const decoded = Buffer.from(encoded, "base64");
+    if (decoded.byteLength !== expectedBytes) {
+      throw new BrowserControlTransportError("browser private binary response changed during read");
+    }
+    chunks.push(decoded);
+  }
+  return Uint8Array.from(Buffer.concat(chunks));
+}
+
 async function runPrivateReadCommand(
   session: BrowserControlPlacementSession,
   command: string,
@@ -2312,13 +2824,13 @@ async function runPrivateReadCommand(
   const result = session.exec
     ? await session.exec({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: bounded,
         maxOutputTokens,
       })
     : await session.execCommand!({
         cmd: command,
-        workdir: PLACEMENT_CONTROLLER_WORKDIR,
+        workdir: placementControllerWorkdir(session),
         yieldTimeMs: bounded,
         maxOutputTokens,
       });

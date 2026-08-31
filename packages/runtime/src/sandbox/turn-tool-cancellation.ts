@@ -569,12 +569,41 @@ function retainedProcessSession(
 
 /**
  * The model-facing rendering for a fault raised on a direct (non-SDK-tool)
- * retained-process path. Mirrors the Agents SDK's default tool `errorFunction`
- * byte-for-byte so `write_stdin` to a retained PTY reports a fenced/failed
- * admission exactly like `exec_command` on the same lease: as the tool's
- * string result, keeping the run alive instead of failing the turn.
+ * retained-process path. A durable terminal-process fence is not a retryable
+ * tool failure: replay its already-known exit/loss result without another
+ * provider call. Every other fault mirrors the Agents SDK's default tool
+ * `errorFunction` byte-for-byte so `write_stdin` to a retained PTY reports a
+ * fenced/failed admission exactly like `exec_command` on the same lease: as the
+ * tool's string result, keeping the run alive instead of failing the turn.
  */
-export function renderDirectToolFault(error: unknown): string {
+export function renderDirectToolFault(error: unknown, retainedProcessSessionId?: number): string {
+  try {
+    const terminal = error as {
+      name?: unknown;
+      code?: unknown;
+      state?: unknown;
+      exitCode?: unknown;
+    };
+    if (
+      retainedProcessSessionId !== undefined &&
+      Number.isSafeInteger(retainedProcessSessionId) &&
+      terminal.name === "SandboxRetainedProcessTerminalError" &&
+      terminal.code === "process_fenced"
+    ) {
+      if (
+        terminal.state === "exited" &&
+        typeof terminal.exitCode === "number" &&
+        Number.isSafeInteger(terminal.exitCode)
+      ) {
+        return `Process exited with code ${terminal.exitCode}\n\nOutput:\n`;
+      }
+      if (terminal.state === "lost" || terminal.state === "exited") {
+        return `write_stdin failed: session not found: ${retainedProcessSessionId}`;
+      }
+    }
+  } catch {
+    // A hostile error Proxy must not replace the original safe fault renderer.
+  }
   const details = error instanceof Error ? error.toString() : String(error);
   return `An error occurred while running the tool. Please try again. Error: ${details}`;
 }
@@ -1155,7 +1184,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     : {}),
                 });
               } catch (error) {
-                return renderDirectToolFault(error);
+                return renderDirectToolFault(error, sessionId);
               }
             } else {
               output = await tool.invoke(runContext, cappedInput, details);

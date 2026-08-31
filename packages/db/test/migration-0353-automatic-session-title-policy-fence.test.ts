@@ -944,6 +944,10 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // today's evaluator strict for every table that existed at that boundary,
     // while explicitly removing tables introduced by later migrations.
     const post0353RuntimeTables = new Set([
+      "company_profile_agent_automatic_activation_receipts",
+      "organization_company_profile_agent_policies",
+      "organization_company_profile_agent_policy_events",
+      "organization_codex_rotation_settings",
       "organization_recovery_approvals",
       "organization_recovery_command_receipts",
       "organization_recovery_custodian_acceptances",
@@ -957,21 +961,30 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "pr_review_managed_github_authority_nonces",
       "pr_review_managed_github_routes",
       "remember_knowledge_memory_materializations",
+      "session_event_cursors",
       "session_work_claim_revisions",
       "session_work_claim_write_capabilities",
       "session_work_claims",
+      "workspace_codex_subscription_preferences",
     ]);
     // The current runtime evaluator intentionally requires every capability in
     // today's schema. A database frozen immediately after 0353 predates the
-    // 0361 Memory materialization table/function, so preserve those exact,
-    // expected boundary gaps while continuing to reject every other posture
-    // violation in this rolling-compatibility test.
+    // 0361 Memory materialization table/function and the 0380 company-profile
+    // autonomy policy tables/functions. Preserve those exact expected boundary
+    // gaps while continuing to reject every other posture violation in this
+    // rolling-compatibility test.
     const expectedPost0353EvaluatorGaps = [
+      "target-schema runtime capability propose_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, text) authority tables are missing: company_profile_agent_automatic_activation_receipts, organization_company_profile_agent_policies, organization_company_profile_agent_policy_events",
+      "target-schema runtime capability propose_company_profile_for_attempt_v2(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, text, text, text) is missing or ambiguous",
+      "target-schema runtime capability confirm_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: company_profile_agent_automatic_activation_receipts, organization_company_profile_agent_policies, organization_company_profile_agent_policy_events",
+      "target-schema runtime capability get_company_profile_agent_policy(uuid, uuid, text) is missing or ambiguous",
+      "target-schema runtime capability update_company_profile_agent_policy(uuid, uuid, text, text, bigint, uuid) is missing or ambiguous",
       "target-schema runtime capability activate_governed_learning_decision(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
       "target-schema runtime capability activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
       "target-schema runtime capability confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
       "target-schema runtime capability materialize_remember_knowledge_memory(uuid, uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability undo_governed_learning_activation(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability list_organization_workspace_ids(uuid) is missing or ambiguous",
     ];
     const sessionSetTables = new Set([
       "managed_auth_actor_mutation_leases",
@@ -1007,6 +1020,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     const post0353CapabilityRoutines = new Set([
       ...sessionSetRoutines,
       "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
+      "resolve_workspace_codex_subscription_source(uuid, uuid)",
     ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(

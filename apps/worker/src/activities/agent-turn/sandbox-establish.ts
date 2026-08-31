@@ -43,6 +43,7 @@ import {
   makeMachineOpObserver,
   recordSandboxLogicalProvision,
   recordSandboxProvisionAttempt,
+  recordSandboxSharedPreparation,
   recordTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
@@ -69,6 +70,7 @@ import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
 import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
+import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 
 export type SandboxRouteDeps = {
   input: RunAgentTurnInput;
@@ -896,7 +898,7 @@ export async function bindLazySandboxProvisioner(
         // recursion that HANGS the turn — caught live on staging 2026-07-08). The SDK
         // already holds the proxy directly (injected as lazyOwnedSandbox.session), so it
         // gets per-op routing; the worker-side handle (resolvedSandbox: release,
-        // heartbeat, computer-use recording) wants the real box, unproxied.
+        // heartbeat, workspace capture) wants the real box, unproxied.
         return provisioned;
       },
       {
@@ -1020,6 +1022,24 @@ export async function bindLazySandboxProvisioner(
                           eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
                             eventing.toolCancellationFenceRef.current,
                           ),
+                      }
+                    : {}),
+                  ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
+                    ? {
+                        coordinateSharedRigSetup: createSharedRigSetupCoordinator({
+                          db,
+                          accountId: input.accountId,
+                          workspaceId: input.workspaceId,
+                          sandboxGroupId: sandboxState.sandboxGroupId,
+                          attemptId: input.attemptId,
+                          holderId: sandboxState.sandboxHolderId,
+                          sandbox: provisioned,
+                          ...(runtimeCancellationSignal
+                            ? { signal: runtimeCancellationSignal }
+                            : {}),
+                          observe: (measurement) =>
+                            recordSandboxSharedPreparation(observability, measurement),
+                        }),
                       }
                     : {}),
                 },

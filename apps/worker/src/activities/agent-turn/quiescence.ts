@@ -79,6 +79,32 @@ export function assertSessionAttemptQuiescenceRecoveryDurable(input: {
 
 export const QUIESCENCE_PROOF_SIGNAL_INITIAL_RETRY_MS = 250;
 export const QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS = 5_000;
+export const TURN_QUIESCENCE_WATCHDOG_MS = 5 * 60_000;
+
+/** A fenced activity must never heartbeat forever while its physical writer
+ * drain is stuck. The last-resort worker exit stops every in-process writer;
+ * Kubernetes replaces the pod and the workflow's heartbeat-lease reconciler
+ * then commits the exact quiescence receipt. */
+export function armTurnQuiescenceWatchdog(input: {
+  enabled: boolean;
+  timeoutMs?: number;
+  onTimeout?: () => void;
+  terminateWorker: () => void;
+}): () => void {
+  if (!input.enabled) return () => undefined;
+  let armed = true;
+  const timer = setTimeout(() => {
+    if (!armed) return;
+    input.onTimeout?.();
+    input.terminateWorker();
+  }, input.timeoutMs ?? TURN_QUIESCENCE_WATCHDOG_MS);
+  timer.unref?.();
+  return () => {
+    if (!armed) return;
+    armed = false;
+    clearTimeout(timer);
+  };
+}
 
 /** Persist the authoritative receipt or durably hand the exact physical proof
  * to Temporal. This retries signal delivery, not DB eligibility or workflow

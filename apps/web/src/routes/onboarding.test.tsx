@@ -29,18 +29,19 @@ const previewSetup = mock(
   }),
 );
 
+class TestAuthApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+    readonly field: string | null,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 mock.module("@/api", () => ({
-  AuthApiError: class AuthApiError extends Error {
-    constructor(
-      public readonly status: number,
-      public readonly code: string | null,
-      public readonly field: string | null,
-      message: string,
-    ) {
-      super(message);
-      this.name = "AuthApiError";
-    }
-  },
+  AuthApiError: TestAuthApiError,
   apiBaseUrl: "",
   completeOrganizationUserSetup: completeSetup,
   managedActorMutationBusySnapshot: () => false,
@@ -124,7 +125,7 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("broker registration can expose signup and resend without a direct sign-in form", async () => {
+  test("broker registration reveals resend only after signup succeeds", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -140,12 +141,110 @@ describe("organization onboarding UI", () => {
         ),
       );
       expect(container.textContent).toContain("Create account");
-      expect(container.textContent).toContain("Resend verification email");
+      expect(container.textContent).not.toContain("Resend verification email");
       expect(
         Array.from(container.querySelectorAll("button")).some(
           (button) => button.textContent?.trim() === "Sign in",
         ),
       ).toBe(false);
+      await enter(container.querySelector("#managed-auth-name")!, "Ada Lovelace");
+      await enter(container.querySelector("#managed-auth-email")!, "ada@example.test");
+      await enter(container.querySelector("#managed-auth-password")!, "password1234");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.textContent).toContain("Resend verification email");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("submit and resend keep identity controls fixed until the request settles", async () => {
+    let resolveSubmit!: () => void;
+    const submitted = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSubmit = resolve;
+        }),
+    );
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<ManagedAuthPanel initialMode="signup" onSubmit={submitted} />),
+      );
+      await enter(container.querySelector("#managed-auth-name")!, "Ada Lovelace");
+      await enter(container.querySelector("#managed-auth-email")!, "ada@example.test");
+      await enter(container.querySelector("#managed-auth-password")!, "password1234");
+
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      expect(container.querySelector<HTMLInputElement>("#managed-auth-email")!.disabled).toBeTrue();
+      expect(
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+          (button) => button.textContent?.trim() === "Sign in",
+        )!.disabled,
+      ).toBeTrue();
+
+      await act(async () => resolveSubmit());
+      await flush();
+      expect(container.textContent).toContain("Resend verification email");
+
+      let resolveResend!: (value: { status: true }) => void;
+      resendVerification.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveResend = resolve;
+          }),
+      );
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Resend verification email")!
+          .click(),
+      );
+      expect(container.querySelector<HTMLInputElement>("#managed-auth-email")!.disabled).toBeTrue();
+      expect(
+        container.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled,
+      ).toBeTrue();
+
+      await act(async () => resolveResend({ status: true }));
+      await flush();
+      expect(
+        container.querySelector<HTMLInputElement>("#managed-auth-email")!.disabled,
+      ).toBeFalse();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("ordinary sign-in hides resend until the account is known to be unverified", async () => {
+    const submitted = mock(async () => {
+      throw new TestAuthApiError(403, "EMAIL_NOT_VERIFIED", null, "Email not verified");
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<ManagedAuthPanel onSubmit={submitted} />));
+      expect(container.textContent).not.toContain("Resend verification email");
+      await enter(container.querySelector("#managed-auth-email")!, "ada@example.test");
+      await enter(container.querySelector("#managed-auth-password")!, "password1234");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.textContent).toContain("Verify your email before signing in.");
+      expect(container.textContent).toContain("Resend verification email");
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Resend verification email")!
+          .click(),
+      );
+      await flush();
+      expect(resendVerification).toHaveBeenCalledWith({ email: "ada@example.test" });
+
+      await enter(container.querySelector("#managed-auth-email")!, "other@example.test");
+      expect(container.textContent).not.toContain("Resend verification email");
     } finally {
       await act(async () => root.unmount());
       container.remove();

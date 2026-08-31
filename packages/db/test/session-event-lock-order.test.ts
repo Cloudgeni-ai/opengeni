@@ -4,6 +4,7 @@ import {
   SessionAuthorizationDeniedError,
   steerAgentSession,
 } from "@opengeni/core";
+import { SESSION_EVENT_RAW_DELTA_TYPES } from "@opengeni/contracts";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
   acquireSharedTestDatabase,
@@ -45,6 +46,7 @@ import {
 } from "../src/index";
 
 const BARRIER_CLASS = 630_063;
+const RAW_SESSION_EVENT_TYPES = new Set<string>(SESSION_EVENT_RAW_DELTA_TYPES);
 const externalAdminUrl = process.env.OPENGENI_EVENT_ORDER_POSTGRES_ADMIN_URL?.trim();
 const externalAppUrl = process.env.OPENGENI_EVENT_ORDER_POSTGRES_APP_URL?.trim();
 
@@ -71,6 +73,7 @@ let shared: SharedTestDatabase;
 let admin: postgres.Sql;
 let monitor: postgres.Sql;
 let barrier: postgres.Sql;
+let readModelBlocker: postgres.Sql;
 let appClient: DbClient;
 let db: Database;
 let nextBarrierId = 1;
@@ -719,10 +722,22 @@ async function assertCommittedSequence(
   expect(rows).toHaveLength(expectedCount);
   expect(new Set(sequences).size).toBe(sequences.length);
   expect(sequences).toEqual(Array.from({ length: expectedCount }, (_, index) => index + 1));
-  const [session] = await admin<{ last_sequence: number }[]>`
-    select last_sequence from sessions where id = ${fixture.sessionId}
+  const [sequenceState] = await admin<Array<{ cursor_sequence: number; session_sequence: number }>>`
+    select cursor.last_sequence as cursor_sequence,
+      session.last_sequence as session_sequence
+    from sessions session
+    join session_event_cursors cursor
+      on cursor.workspace_id = session.workspace_id
+      and cursor.session_id = session.id
+    where session.id = ${fixture.sessionId}
   `;
-  expect(session?.last_sequence).toBe(sequences.at(-1) ?? 0);
+  const committedSequence = sequences.at(-1) ?? 0;
+  expect(sequenceState?.cursor_sequence).toBe(committedSequence);
+  if (rows.at(-1) && RAW_SESSION_EVENT_TYPES.has(rows.at(-1)!.type)) {
+    expect(sequenceState?.session_sequence).toBeLessThanOrEqual(committedSequence);
+  } else {
+    expect(sequenceState?.session_sequence).toBe(committedSequence);
+  }
   return rows;
 }
 
@@ -820,6 +835,7 @@ beforeAll(async () => {
   admin = shared.admin;
   monitor = postgres(shared.adminUrl, { max: 1 });
   barrier = postgres(shared.adminUrl, { max: 1 });
+  readModelBlocker = postgres(shared.adminUrl, { max: 1 });
   appClient = createDb(shared.appUrl, { max: 20 });
   db = appClient.db;
 
@@ -964,6 +980,7 @@ afterAll(async () => {
   await appClient?.close().catch(() => undefined);
   await monitor?.end().catch(() => undefined);
   await barrier?.end().catch(() => undefined);
+  await readModelBlocker?.end().catch(() => undefined);
   await shared?.release();
 }, 60_000);
 
@@ -1003,12 +1020,13 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public'
         and c.relname in (
-          'workspace_inference_controls', 'sessions',
+          'workspace_inference_controls', 'sessions', 'session_event_cursors',
           'session_turns', 'session_turn_attempts', 'session_events'
         )
       order by c.relname`;
     expect(Array.from(lockedTables)).toEqual(
       [
+        "session_event_cursors",
         "session_events",
         "session_turn_attempts",
         "session_turns",
@@ -1535,6 +1553,41 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       await held;
     }
     await assertCommittedSequence(first, 1);
+  });
+
+  test("does not read background-command settlement projection during attempt append", async () => {
+    const fixture = await seedRunningSession();
+    let release!: () => void;
+    let locked!: () => void;
+    let lockFailed!: (reason?: unknown) => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const acquired = new Promise<void>((resolve, reject) => {
+      locked = resolve;
+      lockFailed = reject;
+    });
+    const blocker = readModelBlocker.begin(async (tx) => {
+      await tx`lock table session_background_commands in access exclusive mode`;
+      locked();
+      await hold;
+    });
+    void blocker.catch(lockFailed);
+    await within(acquired, "the background-command table lock to be acquired", 2_000);
+    try {
+      const result = await within(
+        activityWriter(fixture, "agent.message.delta"),
+        "the attempt append to ignore background-command settlement projection",
+        2_000,
+      );
+      expect(result).toMatchObject({ accepted: true });
+      expect(await assertCommittedSequence(fixture, 1)).toMatchObject([
+        { sequence: 1, type: "agent.message.delta" },
+      ]);
+    } finally {
+      release();
+      await blocker;
+    }
   });
 
   test("locks actor and target rows before command receipt foreign keys can form an upgrade cycle", async () => {

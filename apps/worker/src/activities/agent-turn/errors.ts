@@ -3,6 +3,7 @@ import {
   ApprovalRunStateLimitExceededError,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
+  SandboxLeaseTransitionError,
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
@@ -10,6 +11,7 @@ import {
   EmptyCompactionSummaryError,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
+  isModalTaskExecStartDnsResolutionError,
   RoutingWorkspaceRootChangedError,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
@@ -104,6 +106,7 @@ export function providerRecoveryResult(input: {
       ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
+          input.failureCode === "sandbox_command_start_unavailable" ||
           input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable" ||
           input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
@@ -365,6 +368,66 @@ export function postClaimDatabaseRecoveryFailure(input: {
  */
 export function isWorkerShutdownCancellation(error: unknown): boolean {
   return error instanceof CancelledFailure && error.message === "WORKER_SHUTDOWN";
+}
+
+export type SandboxLifecycleTransitionDiagnostic = {
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  reason: "capture_in_progress" | "rotation_in_progress" | "provider_recovery_in_progress";
+};
+
+/**
+ * Recover a typed sandbox lifecycle transition through the structural wrappers
+ * used by parallel Agents SDK function-tool execution. Never infer transition
+ * truth from message text: only the original class or an exact, fully-shaped
+ * cross-package error object is accepted.
+ */
+export function sandboxLifecycleTransitionDiagnostic(
+  error: unknown,
+): SandboxLifecycleTransitionDiagnostic | null {
+  const pending: unknown[] = [error];
+  const seen = new WeakSet<object>();
+  let inspected = 0;
+
+  while (pending.length > 0 && inspected < 64) {
+    const current = pending.shift();
+    inspected += 1;
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+
+    try {
+      const record = current as Record<string, unknown>;
+      const reason = record.reason;
+      if (
+        (current instanceof SandboxLeaseTransitionError ||
+          record.name === "SandboxLeaseTransitionError") &&
+        typeof record.sandboxGroupId === "string" &&
+        record.sandboxGroupId.length > 0 &&
+        typeof record.leaseEpoch === "number" &&
+        Number.isSafeInteger(record.leaseEpoch) &&
+        record.leaseEpoch >= 0 &&
+        (reason === "capture_in_progress" ||
+          reason === "rotation_in_progress" ||
+          reason === "provider_recovery_in_progress")
+      ) {
+        return {
+          sandboxGroupId: record.sandboxGroupId,
+          leaseEpoch: record.leaseEpoch,
+          reason,
+        };
+      }
+
+      for (const key of ["cause", "error"] as const) {
+        const nested = record[key];
+        if (nested && typeof nested === "object") pending.push(nested);
+      }
+      if (Array.isArray(record.errors)) pending.push(...record.errors.slice(0, 32));
+    } catch {
+      // A hostile proxy or getter is not durable lifecycle evidence.
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -809,6 +872,14 @@ export function agentRunFailurePayload(
       error:
         "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
       code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
+      retryable: true,
+    };
+  }
+  if (isModalTaskExecStartDnsResolutionError(error)) {
+    return {
+      error:
+        "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
+      code: "sandbox_command_start_unavailable",
       retryable: true,
     };
   }

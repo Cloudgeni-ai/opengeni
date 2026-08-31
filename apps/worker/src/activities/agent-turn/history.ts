@@ -169,7 +169,11 @@ export function pendingToolCallFromSdkEvent(event: unknown): {
 
 /** Tools whose intentional visual result must survive inline-media sanitization. */
 export function toolCallProducesRetainableSessionImage(name: string | null): boolean {
-  return name === "computer_screenshot" || name === "view_image";
+  return (
+    name === "computer_screenshot" ||
+    name === "view_image" ||
+    name === "interaction__computer_observe"
+  );
 }
 
 export function completedToolCallFromSdkEvent(event: unknown): {

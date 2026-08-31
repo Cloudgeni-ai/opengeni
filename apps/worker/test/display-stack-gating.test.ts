@@ -5,8 +5,8 @@ import { join } from "node:path";
 // Regression for the production capacity incident of 2026-07-15: every
 // filesystem turn eagerly started Xvfb/XFCE/ffmpeg, occupying all turn-worker
 // slots for minutes and creating a large Modal burst. The turn resume path is
-// now strictly compute-only. Viewer attach and actual computer-use own desktop
-// initialization in their respective lazy paths.
+// now strictly compute-only. Viewer attach and managed ComputerSession operations
+// own desktop initialization in their respective lazy paths.
 describe("turn sandbox resume is desktop-free", () => {
   const resumeSource = readFileSync(
     join(import.meta.dir, "..", "src", "sandbox-resume.ts"),
@@ -24,14 +24,9 @@ describe("turn sandbox resume is desktop-free", () => {
     expect(resumeSource).toContain("dataPlaneUrl: null");
   });
 
-  test("recording starts only from the actual computer-use callback", () => {
-    expect(agentTurnSource).toContain("onComputerUseReady: async () =>");
-    const eagerCalls = agentTurnSource.match(/await maybeStartOnTurnRecording\(/g) ?? [];
-    expect(eagerCalls).toHaveLength(1);
-    const callback = agentTurnSource.slice(agentTurnSource.indexOf("onComputerUseReady: async"));
-    const observation = callback.indexOf("didComputerUse = true");
-    const recordingStart = callback.indexOf("await maybeStartOnTurnRecording(");
-    expect(observation).toBeGreaterThan(0);
-    expect(recordingStart).toBeGreaterThan(observation);
+  test("agent turns do not expose the retired model-bound computer or on-turn recording seams", () => {
+    expect(agentTurnSource).not.toContain("onComputerUseReady");
+    expect(agentTurnSource).not.toContain("computerToolMode");
+    expect(agentTurnSource).not.toContain("maybeStartOnTurnRecording");
   });
 });

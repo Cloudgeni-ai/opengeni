@@ -839,6 +839,36 @@ roles, enumerate unrelated workspace access, or administer Personal
 workspaces. The separate Slack access-request queue keeps its existing
 workspace-admin lifecycle.
 
+### External product integration contract
+
+An external product integrates through the organization boundary documented in
+[`product-integration.md`](product-integration.md): its backend holds an
+**organization API key**, maps each product tenant to one OpenGeni
+**organization workspace**, and then uses ordinary workspace-scoped operational
+routes for sessions, files, events, and tools.
+
+“Organization workspace” is the customer-facing term. Its exact wire kind is
+`"shared"`; the server derives that kind from canonical organization tenancy
+rather than a name, slug, or client assertion. Product provisioning uses
+`PUT /v1/workspaces/external` / the SDK's `ensureWorkspace` with a stable external
+mapping identity, and persists the returned opaque workspace id. Retrying that
+same mapping must resolve the same workspace rather than creating a second
+tenant boundary.
+
+Personal workspaces are excluded. They belong to their owning managed human,
+are represented by wire `kind: "personal"`, and are neither discoverable nor
+provisionable through the organization-key integration flow. An external
+backend must not fall back to `/v1/access/me`'s personal/default workspace when
+a tenant mapping is absent. Organization API keys receive no Personal-workspace
+authority through organization administration, key scope, or workspace ensure.
+
+The external backend also remains the source of truth for product Skills. It
+stores and versions them outside OpenGeni and passes the selected definitions
+inline in `CreateSessionRequest.skills` for each product-created session. There
+is no organization-wide Skill registry or Skill inheritance in this product
+integration contract, and workspace tenancy must not be widened by treating an
+installed or previously selected Skill as ambient organization state.
+
 ### Recovery custody and permanent workspace ownership
 
 The complete security, notification, rollout, self-hosting, and unsupported

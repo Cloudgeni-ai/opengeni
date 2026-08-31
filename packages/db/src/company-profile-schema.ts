@@ -1,10 +1,12 @@
 import { sql } from "drizzle-orm";
 import type {
   CompanyProfileAgentHumanInputPrompt,
+  CompanyProfileAgentPolicyMode,
   CompanyProfileSnapshotEntry,
 } from "@opengeni/contracts";
 import {
   bigint,
+  boolean,
   check,
   index,
   integer,
@@ -111,6 +113,57 @@ export const companyProfileActivationEvents = pgTable(
   }),
 );
 
+export const organizationCompanyProfileAgentPolicies = pgTable(
+  "organization_company_profile_agent_policies",
+  {
+    accountId: uuid("account_id").primaryKey(),
+    mode: text("mode").$type<CompanyProfileAgentPolicyMode>().notNull().default("suggest"),
+    version: bigint("version", { mode: "number" }).notNull().default(0),
+    updatedByMembershipId: uuid("updated_by_membership_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    mode: check(
+      "organization_company_profile_agent_policies_mode_check",
+      sql`${table.mode} in ('off', 'suggest', 'automatic')`,
+    ),
+    version: check(
+      "organization_company_profile_agent_policies_version_check",
+      sql`${table.version} >= 0`,
+    ),
+  }),
+);
+
+export const organizationCompanyProfileAgentPolicyEvents = pgTable(
+  "organization_company_profile_agent_policy_events",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    actorMembershipId: uuid("actor_membership_id").notNull(),
+    requestedMode: text("requested_mode").$type<CompanyProfileAgentPolicyMode>().notNull(),
+    expectedVersion: bigint("expected_version", { mode: "number" }).notNull(),
+    resultMode: text("result_mode").$type<CompanyProfileAgentPolicyMode>().notNull(),
+    resultVersion: bigint("result_version", { mode: "number" }).notNull(),
+    resultUpdatedAt: timestamp("result_updated_at", { withTimezone: true }).notNull(),
+    changed: boolean("changed").notNull(),
+  },
+  (table) => ({
+    accountTimeline: index("organization_company_profile_agent_policy_events_account_idx").on(
+      table.accountId,
+      table.resultVersion,
+    ),
+    modes: check(
+      "organization_company_profile_agent_policy_events_mode_check",
+      sql`${table.requestedMode} in ('off', 'suggest', 'automatic')
+        and ${table.resultMode} in ('off', 'suggest', 'automatic')`,
+    ),
+    versions: check(
+      "organization_company_profile_agent_policy_events_version_check",
+      sql`${table.expectedVersion} >= 0 and ${table.resultVersion} > 0`,
+    ),
+  }),
+);
+
 export const companyProfileSnapshots = pgTable(
   "company_profile_snapshots",
   {
@@ -164,6 +217,8 @@ export const companyProfileAgentProposalReceipts = pgTable(
     revisionId: uuid("revision_id").notNull(),
     expectedCurrentRevisionId: uuid("expected_current_revision_id"),
     expectedActivationVersion: bigint("expected_activation_version", { mode: "number" }).notNull(),
+    policyMode: text("policy_mode").$type<CompanyProfileAgentPolicyMode>().notNull(),
+    policyVersion: bigint("policy_version", { mode: "number" }).notNull(),
     reason: text("reason").notNull(),
     humanInput: jsonb("human_input").$type<CompanyProfileAgentHumanInputPrompt>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -193,7 +248,9 @@ export const companyProfileAgentProposalReceipts = pgTable(
     ),
     generation: check(
       "company_profile_agent_proposals_generation_check",
-      sql`${table.executionGeneration} > 0 and ${table.expectedActivationVersion} >= 0`,
+      sql`${table.executionGeneration} > 0
+        and ${table.expectedActivationVersion} >= 0
+        and ${table.policyVersion} >= 0`,
     ),
     subject: check(
       "company_profile_agent_proposals_subject_check",
@@ -203,6 +260,10 @@ export const companyProfileAgentProposalReceipts = pgTable(
       "company_profile_agent_proposals_reason_check",
       sql`char_length(btrim(${table.reason})) between 1 and 4096
         and octet_length(convert_to(btrim(${table.reason}), 'UTF8')) <= 16384`,
+    ),
+    policyMode: check(
+      "company_profile_agent_proposals_policy_mode_check",
+      sql`${table.policyMode} in ('suggest', 'automatic')`,
     ),
     humanInputShape: check(
       "company_profile_agent_proposals_human_input_check",
@@ -258,6 +319,59 @@ export const companyProfileAgentConfirmationReceipts = pgTable(
     subject: check(
       "company_profile_agent_confirmations_subject_check",
       sql`octet_length(btrim(${table.approverSubjectId})) between 1 and 1024`,
+    ),
+  }),
+);
+
+export const companyProfileAgentAutomaticActivationReceipts = pgTable(
+  "company_profile_agent_automatic_activation_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    operationId: uuid("operation_id").notNull(),
+    inputHash: text("input_hash").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    activationAttemptId: uuid("activation_attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    proposalReceiptId: uuid("proposal_receipt_id").notNull(),
+    proposalRevisionId: uuid("proposal_revision_id").notNull(),
+    initiatingHumanSubjectId: text("initiating_human_subject_id").notNull(),
+    initiatingMembershipId: uuid("initiating_membership_id").notNull(),
+    policyVersion: bigint("policy_version", { mode: "number" }).notNull(),
+    activationEventId: uuid("activation_event_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountOperation: uniqueIndex(
+      "company_profile_agent_automatic_activations_account_operation_uq",
+    ).on(table.accountId, table.operationId),
+    proposal: uniqueIndex("company_profile_agent_automatic_activations_proposal_uq").on(
+      table.accountId,
+      table.proposalReceiptId,
+    ),
+    activationEvent: uniqueIndex("company_profile_agent_automatic_activations_event_uq").on(
+      table.accountId,
+      table.activationEventId,
+    ),
+    turn: index("company_profile_agent_automatic_activations_turn_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+      table.executionGeneration,
+    ),
+    hash: check(
+      "company_profile_agent_automatic_activations_input_hash_check",
+      sql`${table.inputHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    generation: check(
+      "company_profile_agent_automatic_activations_generation_check",
+      sql`${table.executionGeneration} > 0 and ${table.policyVersion} >= 0`,
+    ),
+    subject: check(
+      "company_profile_agent_automatic_activations_subject_check",
+      sql`octet_length(btrim(${table.initiatingHumanSubjectId})) between 1 and 1024`,
     ),
   }),
 );

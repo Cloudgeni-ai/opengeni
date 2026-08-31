@@ -47,6 +47,7 @@ describe("managed auth form", () => {
       fields: { email: "An account already exists for this email." },
       message: "Sign in with this email instead, or use a different email address.",
       switchTo: "signin",
+      canResendVerification: false,
     });
     expect(
       managedAuthFailure(
@@ -54,6 +55,15 @@ describe("managed auth form", () => {
         new AuthApiError(401, "INVALID_EMAIL_OR_PASSWORD", null, "Invalid email or password"),
       ).message,
     ).toBe("Email or password is incorrect.");
+    expect(
+      managedAuthFailure(
+        "signin",
+        new AuthApiError(403, "EMAIL_NOT_VERIFIED", null, "Email not verified"),
+      ),
+    ).toMatchObject({
+      message: "Verify your email before signing in.",
+      canResendVerification: true,
+    });
   });
 
   test("explains a signup that created an account without a browser session", () => {

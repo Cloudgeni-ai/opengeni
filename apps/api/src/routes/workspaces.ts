@@ -1,6 +1,8 @@
 import {
   AddWorkspaceMemberRequest,
   CreateWorkspaceRequest,
+  EnsureWorkspaceRequest,
+  EnsureWorkspaceResponse,
   ListWorkspaceMemberCandidatesResponse,
   ListWorkspaceMembersResponse,
   SetWorkspaceDefaultRigRequest,
@@ -24,6 +26,8 @@ import {
   allWorkspacePermissions,
   createWorkspace,
   deleteWorkspaceIfQuiescent,
+  ensureWorkspaceByExternalIdentity,
+  findWorkspaceByExternalIdentity,
   getManagedUserProfilesByIds,
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
@@ -31,6 +35,7 @@ import {
   listWorkspaceMemberManagementCandidates,
   normalizeWorkspaceMembershipPermissions,
   listWorkspaceControlEvents,
+  listSharedWorkspacesForAccount,
   listWorkspacesForSubject,
   nestedPostgresSqlState,
   removeWorkspaceMember,
@@ -45,12 +50,15 @@ import {
   workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
+  WorkspaceExternalIdentityConflictError,
+  WorkspaceLimitExceededError,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   getManagedAuthRequestActorEpoch,
+  accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
   requireAccessGrant,
@@ -68,11 +76,13 @@ import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
 import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-cleanup";
+import { workspaceDeleteObserver } from "../workspace-delete-observability";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   CODEX_REALTIME_MODEL_ID,
   SUPERGROK_REALTIME_MODEL_ID,
   canonicalizeConfiguredModelId,
+  configuredStaticUsageLimits,
   type Settings,
 } from "@opengeni/config";
 
@@ -119,6 +129,17 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
+    const accountScopedAuthority = accountScopedApiKeyWorkspaceAuthority(context);
+    if (
+      accountScopedAuthority &&
+      hasPermission(accountScopedAuthority.permissions, "workspace:read")
+    ) {
+      return c.json(
+        (await listSharedWorkspacesForAccount(deps.db, accountScopedAuthority.accountId)).map(
+          (workspace) => Workspace.parse(workspace),
+        ),
+      );
+    }
     const readableWorkspaceIds = [
       ...new Set(
         context.workspaceGrants
@@ -139,6 +160,57 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.put("/v1/workspaces/external", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const payload = EnsureWorkspaceRequest.parse(await c.req.json());
+    requireAccountPermission(context, payload.accountId, "workspace:create");
+    try {
+      const existing = await findWorkspaceByExternalIdentity(deps.db, {
+        externalSource: payload.externalSource,
+        externalId: payload.externalId,
+      });
+      if (existing) {
+        if (existing.accountId !== payload.accountId || existing.kind !== "shared") {
+          throw new WorkspaceExternalIdentityConflictError();
+        }
+        return c.json(
+          EnsureWorkspaceResponse.parse({
+            workspace: existing,
+            created: false,
+          }),
+        );
+      }
+      await requireLimit(deps, {
+        accountId: payload.accountId,
+        action: "workspace:create",
+        quantity: 1,
+      });
+      const result = await ensureWorkspaceByExternalIdentity(deps.db, {
+        accountId: payload.accountId,
+        externalSource: payload.externalSource,
+        externalId: payload.externalId,
+        name: payload.name,
+        slug: payload.slug ?? null,
+        ...(payload.agentInstructions !== undefined
+          ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
+          : {}),
+        maxWorkspacesPerAccount: workspaceLimit(deps),
+      });
+      const response = EnsureWorkspaceResponse.parse(result);
+      return result.created ? c.json(response, 201) : c.json(response);
+    } catch (error) {
+      if (error instanceof WorkspaceExternalIdentityConflictError) {
+        throw new HTTPException(409, {
+          message: "external workspace identity is already in use",
+        });
+      }
+      if (error instanceof WorkspaceLimitExceededError) {
+        throw new HTTPException(429, { message: error.message });
+      }
+      throw error;
+    }
+  });
+
   app.post("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
     const payload = CreateWorkspaceRequest.parse(await c.req.json());
@@ -154,27 +226,35 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       action: "workspace:create",
       quantity: 1,
     });
-    const workspace = await createWorkspace(deps.db, {
-      accountId,
-      name: payload.name.trim(),
-      slug: payload.slug?.trim() || null,
-      externalSource: payload.externalSource ?? null,
-      externalId: payload.externalId ?? null,
-      ...(payload.agentInstructions !== undefined
-        ? {
-            agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
-          }
-        : {}),
-    });
-    await grantWorkspaceAccess(deps.db, {
-      accountId,
-      workspaceId: workspace.id,
-      subjectId: context.subjectId,
-      role: "owner",
-      permissions: allWorkspacePermissions,
-      ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
-    });
-    return c.json(Workspace.parse(workspace), 201);
+    try {
+      const workspace = await createWorkspace(deps.db, {
+        accountId,
+        name: payload.name.trim(),
+        slug: payload.slug?.trim() || null,
+        externalSource: payload.externalSource ?? null,
+        externalId: payload.externalId ?? null,
+        ...(payload.agentInstructions !== undefined
+          ? {
+              agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
+            }
+          : {}),
+        maxWorkspacesPerAccount: workspaceLimit(deps),
+      });
+      await grantWorkspaceAccess(deps.db, {
+        accountId,
+        workspaceId: workspace.id,
+        subjectId: context.subjectId,
+        role: "owner",
+        permissions: allWorkspacePermissions,
+        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+      });
+      return c.json(Workspace.parse(workspace), 201);
+    } catch (error) {
+      if (error instanceof WorkspaceLimitExceededError) {
+        throw new HTTPException(429, { message: error.message });
+      }
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId", async (c) => {
@@ -437,9 +517,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     // session/lease before checking runtime quiescence, then returns the exact
     // external schedules removed by the cascade. A racing cold->warm transition
     // can therefore never erase the only provider/capture ownership receipt.
+    const deleteObserver = workspaceDeleteObserver(deps.observability, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
     const deleted = await deleteWorkspaceIfQuiescent(deps.db, {
       accountId: grant.accountId,
       workspaceId,
+      ...(deleteObserver ? { observer: deleteObserver } : {}),
     });
     if (deleted.status === "not_found") {
       throw new HTTPException(404, { message: "workspace not found" });
@@ -626,6 +711,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     return c.body(null, 204);
   });
+}
+
+function workspaceLimit(deps: ApiRouteDeps): number | null {
+  if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
+    return null;
+  }
+  return configuredStaticUsageLimits(deps.settings).maxWorkspacesPerAccount ?? null;
 }
 
 async function listWorkspacePeople(

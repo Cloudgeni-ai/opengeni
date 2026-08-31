@@ -30,6 +30,9 @@ Code and the live service are authoritative. Prefer `/v1/config/client`,
 `/v1/access/me`, the installed package types, and live probes over memorized
 route, model, tool, or backend lists. When source is available, verify exact
 behavior in `packages/sdk`, `packages/react`, contracts, and API routes.
+Read `docs/product-integration.md` when the repository is available; it is the
+canonical product boundary for organization keys, workspace mapping, and Skill
+ownership.
 
 ## Choose The Integration Shape First
 
@@ -55,9 +58,21 @@ Read `references/product-integration-shapes.md` before designing the boundary.
 Read `references/api-workflows.md` for session, upload, retry, repository,
 machine, and schedule patterns.
 
+## Choose The Credential
+
+- Use an **organization API key** when one server-side product integration
+  provisions or manages many organization workspaces in one OpenGeni
+  organization.
+- Use a **workspace API key** when the integration is deliberately constrained
+  to one organization workspace and should not provision others.
+- Use a **delegated token** when the host acts with short-lived, explicit
+  user/workspace authority rather than one standing product credential.
+- A **deployment access key** is a coarse deployment perimeter. Never use it as
+  tenant identity or infer organization/workspace authority from it.
+
 ## Default Trust Boundary
 
-- Keep OpenGeni API keys and operator credentials on the product server.
+- Keep the organization API key and operator credentials on the product server.
 - Authenticate the product's user first, resolve their allowed OpenGeni
   workspace/session server-side, and expose only the routes that product needs.
 - Use `@opengeni/sdk` instead of reconstructing event streaming, upload signing,
@@ -74,6 +89,28 @@ owns sessions, turns, durable event history, approvals, agent execution,
 selected tools/resources, files, realtime session state, and compute lifecycle.
 Link records by opaque IDs; do not copy one system's whole data model into the
 other.
+
+## Organization And Workspace Bootstrap
+
+Use one organization API key for the external backend. Organization key
+administration is exposed through `listOrganizationApiKeys`,
+`createOrganizationApiKey`, and `deleteOrganizationApiKey`, corresponding to
+the organization-scoped `/v1/organizations/:organizationId/api-keys` routes.
+The create response shows the token once; store it only in the product's secret
+manager.
+
+For each product tenant, call `ensureWorkspace` /
+`PUT /v1/workspaces/external` with a stable external mapping identity and persist
+the returned `result.workspace.id`; `result.created` distinguishes the first
+insert from an idempotent replay. Call it an **organization workspace** in
+customer guidance; its exact wire kind is `"shared"`. Personal workspaces are
+excluded and must never be selected through a default-workspace fallback.
+
+The external backend owns product Skills. Store and version them outside
+OpenGeni, then pass the selected definitions inline in
+`CreateSessionRequest.skills` for each product-created session. There is no
+organization-wide Skill registry or Skill inheritance in this integration
+contract.
 
 ## Prompt And Context Contract
 
@@ -93,24 +130,32 @@ agent instruction prefix.
 
 ## Client Workflow
 
-1. Resolve API base URL, credential mode, and product user-to-workspace mapping.
-2. Read client config and access context.
-3. Create a session with a stable idempotency key; optionally preallocate its ID
+1. Resolve the API base URL and load the server-held organization API key.
+2. Resolve the authenticated product tenant, call `ensureWorkspace` with its
+   stable external identity, and persist or verify the opaque workspace mapping.
+3. Read client config and access context without falling back to a Personal
+   workspace.
+4. Load the exact Skills selected by the external product and pass them inline.
+5. Create a session with a stable idempotency key; optionally preallocate its ID
    when the product must persist a link before the first turn can run.
-4. Attach only canonical resources, skills, and tool selections the user may use.
-5. Stream/replay session events through the SDK; tolerate unknown additive event
+6. Attach only canonical resources and tool selections the user may use.
+7. Stream/replay session events through the SDK; tolerate unknown additive event
    types.
-6. Send visible text separately from `modelContext`.
-7. Use the SDK upload helper; it owns begin, signed storage PUT, and completion.
-8. Surface approvals, human-input requests, queue state, errors, credit limits,
+8. Send visible text separately from `modelContext`.
+9. Use the SDK upload helper; it owns begin, signed storage PUT, and completion.
+10. Surface approvals, human-input requests, queue state, errors, credit limits,
    and reconnect state as product state rather than generic chat text.
-9. Add realtime, Connected Machines, schedules, or the workbench only when the
+11. Add realtime, Connected Machines, schedules, or the workbench only when the
    product use case needs them.
 
 ## Guardrails
 
 - Workspace-scoped routes are canonical; resource IDs never authorize by
   themselves.
+- Organization workspaces have wire `kind: "shared"`; Personal workspaces are
+  outside the external product mapping.
+- Do not invent an organization-wide Skill registry or rely on Skill
+  inheritance. The external backend passes selected Skills inline per session.
 - Do not call Temporal, NATS, Postgres, workers, sandbox providers, object
   storage APIs, or MCP transports as substitutes for the public SDK/API.
 - Do not claim auth, model, tool, billing, CORS, storage, or compute behavior
@@ -120,3 +165,5 @@ agent instruction prefix.
 - Generate a customer-specific skill only for stable facts their coding agents
   repeatedly need. Keep it beside their integration code, point it at the SDK,
   include a config/access smoke probe, and never paste secrets into it.
+  Start from `references/customer-skill-template.md` when the OpenGeni skill
+  package is available.

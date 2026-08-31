@@ -200,7 +200,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/index.ts#claimSessionWorkForAttempt": {
-    inserts: 4,
+    inserts: 5,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#failScheduledGeneratedSessionRoute": {
+    inserts: 1,
     contract: "canonical",
   },
   "packages/db/src/index.ts#failSessionWorkBeforeAttemptClaim": {
@@ -584,6 +588,26 @@ function functionCalls(functionNode: FunctionLikeDeclaration, expectedName: stri
   let found = false;
   const visit = (node: t.Node): void => {
     if (isCallExpression(node) && callName(node) === expectedName) found = true;
+    if (!found) forEachChild(node, visit);
+  };
+  forEachChild(functionNode, visit);
+  return found;
+}
+
+function functionCallHasProperty(
+  functionNode: FunctionLikeDeclaration,
+  expectedName: string,
+  propertyName: string,
+): boolean {
+  let found = false;
+  const visit = (node: t.Node): void => {
+    if (
+      isCallExpression(node) &&
+      callName(node) === expectedName &&
+      callHasProperty(node, propertyName)
+    ) {
+      found = true;
+    }
     if (!found) forEachChild(node, visit);
   };
   forEachChild(functionNode, visit);
@@ -1070,6 +1094,9 @@ describe("session_events writer inventory", () => {
         } else if (callerOwnedControlWriters.has(key)) {
           const writerName = key.slice(key.lastIndexOf("#") + 1);
           expect(Object.hasOwn(expectedOwnedSuffixCallers, writerName)).toBe(true);
+          expect(
+            functionCallHasProperty(writer.functionNode, "lockSessionEventWriteRows", "sessionIds"),
+          ).toBe(true);
         } else {
           const prefixes = controlAwarePrefixPositions(writer.functionNode);
           expect(prefixes.length).toBeGreaterThan(0);

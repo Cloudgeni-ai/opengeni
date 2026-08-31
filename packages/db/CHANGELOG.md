@@ -1,5 +1,51 @@
 # @opengeni/db
 
+## 3.7.1
+
+### Patch Changes
+
+- c3b43a5: Expose bounded durable recovery-backlog metrics from every control worker and alert when closed recoverable attempts remain without active ownership or a settled session projection.
+- fab355b: Allocate canonical session event sequences from the locked narrow cursor while retaining the session-row compatibility projection.
+- b471a90: Add an organization-owner Off, Review first, or Autonomous policy for agent-managed organization identity, including owner-only API and SDK controls, exact-attempt automatic activation, immutable receipts, and the organization settings control.
+- e41285f: Overlap optional MCP preparation with first inference even when artifact tooling is enabled, keep optional eager integrations off the first-token critical path, reuse immutable large-history projections incrementally, and expose fenced event-append phase latency without changing durable ordering.
+- 1f289a0: Attach machine input that arrived during a structured human-input wait to the resumed logical turn after its open tool-call result, while leaving post-resume arrivals for the next turn.
+- c9ac869: Make the narrow session-event cursor authoritative for public sequence and unread projections, and isolate accepted raw exact-attempt batches from the wide session-row lock while preserving legacy SQL writer compatibility.
+- fab355b: Add the rolling, parity-checked narrow session-event cursor foundation for a later sequencer cutover.
+- fab355b: Lock and parity-check each narrow session event cursor in the canonical event and control writer prefix before turn and attempt locks.
+- 4bacdd3: Add fixed-scope organization API keys, idempotent external tenant workspace provisioning, Personal-workspace exclusion, and the matching SDK and integration guidance.
+- 72de39c: Retain low-cardinality workspace deletion phase, inventory, and total transaction metrics with exact workspace identifiers confined to structured logs.
+- Updated dependencies [b471a90]
+- Updated dependencies [96624a7]
+- Updated dependencies [4bacdd3]
+  - @opengeni/contracts@2.9.1
+  - @opengeni/config@0.22.4
+  - @opengeni/codemode@0.4.21
+
+## 3.7.0
+
+### Minor Changes
+
+- 699477a: Restore autonomous agent Workspace Memory writes whenever workspace Memory is enabled. Agents can save and correct active facts, decisions, incidents, fixes, and outcomes independently of Learning mode while all existing Memory kinds remain retrieval-only through search. Autonomous learning may activate eligible concise Workspace instructions and focused Skills through their governed, auditable, undoable lifecycles; Review first keeps proposals inactive and Off creates no derived change.
+- ddce5cc: Allow scheduled generated sessions and nested workers to target an exact Connected Machine, and fail closed without leaving an unstarted generated session behind when that route cannot be established.
+
+### Patch Changes
+
+- 3ef2488: Coordinate immutable Rig setup once per exact sandbox lease epoch and provider instance while keeping credentials, repositories, and files turn-private.
+- Updated dependencies [699477a]
+- Updated dependencies [ddce5cc]
+- Updated dependencies [132c8d3]
+- Updated dependencies [88b6b48]
+  - @opengeni/contracts@2.9.0
+  - @opengeni/codemode@0.4.20
+  - @opengeni/config@0.22.3
+
+## 3.6.3
+
+### Patch Changes
+
+- 551cead: Return durable retained-process exit or loss results to shell tools instead of rendering a retryable platform fault for an already-terminal command handle.
+- 06fda28: Return bounded stable-key conflict outcomes for governed preference proposals instead of exposing persistence query details.
+
 ## 3.6.2
 
 ### Patch Changes

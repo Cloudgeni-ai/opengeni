@@ -27,8 +27,10 @@ import {
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   claimSandboxCheckpointArtifactsForGc,
+  claimSandboxSharedPreparation,
   persistDrainSnapshot as persistDrainSnapshotRaw,
   readLease,
+  readSandboxSharedPreparation,
   readWorkspaceArchiveCapturePreflight,
   recordWarmingSandboxCreated,
   registerSandboxCheckpointArtifact,
@@ -48,8 +50,10 @@ import {
   SandboxImageConflictError,
   SandboxRigConflictError,
   settleTemporalScheduleCleanup,
+  settleSandboxSharedPreparation,
   type Database,
   type DbClient,
+  type WorkspaceDeleteObservation,
 } from "../src/index";
 
 // The 0017 lease state machine driven through the REAL packages/db query fns
@@ -608,7 +612,12 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       where workspace_id = ${workspaceId}`;
     expect(attachmentBeforeDelete?.count).toBe(1);
 
-    const deleted = await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId });
+    const deleteObservations: WorkspaceDeleteObservation[] = [];
+    const deleted = await deleteWorkspaceIfQuiescent(db, {
+      accountId,
+      workspaceId,
+      observer: { onPhase: (observation) => deleteObservations.push(observation) },
+    });
     expect(deleted.status).toBe("deleted");
     if (deleted.status !== "deleted") throw new Error("workspace deletion did not commit");
     const cleanup = deleted.temporalScheduleCleanups[0];
@@ -636,6 +645,26 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(workspaceCount?.count).toBe(0);
     expect(scheduleCount?.count).toBe(0);
     expect(commandCount?.count).toBe(0);
+    expect(deleteObservations.map((observation) => observation.phase)).toEqual([
+      "lifecycle_lock",
+      "account_workspace_lock",
+      "session_fence",
+      "runtime_ownership",
+      "external_cleanup",
+      "variable_set_detach",
+      "cascade",
+      "transaction",
+    ]);
+    expect(deleteObservations.find((observation) => observation.phase === "cascade")).toMatchObject(
+      { outcome: "deleted" },
+    );
+    expect(
+      deleteObservations.find((observation) => observation.phase === "external_cleanup"),
+    ).toMatchObject({ inventory: { temporal_schedules: 1 } });
+    expect(deleteObservations.at(-1)).toMatchObject({
+      phase: "transaction",
+      outcome: "deleted",
+    });
 
     // The receipt intentionally survives the workspace FK cascade. A stale
     // process cannot settle it; a failed exact owner releases it, and another
@@ -878,6 +907,105 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const row = await readRow(workspaceId, groupId);
     expect(row?.refcount).toBe(N);
     expect(row?.liveness).toBe("warming");
+  }, 60_000);
+
+  test("durable shared preparation elects one owner, joins siblings, and reuses completion", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "shared-preparation-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const instanceId = "shared-preparation-instance";
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId,
+      dataPlaneUrl: null,
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: {} },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    expect(committed.lease).not.toBeNull();
+    const warmLeaseEpoch = committed.lease!.leaseEpoch;
+
+    const specHash = `sha256:${"a".repeat(64)}`;
+    const ownerClaimId = crypto.randomUUID();
+    const owner = await claimSandboxSharedPreparation(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedLeaseEpoch: warmLeaseEpoch,
+      expectedInstanceId: instanceId,
+      specHash,
+      holderId: "shared-preparation-owner",
+      claimId: ownerClaimId,
+      ownerAttemptId: crypto.randomUUID(),
+      timeoutMs: 60_000,
+    });
+    expect(owner.role).toBe("owner");
+
+    const sibling = await claimSandboxSharedPreparation(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedLeaseEpoch: warmLeaseEpoch,
+      expectedInstanceId: instanceId,
+      specHash,
+      holderId: "shared-preparation-owner",
+      claimId: crypto.randomUUID(),
+      ownerAttemptId: crypto.randomUUID(),
+      timeoutMs: 60_000,
+    });
+    expect(sibling.role).toBe("joined");
+    expect(
+      await settleSandboxSharedPreparation(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedLeaseEpoch: warmLeaseEpoch,
+        expectedInstanceId: instanceId,
+        specHash,
+        holderId: "shared-preparation-owner",
+        claimId: ownerClaimId,
+        outcome: "completed",
+      }),
+    ).toBe(true);
+
+    const observed = await readSandboxSharedPreparation(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedLeaseEpoch: warmLeaseEpoch,
+      expectedInstanceId: instanceId,
+      specHash,
+      holderId: "shared-preparation-owner",
+    });
+    expect(observed.status).toBe("available");
+    if (observed.status === "available") expect(observed.preparation.status).toBe("completed");
+
+    const reused = await claimSandboxSharedPreparation(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedLeaseEpoch: warmLeaseEpoch,
+      expectedInstanceId: instanceId,
+      specHash,
+      holderId: "shared-preparation-owner",
+      claimId: crypto.randomUUID(),
+      ownerAttemptId: crypto.randomUUID(),
+      timeoutMs: 60_000,
+    });
+    expect(reused.role).toBe("reused");
   }, 60_000);
 
   test("(0281) a viewer acquire records the authority claims; re-acquire is monotone", async () => {

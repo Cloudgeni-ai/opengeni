@@ -500,7 +500,7 @@ describe("catalog-backed ModelPicker", () => {
     }
   });
 
-  test("keeps client nav while mounted; remount resets to selected Thinking", async () => {
+  test("standalone menu keeps client nav while mounted; remount resets to selected Thinking", async () => {
     const rows = projectPickerRows([
       catalogModel({ id: "gpt-5.6-sol", label: "Sol" }),
       catalogModel({
@@ -541,7 +541,7 @@ describe("catalog-backed ModelPicker", () => {
         container.querySelector('[data-testid="model-picker-rail-codex_subscription"]'),
       ).toBeTruthy();
 
-      // Still mounted → stay on providers (close/reopen equivalent).
+      // A plain rerender without an open transition keeps the standalone menu page.
       await act(async () => root.render(menu));
       expect(
         container.querySelector('[data-testid="model-picker-rail-codex_subscription"]'),

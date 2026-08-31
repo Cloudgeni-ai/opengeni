@@ -106,6 +106,12 @@ describe("session control surface architecture", () => {
     );
     expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
+    expect(route).toContain("personalResourceSendBlocker");
+    expect(route).toContain(
+      "This workspace-visible chat uses an Only me Variable Set. Confirm private credential use below before sending.",
+    );
+    expect(route).toContain("Confirm private credential or resource use before sending");
+    expect(route).toContain("messages={");
     expect(route).not.toContain("PersonalResourceAttachmentControl");
     expect(route).not.toContain("Your resource access");
     expect(route).not.toContain("loadPersonalResourceCatalog");

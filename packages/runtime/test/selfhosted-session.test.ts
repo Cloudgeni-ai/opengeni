@@ -254,12 +254,6 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       (session) => session.listFiles({ path: "/workspace" }),
       (session) => session.statFile({ path: "/workspace/read.txt" }),
       (session) => session.materializeEntry({ path: "/workspace/staged", entry: {} }),
-      (session) => session.screenshot(),
-      (session) =>
-        session.desktopInput({
-          $case: "key",
-          key: { key: "Escape", isText: false, action: 1 },
-        }),
       (session) => session.resolveExposedPort(7681),
       (session) => session.resolveExposedPort(6080),
     ];

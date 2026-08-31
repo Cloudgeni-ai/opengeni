@@ -2362,7 +2362,6 @@ function densityProfileSettings(productionSettings: Settings, densityMcpUrl: str
     sandboxOwnershipEnabled: false,
     sandboxLazyProvisionEnabled: false,
     sandboxDesktopEnabled: false,
-    computerUseEnabled: false,
     recordingEnabled: false,
     workspaceCaptureEnabled: false,
     integrationsEnabled: false,

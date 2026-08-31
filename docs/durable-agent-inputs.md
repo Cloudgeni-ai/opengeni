@@ -15,6 +15,12 @@ an activity-local system message.
    serializes one deterministic system message, and inserts that exact message
    into `session_history_items` in the same transaction that marks every member
    `delivered`.
+   A `requires_action` resume is the one two-phase form of that boundary: the
+   resumed attempt first persists the interrupted call/result pair, then
+   idempotently re-enters its exact claim to attach only machine inputs whose
+   pending-event sequence was frozen when that resumed attempt started. This keeps provider
+   call/result ordering valid, prevents a second inference for pre-resume
+   input, and leaves later arrivals pending for the next turn.
 4. The worker builds the first and every subsequent model request from active
    session history. It does not inject a second transient copy and does not
    remove system input during reconciliation.
@@ -140,11 +146,15 @@ writes nothing.
 Read state is per viewer, so this only ever changes the rail for that one
 human; another member still sees the child unread. It only ever removes noise:
 `unread` is nothing but `sessions.last_sequence > acknowledged_sequence`, so a
-child that emits one more event goes unread again with no special handling, and
-the `failed` and `requires_action` rail indicators are derived from
-`sessions.status`, rank above unread, and are untouched. The fence is monotone:
-a human who has already read further, or a racing claim that observed a later
-sequence, is never regressed.
+child that emits one more event goes unread again with no special handling.
+`requires_action` remains a live lifecycle indicator until the input is
+resolved. A failed lifecycle remains visible inside the session, while the
+rail's red failure-attention marker is viewer-specific and appears only while
+that failed session's latest event is unread. Parent tree projections expose a
+separate `unreadFailedDescendants` count so an acknowledged historical failure
+does not color every ancestor forever. The fence is monotone: a human who has
+already read further, or a racing claim that observed a later sequence, is
+never regressed.
 
 Monotonicity has one consequence worth stating plainly: an explicit mark-unread
 is **not** sticky against a later consumption. Marking a child unread, then

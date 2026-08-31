@@ -21,7 +21,13 @@ function contentFromModelOutput(output: unknown): unknown[] {
   return Array.isArray(output) ? output : [output];
 }
 
-function sdkModelOutputForServer(server: MCPServer, result: AttemptToolResultValue): unknown {
+export function sdkModelOutputForServer(
+  server: MCPServer,
+  result: AttemptToolResultValue,
+): unknown {
+  if (result.content.some((entry) => entry.type !== "text")) {
+    return result.content.length === 1 ? result.content[0] : result.content;
+  }
   if (
     server.useStructuredContent === true &&
     result.isError !== true &&

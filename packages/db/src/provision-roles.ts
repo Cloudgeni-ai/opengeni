@@ -533,6 +533,8 @@ async function grantAppRoleIfSchemaExists(
     "list_organization_invitations(uuid,text,uuid,integer)",
     "get_organization_administration_overview(uuid,text)",
     "get_workspace_kind(uuid,uuid)",
+    "resolve_workspace_codex_subscription_source(uuid,uuid)",
+    "list_organization_workspace_ids(uuid)",
     "organization_workspace_command(jsonb)",
     "resolve_organization_workspace_removal_subject(uuid,text,uuid)",
     "prepare_organization_workspace_member_removal(jsonb)",
@@ -1104,12 +1106,45 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.propose_company_profile_for_attempt_v2(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.propose_company_profile_for_attempt_v2(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, text, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.confirm_company_profile_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid)',
         ${literal(schema)}
       )
     ) IS NOT NULL THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.confirm_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.get_company_profile_agent_policy(uuid,uuid,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.get_company_profile_agent_policy(uuid, uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.update_company_profile_agent_policy(uuid,uuid,text,text,bigint,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.update_company_profile_agent_policy(uuid, uuid, text, text, bigint, uuid) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );

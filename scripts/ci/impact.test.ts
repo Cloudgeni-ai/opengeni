@@ -34,6 +34,7 @@ const ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E =
   "test/e2e/organization-workspace-administration.browser.e2e.ts";
 const ORGANIZATION_RECOVERY_E2E = "test/e2e/organization-recovery.browser.e2e.ts";
 const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.e2e.ts";
+const CRYPTO_RANDOM_UUID_E2E = "test/e2e/crypto-random-uuid.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
 const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
@@ -94,6 +95,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      CRYPTO_RANDOM_UUID_E2E,
       "test/e2e/framework-ui-parity.browser.e2e.ts",
       "test/e2e/framework-ui-soak.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
@@ -354,6 +356,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      CRYPTO_RANDOM_UUID_E2E,
       "test/e2e/framework-ui-parity.browser.e2e.ts",
       "test/e2e/framework-ui-soak.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,

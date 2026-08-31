@@ -170,7 +170,6 @@ describe("local artifact runtime stack contract", () => {
     for (const setting of [
       "OPENGENI_SANDBOX_DESKTOP_ENABLED",
       "OPENGENI_SANDBOX_DESKTOP_INTERACTIVE",
-      "OPENGENI_COMPUTER_USE_ENABLED",
     ]) {
       expect(source).toContain(`if [ -z "\${${setting}:-}" ]; then`);
       expect(source).toContain(`${setting}=true`);

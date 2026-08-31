@@ -25,7 +25,6 @@ import {
   RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
   RoutingWorkspaceRootChangedError,
-  RoutingUnsupportedError,
   makeActiveBackendResolver,
   ActiveBackendUnresolvableError,
   swapTargetEstablishability,
@@ -37,9 +36,6 @@ import {
   type RoutableSandbox,
   type RoutingSandboxSessionDeps,
 } from "../src/sandbox";
-// The REAL computer-use discriminator — the proxy's native-surface presence must
-// satisfy (and, for Modal, fail) this exact duck-type, not a local reimplementation.
-import { isNativeDesktopSession } from "../src/sandbox-computer";
 
 const WS = "11111111-1111-1111-1111-111111111111";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
@@ -111,25 +107,6 @@ class FakeBackend implements RoutableBackendSession {
       throw err;
     }
     return new TextEncoder().encode(this.tag);
-  }
-}
-
-/** A backend that ALSO implements the native-desktop control-plane surface
- *  (`desktopInput`/`screenshot`) — the SelfhostedSession shape the computer-use
- *  capability duck-types as native. Records the events it received so a test can
- *  assert the proxy dispatched to it with the right args. */
-class NativeFakeBackend extends FakeBackend {
-  readonly desktopEvents: unknown[] = [];
-  screenshots = 0;
-  readonly frame = { png: new Uint8Array([137, 80, 78, 71]), width: 1440, height: 900 };
-
-  async desktopInput(event: unknown): Promise<void> {
-    this.desktopEvents.push(event);
-  }
-
-  async screenshot(): Promise<{ png: Uint8Array; width: number; height: number }> {
-    this.screenshots += 1;
-    return this.frame;
   }
 }
 
@@ -1182,6 +1159,129 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(proxy.hasRetainedProcess(75)).toBe(false);
   });
 
+  test("a concurrent matching durable terminal settlement unpins the original route", async () => {
+    let writes = 0;
+    let settlementAttempts = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 78\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        writes += 1;
+        return "write_stdin failed: session not found: 78";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      settleProcess: async () => {
+        settlementAttempts += 1;
+        throw Object.assign(new Error("retained process already settled by the lease reaper"), {
+          name: "SandboxRetainedProcessTerminalError",
+          code: "process_fenced",
+          state: "lost",
+          exitCode: null,
+        });
+      },
+    });
+
+    await proxy.execCommand({ cmd: "start" });
+    expect(await proxy.writeStdinForProcessControl({ sessionId: 78, chars: "" })).toBe(
+      "write_stdin failed: session not found: 78",
+    );
+    expect(writes).toBe(1);
+    expect(settlementAttempts).toBe(1);
+    expect(proxy.hasRetainedProcess(78)).toBe(false);
+  });
+
+  test("a contradictory durable terminal settlement remains outcome-unknown and pinned", async () => {
+    let writes = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 79\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        writes += 1;
+        return "write_stdin failed: session not found: 79";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      settleProcess: async () => {
+        throw Object.assign(new Error("retained process already exited elsewhere"), {
+          name: "SandboxRetainedProcessTerminalError",
+          code: "process_fenced",
+          state: "exited",
+          exitCode: 0,
+        });
+      },
+    });
+
+    await proxy.execCommand({ cmd: "start" });
+    await expect(
+      proxy.writeStdinForProcessControl({ sessionId: 79, chars: "" }),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(writes).toBe(1);
+    expect(proxy.hasRetainedProcess(79)).toBe(true);
+  });
+
+  test("a terminal admission race returns durable truth without another provider call", async () => {
+    for (const terminal of [
+      {
+        sessionId: 80,
+        state: "exited",
+        exitCode: 17,
+        expected: "Process exited with code 17\n\nOutput:\n",
+      },
+      {
+        sessionId: 81,
+        state: "lost",
+        exitCode: null,
+        expected: "write_stdin failed: session not found: 81",
+      },
+    ] as const) {
+      let writes = 0;
+      const backend: RoutableBackendSession = {
+        async execCommand() {
+          return `Process running with session ID ${terminal.sessionId}\n\nOutput:\nstarted`;
+        },
+        async writeStdin() {
+          writes += 1;
+          return "Process exited with code 0\n\nOutput:\nwrong";
+        },
+      };
+      const proxy = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+        beforeMutation: async () => "parent",
+        afterMutation: async () => undefined,
+        beforeProcessMutation: async () => {
+          throw Object.assign(new Error("retained process is already terminal"), {
+            name: "SandboxRetainedProcessTerminalError",
+            code: "process_fenced",
+            state: terminal.state,
+            exitCode: terminal.exitCode,
+          });
+        },
+      });
+
+      await proxy.execCommand({ cmd: "start" });
+      expect(
+        await proxy.writeStdinForProcessMutation({
+          sessionId: terminal.sessionId,
+          chars: "status",
+        }),
+      ).toBe(terminal.expected);
+      expect(writes).toBe(0);
+      expect(proxy.hasRetainedProcess(terminal.sessionId)).toBe(false);
+    }
+  });
+
   test("ambiguous process promotion retries the same UUID and exact route before control proceeds", async () => {
     const ptr = mutablePointer();
     let promotions = 0;
@@ -2182,102 +2282,6 @@ describe("swapTargetEstablishability — the shared admission/establishment pred
     if (!r.ok) {
       expect(r.code).toBe("unsupported_backend_context");
     }
-  });
-});
-
-describe("RoutingSandboxSession — native-desktop surface (machine-primary computer-use)", () => {
-  test("proxy fronting a native-capable default backend duck-types as native + dispatches desktopInput/screenshot to the active backend", async () => {
-    // The bug: a machine-primary session routes computer-use through the proxy, but
-    // the proxy did not forward desktopInput/screenshot → isNativeDesktopSession failed
-    // → the capability bound the Linux exec-shelling SandboxComputer onto the Mac.
-    const native = new NativeFakeBackend("selfhosted");
-    const ptr = mutablePointer({ activeSandboxId: "sbx-self", activeEpoch: 1 });
-    const proxy = new RoutingSandboxSession({
-      defaultResolved: { session: native, sandboxId: "sbx-self", kind: "selfhosted" },
-      readPointer: ptr.read,
-      resolveActiveBackend: async () => ({
-        session: native,
-        sandboxId: "sbx-self",
-        kind: "selfhosted",
-      }),
-    });
-
-    // The REAL discriminator selects the native computer for this proxy.
-    expect(isNativeDesktopSession(proxy as never)).toBe(true);
-
-    // desktopInput dispatches to the active backend, carrying the event through.
-    const event = { $case: "pointer", pointer: { x: 12, y: 34, action: "click", button: "left" } };
-    await proxy.desktopInput!(event);
-    expect(native.desktopEvents).toEqual([event]);
-
-    // screenshot dispatches and returns the backend's frame.
-    const shot = await proxy.screenshot!();
-    expect(native.screenshots).toBe(1);
-    expect(shot).toEqual(native.frame);
-  });
-
-  test("proxy fronting a Modal-like default backend (no native surface) does NOT duck-type as native (regression: Modal misclassification)", async () => {
-    // A Modal box has no desktopInput/screenshot. The proxy must NOT expose them
-    // (presence is the selection signal), or every Modal-fronting proxy would be
-    // misclassified as native and driven with CGEvent/screenshot ops it can't serve.
-    const modal = new FakeBackend("modal");
-    const ptr = mutablePointer();
-    const proxy = new RoutingSandboxSession({
-      defaultResolved: { session: modal, sandboxId: null, kind: "modal" },
-      readPointer: ptr.read,
-      resolveActiveBackend: async () => ({ session: modal, sandboxId: null, kind: "modal" }),
-    });
-
-    expect(isNativeDesktopSession(proxy as never)).toBe(false);
-    expect(typeof proxy.desktopInput).toBe("undefined");
-    expect(typeof proxy.screenshot).toBe("undefined");
-  });
-
-  test("mid-turn cross-kind swap: default native, pointer swaps to a NON-native backend → screenshot() rejects RoutingUnsupportedError", async () => {
-    // The proxy exposes the native surface (default backend was native), but a
-    // mid-turn swap repoints to a Modal box with no screenshot. Rather than silently
-    // shelling Linux tools onto a Mac (or crashing opaquely), dispatch surfaces a
-    // legible RoutingUnsupportedError the caller can report as a tool failure.
-    const native = new NativeFakeBackend("selfhosted");
-    const modal = new FakeBackend("modal");
-    const ptr = mutablePointer({ activeSandboxId: "sbx-self", activeEpoch: 1 });
-    const proxy = new RoutingSandboxSession({
-      defaultResolved: { session: native, sandboxId: "sbx-self", kind: "selfhosted" },
-      readPointer: ptr.read,
-      resolveActiveBackend: async (pointer): Promise<ResolvedActiveBackend> =>
-        pointer.activeSandboxId === "sbx-self"
-          ? { session: native, sandboxId: "sbx-self", kind: "selfhosted" }
-          : { session: modal, sandboxId: pointer.activeSandboxId, kind: "modal" },
-    });
-
-    // Native surface is present (minted from the native default).
-    expect(typeof proxy.screenshot).toBe("function");
-    // First screenshot lands on the native backend.
-    await proxy.screenshot!();
-    expect(native.screenshots).toBe(1);
-
-    // Swap to the non-native Modal box (epoch bump) → the NEXT screenshot rejects.
-    ptr.swap("sbx-modal");
-    await expect(proxy.screenshot!()).rejects.toBeInstanceOf(RoutingUnsupportedError);
-  });
-
-  test("screenshot return value passes through unchanged ({png,width,height})", async () => {
-    const native = new NativeFakeBackend("selfhosted");
-    const ptr = mutablePointer({ activeSandboxId: "sbx-self", activeEpoch: 1 });
-    const proxy = new RoutingSandboxSession({
-      defaultResolved: { session: native, sandboxId: "sbx-self", kind: "selfhosted" },
-      readPointer: ptr.read,
-      resolveActiveBackend: async () => ({
-        session: native,
-        sandboxId: "sbx-self",
-        kind: "selfhosted",
-      }),
-    });
-
-    const shot = await proxy.screenshot!();
-    expect(shot.png).toBe(native.frame.png);
-    expect(shot.width).toBe(1440);
-    expect(shot.height).toBe(900);
   });
 });
 

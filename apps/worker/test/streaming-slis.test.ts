@@ -11,12 +11,14 @@ import {
   recordSandboxLogicalProvision,
   recordSandboxProvisionAttempt,
   recordSessionEventAppendLatency,
+  recordSessionEventAppendPhase,
   recordSessionEventPublishLatency,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupMilestone,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
+  sessionEventBatchSizeClass,
   turnStartupCountBucket,
 } from "../src/observability-metrics";
 
@@ -427,6 +429,40 @@ describe("event I/O latency split (write path vs delivery)", () => {
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(/opengeni_session_event_append_seconds_sum\{[^}]*\} 0\.02\b/);
     expect(metrics).toMatch(/opengeni_session_event_publish_seconds_sum\{[^}]*\} 0\.03\b/);
+  });
+
+  test("records bounded append phase attribution without tenant identifiers", async () => {
+    const observability = worker();
+    recordSessionEventAppendPhase(observability, {
+      phase: "turn_attempt_fence",
+      eventClass: "mixed",
+      eventCount: 12,
+      outcome: "rejected",
+      durationSeconds: 0.04,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_session_event_append_phase_seconds_sum\{[^}]*batch_size_class="11-25"[^}]*event_class="mixed"[^}]*outcome="rejected"[^}]*path="turn_attempt"[^}]*phase="turn_attempt_fence"[^}]*\} 0\.04\b/,
+    );
+    expect(metrics).not.toContain("workspace_id");
+    expect(metrics).not.toContain("session_id");
+  });
+
+  test("buckets append batch sizes into a closed label set", () => {
+    expect([0, 1, 2, 5, 6, 10, 11, 25, 26, 50, 51].map(sessionEventBatchSizeClass)).toEqual([
+      "unknown",
+      "1",
+      "2-5",
+      "2-5",
+      "6-10",
+      "6-10",
+      "11-25",
+      "11-25",
+      "26-50",
+      "26-50",
+      "51+",
+    ]);
   });
 });
 

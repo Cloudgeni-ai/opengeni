@@ -407,6 +407,11 @@ describe("successful-create selection history", () => {
       folder: { kind: "path", path: "/workspace/opengeni" },
     });
     expect(rememberedProjectCompute(history, null)).toEqual({ kind: "sandbox", backend: "" });
+    expect(rememberedProjectCompute(history, null, "selfhosted")).toEqual({
+      kind: "machine",
+      sandboxId: null,
+      folder: { kind: "root" },
+    });
   });
 
   test("restores paths only within the exact project and machine pair", () => {
@@ -419,6 +424,14 @@ describe("successful-create selection history", () => {
 });
 
 describe("new-session draft option mapping", () => {
+  test("restores an empty older draft to the required machine path on selfhosted-primary", () => {
+    expect(sessionDraftFromNewSessionDraftOptions({}, undefined, "selfhosted").compute).toEqual({
+      kind: "machine",
+      sandboxId: null,
+      folder: { kind: "root" },
+    });
+  });
+
   test("creates Only-me Personal-workspace sessions with private tenancy", () => {
     expect(newSessionCreateVisibility(true, "workspace")).toBe("private");
     expect(newSessionCreateVisibility(true, "private")).toBe("private");

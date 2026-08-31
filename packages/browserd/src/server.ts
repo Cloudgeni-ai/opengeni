@@ -670,7 +670,26 @@ export class BrowserControlServer {
       return success(await supervisor.observe(reference, targetId));
     }
     if (segments[5] === "screenshot" && request.method === "GET") {
-      const frame = await supervisor.capture(reference, targetId);
+      const frame = await supervisor.capture(reference, targetId, {
+        ...(url.searchParams.has("format")
+          ? { format: parseImageFormat(url.searchParams.get("format")) }
+          : {}),
+        ...(url.searchParams.has("quality")
+          ? {
+              quality: parseInteger(url.searchParams.get("quality"), "quality", 1, 100),
+            }
+          : {}),
+        ...(url.searchParams.has("maxWidth")
+          ? {
+              maxWidth: parseInteger(url.searchParams.get("maxWidth"), "maxWidth", 1, 4_096),
+            }
+          : {}),
+        ...(url.searchParams.has("maxHeight")
+          ? {
+              maxHeight: parseInteger(url.searchParams.get("maxHeight"), "maxHeight", 1, 4_096),
+            }
+          : {}),
+      });
       return new Response(frame.data.slice().buffer, {
         status: 200,
         headers: {

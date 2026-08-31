@@ -31,6 +31,8 @@ export type {
   BillingBalance,
   BillingEntitlementsResponse,
   BillingSummary,
+  CompanyProfileAgentPolicy,
+  CompanyProfileAgentPolicyMode,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,

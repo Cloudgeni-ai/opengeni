@@ -14,6 +14,7 @@ import {
   getSessionForSubject,
   grantWorkspaceAccess,
   initializeSessionStartAtomically,
+  listSessionsForSubject,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
   materializeGoalContinuation,
   mutateSessionControlInTransaction,
@@ -392,13 +393,24 @@ describe("child read acknowledgment on parent consumption", () => {
     expect(await pinRowCount(child.session.id)).toBe(0);
   });
 
-  test("acknowledging a failed child never touches its status-derived indicator", async () => {
+  test("a parent-consumed failure keeps lifecycle truth but clears failure attention", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { message: "orchestrate" });
     const child = await startSession(grant, { parent, message: "work" });
     await settleFailed(grant, child);
     expect(await deliverOutboxTo(parent.session.id)).toBe(1);
     await settleIdle(grant, parent);
+    const beforeClaim = await listSessionsForSubject(client.db, grant.workspaceId, {
+      subjectId: grant.subjectId,
+      parentSessionId: null,
+    });
+    expect(
+      beforeClaim.sessions.find((session) => session.id === parent.session.id)?.treeStats,
+    ).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+      unreadDescendants: 1,
+    });
     await enqueueHumanTurn(grant, parent.session.id);
     expect((await claim(grant, parent.session.id)).action).toBe("claimed");
 
@@ -409,9 +421,20 @@ describe("child read acknowledgment on parent consumption", () => {
       grant.subjectId,
     );
     expect(seen?.unread).toBe(false);
-    // Failed (red) and needs-attention (purple) come from `sessions.status` and
-    // outrank unread in the rail, so the acknowledgment removes noise only.
+    // Lifecycle truth is unchanged, while the viewer-specific rail attention
+    // on this child and its ancestors has been acknowledged.
     expect(seen?.status).toBe("failed");
+    const afterClaim = await listSessionsForSubject(client.db, grant.workspaceId, {
+      subjectId: grant.subjectId,
+      parentSessionId: null,
+    });
+    expect(
+      afterClaim.sessions.find((session) => session.id === parent.session.id)?.treeStats,
+    ).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 0,
+      unreadDescendants: 0,
+    });
   });
 
   test("an acknowledgment already ahead of the consumed child is never regressed", async () => {
