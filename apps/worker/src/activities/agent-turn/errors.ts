@@ -154,6 +154,13 @@ export function providerRecoveryCountFromMetadata(metadata: Record<string, unkno
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
+export function providerRecoveryCountAfterModelRequestPhase(
+  currentCount: number,
+  phase: string,
+): number {
+  return phase === "completed" ? 0 : currentCount;
+}
+
 export function headerValue(headers: unknown, name: string): string | null {
   if (!headers || typeof headers !== "object") return null;
   const getter = (headers as { get?: unknown }).get;

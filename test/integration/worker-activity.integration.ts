@@ -645,7 +645,7 @@ describe("worker activities integration", () => {
             functionCall(
               "opengeni__session_create",
               {
-                initialMessage: "worker: reply ready then goal_complete",
+                initialMessage: "Verify spawned worker inheritance",
                 sandboxBackend: "none",
               },
               "call-spawn-1",
@@ -692,6 +692,25 @@ describe("worker activities integration", () => {
       expect(worker?.parentSessionId).toBe(manager.id);
       expect(worker?.model).toBe("scripted-model");
       expect(worker?.metadata.reasoningEffort).toBe("medium");
+      expect(worker).toMatchObject({
+        title: "Verify spawned worker inheritance",
+        titleSource: "agent",
+      });
+      const workerEvents = await listSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        worker!.id,
+        0,
+        20,
+      );
+      expect(workerEvents.map((event) => event.type).slice(0, 2)).toEqual([
+        "session.created",
+        "session.title_set",
+      ]);
+      expect(workerEvents[1]?.payload).toEqual({
+        title: "Verify spawned worker inheritance",
+        source: "agent",
+      });
     } finally {
       server.stop(true);
     }

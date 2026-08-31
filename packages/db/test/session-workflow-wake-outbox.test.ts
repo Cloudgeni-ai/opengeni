@@ -265,6 +265,11 @@ describe("transactional session workflow wake outbox", () => {
       createdEventPayload: {},
       goal: { text: "Resume only when admitted" },
     });
+    await setSessionGoalStatus(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "paused",
+      rationale: "test hold",
+    });
+    await pauseWorkspace(ctx);
     await markSessionWorkflowWakeDelivered(client.db, {
       accountId: ctx.grant.accountId,
       workspaceId: ctx.grant.workspaceId!,
@@ -272,11 +277,6 @@ describe("transactional session workflow wake outbox", () => {
       temporalWorkflowId: started.temporalWorkflowId,
       wakeRevision: started.workflowWakeRevision!,
     });
-    await setSessionGoalStatus(client.db, ctx.grant.workspaceId!, ctx.session.id, {
-      status: "paused",
-      rationale: "test hold",
-    });
-    await pauseWorkspace(ctx);
     const afterPause = await wakeRow(ctx.grant.workspaceId!, ctx.session.id);
 
     const resumed = await setSessionGoalStatus(client.db, ctx.grant.workspaceId!, ctx.session.id, {
@@ -380,18 +380,59 @@ describe("transactional session workflow wake outbox", () => {
       deliveredRevision: 1,
     });
 
-    await markSessionWorkflowWakeDelivered(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      temporalWorkflowId: `session-${ctx.session.id}`,
-      wakeRevision: second.wakeRevision,
-    });
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        temporalWorkflowId: `session-${ctx.session.id}`,
+        wakeRevision: second.wakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_prompt_turn" });
     expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
       wakeRevision: 2,
-      deliveredRevision: 2,
+      deliveredRevision: 1,
       attempts: 0,
     });
+  });
+
+  test("accepted Send and human Steer wakes remain pending until their prompt turns are claimed", async () => {
+    for (const delivery of ["send", "steer"] as const) {
+      const ctx = await fixture();
+      const queued = await send(ctx, `admit ${delivery}`, delivery);
+      const claimedWake = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
+        (entry) => entry.sessionId === ctx.session.id,
+      );
+      expect(claimedWake?.wakeRevision).toBe(queued.wakeRevision);
+
+      expect(await markSessionWorkflowWakeDelivered(client.db, claimedWake!)).toEqual({
+        action: "pending_admission",
+        blocker: "pending_prompt_turn",
+      });
+      expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+        wakeRevision: queued.wakeRevision,
+        deliveredRevision: 0,
+      });
+
+      const claimedTurn = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+        sessionId: ctx.session.id,
+        workflowId: `session-${ctx.session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      expect(claimedTurn.action).toBe("claimed");
+      if (claimedTurn.action !== "claimed") throw new Error(`${delivery} turn was not claimed`);
+
+      expect(await markSessionWorkflowWakeDelivered(client.db, claimedWake!)).toEqual({
+        action: "acknowledged",
+      });
+      expect(await wakeRow(ctx.grant.workspaceId!, ctx.session.id)).toMatchObject({
+        wakeRevision: queued.wakeRevision,
+        deliveredRevision: queued.wakeRevision,
+      });
+    }
   });
 
   test("starts a delivered row at the new deadline while preserving an earlier pending wake", async () => {
@@ -478,6 +519,16 @@ describe("transactional session workflow wake outbox", () => {
     );
     expect(claimed?.wakeRevision).toBe(queued.wakeRevision);
 
+    const turnClaim = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(turnClaim.action).toBe("claimed");
+
     await markSessionWorkflowWakeDelivered(client.db, claimed!);
     expect(await markSessionWorkflowWakeFailed(client.db, claimed!, "late duplicate failure")).toBe(
       false,
@@ -531,13 +582,6 @@ describe("transactional session workflow wake outbox", () => {
   test("repair claims derive cancellation from the durable interruption ledger", async () => {
     const ctx = await fixture();
     const queued = await send(ctx, "run");
-    await markSessionWorkflowWakeDelivered(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      temporalWorkflowId: `session-${ctx.session.id}`,
-      wakeRevision: queued.wakeRevision,
-    });
     const attemptId = crypto.randomUUID();
     await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
       sessionId: ctx.session.id,
@@ -546,6 +590,13 @@ describe("transactional session workflow wake outbox", () => {
       attemptId,
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" },
+    });
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: queued.wakeRevision,
     });
     const paused = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
@@ -583,13 +634,6 @@ describe("transactional session workflow wake outbox", () => {
       reasoningEffortFallback: "low",
       createdEventPayload: {},
     });
-    await markSessionWorkflowWakeDelivered(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      temporalWorkflowId: started.temporalWorkflowId,
-      wakeRevision: started.workflowWakeRevision!,
-    });
     const attemptId = crypto.randomUUID();
     const workflowRunId = crypto.randomUUID();
     const activityId = crypto.randomUUID();
@@ -603,6 +647,13 @@ describe("transactional session workflow wake outbox", () => {
     });
     expect(claimed.action).toBe("claimed");
     if (claimed.action !== "claimed") throw new Error("turn was not claimed");
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: started.temporalWorkflowId,
+      wakeRevision: started.workflowWakeRevision!,
+    });
 
     expect(
       await requestSessionTurnRecovery(client.db, ctx.grant.workspaceId!, {
@@ -661,13 +712,6 @@ describe("transactional session workflow wake outbox", () => {
       reasoningEffortFallback: "low",
       createdEventPayload: {},
     });
-    await markSessionWorkflowWakeDelivered(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      temporalWorkflowId: started.temporalWorkflowId,
-      wakeRevision: started.workflowWakeRevision!,
-    });
     const predecessorAttemptId = crypto.randomUUID();
     const predecessorRunId = crypto.randomUUID();
     const predecessorActivityId = crypto.randomUUID();
@@ -681,6 +725,13 @@ describe("transactional session workflow wake outbox", () => {
     });
     expect(predecessor.action).toBe("claimed");
     if (predecessor.action !== "claimed") throw new Error("predecessor was not claimed");
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: started.temporalWorkflowId,
+      wakeRevision: started.workflowWakeRevision!,
+    });
     expect(
       await requestSessionTurnRecovery(client.db, ctx.grant.workspaceId!, {
         sessionId: ctx.session.id,
@@ -745,13 +796,6 @@ describe("transactional session workflow wake outbox", () => {
   test("fully quiesced historical interruptions do not upgrade ordinary wakes to control", async () => {
     const ctx = await fixture();
     const queued = await send(ctx, "run");
-    await markSessionWorkflowWakeDelivered(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      temporalWorkflowId: `session-${ctx.session.id}`,
-      wakeRevision: queued.wakeRevision,
-    });
     const attemptId = crypto.randomUUID();
     const workflowRunId = crypto.randomUUID();
     const activityId = crypto.randomUUID();
@@ -762,6 +806,13 @@ describe("transactional session workflow wake outbox", () => {
       attemptId,
       dispatchId: activityId,
       trigger: { kind: "next" },
+    });
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: queued.wakeRevision,
     });
     const paused = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
@@ -861,13 +912,6 @@ describe("transactional session workflow wake outbox", () => {
   test("an ownerless Steer keeps control priority when a later Send coalesces", async () => {
     const ctx = await fixture();
     const queued = await send(ctx, "run");
-    await markSessionWorkflowWakeDelivered(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      temporalWorkflowId: `session-${ctx.session.id}`,
-      wakeRevision: queued.wakeRevision,
-    });
     const attemptId = crypto.randomUUID();
     const predecessor = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
       sessionId: ctx.session.id,
@@ -879,6 +923,13 @@ describe("transactional session workflow wake outbox", () => {
     });
     expect(predecessor.action).toBe("claimed");
     if (predecessor.action !== "claimed") throw new Error("predecessor was not claimed");
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: queued.wakeRevision,
+    });
     expect(
       await requestSessionTurnRecovery(client.db, ctx.grant.workspaceId!, {
         sessionId: ctx.session.id,

@@ -822,7 +822,7 @@ describe("immutable session turn initiators", () => {
       ...sessionInput(grant),
       createdBy: { kind: "service", subjectId: "scheduler" },
     });
-    const { runId: scheduledRunId } = await addAcceptedScheduledOccurrence(
+    const { taskId: scheduledTaskId, runId: scheduledRunId } = await addAcceptedScheduledOccurrence(
       grant,
       scheduledTarget.id,
     );
@@ -842,7 +842,75 @@ describe("immutable session turn initiators", () => {
       label: "OpenGeni scheduler",
     });
     expect(scheduledClaim.turn.initiatingHumanSubjectId).toBeNull();
+    expect(scheduledClaim.turn.scheduledTaskRunId).toBe(scheduledRunId);
     expect(scheduledClaim.turn.initiatorContext.scheduledRunIds).toEqual([scheduledRunId]);
+    const [scheduledHistory] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ item: schema.sessionHistoryItems.item })
+        .from(schema.sessionHistoryItems)
+        .where(eq(schema.sessionHistoryItems.turnId, scheduledClaim.turn.id)),
+    );
+    expect(scheduledHistory?.item).toMatchObject({ type: "message", role: "user" });
+    const scheduledHistoryContent = scheduledHistory?.item.content;
+    if (typeof scheduledHistoryContent !== "string") {
+      throw new Error("Scheduled occurrence history item has no text content");
+    }
+    expect(scheduledHistoryContent).toContain("[OpenGeni scheduled task occurrence]");
+    expect(scheduledHistoryContent).toContain(`Scheduled task ID: ${scheduledTaskId}`);
+    expect(scheduledHistoryContent).toContain(`Scheduled task run ID: ${scheduledRunId}`);
+    expect(scheduledHistoryContent).toContain("Instructions:\nScheduled work");
+
+    const attachedTarget = await createSession(client.db, sessionInput(grant));
+    const sender = "user:scheduled-attachment-sender";
+    const sent = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, sender, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: attachedTarget.id,
+          subjectId: sender,
+          subjectLabel: "Scheduled attachment sender",
+          actor: { type: "human", subjectId: sender },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Keep this human task authoritative.",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    await addAcceptedScheduledOccurrence(grant, attachedTarget.id);
+    const attachedClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: attachedTarget.id,
+      workflowId: `session-${attachedTarget.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(attachedClaim.action).toBe("claimed");
+    if (attachedClaim.action !== "claimed") {
+      throw new Error("Human turn with an attached scheduled occurrence was not claimed");
+    }
+    expect(attachedClaim.turn.id).toBe(sent.turnId);
+    expect(attachedClaim.turn.initiator).toEqual({
+      kind: "subject",
+      subjectId: sender,
+      label: "Scheduled attachment sender",
+    });
+    expect(attachedClaim.turn.scheduledTaskRunId).toBeNull();
+    const attachedHistory = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ item: schema.sessionHistoryItems.item })
+        .from(schema.sessionHistoryItems)
+        .where(eq(schema.sessionHistoryItems.turnId, attachedClaim.turn.id))
+        .orderBy(schema.sessionHistoryItems.position),
+    );
+    expect(attachedHistory.map(({ item }) => item.role)).toEqual(["user", "system"]);
+    expect(attachedHistory[0]?.item.content).toBe("Keep this human task authoritative.");
+    expect(attachedHistory[1]?.item.content).toContain("[OpenGeni internal updates]");
+    expect(attachedHistory[1]?.item.content).not.toContain("[OpenGeni scheduled task occurrence]");
 
     const mixedTarget = await createSession(client.db, sessionInput(grant));
     const goal = await createSessionGoal(client.db, {

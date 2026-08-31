@@ -39,6 +39,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  SESSION_TITLE_MAX_CHARACTERS,
   MAX_SELECTED_VARIABLE_SETS,
   sessionGoalUtf8Bytes,
   TASK_NOTE_LIST_DEFAULT_LIMIT,
@@ -4814,6 +4815,14 @@ function registerWorkspaceOrchestrationTools(
     const sessionCreateInput = z4
       .object({
         initialMessage: z4.string().min(1),
+        title: z4
+          .string()
+          .min(1)
+          .max(SESSION_TITLE_MAX_CHARACTERS)
+          .optional()
+          .describe(
+            "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; OpenGeni derives a sensitive-safe bounded fallback from that text.",
+          ),
         instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
         goal: z4.unknown().optional(),
         resources: z4.array(z4.unknown()).optional(),
@@ -4896,7 +4905,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {
@@ -4909,18 +4918,25 @@ function registerWorkspaceOrchestrationTools(
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
-          const { machineTarget, ...request } = args;
-          const result = await createSessionForRequestWithOutcome(deps, grant, grant.workspaceId, {
-            ...request,
-            ...(machineTarget
-              ? {
-                  targetSandboxId: machineTarget.targetSandboxId,
-                  ...(machineTarget.workingDir !== undefined
-                    ? { workingDir: machineTarget.workingDir }
-                    : {}),
-                }
-              : {}),
-          });
+          const { machineTarget, title, ...request } = args;
+          const result = await createSessionForRequestWithOutcome(
+            deps,
+            grant,
+            grant.workspaceId,
+            {
+              ...request,
+              ...(machineTarget
+                ? {
+                    targetSandboxId: machineTarget.targetSandboxId,
+                    ...(machineTarget.workingDir !== undefined
+                      ? { workingDir: machineTarget.workingDir }
+                      : {}),
+                  }
+                : {}),
+            },
+            undefined,
+            title === undefined ? {} : { automaticTitleCandidate: title },
+          );
           return json(sessionCreateMutationReceipt(result, Boolean(request.idempotencyKey)));
         } catch (error) {
           return orchestrationFailureResult("session_create", error);

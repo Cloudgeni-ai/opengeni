@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 3.7.3
+
+### Patch Changes
+
+- 463c709: Reset provider recovery backoff after a fenced successful model request so intermittent outages cannot exhaust a long-running turn's consecutive retry budget.
+
 ## 3.7.2
 
 ### Patch Changes

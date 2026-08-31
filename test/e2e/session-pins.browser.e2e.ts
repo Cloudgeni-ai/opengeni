@@ -27,6 +27,7 @@ import {
   type BrowserContextOptions,
   type Page,
   type Response as PlaywrightResponse,
+  type Route,
 } from "playwright";
 import postgres from "postgres";
 
@@ -166,6 +167,101 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(
         await page.getByRole("menuitemradio", { name: "Creator" }).getAttribute("aria-checked"),
       ).toBe("true");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("normalizes search-only creators and counts hierarchical browse roots", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Created grouping unrelated root",
+      );
+      const manager = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Created grouping manager",
+      );
+      const child = await createTitledSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Created grouping child",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        parentSessionId: manager.id,
+        createdBy: {
+          kind: "subject",
+          subjectId: "sessionpin-child-only-creator",
+          label: "Child-only creator",
+        },
+      });
+
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const rail = page.locator("[data-sessionpin-session-list]");
+      const managerRow = rail.locator(`a[data-session-row="${manager.id}"]`);
+      await managerRow.waitFor();
+
+      const search = page.getByRole("searchbox", { name: "Search sessions" });
+      await search.fill("Created grouping child");
+      await page.getByText("1 matching session.").waitFor();
+      await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("menuitem", { name: /^Creator/ }).hover();
+      await page.getByRole("menuitemradio", { name: "Child-only creator" }).click();
+
+      // A creator offered only by flat child search is not a valid root filter.
+      // Leaving search clears that scoped choice instead of painting an empty
+      // hierarchy or leaving the submenu with a generic "Selected" value.
+      await search.fill("");
+      await managerRow.waitFor();
+      await page.getByRole("button", { name: "Session filters" }).click();
+      expect(await page.getByText("Selected", { exact: true }).count()).toBe(0);
+      await page.getByRole("menuitemradio", { name: "Created date" }).click();
+      await page.getByRole("button", { name: "Session filters, active" }).waitFor();
+      const liveRegion = rail.locator('[aria-live="polite"]');
+      await page.waitForFunction(() => {
+        const message = document.querySelector(
+          '[data-sessionpin-session-list] [aria-live="polite"]',
+        )?.textContent;
+        return Boolean(message && message !== "1 matching session.");
+      });
+      const rootCountAnnouncement = await liveRegion.textContent();
+      expect(rootCountAnnouncement).toMatch(/^\d+ matching sessions?\.$/);
+
+      // Browse grouping keeps root-only pagination and lazy child loading. The
+      // child must not appear beside its manager as another top-level result.
+      expect(await rail.locator(`a[data-session-row="${child.id}"]`).count()).toBe(0);
+      const managerItem = managerRow.locator("xpath=../..");
+      await managerItem.getByRole("button", { name: "Expand spawned sessions" }).click();
+      const childRow = rail.locator(`a[data-session-row="${child.id}"]`);
+      await childRow.waitFor();
+      await page.waitForTimeout(250);
+      expect(await liveRegion.textContent()).toBe(rootCountAnnouncement);
+      expect(
+        await childRow.evaluate((element) =>
+          element.closest('[role="list"]')?.getAttribute("aria-label"),
+        ),
+      ).toBe("Spawned sessions from Created grouping manager");
+      expect(await rail.locator(`a[data-session-row="${child.id}"]`).count()).toBe(1);
+      await expectNoAxeViolations(page, ["[data-sessionpin-session-list]"]);
+      await page.screenshot({
+        path: "/tmp/opengeni-session-created-group-hierarchy.png",
+        fullPage: true,
+      });
     } finally {
       await context.close();
     }
@@ -919,6 +1015,60 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         descendant,
         true,
       );
+
+      // A direct child route hydrates its parent branch in the background.
+      // Hold that request open so any transient tree feedback remains visible
+      // long enough to catch: route reconciliation must not append a loading
+      // row beneath the workstream.
+      const childPagePattern = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions?**`;
+      let releaseChildPage!: () => void;
+      let markChildPageStarted!: () => void;
+      let markChildPageFinished!: () => void;
+      let childPageRequestStarted = false;
+      const childPageGate = new Promise<void>((resolve) => {
+        releaseChildPage = resolve;
+      });
+      const childPageStarted = new Promise<void>((resolve) => {
+        markChildPageStarted = resolve;
+      });
+      const childPageFinished = new Promise<void>((resolve) => {
+        markChildPageFinished = resolve;
+      });
+      const holdChildPage = async (route: Route): Promise<void> => {
+        const url = new URL(route.request().url());
+        if (
+          url.searchParams.get("parentSessionId") !== manager.id ||
+          url.searchParams.has("cursor")
+        ) {
+          await route.continue();
+          return;
+        }
+        childPageRequestStarted = true;
+        markChildPageStarted();
+        await childPageGate;
+        await route.continue();
+        markChildPageFinished();
+      };
+      await page.route(childPagePattern, holdChildPage);
+      try {
+        await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${ordinaryChild.id}`);
+        await page
+          .getByTestId("session-timeline")
+          .getByText("Ordinary manager child", { exact: true })
+          .waitFor();
+        await childPageStarted;
+        expect(
+          await page
+            .locator("[data-sessionpin-session-list]")
+            .getByText("Loading sessions…", { exact: true })
+            .count(),
+        ).toBe(0);
+      } finally {
+        releaseChildPage();
+        if (childPageRequestStarted) await childPageFinished;
+        await page.unroute(childPagePattern, holdChildPage);
+      }
+
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`);
 
       const pinnedList = page.getByRole("list", { name: "Pinned sessions" });

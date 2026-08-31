@@ -1,9 +1,20 @@
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import { AlertTriangleIcon, CopyIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
+
+const RECONNECT_PILL_REVEAL_DELAY_MS = 1_500;
+
+type ConnectionPillMeta = { label: string; dot: string; text: string };
+
+const degradedConnectionStates: Partial<Record<SessionEventsConnectionState, ConnectionPillMeta>> =
+  {
+    connecting: { label: "Connecting…", dot: "bg-status-running", text: "text-status-running" },
+    reconnecting: { label: "Reconnecting…", dot: "bg-status-running", text: "text-status-running" },
+    error: { label: "Stream error", dot: "bg-status-failed", text: "text-status-failed" },
+  };
 
 export function LoadingPanel({ label }: { label: string }) {
   return (
@@ -33,26 +44,36 @@ export function ProblemPanel(props: { title: string; description: ReactNode; act
  * Connection health, shown only when it needs a word (doctrine D2). Healthy
  * states (live / idle / ended) render nothing — the session status badge is the
  * single persistent pill, so there is no "live" + "Idle" double-green. The pill
- * surfaces only while the stream is degraded, in sentence case.
+ * surfaces only while the stream is degraded, in sentence case. Routine HTTP/1
+ * stream cycling never mounts the reconnect pill, so its hidden content cannot
+ * shift the surrounding header controls.
  */
 export function ConnectionPill({ state }: { state: SessionEventsConnectionState }) {
-  const degraded: Partial<
-    Record<SessionEventsConnectionState, { label: string; dot: string; text: string }>
-  > = {
-    connecting: { label: "Connecting…", dot: "bg-status-running", text: "text-status-running" },
-    reconnecting: { label: "Reconnecting…", dot: "bg-status-running", text: "text-status-running" },
-    error: { label: "Stream error", dot: "bg-status-failed", text: "text-status-failed" },
-  };
-  const meta = degraded[state];
+  const meta = degradedConnectionStates[state];
   if (!meta) {
     return null;
   }
+  if (state === "reconnecting") {
+    return <DelayedReconnectPill meta={meta} />;
+  }
+  return <ConnectionPillContent meta={meta} />;
+}
+
+function DelayedReconnectPill({ meta }: { meta: ConnectionPillMeta }) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setVisible(true), RECONNECT_PILL_REVEAL_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, []);
+  return visible ? <ConnectionPillContent meta={meta} /> : null;
+}
+
+function ConnectionPillContent({ meta }: { meta: ConnectionPillMeta }) {
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-2 py-1 text-xs font-medium",
         meta.text,
-        state === "reconnecting" && "og-connection-pill-reconnect",
       )}
     >
       <span className={cn("size-2 rounded-full motion-safe:animate-pulse", meta.dot)} />
