@@ -10,7 +10,9 @@ import {
   getScheduledTaskRunAcceptedExecution,
   listSessions,
   listScheduledTaskRuns,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
   type DbClient,
+  updateScheduledTask,
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
@@ -18,6 +20,7 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
@@ -76,6 +79,26 @@ async function waitForBlockedBackend(blockerPid: number, description: string): P
       ) as waiting
     `;
     if (row?.waiting) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`${description} did not block behind backend ${blockerPid}`);
+}
+
+async function waitForBackendBlockedBy(blockerPid: number, description: string): Promise<number> {
+  if (!shared) throw new Error("scheduled-task model catalog fixture is unavailable");
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const [row] = await shared.admin<Array<{ pid: number }>>`
+      select activity.pid::int as pid
+      from pg_stat_activity activity
+      where activity.datname = current_database()
+        and activity.state = 'active'
+        and activity.wait_event_type = 'Lock'
+        and ${blockerPid} = any(pg_blocking_pids(activity.pid))
+      order by activity.pid
+      limit 1
+    `;
+    if (row) return row.pid;
     await Bun.sleep(10);
   }
   throw new Error(`${description} did not block behind backend ${blockerPid}`);
@@ -257,6 +280,126 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
     });
     expect(await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).toHaveLength(0);
     expect(await listSessions(client.db, grant.workspaceId, 10)).toHaveLength(0);
+  }, 60_000);
+
+  test("orders fresh occurrence admission before the task row behind a queued retirement", async () => {
+    if (!available) return;
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `scheduled-model-lock-order-account-${crypto.randomUUID()}`,
+      accountName: "Scheduled model lock order account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `scheduled-model-lock-order-workspace-${crypto.randomUUID()}`,
+      workspaceName: "Scheduled model lock order workspace",
+      subjectId: "user:scheduled-model-lock-order-owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    const upstreamModelId = `race/scheduled-lock-order-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const customModel = await createWorkspaceGatewayCustomModel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      upstreamModelId,
+      operationId: crypto.randomUUID(),
+      requestHash: "6".repeat(64),
+      createdBySubjectId: grant.subjectId,
+    });
+    if (!customModel) throw new Error("custom model create unexpectedly conflicted");
+    const task = await createScheduledTask(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      name: "Custom-model lock-order occurrence",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-model-lock-order-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Run only while the selected custom model remains active",
+        model: productModelId,
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+
+    let releaseUpdate!: () => void;
+    const updateRelease = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    let markUpdateReady!: () => void;
+    const updateReady = new Promise<void>((resolve) => {
+      markUpdateReady = resolve;
+    });
+    let updateBackendPid: number | null = null;
+    const updatePromise = updateScheduledTask(client.db, grant.workspaceId, task.id, {
+      name: "Custom-model lock-order occurrence updated",
+      beforeUpdateCommit: async (tx) => {
+        const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          upstreamModelId,
+        });
+        if (!active) throw new Error("custom model disappeared before the lock-order fixture");
+        const rows = await tx.execute(sql<{ pid: number }>`select pg_backend_pid()::int as pid`);
+        updateBackendPid = rows[0]?.pid ?? null;
+        if (!updateBackendPid) throw new Error("task updater has no backend pid");
+        markUpdateReady();
+        await updateRelease;
+      },
+    });
+
+    try {
+      await updateReady;
+      const blockerPid = updateBackendPid;
+      if (!blockerPid) throw new Error("task updater did not expose its backend pid");
+
+      const retirementPromise = deleteWorkspaceGatewayCustomModel(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        customModelId: customModel.id,
+        expectedVersion: customModel.version,
+        operationId: crypto.randomUUID(),
+        requestHash: "7".repeat(64),
+      });
+      const retirementBackendPid = await waitForBackendBlockedBy(
+        blockerPid,
+        "queued custom-model retirement",
+      );
+
+      const dispatchPromise = activities().dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `scheduled-model-lock-order-${crypto.randomUUID()}`,
+      });
+      await waitForBackendBlockedBy(
+        retirementBackendPid,
+        "fresh scheduled occurrence behind queued custom-model retirement",
+      );
+
+      releaseUpdate();
+      const [updated, retired, dispatch] = await Promise.all([
+        updatePromise,
+        retirementPromise,
+        dispatchPromise,
+      ]);
+      expect(updated.name).toBe("Custom-model lock-order occurrence updated");
+      expect(retired).toMatchObject({ outcome: "success" });
+      expect(dispatch).toEqual({
+        action: "blocked",
+        reason: "scheduled_run_terminal",
+      });
+      expect(await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).toHaveLength(
+        0,
+      );
+      expect(await listSessions(client.db, grant.workspaceId, 10)).toHaveLength(0);
+    } finally {
+      releaseUpdate();
+      await updatePromise.catch(() => undefined);
+    }
   }, 60_000);
 
   test("replays an accepted generated-session occurrence after custom-model retirement", async () => {
