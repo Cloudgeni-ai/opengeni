@@ -215,6 +215,9 @@ describe("release schema contract", () => {
     const codexCooldownRevisionGuardPrivileges = completeSourceContract.migrations.some(
       (migration) => migration.path === "0384_codex_cooldown_revision_guard_privileges.sql",
     );
+    const connectedMachineLegacyTildeWorkdirs = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0385_connected_machine_legacy_tilde_workdirs.sql",
+    );
     const automaticSessionTitleMigrationPaths = new Set([
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
@@ -248,6 +251,7 @@ describe("release schema contract", () => {
       "0382_organization_api_key_provenance.sql",
       "0383_codex_cooldown_reconciliation.sql",
       "0384_codex_cooldown_revision_guard_privileges.sql",
+      "0385_connected_machine_legacy_tilde_workdirs.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -287,10 +291,13 @@ describe("release schema contract", () => {
         (organizationCodexSubscriptionInheritance ? 1 : 0) +
         (organizationApiKeyProvenance ? 1 : 0) +
         (codexCooldownReconciliation ? 1 : 0) +
-        (codexCooldownRevisionGuardPrivileges ? 1 : 0),
-      latestMigration: codexCooldownRevisionGuardPrivileges
-        ? "0384_codex_cooldown_revision_guard_privileges.sql"
-        : codexCooldownReconciliation
+        (codexCooldownRevisionGuardPrivileges ? 1 : 0) +
+        (connectedMachineLegacyTildeWorkdirs ? 1 : 0),
+      latestMigration: connectedMachineLegacyTildeWorkdirs
+        ? "0385_connected_machine_legacy_tilde_workdirs.sql"
+        : codexCooldownRevisionGuardPrivileges
+          ? "0384_codex_cooldown_revision_guard_privileges.sql"
+          : codexCooldownReconciliation
           ? "0383_codex_cooldown_reconciliation.sql"
           : organizationApiKeyProvenance
             ? "0382_organization_api_key_provenance.sql"
@@ -479,6 +486,7 @@ describe("release schema contract", () => {
       "0382_organization_api_key_provenance.sql",
       "0383_codex_cooldown_reconciliation.sql",
       "0384_codex_cooldown_revision_guard_privileges.sql",
+      "0385_connected_machine_legacy_tilde_workdirs.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -617,6 +625,9 @@ describe("release schema contract", () => {
     const codexCooldownRevisionGuardPrivileges = completeSourceContract.migrations.some(
       (migration) => migration.path === "0384_codex_cooldown_revision_guard_privileges.sql",
     );
+    const connectedMachineLegacyTildeWorkdirs = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0385_connected_machine_legacy_tilde_workdirs.sql",
+    );
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
@@ -656,10 +667,13 @@ describe("release schema contract", () => {
         (organizationCodexSubscriptionInheritance ? 1 : 0) +
         (organizationApiKeyProvenance ? 1 : 0) +
         (codexCooldownReconciliation ? 1 : 0) +
-        (codexCooldownRevisionGuardPrivileges ? 1 : 0),
-      latestMigration: codexCooldownRevisionGuardPrivileges
-        ? "0384_codex_cooldown_revision_guard_privileges.sql"
-        : codexCooldownReconciliation
+        (codexCooldownRevisionGuardPrivileges ? 1 : 0) +
+        (connectedMachineLegacyTildeWorkdirs ? 1 : 0),
+      latestMigration: connectedMachineLegacyTildeWorkdirs
+        ? "0385_connected_machine_legacy_tilde_workdirs.sql"
+        : codexCooldownRevisionGuardPrivileges
+          ? "0384_codex_cooldown_revision_guard_privileges.sql"
+          : codexCooldownReconciliation
           ? "0383_codex_cooldown_reconciliation.sql"
           : organizationApiKeyProvenance
             ? "0382_organization_api_key_provenance.sql"
