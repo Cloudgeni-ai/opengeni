@@ -356,9 +356,7 @@ function LiveAgentSession({
     sendBlocked: () => attachments.hasUnresolved,
     onSent: (_text, input) =>
       attachments.removeReadyFiles(
-        (input.resources ?? []).flatMap((resource) =>
-          resource.kind === "file" ? [resource.fileId] : [],
-        ),
+        (input.resources ?? []).filter((resource) => resource.kind === "file"),
       ),
   });
   const status = sessionStatus ?? session?.status ?? null;

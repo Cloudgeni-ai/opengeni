@@ -92,11 +92,12 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/provider.tsx"))).toBe(false);
     expect(reactSources.some((id) => id.endsWith("/src/session-context.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/older-history.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/lib/resource-identity.ts"))).toBe(true);
     expect(reactSources.some((id) => id.includes("/src/components/"))).toBe(false);
     expect(reactSources.some((id) => id.includes("/src/commands/"))).toBe(false);
     // Keep the session-only closure explicit: adding a source requires reviewing
     // whether it belongs to this provider-neutral public subpath.
-    expect(reactSources.length).toBe(21);
+    expect(reactSources.length).toBe(22);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

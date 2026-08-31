@@ -534,12 +534,14 @@ describe("useFileAttachments", () => {
       status: "uploading",
     });
     expect(hook.result.current.attachments[1]).toEqual({
-      id: "restored:restored-ready",
+      id: "restored:restored-ready:default",
       name: "restored.png",
       contentType: ready.contentType,
       sizeBytes: ready.sizeBytes,
       status: "ready",
       file: ready,
+      resource: { kind: "file", fileId: "restored-ready" },
+      restored: true,
     });
     expect(hook.result.current.attachments[1]?.previewUrl).toBeUndefined();
     expect(hook.result.current.uploading).toBe(true);
@@ -548,6 +550,262 @@ describe("useFileAttachments", () => {
     ]);
 
     await flushing(() => resolveUpload(fakeAsset({ id: "local-ready" })));
+    await hook.unmount();
+  });
+
+  test("hydrates a durable image into one named card with a signed preview", async () => {
+    const asset = fakeAsset({ id: "durable-image", filename: "durable.png", sizeBytes: 4096 });
+    const getFileCalls: string[] = [];
+    const downloadCalls: string[] = [];
+    const client = fakeClient({
+      uploadFile: async () => asset,
+      getFile: async (_workspaceId, fileId) => {
+        getFileCalls.push(fileId);
+        return asset;
+      },
+      createFileDownloadUrl: async (_workspaceId, fileId) => {
+        downloadCalls.push(fileId);
+        return {
+          url: "https://files.example.test/durable-image",
+          expiresAt: "2026-08-12T12:00:00.000Z",
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() =>
+      hook.result.current.restoreResources?.([{ kind: "file", fileId: asset.id }]),
+    );
+    await flush();
+
+    expect(hook.result.current.attachments).toHaveLength(1);
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      id: "restored:durable-image:default",
+      name: "durable.png",
+      contentType: "image/png",
+      sizeBytes: 4096,
+      status: "ready",
+      file: asset,
+      resource: { kind: "file", fileId: asset.id },
+      restored: true,
+      previewUrl: "https://files.example.test/durable-image",
+    });
+    expect(hook.result.current.attachments[0]?.metadataStatus).toBeUndefined();
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
+    expect(getFileCalls).toEqual([asset.id]);
+    expect(downloadCalls).toEqual([asset.id]);
+
+    await flushing(() =>
+      hook.result.current.restoreResources?.([{ kind: "file", fileId: asset.id }]),
+    );
+    await flush();
+    expect(getFileCalls).toEqual([asset.id]);
+    expect(downloadCalls).toEqual([asset.id]);
+    await hook.unmount();
+  });
+
+  test("preserves exact custom mounts while hydrating shared file metadata once", async () => {
+    const asset = fakeAsset({ id: "shared-file", filename: "shared.png" });
+    let getFileCalls = 0;
+    let downloadCalls = 0;
+    const client = fakeClient({
+      uploadFile: async () => asset,
+      getFile: async () => {
+        getFileCalls += 1;
+        return asset;
+      },
+      createFileDownloadUrl: async () => {
+        downloadCalls += 1;
+        return {
+          url: "https://files.example.test/shared",
+          expiresAt: "2026-08-12T12:00:00.000Z",
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const resources = [
+      { kind: "file", fileId: asset.id, mountPath: "input/one.png" },
+      { kind: "file", fileId: asset.id, mountPath: "input/two.png" },
+      { kind: "file", fileId: asset.id, mountPath: "input/one.png" },
+    ] as const;
+
+    await flushing(() => hook.result.current.restoreResources?.(resources));
+    await flush();
+
+    expect(hook.result.current.attachments).toHaveLength(2);
+    expect(hook.result.current.attachments.map((attachment) => attachment.resource)).toEqual(
+      resources.slice(0, 2),
+    );
+    expect(hook.result.current.attachments.map((attachment) => attachment.previewUrl)).toEqual([
+      "https://files.example.test/shared",
+      "https://files.example.test/shared",
+    ]);
+    expect(hook.result.current.readyResources).toEqual(resources.slice(0, 2));
+    expect(getFileCalls).toBe(1);
+    expect(downloadCalls).toBe(1);
+    await hook.unmount();
+  });
+
+  test("exact accepted mount cleanup preserves a later mount of the same file", async () => {
+    const asset = fakeAsset({ id: "mounted-file", filename: "mounted.png" });
+    const client = fakeClient({ uploadFile: async () => asset });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const accepted = { kind: "file", fileId: asset.id, mountPath: "inputs/accepted.png" } as const;
+    const later = { kind: "file", fileId: asset.id, mountPath: "inputs/later.png" } as const;
+
+    await flushing(() => hook.result.current.restoreReadyFiles([asset], [accepted, later]));
+    await flushing(() => hook.result.current.removeReadyFiles([accepted]));
+
+    expect(hook.result.current.attachments).toHaveLength(1);
+    expect(hook.result.current.attachments[0]?.resource).toEqual(later);
+    expect(hook.result.current.readyResources).toEqual([later]);
+    await hook.unmount();
+  });
+
+  test("a stale metadata request cannot resurrect an older durable resource set", async () => {
+    let resolveFirst!: (file: FileAsset) => void;
+    let resolveSecond!: (file: FileAsset) => void;
+    const first = new Promise<FileAsset>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = new Promise<FileAsset>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const client = fakeClient({
+      uploadFile: async () => fakeAsset(),
+      getFile: async (_workspaceId, fileId) => await (fileId === "first-durable" ? first : second),
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() =>
+      hook.result.current.restoreResources?.([{ kind: "file", fileId: "first-durable" }]),
+    );
+    await flushing(() =>
+      hook.result.current.restoreResources?.([{ kind: "file", fileId: "second-durable" }]),
+    );
+    await flushing(() =>
+      resolveSecond(fakeAsset({ id: "second-durable", filename: "second.png" })),
+    );
+    await flush();
+    await flushing(() => resolveFirst(fakeAsset({ id: "first-durable", filename: "first.png" })));
+    await flush();
+
+    expect(hook.result.current.attachments).toHaveLength(1);
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      name: "second.png",
+      resource: { kind: "file", fileId: "second-durable" },
+    });
+    expect(hook.result.current.readyResources).toEqual([
+      { kind: "file", fileId: "second-durable" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("soft reconciliation preserves the local object URL and does not mint a signed preview", async () => {
+    const asset = fakeAsset({ id: "local-image", filename: "local.png" });
+    let downloadCalls = 0;
+    const client = fakeClient({
+      uploadFile: async () => asset,
+      createFileDownloadUrl: async () => {
+        downloadCalls += 1;
+        return {
+          url: "https://files.example.test/local-image",
+          expiresAt: "2026-08-12T12:00:00.000Z",
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("local.png")]));
+    await flush();
+    const attachmentId = hook.result.current.attachments[0]!.id;
+    const localPreview = hook.result.current.attachments[0]!.previewUrl;
+
+    await flushing(() =>
+      hook.result.current.restoreReadyFiles([asset], [{ kind: "file", fileId: asset.id }]),
+    );
+    await flush();
+
+    expect(hook.result.current.attachments).toHaveLength(1);
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      id: attachmentId,
+      file: asset,
+      resource: { kind: "file", fileId: asset.id },
+      previewUrl: localPreview,
+    });
+    expect(downloadCalls).toBe(0);
+    expect(revoked).not.toContain(localPreview);
+    await hook.unmount();
+  });
+
+  test("a minimal upload-only client degrades a durable ref to one coherent fallback card", async () => {
+    const client = fakeClient({ uploadFile: async () => fakeAsset() });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() =>
+      hook.result.current.restoreResources?.([{ kind: "file", fileId: "fallback-file" }]),
+    );
+
+    expect(hook.result.current.attachments).toEqual([
+      {
+        id: "restored:fallback-file:default",
+        name: "fallback-file",
+        contentType: "application/octet-stream",
+        sizeBytes: 0,
+        status: "ready",
+        resource: { kind: "file", fileId: "fallback-file" },
+        restored: true,
+        metadataStatus: "failed",
+      },
+    ]);
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: "fallback-file" }]);
+    await hook.unmount();
+  });
+
+  test("a failed signed preview keeps hydrated image metadata and falls back safely", async () => {
+    const asset = fakeAsset({ id: "broken-preview", filename: "still-named.png" });
+    const client = fakeClient({
+      uploadFile: async () => asset,
+      getFile: async () => asset,
+      createFileDownloadUrl: async () => {
+        throw new Error("signing unavailable");
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() =>
+      hook.result.current.restoreResources?.([{ kind: "file", fileId: asset.id }]),
+    );
+    await flush();
+
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      name: "still-named.png",
+      contentType: "image/png",
+      file: asset,
+      previewFailed: true,
+    });
+    expect(hook.result.current.attachments[0]?.previewUrl).toBeUndefined();
     await hook.unmount();
   });
 

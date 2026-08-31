@@ -931,9 +931,7 @@ function SessionsIndexRouteContent({
                   setMessage("");
                   setDraft(emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend));
                   attachments.removeReadyFiles(
-                    submittedResources.flatMap((resource) =>
-                      resource.kind === "file" ? [resource.fileId] : [],
-                    ),
+                    submittedResources.filter((resource) => resource.kind === "file"),
                   );
                 } else if (
                   !acknowledged ||

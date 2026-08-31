@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type {
   FileAsset,
+  FileResourceRef,
   NewSessionDraft,
   OpenGeniClient,
   SaveNewSessionDraftRequest,
@@ -72,14 +73,18 @@ function renderDraftHook(draftClient: DraftClient, workspaceId = WORKSPACE_A) {
     (props: { client: DraftClient; workspaceId: string }) => {
       const [value, setValue] = useState(() => editable());
       const [files, setFiles] = useState<FileAsset[]>([]);
+      const [fileResources, setFileResources] = useState<FileResourceRef[]>([]);
       const draft = useNewSessionDraft({
         client: props.client,
         workspaceId: props.workspaceId,
         value,
         onApplyRemote: setValue,
-        restoreReadyFiles: (next) => setFiles([...next]),
+        restoreReadyFiles: (next, resources) => {
+          setFiles([...next]);
+          setFileResources([...(resources ?? [])]);
+        },
       });
-      return { draft, value, setValue, files };
+      return { draft, value, setValue, files, fileResources };
     },
     { client: draftClient, workspaceId },
   );
@@ -160,11 +165,45 @@ describe("useNewSessionDraft", () => {
     expect(hook.result.current.value.text).toBe("restore me");
     expect(hook.result.current.value.resources).toEqual([
       { kind: "repository", uri: "https://example.com/repo.git", ref: "main" },
-      { kind: "file", fileId: readyId },
+      { kind: "file", fileId: readyId, mountPath: `files/${readyId}` },
     ]);
     expect(hook.result.current.files.map((file) => file.id)).toEqual([readyId]);
+    expect(hook.result.current.fileResources).toEqual([
+      { kind: "file", fileId: readyId, mountPath: `files/${readyId}` },
+    ]);
     expect(hook.result.current.draft.loading).toBe(false);
     expect(saves).toHaveLength(0);
+    await hook.unmount();
+  });
+
+  test("retains distinct mounts for one revalidated file while reading metadata once", async () => {
+    const fileId = "00000000-0000-4000-8000-000000000021";
+    let reads = 0;
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () =>
+          remote(3, {
+            resources: [
+              { kind: "file", fileId, mountPath: "inputs/primary.png" },
+              { kind: "file", fileId, mountPath: "inputs/reference.png" },
+            ],
+          }),
+        getFile: async () => {
+          reads += 1;
+          return asset(fileId, { filename: "shared.png", contentType: "image/png" });
+        },
+      }),
+    );
+    await flush();
+
+    const expected: FileResourceRef[] = [
+      { kind: "file", fileId, mountPath: "inputs/primary.png" },
+      { kind: "file", fileId, mountPath: "inputs/reference.png" },
+    ];
+    expect(reads).toBe(1);
+    expect(hook.result.current.value.resources).toEqual(expected);
+    expect(hook.result.current.files.map((file) => file.id)).toEqual([fileId]);
+    expect(hook.result.current.fileResources).toEqual(expected);
     await hook.unmount();
   });
 
