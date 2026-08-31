@@ -23,11 +23,13 @@ function selectedVariableSetIds(
 
 export function SessionVariableSetPicker(props: {
   session: Pick<Session, "id" | "workspaceId" | "variableSetIds" | "variableSetId" | "tenancy">;
+  canControl: boolean;
   canAttach: boolean;
   canUse: boolean;
   canList: boolean;
   disabled?: boolean;
   busy?: boolean;
+  goalActive?: boolean;
   compact?: boolean;
   triggerClassName?: string;
   onReloadSession: () => Promise<void>;
@@ -52,11 +54,17 @@ export function SessionVariableSetPicker(props: {
   const [draftIds, setDraftIds] = useState(currentIds);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshRequired, setRefreshRequired] = useState(false);
+  const [committedKey, setCommittedKey] = useState<string | null>(null);
 
   useEffect(() => {
     setDraftIds(currentIds);
-    setError(null);
-  }, [currentIds, props.session.id]);
+    if (committedKey === null || currentKey === committedKey) {
+      setCommittedKey(null);
+      setRefreshRequired(false);
+      setError(null);
+    }
+  }, [committedKey, currentIds, currentKey, props.session.id]);
 
   const selectedChanged = draftIds.join("\u0000") !== currentKey;
   const availableVariableSets = variableSets.variableSets.filter(
@@ -65,7 +73,9 @@ export function SessionVariableSetPicker(props: {
   const selectedPersonal = variableSets.variableSets.filter(
     (variableSet) => variableSet.scope === "user" && draftIds.includes(variableSet.id),
   );
-  const canAdd = props.canAttach && props.canUse && props.canList;
+  const canEdit = props.canControl && props.canAttach && !refreshRequired;
+  const canAdd = canEdit && props.canUse && props.canList;
+  const busy = props.busy || props.goalActive;
   const visible = currentIds.length > 0 || canAdd;
   if (!visible) return null;
 
@@ -76,7 +86,19 @@ export function SessionVariableSetPicker(props: {
       await context.client.updateSessionVariableSets(props.session.workspaceId, props.session.id, {
         variableSetIds: draftIds,
       });
-      await props.onReloadSession();
+      const nextCommittedKey = draftIds.join("\u0000");
+      setCommittedKey(nextCommittedKey);
+      setRefreshRequired(true);
+      try {
+        await props.onReloadSession();
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        const refreshMessage = `The Variable Sets were updated, but the session could not be refreshed: ${message}`;
+        setError(refreshMessage);
+        setOpen(false);
+        toast.warning("Variable Sets updated; refresh required", { description: message });
+        return;
+      }
       setOpen(false);
       toast.success("Variable Sets updated", {
         description: "The selection will apply to the next message in a fresh sandbox.",
@@ -90,14 +112,33 @@ export function SessionVariableSetPicker(props: {
     }
   };
 
+  const refreshCommittedSession = async () => {
+    setSaving(true);
+    try {
+      await props.onReloadSession();
+      setOpen(false);
+      toast.success("Session refreshed");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(
+        `The Variable Sets were updated, but the session could not be refreshed: ${message}`,
+      );
+      toast.warning("Session refresh failed", { description: message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <DropdownMenu
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
         if (next) {
-          setDraftIds(currentIds);
-          setError(null);
+          if (!refreshRequired) {
+            setDraftIds(currentIds);
+            setError(null);
+          }
         }
       }}
     >
@@ -143,7 +184,7 @@ export function SessionVariableSetPicker(props: {
           <SelectedVariableSetList
             selectedIds={draftIds}
             variableSets={variableSets.variableSets}
-            disabled={saving || !props.canAttach}
+            disabled={saving || !canEdit || !props.canUse}
             onChange={setDraftIds}
           />
         ) : (
@@ -185,10 +226,32 @@ export function SessionVariableSetPicker(props: {
           </Select>
         ) : null}
 
+        {canEdit && !props.canUse && draftIds.length > 0 ? (
+          <div className="flex items-center justify-between gap-3 text-xs text-fg-subtle">
+            <span>
+              Without Variable Set use permission, all attachments must be removed together.
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={saving}
+              onClick={() => setDraftIds([])}
+            >
+              Remove all
+            </Button>
+          </div>
+        ) : null}
+
         {variableSets.error ? (
           <div className="flex items-center justify-between gap-3 text-xs text-status-waiting">
             <span>
-              Available Variable Sets could not be loaded. Attached entries can still be removed.
+              Available Variable Sets could not be loaded.
+              {canEdit
+                ? props.canUse
+                  ? " Attached entries can still be removed."
+                  : " The complete attachment selection can still be cleared."
+                : ""}
             </span>
             <Button
               type="button"
@@ -209,10 +272,35 @@ export function SessionVariableSetPicker(props: {
           </p>
         ) : null}
 
-        {props.busy ? (
+        {!props.canControl ? (
+          <p className="text-2xs text-fg-subtle">
+            Session control permission is required to change Variable Sets.
+          </p>
+        ) : null}
+        {props.goalActive ? (
+          <p className="text-2xs text-fg-subtle">
+            Pause or complete the active goal before changing Variable Sets.
+          </p>
+        ) : props.busy ? (
           <p className="text-2xs text-fg-subtle">
             Variable Sets can be changed after the current and queued work finishes.
           </p>
+        ) : null}
+        {refreshRequired ? (
+          <div className="flex items-center justify-between gap-3 text-xs text-status-waiting">
+            <span>
+              The update committed, but this session must be refreshed before more changes.
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={saving}
+              onClick={() => void refreshCommittedSession()}
+            >
+              Retry refresh
+            </Button>
+          </div>
         ) : null}
         {error ? (
           <p role="alert" className="text-xs text-danger">
@@ -233,7 +321,13 @@ export function SessionVariableSetPicker(props: {
           <Button
             type="button"
             size="sm"
-            disabled={!selectedChanged || saving || props.busy || !props.canAttach}
+            disabled={
+              !selectedChanged ||
+              saving ||
+              busy ||
+              !canEdit ||
+              (draftIds.length > 0 && !props.canUse)
+            }
             onClick={() => void save()}
           >
             {saving ? <Loader2Icon className="animate-spin" /> : null}

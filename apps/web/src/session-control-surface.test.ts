@@ -138,8 +138,18 @@ describe("session control surface architecture", () => {
     expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
     expect(establishedRoute).toContain("<SessionVariableSetPicker");
     expect(establishedPicker).toContain("Attach Variable Set…");
-    expect(establishedPicker).toContain("Attached entries can still be removed");
+    expect(establishedPicker).toContain("all attachments must be removed together");
+    expect(establishedPicker).toContain("The complete attachment selection can still be cleared.");
+    expect(establishedPicker).toContain("The update committed");
+    expect(establishedPicker).toContain("Retry refresh");
     expect(establishedPicker).toContain("updateSessionVariableSets");
+    expect(establishedPicker).toContain("props.canControl && props.canAttach");
+    expect(
+      establishedRoute.match(
+        /canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
+      ),
+    ).toHaveLength(2);
+    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(2);
     expect(establishedControl).not.toContain('value: "once"');
     expect(establishedControl).not.toContain('value: "session"');
     expect(establishedControl).not.toContain('value: "always"');

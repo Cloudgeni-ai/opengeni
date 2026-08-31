@@ -2032,6 +2032,7 @@ function SessionChatPane(props: {
                 />
                 <SessionVariableSetPicker
                   session={props.session}
+                  canControl={workspacePermissions.includes("sessions:control")}
                   canAttach={workspacePermissions.includes("variable-sets:attach")}
                   canUse={workspacePermissions.includes("variable-sets:use")}
                   canList={
@@ -2044,6 +2045,7 @@ function SessionChatPane(props: {
                     props.session.activeTurnId !== null ||
                     props.queue.queue.length > 0
                   }
+                  goalActive={props.goal.isActive}
                   compact
                   triggerClassName="sm:hidden"
                   onReloadSession={props.onReloadSession}
@@ -2118,6 +2120,7 @@ function SessionChatPane(props: {
                 />
                 <SessionVariableSetPicker
                   session={props.session}
+                  canControl={workspacePermissions.includes("sessions:control")}
                   canAttach={workspacePermissions.includes("variable-sets:attach")}
                   canUse={workspacePermissions.includes("variable-sets:use")}
                   canList={
@@ -2130,6 +2133,7 @@ function SessionChatPane(props: {
                     props.session.activeTurnId !== null ||
                     props.queue.queue.length > 0
                   }
+                  goalActive={props.goal.isActive}
                   triggerClassName="max-sm:hidden"
                   onReloadSession={props.onReloadSession}
                 />

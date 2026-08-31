@@ -141,7 +141,8 @@ export function usePersonalResourceAttachment(input: {
   const resolvedTargetWorkspaceId = resolvedScope?.targetWorkspaceId;
   const resolvedPersonalWorkspaceId = resolvedScope?.personalWorkspaceId;
   // Provider refreshes may replace equivalent projection objects. Preserve the
-  // catalog and the user's decision until one exact authority identity changes.
+  // catalog and current resource-selection identity until the exact authority
+  // identity changes.
   const scope = useMemo(
     () =>
       resolvedIdentityKey &&
