@@ -28,6 +28,7 @@ type PersonalResourceAttachmentAttempt = {
 type SessionAuthorityRecovery = Readonly<{
   identityKey: string;
   expectedAuthorityEpoch: number | undefined;
+  selectedResourceCount: number;
   status: "pending" | "reload_settled" | "failed";
   error: Error | null;
 }>;
@@ -349,11 +350,15 @@ export function usePersonalResourceAttachment(input: {
           activeSessionAuthorityRecovery !== null ||
           effectiveError !== null)));
   const recoverSessionAuthority = useCallback(
-    async (attemptedAuthorityEpoch: number | undefined): Promise<void> => {
+    async (
+      attemptedAuthorityEpoch: number | undefined,
+      selectedResourceCount: number,
+    ): Promise<void> => {
       const generation = ++recoveryGeneration.current;
       setSessionAuthorityRecovery({
         identityKey: recoveryIdentityKey,
         expectedAuthorityEpoch: attemptedAuthorityEpoch,
+        selectedResourceCount,
         status: "pending",
         error: null,
       });
@@ -369,6 +374,7 @@ export function usePersonalResourceAttachment(input: {
         setSessionAuthorityRecovery({
           identityKey: recoveryIdentityKey,
           expectedAuthorityEpoch: attemptedAuthorityEpoch,
+          selectedResourceCount,
           status: "failed",
           error: new Error("The session authority could not be refreshed. Retry before sending."),
         });
@@ -382,6 +388,7 @@ export function usePersonalResourceAttachment(input: {
       setSessionAuthorityRecovery({
         identityKey: recoveryIdentityKey,
         expectedAuthorityEpoch: attemptedAuthorityEpoch,
+        selectedResourceCount,
         status: "reload_settled",
         error: null,
       });
@@ -419,6 +426,14 @@ export function usePersonalResourceAttachment(input: {
     ) {
       return;
     }
+    if (selected.resourceCount < activeSessionAuthorityRecovery.selectedResourceCount) {
+      setSessionAuthorityRecovery(null);
+      setSourceLost(true);
+      setNotice(
+        "Access to the selected personal resource changed. Choose an available resource before submitting.",
+      );
+      return;
+    }
     setSessionAuthorityRecovery(null);
     setNotice("Session authority changed. Personal resources were reloaded before retrying.");
   }, [
@@ -427,12 +442,16 @@ export function usePersonalResourceAttachment(input: {
     loading,
     refreshing,
     scopeKey,
+    selected.resourceCount,
     settledCatalogScopeKey,
   ]);
   const refresh = useCallback(
     async () =>
       activeSessionAuthorityRecovery
-        ? await recoverSessionAuthority(activeSessionAuthorityRecovery.expectedAuthorityEpoch)
+        ? await recoverSessionAuthority(
+            activeSessionAuthorityRecovery.expectedAuthorityEpoch,
+            activeSessionAuthorityRecovery.selectedResourceCount,
+          )
         : await load(true),
     [activeSessionAuthorityRecovery, load, recoverSessionAuthority],
   );
@@ -451,9 +470,10 @@ export function usePersonalResourceAttachment(input: {
       if (!isPersonalAttachmentConflict(deliveryError, attemptedInput)) return;
       void recoverSessionAuthority(
         attemptedInput.personalResourceAttachment?.expectedAuthorityEpoch,
+        selected.resourceCount,
       );
     },
-    [recoverSessionAuthority],
+    [recoverSessionAuthority, selected.resourceCount],
   );
 
   return {
