@@ -3,9 +3,11 @@ import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
 import type {
   ModelContextContributionSummary,
+  SessionEvent,
   SessionStatus,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
+import type { DetachedSessionEventFanout } from "@opengeni/events";
 import type {
   EstablishedSandboxSession,
   OpenGeniRuntime,
@@ -20,7 +22,7 @@ import type { GitCredentialRenewalController } from "../git-credential-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
 import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming";
 import type { RunAgentTurnResult } from "../types";
-import type { TurnOutcome } from "../../observability-metrics";
+import type { AgentLoopPhaseTracker, TurnOutcome } from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
 import type { TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
@@ -119,6 +121,9 @@ export type RenewalState = {
 };
 
 export type EventingState = {
+  detachedFanout: DetachedSessionEventFanout;
+  publishDurable: (events: SessionEvent[]) => Promise<void>;
+  phaseTracker: AgentLoopPhaseTracker;
   heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
   batcher: ReturnType<typeof createRuntimeBatcher> | null;
   preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null;
@@ -184,6 +189,9 @@ export type TurnContext = {
 export function createTurnContext(input: {
   settings: Settings;
   cancellationRequestedAt: number | null;
+  detachedFanout: DetachedSessionEventFanout;
+  publishDurable: (events: SessionEvent[]) => Promise<void>;
+  phaseTracker: AgentLoopPhaseTracker;
 }): TurnContext {
   return {
     control: {
@@ -242,6 +250,9 @@ export function createTurnContext(input: {
       publishedRunCredentialNotices: new Set(),
     },
     eventing: {
+      detachedFanout: input.detachedFanout,
+      publishDurable: input.publishDurable,
+      phaseTracker: input.phaseTracker,
       heartbeatTimer: undefined,
       batcher: null,
       preparedTools: null,

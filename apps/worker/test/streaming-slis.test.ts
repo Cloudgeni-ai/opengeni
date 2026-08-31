@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import {
+  AgentLoopPhaseTracker,
   ModelRequestLifecycleMetrics,
+  recordAgentLoopPhaseDuration,
   recordBatchFlush,
   recordContextCompaction,
   recordCompanyBrainContributions,
@@ -13,6 +15,7 @@ import {
   recordSessionEventAppendLatency,
   recordSessionEventAppendPhase,
   recordSessionEventPublishLatency,
+  recordDetachedSessionEventFanoutOutcome,
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupMilestone,
   recordTurnStartupPhase,
@@ -463,6 +466,80 @@ describe("event I/O latency split (write path vs delivery)", () => {
       "26-50",
       "51+",
     ]);
+  });
+});
+
+describe("agent-loop phase timing", () => {
+  test("records durable append, live fanout, and cross-boundary phases with closed labels", async () => {
+    const observability = worker();
+    recordAgentLoopPhaseDuration(observability, {
+      phase: "durable_append",
+      durationSeconds: 0.02,
+    });
+    recordAgentLoopPhaseDuration(observability, {
+      phase: "live_fanout",
+      durationSeconds: 0.03,
+    });
+    const tracker = new AgentLoopPhaseTracker();
+    tracker.markProvisionCompleted();
+    tracker.markToolOutput();
+    tracker.recordModelRequestStart(observability);
+
+    const metrics = await observability.prometheusMetrics();
+    for (const phase of [
+      "durable_append",
+      "live_fanout",
+      "provision_to_model_preparation",
+      "tool_output_to_model_continuation",
+    ]) {
+      expect(metrics).toMatch(
+        new RegExp(
+          `opengeni_agent_loop_phase_duration_seconds_count\\{[^}]*phase="${phase}"[^}]*\\} 1\\b`,
+        ),
+      );
+    }
+  });
+
+  test("accounts detached fanout with only bounded outcome labels", async () => {
+    const observability = worker();
+    for (const outcome of ["succeeded", "failed", "timed_out", "dropped"] as const) {
+      recordDetachedSessionEventFanoutOutcome(observability, {
+        outcome,
+        durationSeconds: 0.01,
+      });
+    }
+
+    const metrics = await observability.prometheusMetrics();
+    for (const outcome of ["succeeded", "failed", "timed_out", "dropped"] as const) {
+      expect(metrics).toMatch(
+        new RegExp(
+          `opengeni_session_event_detached_fanout_total\\{[^}]*outcome="${outcome}"[^}]*\\} 1\\b`,
+        ),
+      );
+    }
+  });
+
+  test("consumes each marker once and retains the earliest tool-output boundary", async () => {
+    const observability = worker();
+    let now = 1_000;
+    const tracker = new AgentLoopPhaseTracker(() => now);
+    tracker.markProvisionCompleted();
+    tracker.markToolOutput();
+    now = 2_000;
+    tracker.markToolOutput();
+    tracker.recordModelRequestStart(observability);
+    tracker.recordModelRequestStart(observability);
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_agent_loop_phase_duration_seconds_count\{[^}]*phase="provision_to_model_preparation"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_agent_loop_phase_duration_seconds_count\{[^}]*phase="tool_output_to_model_continuation"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_agent_loop_phase_duration_seconds_sum\{[^}]*phase="tool_output_to_model_continuation"[^}]*\} 1\b/,
+    );
   });
 });
 

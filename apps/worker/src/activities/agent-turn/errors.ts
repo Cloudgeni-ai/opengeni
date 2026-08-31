@@ -21,6 +21,7 @@ import {
   type McpTransportRequestFailureDiagnostic,
 } from "@opengeni/runtime/mcp-network";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
+import type { DetachedSessionEventFanoutCloseReason } from "@opengeni/events";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
@@ -41,6 +42,7 @@ import type {
   EscapedMcpTimeoutRecoveryDetail,
   PostClaimDatabaseRecoveryDetail,
   PreClaimFailureDetail,
+  RunAgentTurnResult,
 } from "../types";
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
@@ -375,6 +377,24 @@ export function postClaimDatabaseRecoveryFailure(input: {
  */
 export function isWorkerShutdownCancellation(error: unknown): boolean {
   return error instanceof CancelledFailure && error.message === "WORKER_SHUTDOWN";
+}
+
+export function detachedSessionEventFanoutCloseReason(input: {
+  activityStatus: RunAgentTurnResult["status"] | "unknown";
+  activityError: unknown;
+  finalizationError: unknown;
+  cancellationReason: unknown;
+}): DetachedSessionEventFanoutCloseReason {
+  if (isWorkerShutdownCancellation(input.cancellationReason)) return "worker_shutdown";
+  if (input.activityStatus === "cancelled") return "activity_cancelled";
+  if (
+    input.activityStatus === "failed" ||
+    input.activityError !== undefined ||
+    input.finalizationError !== undefined
+  ) {
+    return "activity_failed";
+  }
+  return "activity_completed";
 }
 
 export type SandboxLifecycleTransitionDiagnostic = {

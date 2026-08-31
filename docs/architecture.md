@@ -119,6 +119,19 @@ live fanout, and backfill from Postgres whenever a sequence gap appears. A NATS
 restart may interrupt live delivery or machine reachability, but it must not
 erase session history or queued obligations.
 
+An agent activity owns one bounded live-fanout lane. It reserves a slot before
+an exact-attempt append and commits that reservation with the database-assigned
+sequence, preventing a faster higher-sequence append from overtaking a slower
+lower-sequence append for the same session. Only the explicit noncritical
+lifecycle/tool-output allowlist may detach after commit. One publication may be
+active and only the oldest detached ready batch may wait; unresolved detached
+reservations time out and drop live delivery without changing durable truth or
+blocking unrelated sessions. Control, recovery, authorization, model,
+tool-call-creation, and terminal-settlement publications remain awaited in the
+same lane, which closes on every activity exit. Outcome-aware best-effort
+publication records success, failure, or timeout without weakening durable
+outbox `publishConfirmed` acknowledgement or subscriber recovery.
+
 The raw isolation route has an operational rollback switch:
 `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
 validation active while restoring wide-session locking and compatibility writes.
@@ -127,7 +140,10 @@ Interactive commands acknowledge their durable transaction. NATS publication
 and immediate Temporal signalling are replayable follow-up work. Never make a
 committed command depend on a successful best-effort fanout.
 
-Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
+Canonical: `packages/events/src/index.ts`,
+`packages/events/src/activity-fanout.ts`, `apps/api/src/http/sse.ts`,
+`apps/worker/src/activities/agent-turn/claim.ts`,
+`apps/worker/src/activities/agent-turn/finalization.ts`,
 `packages/sdk/src/stream.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
@@ -547,7 +563,10 @@ flowchart LR
    selected provisioned sandbox or Connected Machine when an operation needs
    compute.
 8. Worker events are appended durably before best-effort live publication.
-   The API's SSE stream replays and gap-fills from Postgres.
+   Explicitly allowlisted noncritical lifecycle/tool-output batches may detach
+   through the activity-owned bounded, sequence-aware lane; critical batches
+   await that same lane. The API's SSE stream replays and gap-fills from
+   Postgres.
 
 ### 4.2 Control path versus data path
 

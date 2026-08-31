@@ -750,6 +750,7 @@ export async function runTurnStreamAttempt(
         eventing.firstModelRequestPreparationStartedAt = performance.now();
         eventing.firstModelRequestCheckpointAt = eventing.firstModelRequestPreparationStartedAt;
       }
+      eventing.phaseTracker.recordModelRequestStart(observability);
       const providerDispatchStartedAt = performance.now();
       let providerDispatchOutcome: "completed" | "failed" = "completed";
       try {

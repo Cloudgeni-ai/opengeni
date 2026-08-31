@@ -7,7 +7,6 @@ import {
   XAI_CREDENTIAL_LEASE_TTL_MS,
   armXaiCapacityWait,
 } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
 
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
 
@@ -17,7 +16,6 @@ export async function selectXaiTurnCapacity(
   const {
     input,
     db,
-    bus,
     dispatchId,
     control,
     billingState,
@@ -139,7 +137,7 @@ export async function selectXaiTurnCapacity(
         },
       });
       if (armed.action === "waiting") {
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+        await eventing.publishDurable(armed.events);
         control.turnMetricOutcome = "recovering";
         control.activityStatus = "waiting_capacity";
         return {

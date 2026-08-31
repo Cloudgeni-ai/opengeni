@@ -3,7 +3,9 @@ import {
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
 } from "@opengeni/db";
+import { createDetachedSessionEventFanout } from "@opengeni/events";
 import { sandboxOperationMetricObserver } from "@opengeni/observability";
+import type { SessionEvent } from "@opengeni/contracts";
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
@@ -35,10 +37,13 @@ import type {
   RunAgentTurnResult,
 } from "../types";
 import {
+  AgentLoopPhaseTracker,
   makeMachineOpObserver,
   modelRequestLifecycleMetricsFor,
+  recordDetachedSessionEventFanoutOutcome,
   recordModelRequestPhase,
   recordCompanyBrainContributions,
+  recordSessionEventPublishLatency,
   recordTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
@@ -168,6 +173,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ? AbortSignal.any([cancellationSignal, sandboxRotationController.signal])
       : sandboxRotationController.signal;
 
+    const detachedLifecycleFanout = createDetachedSessionEventFanout(bus, {
+      closeTimeoutMs: 250,
+      onPublishOutcome: ({ outcome, durationSeconds }) => {
+        recordSessionEventPublishLatency(observability, { durationSeconds });
+        recordDetachedSessionEventFanoutOutcome(observability, { outcome, durationSeconds });
+      },
+    });
+    const publishActivitySessionEvents = async (events: SessionEvent[]): Promise<void> => {
+      await detachedLifecycleFanout.publishAwaited(input.workspaceId, input.sessionId, events, {
+        onPublish: ({ durationSeconds }) =>
+          recordSessionEventPublishLatency(observability, { durationSeconds }),
+      });
+    };
+    const agentLoopPhaseTracker = new AgentLoopPhaseTracker();
+
     const {
       control,
       attempt,
@@ -180,6 +200,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     } = createTurnContext({
       settings,
       cancellationRequestedAt: cancellationSignal?.aborted ? performance.now() : null,
+      detachedFanout: detachedLifecycleFanout,
+      publishDurable: publishActivitySessionEvents,
+      phaseTracker: agentLoopPhaseTracker,
     });
     const noteCancellationRequested = (): void => {
       control.cancellationRequestedAt ??= performance.now();

@@ -6,7 +6,7 @@ import {
   updateXaiQuotaMetadata,
   type SessionAttemptQuiescenceCommit,
 } from "@opengeni/db";
-import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
 import { fetchXaiSubscriptionQuota } from "@opengeni/xai-subscription";
@@ -34,7 +34,11 @@ import {
   type ResumedTurnSandbox,
 } from "../../sandbox-resume";
 import { createTurnCredentialLeases } from "./credential-leases";
-import { safeErrorDiagnostic, safeErrorForTelemetry } from "./errors";
+import {
+  detachedSessionEventFanoutCloseReason,
+  safeErrorDiagnostic,
+  safeErrorForTelemetry,
+} from "./errors";
 import {
   assertPhysicalToolQuiescenceForCancellation,
   assertSessionAttemptQuiescenceRecoveryDurable,
@@ -274,10 +278,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
             }
           : {}),
         publishEvents: async (events) => {
-          await waitForTurnFinalizerStep(
-            publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
-            finalizerSignal,
-          );
+          await waitForTurnFinalizerStep(eventing.publishDurable(events), finalizerSignal);
         },
         signalProof: signalSessionAttemptQuiesced,
         heartbeat: (deliveryAttempt, retryMs) => {
@@ -347,6 +348,8 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
           {
             onAppendPhase: (observation) =>
               recordSessionEventAppendPhase(observability, observation),
+            fanout: "awaited",
+            detachedFanout: eventing.detachedFanout,
           },
         ).catch(() => undefined),
         finalizerSignal,
@@ -494,7 +497,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         objectStorage,
         settings,
         publish: async (events) => {
-          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+          await eventing.publishDurable(events);
         },
         session: sandboxState.setupBoxSession as ChannelASession,
         openReadSession: async () =>
@@ -678,6 +681,14 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
       );
     }
+    await eventing.detachedFanout.close(
+      detachedSessionEventFanoutCloseReason({
+        activityStatus: control.activityStatus,
+        activityError: control.activityError,
+        finalizationError,
+        cancellationReason: cancellationSignal?.reason,
+      }),
+    );
     cancellationSignal?.removeEventListener("abort", noteCancellationRequested);
     const completedAt = performance.now();
     const durationSeconds = (completedAt - activityStarted) / 1000;

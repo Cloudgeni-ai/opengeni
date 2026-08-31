@@ -13,7 +13,6 @@ import {
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
 } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
 import { type Settings } from "@opengeni/config";
 import {
   authoritativeCodexCapacityResetAt,
@@ -90,7 +89,6 @@ export async function selectCodexTurnCapacity(
     input,
     settings,
     db,
-    bus,
     observability,
     wakeSessionWorkflow,
     signalCodexCapacityWorkflow,
@@ -483,7 +481,7 @@ export async function selectCodexTurnCapacity(
           },
         });
         if (armed.action === "waiting") {
-          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+          await eventing.publishDurable(armed.events);
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "waiting_capacity";
           return {
@@ -591,7 +589,7 @@ export async function selectCodexTurnCapacity(
           failurePayload,
         });
         if (armed.action === "waiting") {
-          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+          await eventing.publishDurable(armed.events);
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "waiting_capacity";
           return {
