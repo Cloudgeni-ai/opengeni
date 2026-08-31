@@ -3847,6 +3847,8 @@ export const McpServerConnectionRef = z
   .object({
     /** Opaque host or standalone connection identifier. */
     connectionId: z.string().min(1).optional(),
+    /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
+    authoritySource: z.literal("host").optional(),
     /** Stable provider family (for example github, gitlab, or azure_devops). */
     provider: z.string().min(1).max(128).optional(),
     /** Provider host or tenant domain. */
@@ -3861,6 +3863,13 @@ export const McpServerConnectionRef = z
   })
   .strict()
   .superRefine((reference, context) => {
+    if (reference.authoritySource === "host" && !reference.connectionId) {
+      context.addIssue({
+        code: "custom",
+        message: "host authority requires connectionId",
+        path: ["connectionId"],
+      });
+    }
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({

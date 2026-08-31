@@ -610,6 +610,7 @@ export type McpConnectionAuthoritySelection = {
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  authoritySource?: "host" | undefined;
   provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;

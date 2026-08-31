@@ -581,14 +581,14 @@ accounts for one provider or different providers in the same session. The
 singular `resource` field remains the OAuth resource indicator; it is not a
 repository selector.
 
-OpenGeni-owned Connection ids are UUIDs and remain subject to the accepted-use
-snapshot and per-provider-request audit fence. An embedding host that does not
-mirror its provider connection into OpenGeni must use an opaque `connectionId`
-that is not a canonical UUID (including UUID-shaped values with an invalid
-version or variant); with `mcpCredentials` bound, that shape routes directly to
-the host resolver with the immutable turn lineage. This distinction prevents an
-opaque host id from being cast as an OpenGeni database UUID while preserving the
-native authority lane for canonical UUID-backed connections.
+OpenGeni-owned Connection refs omit `authoritySource` and remain subject to the
+accepted-use snapshot and per-provider-request audit fence. An embedding host
+that does not mirror its provider connection into OpenGeni sets
+`authoritySource: "host"` beside its opaque `connectionId`; the id may use any
+non-empty shape, including a UUID. With `mcpCredentials` bound, that explicit
+provenance routes directly to the host resolver with the immutable turn lineage.
+Without the host credential port, a host-owned ref fails closed as
+`unsupported_auth` rather than falling through to OpenGeni's connection store.
 
 Successful results must echo account/workspace/immediate-session plus the exact
 provider, provider domain, requested connection id, OAuth scopes/resource, and

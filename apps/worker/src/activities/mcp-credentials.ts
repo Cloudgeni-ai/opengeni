@@ -12,9 +12,6 @@ import {
 } from "@opengeni/db";
 import { recordTenancyCompatibilityLaneUse, type Observability } from "@opengeni/observability";
 
-const OPENGENI_CONNECTION_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-
 export function connectionTokenResolverForTurn(input: {
   db: Database;
   settings: Settings;
@@ -47,17 +44,26 @@ export function connectionTokenResolverForTurn(input: {
       })
     : buildConnectionTokenResolver(input.db, input.settings);
   return async (request) => {
-    // OpenGeni-owned Connection ids are UUIDs. A bound embedding host may use
-    // any other non-empty opaque id without mirroring its provider connection
-    // into OpenGeni. Keep that host-only lane outside the accepted-connection
-    // SQL boundary: PostgreSQL would otherwise cast the opaque id to uuid and
-    // fail before the host can authorize the immutable turn context.
-    if (
-      hostResolver &&
-      request.connectionRef.connectionId &&
-      !OPENGENI_CONNECTION_ID_PATTERN.test(request.connectionRef.connectionId)
-    ) {
-      return await baseResolver(request);
+    // Host-owned refs carry explicit provenance because their opaque ids may
+    // themselves be valid UUIDs. They never enter OpenGeni's native connection
+    // authority or PostgreSQL UUID lookup; the bound host authorizes the exact
+    // immutable turn context on every credential request.
+    if (request.connectionRef.authoritySource === "host") {
+      if (hostResolver) return await baseResolver(request);
+      return {
+        status: "auth_needed",
+        reason: "unsupported_auth",
+        providerDomain: request.connectionRef.providerDomain,
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+        ...(request.connectionRef.connectionId
+          ? { connectionId: request.connectionRef.connectionId }
+          : {}),
+        ...(request.connectionRef.scopes ? { scopes: request.connectionRef.scopes } : {}),
+        ...(request.connectionRef.resource ? { resource: request.connectionRef.resource } : {}),
+        ...(request.connectionRef.selectedResources
+          ? { selectedResources: request.connectionRef.selectedResources }
+          : {}),
+      };
     }
     const acceptedDelegation = input.turn.personalConnectionDelegations.find(
       (delegation) =>

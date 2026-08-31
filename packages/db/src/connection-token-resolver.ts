@@ -270,6 +270,9 @@ export function buildHostConnectionTokenResolver(
       serverId: input.serverId,
       connectionRef: {
         providerDomain: input.connectionRef.providerDomain,
+        ...(input.connectionRef.authoritySource
+          ? { authoritySource: input.connectionRef.authoritySource }
+          : {}),
         ...(input.connectionRef.provider ? { provider: input.connectionRef.provider } : {}),
         ...(input.connectionRef.connectionId
           ? { connectionId: input.connectionRef.connectionId }
@@ -835,6 +838,9 @@ export function buildConnectionTokenResolver(
     let credentialWorkspaceId = input.workspaceId;
     let expectedAuthorityGeneration: number | undefined;
     let connectionUseAttribution: ConnectionUseAttribution | undefined;
+    if (ref.authoritySource === "host") {
+      return authNeeded(ref, "unsupported_auth", ref.connectionId);
+    }
     // Repository-scoped provider bindings require a broker that can prove the
     // selected-resource boundary. The generic standalone credential store has
     // no provider-specific containment adapter, so it must fail closed instead

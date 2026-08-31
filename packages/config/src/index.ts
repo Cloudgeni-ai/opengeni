@@ -238,10 +238,18 @@ export const McpServerConnectionRefSchema = z
         }
       })
       .optional(),
+    authoritySource: z.literal("host").optional(),
     subjectScope: z.enum(["workspace", "subject"]).optional(),
   })
   .strict()
   .superRefine((reference, context) => {
+    if (reference.authoritySource === "host" && !reference.connectionId) {
+      context.addIssue({
+        code: "custom",
+        message: "host authority requires connectionId",
+        path: ["connectionId"],
+      });
+    }
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({

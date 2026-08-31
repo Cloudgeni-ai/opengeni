@@ -600,6 +600,7 @@ describe("contracts", () => {
   test("models provider-neutral MCP bindings with exact selected repository scope", () => {
     const binding = McpServerConnectionRef.parse({
       connectionId: "host:github:one",
+      authoritySource: "host",
       provider: "github",
       providerDomain: "github.com",
       kind: "app_install",
@@ -609,6 +610,13 @@ describe("contracts", () => {
       ],
     });
     expect(binding.selectedResources?.map((resource) => resource.id)).toEqual(["101", "202"]);
+    expect(binding.authoritySource).toBe("host");
+    expect(() =>
+      McpServerConnectionRef.parse({
+        authoritySource: "host",
+        providerDomain: "host.example",
+      }),
+    ).toThrow("host authority requires connectionId");
     expect(() =>
       McpServerConnectionRef.parse({
         connectionId: "azure-one",

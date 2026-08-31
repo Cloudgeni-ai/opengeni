@@ -161,6 +161,7 @@ describe("workspace connection lane", () => {
       connectionRef: {
         providerDomain: "api.example.test",
         connectionId: "cloudgeni-capability",
+        authoritySource: "host" as const,
         kind: "delegated" as const,
         subjectScope: "workspace" as const,
       },
@@ -169,26 +170,59 @@ describe("workspace connection lane", () => {
     expect(result).toMatchObject({ status: "ok", connectionId: "cloudgeni-capability" });
     expect(result).not.toHaveProperty("authorizeProviderRequest");
 
-    const invalidUuidShapedId = "aaaaaaaa-aaaa-0aaa-0aaa-aaaaaaaaaaaa";
-    const invalidUuidShapedResult = await resolver({
+    const uuidHostBindingId = "44444444-4444-4444-8444-444444444444";
+    const uuidHostBindingResult = await resolver({
       ...workspaceRequest,
-      serverId: "host-invalid-uuid-shape",
+      serverId: "host-uuid-binding",
       destinationUrl: "https://api.example.test/embedded/host-mcp/mcp",
       connectionRef: {
         providerDomain: "api.example.test",
-        connectionId: invalidUuidShapedId,
+        connectionId: uuidHostBindingId,
+        authoritySource: "host" as const,
         kind: "delegated" as const,
         subjectScope: "workspace" as const,
       },
     });
 
-    expect(invalidUuidShapedResult).toMatchObject({
+    expect(uuidHostBindingResult).toMatchObject({
       status: "ok",
-      connectionId: invalidUuidShapedId,
+      connectionId: uuidHostBindingId,
     });
-    expect(invalidUuidShapedResult).not.toHaveProperty("authorizeProviderRequest");
+    expect(uuidHostBindingResult).not.toHaveProperty("authorizeProviderRequest");
     expect(authorizeCalls).toBe(0);
     expect(hostCalls).toBe(2);
+  });
+
+  test("host authority fails closed when no host credential port is bound", async () => {
+    const resolver = connectionTokenResolverForTurn({
+      db: {} as Database,
+      settings: testSettings(),
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      rootSessionId: "session-root",
+      attemptId: "attempt-1",
+      turn,
+    });
+
+    await expect(
+      resolver({
+        ...workspaceRequest,
+        serverId: "host-only",
+        destinationUrl: "https://api.example.test/embedded/host-mcp/mcp",
+        connectionRef: {
+          providerDomain: "api.example.test",
+          connectionId: "host-only",
+          authoritySource: "host" as const,
+          kind: "delegated" as const,
+          subjectScope: "workspace" as const,
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: "auth_needed",
+      reason: "unsupported_auth",
+      connectionId: "host-only",
+    });
   });
 
   test("a ref with no connection id keeps the bounded pre-snapshot legacy path", async () => {

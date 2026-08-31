@@ -1,5 +1,9 @@
 ---
+"@opengeni/config": patch
+"@opengeni/contracts": patch
+"@opengeni/db": patch
+"@opengeni/sdk": patch
 "@opengeni/worker-bundle": patch
 ---
 
-Route non-UUID opaque MCP connection references directly to the bound embedding-host credential resolver instead of treating them as OpenGeni database connection UUIDs.
+Add explicit host authority provenance for opaque MCP connection references so embedding hosts can resolve any binding identity, including UUID values, without mirroring provider connections into OpenGeni.

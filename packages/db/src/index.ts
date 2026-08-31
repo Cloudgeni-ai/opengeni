@@ -71852,6 +71852,9 @@ function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined
     return undefined;
   }
   const ref: McpServerConnectionRef = { providerDomain: record.providerDomain };
+  if (record.authoritySource === "host") {
+    ref.authoritySource = "host";
+  }
   if (typeof record.connectionId === "string" && record.connectionId.length > 0) {
     ref.connectionId = record.connectionId;
   }
