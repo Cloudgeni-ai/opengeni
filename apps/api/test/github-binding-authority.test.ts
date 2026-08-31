@@ -99,8 +99,27 @@ async function startOAuth(app: Hono): Promise<{ state: string; browserHeader: st
     `http://test/v1/github/oauth/callback?code=discover&state=${encodeURIComponent(discoveryState!)}`,
     { headers: { cookie: discoveryCookie! } },
   );
-  expect(discovery.status).toBe(302);
-  const location = new URL(discovery.headers.get("location")!);
+  expect(discovery.status).toBe(200);
+  const html = await discovery.text();
+  expect(html).toContain("Choose a GitHub account");
+  expect(html).toContain("owner");
+  expect(html).toContain('value="new"');
+  const selectionState = html.match(/name="state" value="([^"]+)"/)?.[1];
+  const selectionCookie = discovery.headers.get("set-cookie")?.split(";", 1)[0];
+  expect(selectionState).toBeTruthy();
+  expect(selectionCookie).toBeTruthy();
+  expect(readSignedState(selectionState!, stateSecret)).toMatchObject({
+    accountId,
+    workspaceId,
+    allowedInstallationIds: [42],
+    intent: "installation_authority_selection",
+  });
+  const selection = await app.request(
+    `http://test/v1/workspaces/${workspaceId}/github/installations/select?state=${encodeURIComponent(selectionState!)}&installation_id=42`,
+    { headers: { cookie: selectionCookie! } },
+  );
+  expect(selection.status).toBe(302);
+  const location = new URL(selection.headers.get("location")!);
   const oauthState = location.searchParams.get("state");
   expect(oauthState).toBeTruthy();
   const payload = readSignedState(oauthState!, stateSecret);
@@ -110,7 +129,7 @@ async function startOAuth(app: Hono): Promise<{ state: string; browserHeader: st
     installationId: 42,
     intent: "installation_authority_oauth",
   });
-  const oauthCookie = discovery.headers.get("set-cookie")?.split(";", 1)[0];
+  const oauthCookie = selection.headers.get("set-cookie")?.split(";", 1)[0];
   expect(oauthCookie).toBeTruthy();
   return { state: oauthState!, browserHeader: oauthCookie! };
 }
@@ -193,9 +212,45 @@ describe("GitHub owner-authority binding routes", () => {
     expect(githubBindingStatus(true, [binding])).toBe("bound");
   });
 
-  test("existing owner installation discovery advances to exact fresh GitHub OAuth", async () => {
+  test("one existing owner installation still offers another account before exact OAuth", async () => {
     const app = appWithProvider();
     await startOAuth(app);
+  });
+
+  test("one existing owner installation can advance to a new account installation", async () => {
+    const app = appWithProvider();
+    const state = managerState();
+    const connect = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
+    );
+    const discoveryLocation = new URL(connect.headers.get("location")!);
+    const discoveryState = discoveryLocation.searchParams.get("state")!;
+    const discoveryCookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const discovery = await app.request(
+      `http://test/v1/github/oauth/callback?code=discover&state=${encodeURIComponent(discoveryState)}`,
+      { headers: { cookie: discoveryCookie } },
+    );
+    expect(discovery.status).toBe(200);
+    const html = await discovery.text();
+    const selectionState = html.match(/name="state" value="([^"]+)"/)?.[1];
+    const selectionCookie = discovery.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(selectionState).toBeTruthy();
+    expect(selectionCookie).toBeTruthy();
+
+    const install = await app.request(
+      `http://test/v1/workspaces/${workspaceId}/github/installations/select?state=${encodeURIComponent(selectionState!)}&installation_id=new`,
+      { headers: { cookie: selectionCookie! } },
+    );
+    expect(install.status).toBe(302);
+    const installLocation = new URL(install.headers.get("location")!);
+    expect(installLocation.origin + installLocation.pathname).toBe(
+      "https://github.com/apps/opengeni-test/installations/new",
+    );
+    expect(readSignedState(installLocation.searchParams.get("state")!, stateSecret)).toMatchObject({
+      accountId,
+      workspaceId,
+      intent: "installation_authority_install",
+    });
   });
 
   test("no existing owner installation advances to GitHub installation", async () => {
