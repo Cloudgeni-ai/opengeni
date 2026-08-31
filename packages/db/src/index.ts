@@ -16511,6 +16511,30 @@ export async function createScheduledTaskRun(
     if ((input.taskAuthorityRevision == null) !== (input.taskExecutionDigest == null)) {
       throw new Error("scheduled task run execution binding is incomplete");
     }
+    let replayedProducerRow: typeof schema.scheduledTaskRuns.$inferSelect | undefined;
+    if (input.beforeFreshAgentRunCommit) {
+      if (!input.producerKey || !input.acceptedExecutionSnapshot) {
+        throw new Error(
+          "scheduled fresh agent run commit guard requires a producer-bound accepted execution",
+        );
+      }
+      [replayedProducerRow] = await scopedDb
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+          ),
+        )
+        .limit(1);
+      if (!replayedProducerRow) {
+        // Custom-model admission uses the canonical advisory-lock -> task-row
+        // order. Exact producer replay skips mutable admission entirely, while
+        // a concurrent first writer is rechecked after the task row serializes.
+        await input.beforeFreshAgentRunCommit(scopedDb);
+      }
+    }
     const taskFilter = and(
       eq(schema.scheduledTasks.workspaceId, input.workspaceId),
       eq(schema.scheduledTasks.id, input.taskId),
@@ -16538,23 +16562,24 @@ export async function createScheduledTaskRun(
     ) {
       throw new Error("scheduled task accepted execution binding changed");
     }
-    let replayedProducerRow: typeof schema.scheduledTaskRuns.$inferSelect | undefined;
     if (input.beforeFreshAgentRunCommit) {
       if (actionKind !== "agent_turn" || !input.producerKey || !acceptedExecutionSnapshot) {
         throw new Error(
           "scheduled fresh agent run commit guard requires a producer-bound accepted execution",
         );
       }
-      [replayedProducerRow] = await scopedDb
-        .select()
-        .from(schema.scheduledTaskRuns)
-        .where(
-          and(
-            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
-            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
-          ),
-        )
-        .limit(1);
+      if (!replayedProducerRow) {
+        [replayedProducerRow] = await scopedDb
+          .select()
+          .from(schema.scheduledTaskRuns)
+          .where(
+            and(
+              eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+              eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+            ),
+          )
+          .limit(1);
+      }
       if (replayedProducerRow) {
         if (
           replayedProducerRow.actionKind !== "agent_turn" ||
@@ -16575,8 +16600,6 @@ export async function createScheduledTaskRun(
         ) {
           throw new Error("scheduled task run accepted execution changed");
         }
-      } else {
-        await input.beforeFreshAgentRunCommit(scopedDb);
       }
     }
     const values = {

@@ -4,10 +4,12 @@ import {
   bootstrapWorkspace,
   createDb,
   createScheduledTask,
+  createScheduledTaskRun,
   createSession,
   createWorkspaceGatewayCustomModel,
   deleteWorkspaceGatewayCustomModel,
   getScheduledTaskRunAcceptedExecution,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
   listSessions,
   listScheduledTaskRuns,
   type DbClient,
@@ -335,5 +337,112 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       triggerEventId: first.triggerEventId,
     });
     expect(await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).toHaveLength(1);
+  }, 60_000);
+
+  test("takes custom-model admission before the scheduled-task row lock", async () => {
+    if (!available) return;
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `scheduled-model-lock-order-account-${crypto.randomUUID()}`,
+      accountName: "Scheduled model lock order account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `scheduled-model-lock-order-workspace-${crypto.randomUUID()}`,
+      workspaceName: "Scheduled model lock order workspace",
+      subjectId: "user:scheduled-model-lock-order-owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    const upstreamModelId = `race/scheduled-lock-order-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const customModel = await createWorkspaceGatewayCustomModel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      upstreamModelId,
+      operationId: crypto.randomUUID(),
+      requestHash: "6".repeat(64),
+      createdBySubjectId: grant.subjectId,
+    });
+    if (!customModel) throw new Error("custom model create unexpectedly conflicted");
+    const task = await createScheduledTask(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      name: "Fresh custom-model lock order",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-model-lock-order-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Freeze an accepted execution for the lock-order regression",
+        model: productModelId,
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const first = await activities().dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `scheduled-model-lock-order-first-${crypto.randomUUID()}`,
+    });
+    expect(first.action).toBe("start");
+    const [firstRun] = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+    if (!firstRun) throw new Error("accepted scheduled run is unavailable");
+    const acceptedExecution = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: grant.workspaceId,
+      runId: firstRun.id,
+    });
+    if (!acceptedExecution) throw new Error("accepted scheduled execution is unavailable");
+
+    let markAdmissionEntered!: () => void;
+    const admissionEntered = new Promise<void>((resolve) => {
+      markAdmissionEntered = resolve;
+    });
+    let secondRunPromise: ReturnType<typeof createScheduledTaskRun> | null = null;
+    await shared!.admin.begin(async (barrier) => {
+      await barrier`
+        select id
+        from scheduled_tasks
+        where id = ${task.id}::uuid
+        for update
+      `;
+      secondRunPromise = createScheduledTaskRun(client.db, {
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: task.authorityRevision,
+        taskExecutionDigest: task.executionDigest,
+        triggerType: "scheduled",
+        producerKey: `scheduled-model-lock-order-second-${crypto.randomUUID()}`,
+        acceptedExecutionSnapshot: acceptedExecution,
+        beforeFreshAgentRunCommit: async (tx) => {
+          const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            upstreamModelId,
+          });
+          if (!active) throw new Error("custom model disappeared during lock-order regression");
+          markAdmissionEntered();
+        },
+      });
+      await Promise.race([
+        admissionEntered,
+        Bun.sleep(5_000).then(() => {
+          throw new Error("custom-model admission waited behind the scheduled-task row");
+        }),
+      ]);
+      expect(
+        await Promise.race([
+          secondRunPromise.then(() => "settled" as const),
+          Bun.sleep(50).then(() => "blocked" as const),
+        ]),
+      ).toBe("blocked");
+    });
+    if (!secondRunPromise) throw new Error("second scheduled run was not started");
+    expect(await secondRunPromise).toMatchObject({
+      taskId: task.id,
+      status: "queued",
+    });
   }, 60_000);
 });
