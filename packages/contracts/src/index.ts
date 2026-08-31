@@ -7717,9 +7717,12 @@ function renderScheduledOccurrenceTaskBatch(
 export function sessionSystemUpdateBatchHistoryItem(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
   goalSnapshot?: SessionGoalSnapshot,
+  options: { promoteScheduledOccurrenceToUser?: boolean } = {},
 ): { type: "message"; role: "system" | "user"; content: string } {
   const goalContext = renderSessionGoalContext(goalSnapshot);
-  const scheduledTask = renderScheduledOccurrenceTaskBatch(updates);
+  const scheduledTask = options.promoteScheduledOccurrenceToUser
+    ? renderScheduledOccurrenceTaskBatch(updates)
+    : null;
   return {
     type: "message",
     role: scheduledTask ? "user" : "system",

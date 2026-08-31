@@ -616,6 +616,25 @@ type AgentChildSessionCreatePresentation = {
   automaticTitleCandidate?: string | null;
 };
 
+const AGENT_CHILD_AUTOMATIC_TITLE_CONTEXT_KEY = "agentChildAutomaticTitle" as const;
+
+/** @internal Exported for the keyed-create repair regression. */
+export function freezeAgentChildAutomaticTitleInCreatorContext(
+  context: TurnInitiatorContext | undefined,
+  title: string | null | undefined,
+): TurnInitiatorContext | undefined {
+  return title ? { ...(context ?? {}), [AGENT_CHILD_AUTOMATIC_TITLE_CONTEXT_KEY]: title } : context;
+}
+
+/** @internal Keyed repair must use the committed winner, not the retry payload. */
+export function initialAutomaticTitleForSessionStart(
+  session: Pick<Session, "createdByContext">,
+  requestedTitle: string | null | undefined,
+): string | null {
+  const frozenTitle = session.createdByContext[AGENT_CHILD_AUTOMATIC_TITLE_CONTEXT_KEY];
+  return typeof frozenTitle === "string" ? frozenTitle : (requestedTitle ?? null);
+}
+
 function automaticTitleForAgentChildCreate(
   presentation: AgentChildSessionCreatePresentation,
   goal: GoalSpec | null | undefined,
@@ -762,6 +781,10 @@ export async function createAndStartSessionWithOutcome(input: {
     reasoningEffort: input.reasoningEffort,
     ...(input.latencyMode !== undefined ? { latencyMode: input.latencyMode } : {}),
   };
+  const frozenCreatedByContext = freezeAgentChildAutomaticTitleInCreatorContext(
+    input.createdByContext,
+    input.initialAutomaticTitle,
+  );
   // Keyed creation is intentionally handled only by the database admission
   // transaction below. Its workspace/key lock replays either the successful
   // session or the committed denial atomically; an application-side lookup
@@ -780,7 +803,7 @@ export async function createAndStartSessionWithOutcome(input: {
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
-      ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+      ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
       createdByActor: input.createdByActor ?? null,
       model: input.model,
       reasoningEffort: input.reasoningEffort,
@@ -852,7 +875,7 @@ export async function createAndStartSessionWithOutcome(input: {
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
-      ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+      ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
       createdByActor: input.createdByActor ?? null,
       model: input.model,
       reasoningEffort: input.reasoningEffort,
@@ -1035,7 +1058,10 @@ async function finishStartSession(
             : {}),
         }
       : null,
-    initialAutomaticTitle: input.initialAutomaticTitle ?? null,
+    initialAutomaticTitle: initialAutomaticTitleForSessionStart(
+      session,
+      input.initialAutomaticTitle,
+    ),
     consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
     rememberNewSessionSelection: input.rememberNewSessionSelection ?? null,
     deferInitialTurn: input.deferInitialTurn === true,

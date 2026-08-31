@@ -61716,12 +61716,22 @@ export async function claimSessionWorkForAttempt(
               frozenGoalSnapshot,
             );
           }
+          const scheduledOccurrenceHistoryItem =
+            !routingGoalUpdate &&
+            delivered.updates.length > 0 &&
+            delivered.updates.every((update) => update.kind === "scheduled_occurrence")
+              ? sessionSystemUpdateBatchHistoryItem(
+                  delivered.updates.map((update) => mapSessionSystemUpdate(update)),
+                  frozenGoalSnapshot,
+                  { promoteScheduledOccurrenceToUser: true },
+                )
+              : undefined;
           await persistDeliveredUpdateBatch(
             delivered,
             session.accountId,
             internalTurn.id,
             frozenGoalSnapshot,
-            goalContinuationHistoryItem,
+            goalContinuationHistoryItem ?? scheduledOccurrenceHistoryItem,
           );
           // The batch is now durable model memory. Every child it reports on has
           // been carried to this turn's initiating human, so their read fence on

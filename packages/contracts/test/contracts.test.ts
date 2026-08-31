@@ -1473,29 +1473,33 @@ describe("contracts", () => {
       capturedAt: "2026-08-31T05:00:00.000Z",
     };
     const completedGoalContext = renderSessionGoalContext(completedGoal)!;
-    const scheduled = sessionSystemUpdateBatchHistoryItem(
-      [
-        {
-          id: updateId,
-          kind: "scheduled_occurrence",
-          classification: "info",
-          sourceId: scheduledTaskRunId,
-          summary: "Review and merge pull requests",
-          payload: {
-            type: "scheduled_occurrence",
-            text: "Review every currently open pull request and merge the approved ones.",
-            scheduledTaskId,
-            scheduledTaskRunId,
-          },
-          lineage: {
-            scheduledTaskId,
-            scheduledTaskRunId,
-            causalHumanSubjectId: "user:owner",
-          },
+    const updates = [
+      {
+        id: updateId,
+        kind: "scheduled_occurrence" as const,
+        classification: "info" as const,
+        sourceId: scheduledTaskRunId,
+        summary: "Review and merge pull requests",
+        payload: {
+          type: "scheduled_occurrence" as const,
+          text: "Review every currently open pull request and merge the approved ones.",
+          scheduledTaskId,
+          scheduledTaskRunId,
         },
-      ],
-      completedGoal,
-    );
+        lineage: {
+          scheduledTaskId,
+          scheduledTaskRunId,
+          causalHumanSubjectId: "user:owner",
+        },
+      },
+    ];
+    const attached = sessionSystemUpdateBatchHistoryItem(updates, completedGoal);
+    expect(attached.role).toBe("system");
+    expect(attached.content).toContain("[OpenGeni internal updates]");
+
+    const scheduled = sessionSystemUpdateBatchHistoryItem(updates, completedGoal, {
+      promoteScheduledOccurrenceToUser: true,
+    });
 
     expect(scheduled.role).toBe("user");
     expect(scheduled.content).toStartWith(`${SESSION_GOAL_CONTEXT_LABEL}\n${completedGoalContext}`);
