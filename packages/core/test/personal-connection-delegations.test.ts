@@ -31,6 +31,7 @@ import {
   personalConnectionDelegationSourceForGrant,
   personalConnectionDelegationsFromParent,
   personalConnectionDelegationsFromVisibleConnections,
+  selectedPersonalConnectionServers,
   withFrozenPersonalConnectionDelegations,
 } from "../src/domain/personal-connection-delegations";
 import { validatedScheduledTaskUpdate } from "../src/domain/scheduled-tasks";
@@ -103,6 +104,89 @@ function googleDriveConnection(overrides: Partial<ConnectionMetadata> = {}): Con
 }
 
 describe("personal MCP connection delegation", () => {
+  test("never freezes, inherits, or rewrites subject-scoped host authority", async () => {
+    const hostServer = {
+      id: "host-tools",
+      url: "https://host-tools.example/mcp",
+      cacheToolsList: false,
+      connectionRef: {
+        authoritySource: "host" as const,
+        connectionId: "11111111-1111-4111-8111-111111111111",
+        providerDomain: "host-tools.example",
+        kind: "delegated" as const,
+        subjectScope: "subject" as const,
+      },
+    };
+    expect(
+      selectedPersonalConnectionServers({ mcpServers: [hostServer, personalServer] }, [
+        { kind: "mcp", id: hostServer.id },
+        { kind: "mcp", id: personalServer.id },
+      ]).map((server) => server.id),
+    ).toEqual([personalServer.id]);
+    expect(
+      personalConnectionDelegationsFromVisibleConnections({
+        servers: [hostServer],
+        subjectId: "user:owner",
+        connections: [
+          googleDriveConnection({
+            id: hostServer.connectionRef.connectionId,
+            providerDomain: hostServer.connectionRef.providerDomain,
+            kind: "delegated",
+          }),
+        ],
+      }),
+    ).toEqual([]);
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers: [hostServer],
+        parentDelegations: [
+          {
+            serverId: hostServer.id,
+            connectionId: hostServer.connectionRef.connectionId,
+            ownerSubjectId: "user:owner",
+            providerDomain: hostServer.connectionRef.providerDomain,
+            kind: "delegated",
+          },
+        ],
+      }),
+    ).toEqual([]);
+
+    const received: ResolveConnectionCredentialInput[] = [];
+    let membershipChecks = 0;
+    const resolver = withFrozenPersonalConnectionDelegations({
+      settings: { mcpServers: [hostServer] },
+      personalConnectionDelegations: [],
+      ownerHasWorkspaceMembership: async () => {
+        membershipChecks += 1;
+        return true;
+      },
+      resolveCredential: async (request) => {
+        received.push(request);
+        return {
+          status: "auth_needed",
+          reason: "unsupported_auth",
+          providerDomain: request.connectionRef.providerDomain,
+          connectionId: request.connectionRef.connectionId,
+        };
+      },
+    });
+    const request: ResolveConnectionCredentialInput = {
+      workspaceId: "workspace-1",
+      subjectId: "user:owner",
+      serverId: hostServer.id,
+      destinationUrl: hostServer.url,
+      connectionRef: hostServer.connectionRef,
+    };
+    await expect(resolver(request)).resolves.toEqual({
+      status: "auth_needed",
+      reason: "unsupported_auth",
+      providerDomain: hostServer.connectionRef.providerDomain,
+      connectionId: hostServer.connectionRef.connectionId,
+    });
+    expect(received).toEqual([request]);
+    expect(membershipChecks).toBe(0);
+  });
+
   test("admits an exact same-organization portable selection and membershipless personal owner", async () => {
     const blank = await acquireBlankTestDatabase("core-portable-connection-authority");
     if (!blank) return;

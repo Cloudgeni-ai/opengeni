@@ -638,6 +638,15 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
+      if (item.authoritySource === "host") {
+        if (!item.authorizationUrl) {
+          throw new Error(
+            "This connection is managed by the embedding host and has no recovery link.",
+          );
+        }
+        window.location.assign(item.authorizationUrl);
+        return;
+      }
       if (item.capability) {
         const returnPath = `${window.location.pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
         if (item.capability.id === "api:github-app") {

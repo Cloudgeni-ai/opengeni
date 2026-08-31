@@ -1984,6 +1984,7 @@ export type ToolAuthNeededPayload = {
   providerDomain: string;
   provider?: string | undefined;
   connectionId?: string | null | undefined;
+  authoritySource?: "host" | undefined;
   reason:
     | "missing_connection"
     | "expired"
@@ -6508,6 +6509,7 @@ export type CapabilityCatalogItem = {
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
     connectionId?: string | undefined;
+    authoritySource?: "host" | undefined;
     providerDomain: string;
     kind: string;
     subjectScope?: "subject" | "workspace" | undefined;

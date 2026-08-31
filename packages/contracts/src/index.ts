@@ -10759,11 +10759,13 @@ export const CapabilityCatalogItem = z.object({
   /** @deprecated Compatibility explanation paired with enabled. */
   enabledReason: z.string().nullable().default(null),
   // The non-secret connection binding stored with an enabled installation.
-  // Workspace refs retain an exact row id. Subject refs deliberately omit it:
-  // each caller resolves their own visible row by provider/kind at runtime.
+  // Native workspace refs retain an exact row id. Native subject refs omit it
+  // so each caller resolves their own row. Host refs retain both provenance and
+  // the host's opaque id for either scope because OpenGeni must not reinterpret it.
   connectionRef: z
     .object({
       connectionId: z.string().min(1).optional(),
+      authoritySource: z.literal("host").optional(),
       providerDomain: z.string().min(1),
       kind: z.string().min(1),
       subjectScope: z.enum(["workspace", "subject"]).optional(),
@@ -12334,6 +12336,8 @@ export const ToolAuthNeededPayload = z.object({
   // Embedded hosts may use an opaque connection identity; never assume an
   // OpenGeni UUID on the public event wire.
   connectionId: z.string().min(1).nullable().optional(),
+  /** The failed binding is owned by the embedding host, not OpenGeni's connection broker. */
+  authoritySource: z.literal("host").optional(),
   reason: z.enum([
     "missing_connection",
     "expired",

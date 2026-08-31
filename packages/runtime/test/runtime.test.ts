@@ -9436,6 +9436,7 @@ describe("runtime event normalization", () => {
             url: capMcp.url,
             connectionRef: {
               connectionId,
+              authoritySource: "host",
               providerDomain: "api.integrations-example.com",
               kind: "oauth2",
               subjectScope: "workspace",
@@ -9484,6 +9485,7 @@ describe("runtime event normalization", () => {
           serverId: "cap",
           toolName: "search_documents",
           reason: "expired",
+          authoritySource: "host",
         }),
       );
       // The healthy sibling remains fully usable in the same turn.

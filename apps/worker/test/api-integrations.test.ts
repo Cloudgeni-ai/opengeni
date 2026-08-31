@@ -218,6 +218,7 @@ describe("installed API Integration worker adapters", () => {
 
   test("publishes bounded auth-needed state without invoking the provider", async () => {
     const item = integration();
+    item.connectionRef = { ...item.connectionRef!, authoritySource: "host" };
     const authNeeded: unknown[] = [];
     let providerCalls = 0;
     const settings = testSettings({
@@ -265,6 +266,7 @@ describe("installed API Integration worker adapters", () => {
           toolName: "list_items",
           reason: "expired",
           providerDomain: "127.0.0.1",
+          authoritySource: "host",
         }),
       ]);
     } finally {

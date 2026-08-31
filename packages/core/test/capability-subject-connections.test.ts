@@ -390,6 +390,81 @@ describe("subject-owned capability connection references", () => {
     expect(projected).not.toContain(bob.id);
   });
 
+  test("round-trips opaque and UUID-shaped host capability bindings without native lookup", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const cases = [
+      {
+        suffix: "opaque-workspace",
+        connectionRef: {
+          authoritySource: "host" as const,
+          connectionId: "cloudgeni-capability",
+          providerDomain: "cloudgeni.example",
+          kind: "delegated" as const,
+          subjectScope: "workspace" as const,
+        },
+        projected: {
+          authoritySource: "host",
+          connectionId: "cloudgeni-capability",
+          providerDomain: "cloudgeni.example",
+          kind: "delegated",
+        },
+      },
+      {
+        suffix: "uuid-subject",
+        connectionRef: {
+          authoritySource: "host" as const,
+          connectionId: "11111111-1111-4111-8111-111111111111",
+          providerDomain: "cloudgeni.example",
+          kind: "delegated" as const,
+          subjectScope: "subject" as const,
+        },
+        projected: {
+          authoritySource: "host",
+          connectionId: "11111111-1111-4111-8111-111111111111",
+          providerDomain: "cloudgeni.example",
+          kind: "delegated",
+          subjectScope: "subject",
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const capabilityId = `mcp:host-${testCase.suffix}-${crypto.randomUUID()}`;
+      await createMcpCapability(workspace, capabilityId, {
+        endpointUrl: `https://${testCase.suffix}.example.test/mcp`,
+      });
+      await enableCapability({
+        db,
+        grant: grant(workspace, "subject-alice"),
+        ...workspace,
+        settings,
+        capabilityId,
+        payload: {
+          config: {},
+          metadata: {},
+          headers: {},
+          connectionRef: testCase.connectionRef,
+        },
+      });
+
+      const installation = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+      expect(installation?.config.connectionRef).toEqual(testCase.connectionRef);
+      const servers = await listEnabledMcpCapabilityServers(db, workspace.workspaceId);
+      expect(servers.find((server) => server.capabilityId === capabilityId)?.connectionRef).toEqual(
+        testCase.connectionRef,
+      );
+      const catalog = await buildCapabilityCatalog({
+        db,
+        workspaceId: workspace.workspaceId,
+        settings,
+      });
+      expect(catalog.items.find((item) => item.id === capabilityId)?.connectionRef).toEqual(
+        testCase.projected,
+      );
+    }
+  });
+
   test("a legacy workspace-scoped Slack MCP installation is not runnable at runtime", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

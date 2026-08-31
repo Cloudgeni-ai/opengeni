@@ -4565,6 +4565,7 @@ async function publishAuthNeededForRequest(
         : {}),
     reason: auth.reason,
     ...(connectionId ? { connectionId } : {}),
+    ...(connectionRef.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
     ...(auth.scopes
       ? { scopes: auth.scopes }
       : connectionRef.scopes

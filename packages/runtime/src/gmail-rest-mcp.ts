@@ -713,6 +713,9 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
           ...(result.provider ? { provider: result.provider } : {}),
           reason: result.reason,
           ...(result.connectionId ? { connectionId: result.connectionId } : {}),
+          ...(this.options.connectionRef.authoritySource === "host"
+            ? { authoritySource: "host" as const }
+            : {}),
           ...(result.scopes ? { scopes: result.scopes } : {}),
           ...(result.resource ? { resource: result.resource } : {}),
           ...(result.selectedResources ? { selectedResources: result.selectedResources } : {}),
