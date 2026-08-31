@@ -131,6 +131,10 @@ function startBuilder(root: string, environment: Record<string, string> = {}): B
   const child = spawn(process.execPath, ["scripts/build-publishable-packages.ts"], {
     cwd: root,
     env: { ...process.env, ...environment },
+    // The fixture creates its own detached build supervisor. Keep the fixture
+    // process group independent so supervisor teardown cannot propagate a HUP
+    // into the root Bun test runner after this file's assertions complete.
+    detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
   });
   const result = new Promise<BuilderResult>((resolve, reject) => {
