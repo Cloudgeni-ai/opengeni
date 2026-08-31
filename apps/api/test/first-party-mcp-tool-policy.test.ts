@@ -7,6 +7,7 @@ import {
   MAX_SELECTED_VARIABLE_SETS,
   Permission,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  SESSION_TITLE_MAX_CHARACTERS,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
   type AccessGrant,
   type FirstPartyMcpToolName,
@@ -332,6 +333,7 @@ describe("first-party MCP tool visibility policy", () => {
       );
       expect(tool?.description).toContain("non-delegating leaf");
       expect(tool?.description).toContain("do not use a child-local depth override");
+      expect(tool?.description).toContain("concise semantic title");
       const serialized = JSON.stringify(tool?.inputSchema);
       expect(serialized).not.toContain("maxNestedAgentDepth");
       expect(serialized).not.toContain('"const":"shared"');
@@ -345,6 +347,7 @@ describe("first-party MCP tool visibility policy", () => {
       expect(tool?.inputSchema).toMatchObject({
         properties: {
           instructions: { maxLength: SESSION_INSTRUCTIONS_MAX_CHARACTERS },
+          title: { maxLength: SESSION_TITLE_MAX_CHARACTERS },
         },
       });
       for (const arguments_ of [

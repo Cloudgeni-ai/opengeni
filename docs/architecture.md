@@ -658,6 +658,15 @@ For an existing session, a scheduled turn that omits its turn-level `tools`
 field inherits the durable session tool policy; explicit `tools: []` remains an
 empty override.
 
+A pure scheduled-occurrence batch that creates a standalone scheduler-owned
+turn is persisted in model-facing history as a direct `user`-role task boundary
+carrying the immutable scheduled task, run, and update ids. That role is
+conversation structure only: the logical turn still freezes the scheduler
+service as initiator, retains its causal-human and personal-connection authority
+snapshots, and remains a scheduled run in audit and settlement. Scheduled
+occurrences attached to an existing human/API turn, and all other machine-input
+batches, keep the internal `system`-role envelope.
+
 None of them creates a parallel agent engine. They differ in admission and
 provenance, then use the same logical turn, attempt, event, recovery, and usage
 boundaries.
@@ -1166,7 +1175,7 @@ This index intentionally routes at subsystem granularity. Use
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
 | Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
-| Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
+| Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 
 ### Contracts, access, and persistence
