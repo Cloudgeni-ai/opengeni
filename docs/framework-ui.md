@@ -109,10 +109,8 @@ Svelte hosts can use explicit clients or provide context:
 
 ```svelte
 <script lang="ts">
-  import {
-    createSessionEvents,
-    MessageTimeline,
-  } from "@opengeni/svelte/session-ui";
+  import { createSessionEvents } from "@opengeni/svelte/session";
+  import { MessageTimeline } from "@opengeni/svelte/session-ui";
   import "@opengeni/svelte/compiled.css";
   import { onDestroy } from "svelte";
 

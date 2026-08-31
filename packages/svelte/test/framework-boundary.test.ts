@@ -37,6 +37,8 @@ test("native composer submission and owning examples close their lifecycle", () 
   expect(composer).not.toContain("void controller.submit(delivery");
   expect(readme).toContain("onDestroy(() => events.destroy())");
   expect(frameworkGuide).toContain("onDestroy(() => events.destroy())");
+  expect(frameworkGuide).toContain('createSessionEvents } from "@opengeni/svelte/session"');
+  expect(frameworkGuide).toContain('MessageTimeline } from "@opengeni/svelte/session-ui"');
 });
 
 test("composed native session surfaces fan one retained event feed into every controller", () => {

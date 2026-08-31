@@ -1306,9 +1306,10 @@ try {
       [
         'import type { SessionSurfaceControllers } from "@opengeni/svelte/session";',
         'import { createSessionEvents, readableFromController } from "@opengeni/svelte/session";',
+        'import { MessageTimeline } from "@opengeni/svelte/session-ui";',
         'import type { TimelineRendererRegistry } from "@opengeni/svelte/session-ui";',
         'import type { ModelPickerOption, ToolPolicyOption } from "@opengeni/svelte/composer";',
-        "export const packedSvelteSurface = [createSessionEvents, readableFromController];",
+        "export const packedSvelteSurface = [createSessionEvents, readableFromController, MessageTimeline];",
         "export type PackedSvelteTypes = [SessionSurfaceControllers, TimelineRendererRegistry, ModelPickerOption, ToolPolicyOption];",
         "",
       ].join("\n"),

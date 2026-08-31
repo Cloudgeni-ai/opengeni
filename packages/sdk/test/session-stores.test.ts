@@ -1046,6 +1046,40 @@ describe("framework-neutral session stores", () => {
     store.destroy();
   });
 
+  test("each control action clears stale errors from the other action channel", async () => {
+    let pauseAttempts = 0;
+    let approvalAttempts = 0;
+    const store = createSessionControlStore({
+      client: {
+        pauseSession: async () => {
+          pauseAttempts += 1;
+          if (pauseAttempts === 1) throw new Error("pause failed");
+          return controlResponse("paused");
+        },
+        resumeSession: async () => controlResponse("active"),
+        sendApprovalDecision: async () => {
+          approvalAttempts += 1;
+          if (approvalAttempts === 2) throw new Error("approval failed");
+          return event(3 + approvalAttempts);
+        },
+      } as never,
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      environment: deterministicEnvironment(["approval-key-1", "approval-key-2"]),
+    });
+
+    expect(await store.pause()).toBeNull();
+    expect(store.getSnapshot().error?.message).toBe("pause failed");
+    expect(await store.approve("approval-1")).not.toBeNull();
+    expect(store.getSnapshot().error).toBeNull();
+
+    expect(await store.reject("approval-2")).toBeNull();
+    expect(store.getSnapshot().error?.message).toBe("approval failed");
+    expect(await store.resume()).not.toBeNull();
+    expect(store.getSnapshot().error).toBeNull();
+    store.destroy();
+  });
+
   test("goal 404 is a normal null state", async () => {
     const store = createGoalStore({
       client: {

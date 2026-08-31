@@ -52,6 +52,7 @@ export function createSessionControlStore(options: {
     const sessionId = options.sessionId;
     if (!sessionId || store.getSnapshot().controlling || store.signal.aborted) return null;
     controlError = null;
+    approvalError = null;
     publish({ controlling: true });
     try {
       const response = await options.client[action === "pause" ? "pauseSession" : "resumeSession"](
@@ -81,6 +82,7 @@ export function createSessionControlStore(options: {
       pendingApproval = { decisionKey, clientEventId: environment.ids.randomUUID() };
     }
     const clientEventId = pendingApproval.clientEventId;
+    controlError = null;
     approvalError = null;
     publish({ responding: true });
     try {
