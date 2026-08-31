@@ -23447,7 +23447,11 @@ async function listCodexLeaseCandidatesInTransaction(
       c.secondary_reset_at,
       c.usage_checked_at,
       c.exhausted_until,
-      c.exhausted_kind,
+      -- Migration 0383 adds typed cooldown provenance after the original
+      -- lease rollout. Keep this allocator query executable against the
+      -- pre-0383 compatibility schema while returning the real value once the
+      -- additive column exists.
+      to_jsonb(c) ->> 'exhausted_kind' as exhausted_kind,
       c.selection_count,
       c.last_selected_at,
       ${
