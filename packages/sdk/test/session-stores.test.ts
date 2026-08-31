@@ -29,6 +29,7 @@ import type {
   ComposerDraft,
   FileAsset,
   SessionEvent,
+  SessionGoal,
   SessionHumanInputRequest,
   SessionControlResponse,
   SessionQueueMutationResponse,
@@ -1060,6 +1061,29 @@ describe("framework-neutral session stores", () => {
     store.destroy();
   });
 
+  test("goal reads cannot resurrect a cleared goal when the client ignores abort", async () => {
+    const staleRead = deferred<SessionGoal>();
+    const store = createGoalStore({
+      client: {
+        getGoal: async () => await staleRead.promise,
+        deleteGoal: async () => undefined,
+      } as never,
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+    });
+
+    const starting = store.start();
+    await flushMicrotasks();
+    await store.clearGoal();
+    expect(store.getSnapshot().value).toBeNull();
+
+    staleRead.resolve(sessionGoal("stale-goal", "stale objective"));
+    await starting;
+    store.clearMutationError();
+    expect(store.getSnapshot().value).toBeNull();
+    store.destroy();
+  });
+
   test("terminal human-input races reconcile without resurrecting an error", async () => {
     let reads = 0;
     const request = humanInputRequest();
@@ -1351,6 +1375,32 @@ function scriptedEnvironment(ids: string[], initialVisibility: "visible" | "hidd
 
 function outcomeUnknownError(): Error & { outcomeUnknown: true } {
   return Object.assign(new Error("transport outcome unknown"), { outcomeUnknown: true as const });
+}
+
+function sessionGoal(id: string, text: string): SessionGoal {
+  return {
+    id,
+    accountId: "77777777-7777-4777-8777-777777777777",
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    status: "active",
+    text,
+    successCriteria: null,
+    rootConstraints: [],
+    evidence: null,
+    rationale: null,
+    pausedReason: null,
+    createdBy: "api",
+    version: 1,
+    objectiveRevision: 1,
+    mutationPolicy: "preserve_intent",
+    autoContinuations: 0,
+    noProgressStreak: 0,
+    maxAutoContinuations: null,
+    metadata: {},
+    createdAt: "2026-08-31T00:00:00.000Z",
+    updatedAt: "2026-08-31T00:00:00.000Z",
+  };
 }
 
 function deferred<Value>() {

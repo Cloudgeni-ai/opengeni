@@ -205,37 +205,39 @@
                 <span><strong>{option.label}</strong>{#if option.description}<small>{option.description}</small>{/if}</span>
               </label>
             {/each}
-            <div class="og-human-input__choice" data-og-state={draft.otherSelected ? "ready" : "idle"}>
-              <input
-                id={otherChoiceId}
-                type={question.kind === "single_select" ? "radio" : "checkbox"}
-                name={question.kind === "single_select" ? controlId : undefined}
-                aria-label={messages.other}
-                checked={draft.otherSelected}
-                onchange={(event) => toggleOther(question.id, question.kind as "single_select" | "multi_select", event.currentTarget.checked)}
-              />
-              <span>
-                <label for={otherChoiceId}><strong>{messages.other}</strong></label>
-                <label class="og-visually-hidden" for={otherTextId}>{messages.other} answer for {question.label ?? question.prompt}</label>
+            {#if question.allowOther}
+              <div class="og-human-input__choice" data-og-state={draft.otherSelected ? "ready" : "idle"}>
                 <input
-                  id={otherTextId}
-                  type="text"
-                  value={draft.other}
-                  placeholder="Type a value…"
-                  onfocus={() => selectOther(question.id, question.kind as "single_select" | "multi_select")}
-                  onclick={() => selectOther(question.id, question.kind as "single_select" | "multi_select")}
-                  oninput={(event) => {
-                    const other = event.currentTarget.value;
-                    update(question.id, (current) => ({
-                      ...current,
-                      other,
-                      otherSelected: true,
-                      ...(question.kind === "single_select" ? { values: [] } : {}),
-                    }));
-                  }}
+                  id={otherChoiceId}
+                  type={question.kind === "single_select" ? "radio" : "checkbox"}
+                  name={question.kind === "single_select" ? controlId : undefined}
+                  aria-label={messages.other}
+                  checked={draft.otherSelected}
+                  onchange={(event) => toggleOther(question.id, question.kind as "single_select" | "multi_select", event.currentTarget.checked)}
                 />
-              </span>
-            </div>
+                <span>
+                  <label for={otherChoiceId}><strong>{messages.other}</strong></label>
+                  <label class="og-visually-hidden" for={otherTextId}>{messages.other} answer for {question.label ?? question.prompt}</label>
+                  <input
+                    id={otherTextId}
+                    type="text"
+                    value={draft.other}
+                    placeholder="Type a value…"
+                    onfocus={() => selectOther(question.id, question.kind as "single_select" | "multi_select")}
+                    onclick={() => selectOther(question.id, question.kind as "single_select" | "multi_select")}
+                    oninput={(event) => {
+                      const other = event.currentTarget.value;
+                      update(question.id, (current) => ({
+                        ...current,
+                        other,
+                        otherSelected: true,
+                        ...(question.kind === "single_select" ? { values: [] } : {}),
+                      }));
+                    }}
+                  />
+                </span>
+              </div>
+            {/if}
           </div>
         {/if}
         {#if questionError}<small id={errorId} class="og-error" role="alert">{questionError}</small>{/if}

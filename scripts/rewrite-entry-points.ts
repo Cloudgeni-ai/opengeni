@@ -24,6 +24,7 @@
  * The src->dist mapping per package (mirrors what tsup emits):
  *   main    ./src/index.ts        -> ./dist/index.js
  *   module  ./src/index.ts        -> ./dist/index.js
+ *   svelte  ./src/index.ts        -> ./dist/index.js
  *   types   ./src/index.ts        -> ./dist/index.d.ts
  *   exports["."]                   -> { types: ./dist/index.d.ts, import: ./dist/index.js }
  *
@@ -137,6 +138,10 @@ export function rewriteEntryPointsToDist(pkg: PackageJson): boolean {
     pkg.types = srcToDist(pkg.types, "types");
     changed = true;
   }
+  if (typeof pkg.svelte === "string" && pkg.svelte !== srcToDist(pkg.svelte, "runtime")) {
+    pkg.svelte = srcToDist(pkg.svelte, "runtime");
+    changed = true;
+  }
   if (pkg.exports && typeof pkg.exports === "object") {
     for (const [subpath, entry] of Object.entries(pkg.exports as Record<string, ExportsEntry>)) {
       const next = entryToDist(entry);
@@ -177,6 +182,10 @@ export function rewriteEntryPointsToSrc(pkg: PackageJson): boolean {
   }
   if (typeof pkg.types === "string" && pkg.types !== distToSrc(pkg.types)) {
     pkg.types = distToSrc(pkg.types);
+    changed = true;
+  }
+  if (typeof pkg.svelte === "string" && pkg.svelte !== distToSrc(pkg.svelte)) {
+    pkg.svelte = distToSrc(pkg.svelte);
     changed = true;
   }
   if (pkg.exports && typeof pkg.exports === "object") {

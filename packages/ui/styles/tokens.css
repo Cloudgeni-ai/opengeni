@@ -68,6 +68,9 @@
   --og-timeline-max-width: 56rem;
   --og-touch-target: 2.75rem;
   --og-model-picker-menu-width: 18rem;
+}
+
+.og-root {
   color-scheme: dark;
 }
 
@@ -108,5 +111,11 @@
   --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);
   --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);
   --og-shadow-lg: 0 8px 28px oklch(0.2 0.02 260 / 0.13), 0 2px 8px oklch(0.2 0.02 260 / 0.07);
+}
+
+.og-root[data-og-theme="light"],
+.og-root.og-light,
+[data-og-theme="light"] .og-root,
+.og-light .og-root {
   color-scheme: light;
 }

@@ -138,11 +138,17 @@ export function useVoiceInput({
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [durationSeconds, setDurationSeconds] = useState(0);
   const [locallySaved, setLocallySaved] = useState(false);
-  const [storageAvailable, setStorageAvailable] = useState(
-    () => Boolean(createRecordingStore) || typeof globalThis.indexedDB !== "undefined",
-  );
+  // Keep SSR and the first hydration render identical. The ordinary browser
+  // path is optimistically available; a browser without durable storage is
+  // corrected immediately after mount before a user can begin recording.
+  const [storageAvailable, setStorageAvailable] = useState(true);
   const createRecordingStoreRef = useRef(createRecordingStore);
   createRecordingStoreRef.current = createRecordingStore;
+  useEffect(() => {
+    setStorageAvailable(
+      Boolean(createRecordingStore) || typeof globalThis.indexedDB !== "undefined",
+    );
+  }, [createRecordingStore]);
   const nowRef = useRef(now);
   nowRef.current = now;
   const readNow = useCallback(() => nowRef.current(), []);

@@ -29,6 +29,7 @@ type PackageManifest = {
   main?: string;
   module?: string;
   types?: string;
+  svelte?: string;
   bin?: string | Record<string, string>;
   exports?: Record<string, string | Record<string, string>>;
   dependencies?: Record<string, string>;
@@ -402,6 +403,15 @@ try {
     !sveltePackage.manifest.sideEffects.includes("**/*.css")
   ) {
     throw new Error("svelte tarball does not preserve the CSS side-effect allowlist");
+  }
+  const svelteRootExport = sveltePackage.manifest.exports?.["."];
+  if (
+    !svelteRootExport ||
+    typeof svelteRootExport === "string" ||
+    svelteRootExport.svelte !== "./dist/index.js" ||
+    sveltePackage.manifest.svelte !== svelteRootExport.svelte
+  ) {
+    throw new Error("svelte tarball compatibility entry does not match its root export");
   }
   const runtime = await stageTarball("packages/runtime", stagingRoot, tarballRoot, versions);
   const runtimeLocalDependencies = await Promise.all(

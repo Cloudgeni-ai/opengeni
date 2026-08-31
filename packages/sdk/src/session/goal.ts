@@ -131,10 +131,11 @@ export function createGoalStore(options: {
     const controller = new AbortController();
     readAbort = controller;
     try {
-      goal = await store.trackRead(() =>
+      const loadedGoal = await store.trackRead(() =>
         options.client.getGoal(options.workspaceId, sessionId, { signal: controller.signal }),
       );
       if (ticket !== generation || controller.signal.aborted || store.signal.aborted) return;
+      goal = loadedGoal;
       publish({
         loading: false,
         error: null,

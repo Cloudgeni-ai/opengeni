@@ -9,6 +9,7 @@ describe("release entry-point rewriting", () => {
       main: "./src/index.ts",
       module: "./src/index.ts",
       types: "./src/index.ts",
+      svelte: "./src/index.ts",
       bin: {
         "opengeni-fixture": "./src/cli.ts",
       },
@@ -49,6 +50,7 @@ describe("release entry-point rewriting", () => {
       "./compiled.css": source.exports["./compiled.css"],
     });
     expect(manifest.bin).toEqual({ "opengeni-fixture": "./dist/cli.js" });
+    expect(manifest.svelte).toBe("./dist/index.js");
     expect(rewriteEntryPointsToDist(manifest)).toBe(false);
 
     expect(rewriteEntryPointsToSrc(manifest)).toBe(true);

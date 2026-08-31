@@ -47,6 +47,17 @@ describe("@opengeni/ui contract", () => {
     expect(css).not.toContain("packages/svelte");
   });
 
+  test("scopes browser color scheme and standalone session responsiveness to OpenGeni roots", async () => {
+    const tokens = await readFile(join(import.meta.dir, "../styles/tokens.css"), "utf8");
+    const responsive = await readFile(join(import.meta.dir, "../styles/responsive.css"), "utf8");
+    const rootDefaults = tokens.slice(tokens.indexOf(":root {"), tokens.indexOf("\n}"));
+
+    expect(rootDefaults).not.toContain("color-scheme");
+    expect(tokens).toContain(".og-root {\n  color-scheme: dark;");
+    expect(tokens).toContain('.og-root[data-og-theme="light"]');
+    expect(responsive).toContain(".og-root.og-session, .og-root .og-session");
+  });
+
   test("owns byte-identical React token and responsive compatibility sources", async () => {
     const pairs = [
       ["react-compat-tokens.css", "../../react/styles/tokens.css"],

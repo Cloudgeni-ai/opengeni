@@ -69,6 +69,9 @@
   --og-timeline-max-width: 56rem;
   --og-touch-target: 2.75rem;
   --og-model-picker-menu-width: 18rem;
+}
+
+.og-root {
   color-scheme: dark;
 }
 
@@ -109,6 +112,12 @@
   --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);
   --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);
   --og-shadow-lg: 0 8px 28px oklch(0.2 0.02 260 / 0.13), 0 2px 8px oklch(0.2 0.02 260 / 0.07);
+}
+
+.og-root[data-og-theme="light"],
+.og-root.og-light,
+[data-og-theme="light"] .og-root,
+.og-light .og-root {
   color-scheme: light;
 }
 
@@ -406,7 +415,7 @@
 }
 
 @media (max-width: 40rem) {
-  .og-root .og-session { min-height: 100dvh; border-inline: 0; border-radius: 0; }
+  .og-root.og-session, .og-root .og-session { min-height: 100dvh; border-inline: 0; border-radius: 0; }
   .og-root .og-chrome { padding-inline: var(--og-space-3); }
   .og-root .og-timeline { padding: var(--og-space-3); }
   .og-root .og-composer { margin-inline: var(--og-space-2); margin-bottom: max(var(--og-space-2), env(safe-area-inset-bottom)); }

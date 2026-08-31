@@ -33,7 +33,6 @@ function LoadingComposerTranscriptionControl({
   workspaceEnabled = false,
   messages,
   className,
-  createRecordingStore,
   suppressed = false,
   composer,
   onStart,
@@ -41,17 +40,12 @@ function LoadingComposerTranscriptionControl({
   Pick<ComposerTranscriptionControlImplementationProps, "composer"> & {
     onStart: () => void;
   }) {
-  const storageAvailable =
-    Boolean(createRecordingStore) || typeof globalThis.indexedDB !== "undefined";
   const unavailableMessage = composer.disabled
     ? (messages?.unavailableDisabled ??
       "Voice input is unavailable while the composer is disabled.")
     : !capability?.available || !workspaceEnabled
       ? (messages?.unavailable ?? "Voice input is unavailable for this workspace.")
-      : !storageAvailable
-        ? (messages?.errorStorageUnavailable ??
-          "Voice input stopped because audio could not be saved safely.")
-        : null;
+      : null;
   const idleLabel = unavailableMessage ?? messages?.start ?? "Start voice input";
 
   function start(event: MouseEvent<HTMLButtonElement>) {

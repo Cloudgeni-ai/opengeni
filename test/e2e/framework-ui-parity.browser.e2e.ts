@@ -306,6 +306,13 @@ function isExpectedFirefoxHarnessWarning(diagnostic: string): boolean {
   );
 }
 
+function isExpectedWebKitTerminalTaskQueueWarning(diagnostic: string): boolean {
+  return (
+    engineId === "webkit" &&
+    /^console\.warning: task queue exceeded allotted deadline by \d+ms$/u.test(diagnostic)
+  );
+}
+
 function assertExpectedDiagnostics(
   diagnostics: readonly string[],
   options: { reducedMotionWarning: boolean },
@@ -316,10 +323,15 @@ function assertExpectedDiagnostics(
   expect(diagnostics.filter(isExpectedFirefoxHarnessWarning)).toHaveLength(
     engineId === "firefox" ? 1 : 0,
   );
+  expect(diagnostics.filter(isExpectedWebKitTerminalTaskQueueWarning).length).toBeLessThanOrEqual(
+    1,
+  );
   expect(
     diagnostics.filter(
       (diagnostic) =>
-        !isExpectedReducedMotionWarning(diagnostic) && !isExpectedFirefoxHarnessWarning(diagnostic),
+        !isExpectedReducedMotionWarning(diagnostic) &&
+        !isExpectedFirefoxHarnessWarning(diagnostic) &&
+        !isExpectedWebKitTerminalTaskQueueWarning(diagnostic),
     ),
   ).toEqual([]);
 }

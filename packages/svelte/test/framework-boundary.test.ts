@@ -16,3 +16,13 @@ test("the native Svelte package has no React runtime boundary", () => {
   }
   expect(sources.join("\n")).not.toMatch(/(?:from|import\()\s*["'](?:react|@opengeni\/react)/u);
 });
+
+test("native policy and human-input surfaces preserve host authority", () => {
+  const components = resolve(import.meta.dir, "../src/components");
+  const mcpPolicy = readFileSync(join(components, "McpApprovalPolicySurface.svelte"), "utf8");
+  const humanInput = readFileSync(join(components, "HumanInputForm.svelte"), "utf8");
+
+  expect(mcpPolicy).toContain('<option value="selected" disabled>');
+  expect(mcpPolicy).not.toContain('event.currentTarget.value === "never" ? false : []');
+  expect(humanInput).toContain("{#if question.allowOther}");
+});

@@ -26,7 +26,7 @@
 }
 
 @media (max-width: 40rem) {
-  .og-root .og-session { min-height: 100dvh; border-inline: 0; border-radius: 0; }
+  .og-root.og-session, .og-root .og-session { min-height: 100dvh; border-inline: 0; border-radius: 0; }
   .og-root .og-chrome { padding-inline: var(--og-space-3); }
   .og-root .og-timeline { padding: var(--og-space-3); }
   .og-root .og-composer { margin-inline: var(--og-space-2); margin-bottom: max(var(--og-space-2), env(safe-area-inset-bottom)); }
