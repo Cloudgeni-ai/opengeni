@@ -196,6 +196,67 @@ describe("native Svelte Mission Control demo", () => {
     });
     await context.close();
   }, 60_000);
+
+  test("tool-policy changes use the durable versioned session contract", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 1200, height: 800 },
+      reducedMotion: "reduce",
+      colorScheme: "dark",
+    });
+    const page = await context.newPage();
+    const diagnostics = captureDiagnostics(page);
+    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await expectMissionControlReady(page);
+
+    const browserTool = page
+      .locator(".mission-inspector .og-tool-policy__item")
+      .filter({ hasText: "Browser" })
+      .locator('input[type="checkbox"]');
+    expect(await browserTool.isChecked()).toBe(false);
+    expect(await page.locator("[data-tool-policy-version]").textContent()).toContain("Policy v1");
+    await browserTool.click();
+    await page.getByText("3 enabled · Policy v2", { exact: true }).waitFor();
+    expect(await browserTool.isChecked()).toBe(true);
+
+    await assertAxeClean(page);
+    expect(diagnostics).toEqual([]);
+    await context.close();
+  }, 60_000);
+
+  test("failed tool-policy and pause mutations reconcile without silent local state", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 1200, height: 800 },
+      reducedMotion: "reduce",
+      colorScheme: "dark",
+    });
+    const page = await context.newPage();
+    const diagnostics = captureDiagnostics(page);
+    await page.goto(`${baseUrl}?toolPolicy=fail&control=fail`, { waitUntil: "networkidle" });
+    await expectMissionControlReady(page);
+
+    const browserTool = page
+      .locator(".mission-inspector .og-tool-policy__item")
+      .filter({ hasText: "Browser" })
+      .locator('input[type="checkbox"]');
+    await browserTool.click();
+    await page
+      .locator('[role="alert"]')
+      .filter({ hasText: "Could not save session tools. Fixture tool policy update failed." })
+      .waitFor();
+    expect(await browserTool.isChecked()).toBe(false);
+    expect(await page.locator("[data-tool-policy-version]").textContent()).toContain("Policy v1");
+
+    await page.getByRole("button", { name: "Pause", exact: true }).click();
+    const pauseError = page
+      .locator('[role="alert"]')
+      .filter({ hasText: "Fixture pause request failed." });
+    await pauseError.waitFor();
+    expect(await pauseError.count()).toBe(1);
+
+    await assertAxeClean(page);
+    expect(diagnostics).toEqual([]);
+    await context.close();
+  }, 60_000);
 });
 
 async function expectMissionControlReady(page: Page): Promise<void> {

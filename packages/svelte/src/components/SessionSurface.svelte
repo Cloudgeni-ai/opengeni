@@ -33,6 +33,16 @@
   let goal = $derived(controllers.goal ? readableFromController(controllers.goal.controller, { owned: false }) : null);
   let approvals = $derived(projectPendingApprovals([...$events.events]));
   let status = $derived($events.sessionStatus ?? $session.value?.status ?? "queued");
+
+  function pause() {
+    controllers.control.controller.clearError();
+    return controllers.control.controller.pause();
+  }
+
+  function resume() {
+    controllers.control.controller.clearError();
+    return controllers.control.controller.resume();
+  }
 </script>
 
 <section class="og-root og-session" data-og-component="session" data-og-state={status}>
@@ -45,12 +55,13 @@
     approvalCount={approvals.length}
     inputCount={humanInput ? ($humanInput?.requests.length ?? 0) : 0}
     goalLabel={goal ? $goal?.value?.status : undefined}
-    onPause={() => controllers.control.controller.pause()}
-    onResume={() => controllers.control.controller.resume()}
+    onPause={pause}
+    onResume={resume}
   />
+  {#if $control.error}<div class="og-error" data-og-part="control-error" role="alert">{$control.error.message}</div>{/if}
   <MessageTimeline controller={controllers.events.controller} />
   <div data-og-part="controls">
-    {#if approvals.length > 0}<ApprovalSurface {approvals} controller={controllers.control.controller} />{/if}
+    {#if approvals.length > 0}<ApprovalSurface {approvals} controller={controllers.control.controller} showError={false} />{/if}
     {#if controllers.humanInput}<HumanInputSurface controller={controllers.humanInput.controller} />{/if}
     {#if controllers.goal}<GoalSurface controller={controllers.goal.controller} />{/if}
     {#if $queue.queue.length > 0}<QueueSurface controller={controllers.queue.controller} />{/if}

@@ -2,7 +2,15 @@
   import type { PendingApproval, SessionControlStore } from "@opengeni/sdk/session";
   import { readableFromController } from "../store";
 
-  let { approvals, controller }: { approvals: readonly PendingApproval[]; controller: SessionControlStore } = $props();
+  let {
+    approvals,
+    controller,
+    showError = true,
+  }: {
+    approvals: readonly PendingApproval[];
+    controller: SessionControlStore;
+    showError?: boolean;
+  } = $props();
   let snapshot = $derived(readableFromController(controller, { owned: false }));
 </script>
 
@@ -18,6 +26,6 @@
         </div>
       </article>
     {/each}
-    {#if $snapshot.error}<div class="og-error" role="alert">{$snapshot.error.message}</div>{/if}
+    {#if showError && $snapshot.error}<div class="og-error" role="alert">{$snapshot.error.message}</div>{/if}
   </section>
 {/if}

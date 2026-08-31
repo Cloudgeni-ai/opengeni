@@ -73,10 +73,11 @@ button { font: inherit; }
 .mission-rail-summary dd, .mission-runtime dd { margin: 0; color: var(--og-color-fg); text-align: end; }
 .mission-reset { width: 100%; margin-top: 1rem; padding: 0.55rem 0; color: var(--og-color-fg-subtle); background: transparent; border: 0; border-top: 1px solid var(--og-color-border); font-size: 0.68rem; text-align: start; }
 
-.mission-main { min-width: 0; min-height: 0; overflow: hidden; padding: 0.85rem; }
+.mission-main { position: relative; min-width: 0; min-height: 0; overflow: hidden; padding: 0.85rem; }
 .mission-main .og-session { height: 100%; }
 .mission-main .og-session > [data-og-part="controls"] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--og-space-2); max-height: 18rem; overflow: auto; padding: 0 var(--og-space-3) var(--og-space-2); }
 .mission-main .og-session > [data-og-part="controls"]:empty { display: none; }
+.mission-policy-error { position: absolute; z-index: 10; top: 1.25rem; left: 50%; width: min(32rem, calc(100% - 2rem)); transform: translateX(-50%); pointer-events: none; box-shadow: var(--og-shadow-lg); }
 
 .mission-inspector-section { padding: 0.95rem 0; border-top: 1px solid var(--og-color-border); }
 .mission-inspector-section:first-of-type { border-top: 0; padding-top: 0; }

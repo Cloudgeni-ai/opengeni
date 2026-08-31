@@ -38,3 +38,34 @@ test("native composer submission and owning examples close their lifecycle", () 
   expect(readme).toContain("onDestroy(() => events.destroy())");
   expect(frameworkGuide).toContain("onDestroy(() => events.destroy())");
 });
+
+test("composed native session surfaces fan one retained event feed into every controller", () => {
+  const packageRoot = resolve(import.meta.dir, "..");
+  const controllers = readFileSync(join(packageRoot, "src/controllers.ts"), "utf8");
+  const demo = readFileSync(join(packageRoot, "demo/src/App.svelte"), "utf8");
+
+  expect(controllers.match(/events: sharedEvents/g)).toHaveLength(6);
+  for (const target of ["session", "composer", "queue", "goal?", "humanInput?", "lineage?"]) {
+    expect(controllers).toContain(`controllers.${target}.controller.applyEvents(retained)`);
+  }
+  expect(demo.match(/events: sharedEvents/g)).toHaveLength(5);
+  for (const target of ["session", "composer", "queue", "goal", "humanInput"]) {
+    expect(demo).toContain(`managed.${target}.controller.applyEvents(retained)`);
+  }
+});
+
+test("composed control and demo tool-policy failures remain visible and authoritative", () => {
+  const packageRoot = resolve(import.meta.dir, "..");
+  const sessionSurface = readFileSync(
+    join(packageRoot, "src/components/SessionSurface.svelte"),
+    "utf8",
+  );
+  const demo = readFileSync(join(packageRoot, "demo/src/App.svelte"), "utf8");
+
+  expect(sessionSurface).toContain('data-og-part="control-error" role="alert"');
+  expect(sessionSurface).toContain("controllers.control.controller.clearError()");
+  expect(sessionSurface).toContain("showError={false}");
+  expect(demo).toContain("client.updateSessionToolPolicy(workspaceId, sessionId");
+  expect(demo).toContain("expectedVersion: toolPolicyVersion");
+  expect(demo).toContain("adoptSessionPolicy(await client.getSession(workspaceId, sessionId))");
+});

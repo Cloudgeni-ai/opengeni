@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { OpenGeniClient } from "@opengeni/sdk";
+  import { OpenGeniClient, type Session } from "@opengeni/sdk";
   import { onDestroy, onMount } from "svelte";
   import {
     LatencyPicker,
@@ -25,16 +25,32 @@
   const live = query.get("mode") === "live";
   const workspaceId = query.get("workspace") ?? WORKSPACE_ID;
   const sessionId = query.get("session") ?? SESSION_ID;
-  const client = live ? new OpenGeniClient({ baseUrl: "/demo-api" }) : new MissionControlMockClient();
-  const session = createSessionResource({ client: client as never, workspaceId, sessionId });
+  const client = live
+    ? new OpenGeniClient({ baseUrl: "/demo-api" })
+    : new MissionControlMockClient({
+        failControl: query.get("control") === "fail",
+        failToolPolicy: query.get("toolPolicy") === "fail",
+      });
+  const sharedEvents = [] as const;
+  const session = createSessionResource({
+    client: client as never,
+    workspaceId,
+    sessionId,
+    events: sharedEvents,
+  });
   const eventController = createSessionEvents({ client: client as never, workspaceId, sessionId });
   const composer = createComposer({
     client: client as never,
     workspaceId,
     sessionId,
-    events: [],
+    events: sharedEvents,
   });
-  const queue = createTurnQueue({ client: client as never, workspaceId, sessionId });
+  const queue = createTurnQueue({
+    client: client as never,
+    workspaceId,
+    sessionId,
+    events: sharedEvents,
+  });
   const managed = {
     session,
     events: eventController,
@@ -42,20 +58,38 @@
     attachments: createAttachments({ client: client as never, workspaceId }),
     queue,
     control: createSessionControl({ client: client as never, workspaceId, sessionId }),
-    goal: createGoal({ client: client as never, workspaceId, sessionId }),
-    humanInput: createHumanInput({ client: client as never, workspaceId, sessionId }),
+    goal: createGoal({
+      client: client as never,
+      workspaceId,
+      sessionId,
+      events: sharedEvents,
+    }),
+    humanInput: createHumanInput({
+      client: client as never,
+      workspaceId,
+      sessionId,
+      events: sharedEvents,
+    }),
   };
-  const unsubscribeComposerEvents = eventController.controller.subscribe(() => {
-    composer.controller.applyEvents([...eventController.controller.getSnapshot().events]);
-  });
+  const applySharedEvents = () => {
+    const retained = [...eventController.controller.getSnapshot().events];
+    managed.session.controller.applyEvents(retained);
+    managed.composer.controller.applyEvents(retained);
+    managed.queue.controller.applyEvents(retained);
+    managed.goal.controller.applyEvents(retained);
+    managed.humanInput.controller.applyEvents(retained);
+  };
+  const unsubscribeSharedEvents = eventController.controller.subscribe(applySharedEvents);
   const unsubscribeComposerQueue = queue.controller.subscribe(() => {
     composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
   });
-  composer.controller.applyEvents([...eventController.controller.getSnapshot().events]);
+  applySharedEvents();
   composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
   const controllers: SessionSurfaceControllers = {
     ...managed,
     destroy() {
+      unsubscribeSharedEvents();
+      unsubscribeComposerQueue();
       for (const controller of Object.values(managed)) controller.destroy();
     },
   };
@@ -75,11 +109,57 @@
     .filter((tool) => tool.state !== "denied" && tool.state !== "unavailable")
     .map(({ id, label }) => ({ id, label }));
   const sessionStatus = $derived($eventStore.sessionStatus ?? $sessionStore.value?.status ?? "queued");
-  let selectedTools = $state<string[]>(["search", "github"]);
+  let selectedTools = $state<string[]>([]);
+  let firstPartyMcpTools = $state<Session["firstPartyMcpTools"]>([]);
+  let toolPolicyVersion = $state<number | null>(null);
+  let toolPolicySaving = $state(false);
+  let toolPolicyError = $state<string | null>(null);
   let theme = $state<"dark" | "light">("dark");
   let density = $state<"comfortable" | "compact">("comfortable");
   let navigationOpen = $state(false);
   let inspectorOpen = $state(false);
+
+  function adoptSessionPolicy(value: Session) {
+    selectedTools = value.tools.map((tool) => tool.id);
+    firstPartyMcpTools = [...value.firstPartyMcpTools];
+    toolPolicyVersion = value.toolPolicyVersion;
+  }
+
+  $effect(() => {
+    const value = $sessionStore.value;
+    if (!value) return;
+    if (toolPolicyVersion !== null && value.toolPolicyVersion < toolPolicyVersion) return;
+    adoptSessionPolicy(value);
+  });
+
+  async function saveSelectedTools(ids: string[]) {
+    if (toolPolicySaving || toolPolicyVersion === null) return;
+    const previousSelectedTools = [...selectedTools];
+    selectedTools = [...ids];
+    toolPolicySaving = true;
+    toolPolicyError = null;
+    try {
+      const updated = await client.updateSessionToolPolicy(workspaceId, sessionId, {
+        mode: "explicit",
+        tools: ids.map((id) => ({ kind: "mcp" as const, id })),
+        firstPartyMcpTools: [...firstPartyMcpTools],
+        expectedVersion: toolPolicyVersion,
+      });
+      adoptSessionPolicy(updated);
+      void managed.session.controller.refresh();
+    } catch (error) {
+      selectedTools = previousSelectedTools;
+      toolPolicyError = error instanceof Error ? error.message : String(error);
+      try {
+        adoptSessionPolicy(await client.getSession(workspaceId, sessionId));
+      } catch {
+        // Retain the last authoritative selection while the visible error
+        // communicates that the requested mutation was not accepted.
+      }
+    } finally {
+      toolPolicySaving = false;
+    }
+  }
 
   function closeDrawers() {
     navigationOpen = false;
@@ -94,8 +174,6 @@
     return () => window.removeEventListener("keydown", onKeydown);
   });
   onDestroy(() => {
-    unsubscribeComposerEvents();
-    unsubscribeComposerQueue();
     controllers.destroy();
   });
 </script>
@@ -176,12 +254,13 @@
     </aside>
 
     <main class="mission-main">
+      {#if toolPolicyError}<div class="mission-policy-error og-error" role="alert">Could not save session tools. {toolPolicyError}</div>{/if}
       <SessionSurface
         {controllers}
         models={modelOptions}
         tools={composerTools}
         {selectedTools}
-        onToolsChange={(ids) => (selectedTools = ids)}
+        onToolsChange={(ids) => void saveSelectedTools(ids)}
       />
     </main>
 
@@ -197,8 +276,8 @@
         <label class="mission-field"><span>Latency</span><LatencyPicker value={$composerStore.latencyMode} onChange={managed.composer.controller.setLatencyMode} /></label>
       </section>
       <section class="mission-inspector-section" aria-labelledby="tools-title">
-        <div class="mission-section-heading"><h3 id="tools-title">Capabilities</h3><small>{selectedTools.length} enabled</small></div>
-        <ToolPolicyPicker tools={toolPolicies} selected={selectedTools} onChange={(ids) => (selectedTools = ids)} />
+        <div class="mission-section-heading"><h3 id="tools-title">Capabilities</h3><small data-tool-policy-version>{toolPolicySaving ? "Saving…" : toolPolicyVersion === null ? "Loading…" : `${selectedTools.length} enabled · Policy v${toolPolicyVersion}`}</small></div>
+        <ToolPolicyPicker tools={toolPolicies} selected={selectedTools} disabled={toolPolicySaving || toolPolicyVersion === null} onChange={(ids) => void saveSelectedTools(ids)} />
       </section>
       <section class="mission-inspector-section mission-runtime" aria-labelledby="runtime-title">
         <div class="mission-section-heading"><h3 id="runtime-title">Runtime</h3><small>Browser-safe authority</small></div>

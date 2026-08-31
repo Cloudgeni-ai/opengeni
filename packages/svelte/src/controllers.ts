@@ -76,26 +76,20 @@ export type SessionSurfaceControllers = Readonly<{
 export function createContextSessionControllers(sessionId: string): SessionSurfaceControllers {
   const context = getOpenGeniContext();
   const common = { workspaceId: context.workspaceId, sessionId };
+  const sharedEvents = [] as const;
   const session = createSessionResource({
     client: context.sessionClient ?? context.client,
     ...common,
+    events: sharedEvents,
   });
   const events = createSessionEvents({ client: context.client, ...common });
-  const composer = createComposer({ client: context.client, ...common, events: [] });
+  const composer = createComposer({ client: context.client, ...common, events: sharedEvents });
   const attachments = createAttachments({
     client: context.fileAttachmentClient ?? context.client,
     workspaceId: context.workspaceId,
   });
-  const queue = createTurnQueue({ client: context.client, ...common });
+  const queue = createTurnQueue({ client: context.client, ...common, events: sharedEvents });
   const control = createSessionControl({ client: context.client, ...common });
-  const unsubscribeEvents = events.controller.subscribe(() => {
-    composer.controller.applyEvents([...events.controller.getSnapshot().events]);
-  });
-  const unsubscribeQueue = queue.controller.subscribe(() => {
-    composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
-  });
-  composer.controller.applyEvents([...events.controller.getSnapshot().events]);
-  composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
   const controllers = {
     session,
     events,
@@ -104,13 +98,20 @@ export function createContextSessionControllers(sessionId: string): SessionSurfa
     queue,
     control,
     ...(context.goalClient || "getGoal" in context.client
-      ? { goal: createGoal({ client: context.goalClient ?? (context.client as never), ...common }) }
+      ? {
+          goal: createGoal({
+            client: context.goalClient ?? (context.client as never),
+            ...common,
+            events: sharedEvents,
+          }),
+        }
       : {}),
     ...(context.humanInputClient || "listHumanInputRequests" in context.client
       ? {
           humanInput: createHumanInput({
             client: context.humanInputClient ?? (context.client as never),
             ...common,
+            events: sharedEvents,
           }),
         }
       : {}),
@@ -119,10 +120,26 @@ export function createContextSessionControllers(sessionId: string): SessionSurfa
           lineage: createLineage({
             client: context.lineageClient ?? (context.client as never),
             ...common,
+            events: sharedEvents,
           }),
         }
       : {}),
   };
+  const applySharedEvents = () => {
+    const retained = [...events.controller.getSnapshot().events];
+    controllers.session.controller.applyEvents(retained);
+    controllers.composer.controller.applyEvents(retained);
+    controllers.queue.controller.applyEvents(retained);
+    controllers.goal?.controller.applyEvents(retained);
+    controllers.humanInput?.controller.applyEvents(retained);
+    controllers.lineage?.controller.applyEvents(retained);
+  };
+  const unsubscribeEvents = events.controller.subscribe(applySharedEvents);
+  const unsubscribeQueue = queue.controller.subscribe(() => {
+    composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
+  });
+  applySharedEvents();
+  composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
   return Object.freeze({
     ...controllers,
     destroy() {

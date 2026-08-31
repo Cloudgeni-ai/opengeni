@@ -270,4 +270,4 @@ Canonical source: `packages/db/drizzle/0362_managed_auth_session_sets.sql`,
 `apps/api/src/routes/managed-auth-session-sets.ts`,
 `apps/api/src/auth/managed-auth-session-adapter.ts`,
 `packages/contracts/src/managed-auth-session-sets.ts`,
-`packages/sdk/src/accounts.ts`, and `packages/react/src/accounts.tsx`.
+`packages/sdk/src/accounts.ts`, and `packages/react/src/accounts.ts`.

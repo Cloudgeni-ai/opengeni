@@ -11,6 +11,7 @@ import type {
   SessionQueueSnapshot,
   SubmitComposerDraftRequest,
   SubmitComposerDraftResponse,
+  UpdateSessionToolPolicyRequest,
 } from "@opengeni/sdk";
 
 export const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -25,16 +26,57 @@ let queue = queueSnapshot();
 let goal = goalFixture();
 let humanRequests = [humanInputFixture()];
 
+export type MissionControlMockClientOptions = Readonly<{
+  failControl?: boolean;
+  failToolPolicy?: boolean;
+}>;
+
 export class MissionControlMockClient {
-  async getSession(): Promise<Session> {
-    return sessionFixture();
+  private selectedToolIds = ["search", "github"];
+  private firstPartyMcpTools: Session["firstPartyMcpTools"] = [];
+  private toolPolicyMode: Session["toolPolicy"]["mode"] = "explicit";
+  private toolPolicyVersion = 1;
+
+  constructor(private readonly options: MissionControlMockClientOptions = {}) {}
+
+  private session(): Session {
+    return sessionFixture({
+      selectedToolIds: this.selectedToolIds,
+      firstPartyMcpTools: this.firstPartyMcpTools,
+      toolPolicyMode: this.toolPolicyMode,
+      toolPolicyVersion: this.toolPolicyVersion,
+    });
+  }
+
+  async getSession(_workspaceId?: string, _sessionId?: string): Promise<Session> {
+    return this.session();
   }
   async updateSession(
     _workspaceId: string,
     _sessionId: string,
     input: { title: string },
   ): Promise<Session> {
-    return { ...sessionFixture(), title: input.title, titleSource: "user" };
+    return { ...this.session(), title: input.title, titleSource: "user" };
+  }
+  async updateSessionToolPolicy(
+    _workspaceId: string,
+    _sessionId: string,
+    request: UpdateSessionToolPolicyRequest,
+  ): Promise<Session> {
+    if (this.options.failToolPolicy) throw new Error("Fixture tool policy update failed.");
+    if (request.expectedVersion !== this.toolPolicyVersion) {
+      throw new Error("Fixture tool policy version is stale.");
+    }
+    this.toolPolicyMode = request.mode;
+    if (request.mode === "explicit") {
+      this.selectedToolIds = request.tools.map((tool) => tool.id);
+      this.firstPartyMcpTools = [...request.firstPartyMcpTools];
+    } else {
+      this.selectedToolIds = ["search", "github"];
+      this.firstPartyMcpTools = [];
+    }
+    this.toolPolicyVersion += 1;
+    return this.session();
   }
   async listEvents(): Promise<SessionEvent[]> {
     return [...events];
@@ -146,9 +188,11 @@ export class MissionControlMockClient {
     return { snapshot: queue } as SessionQueueMutationResponse;
   }
   async pauseSession(): Promise<SessionControlResponse> {
+    if (this.options.failControl) throw new Error("Fixture pause request failed.");
     return controlResponse("paused");
   }
   async resumeSession(): Promise<SessionControlResponse> {
+    if (this.options.failControl) throw new Error("Fixture resume request failed.");
     return controlResponse("active");
   }
   async sendApprovalDecision(): Promise<SessionEvent> {
@@ -184,7 +228,7 @@ export class MissionControlMockClient {
     return { ancestors: [], children: [], truncated: false };
   }
   async updateSessionMcpApprovalPolicy() {
-    return { server: sessionFixture().mcpServers[0], effectiveFrom: "next_attempt" };
+    return { server: this.session().mcpServers[0], effectiveFrom: "next_attempt" };
   }
   async uploadFile(
     _workspaceId: string,
@@ -457,13 +501,22 @@ function queueSnapshot(): SessionQueueSnapshot {
     pendingInputAttachment: null,
   };
 }
-function sessionFixture(): Session {
+function sessionFixture(policy: {
+  selectedToolIds: readonly string[];
+  firstPartyMcpTools: Session["firstPartyMcpTools"];
+  toolPolicyMode: Session["toolPolicy"]["mode"];
+  toolPolicyVersion: number;
+}): Session {
   return {
     id: SESSION_ID,
     workspaceId: WORKSPACE_ID,
     status: "requires_action",
     title: "Framework-neutral UI release",
     titleSource: "agent",
+    tools: policy.selectedToolIds.map((id) => ({ kind: "mcp", id })),
+    toolPolicy: { mode: policy.toolPolicyMode, inheritedFromSessionId: null },
+    toolPolicyVersion: policy.toolPolicyVersion,
+    firstPartyMcpTools: [...policy.firstPartyMcpTools],
     mcpServers: [{ id: "github", name: "GitHub", requireApproval: true }],
   } as Session;
 }
