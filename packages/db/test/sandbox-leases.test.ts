@@ -1008,6 +1008,150 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(reused.role).toBe("reused");
   }, 60_000);
 
+  test("quiesced owner release immediately hands off abandoned shared preparation", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const ownerAttemptId = crypto.randomUUID();
+    const siblingAttemptId = crypto.randomUUID();
+    const ownerHolderId = `turn-attempt:${ownerAttemptId}`;
+    const siblingHolderId = `turn-attempt:${siblingAttemptId}`;
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: ownerHolderId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const instanceId = "shared-preparation-quiesced-handoff";
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId,
+      dataPlaneUrl: null,
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: {} },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    const warmLeaseEpoch = committed.lease!.leaseEpoch;
+    const siblingLease = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: siblingHolderId,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(siblingLease.role).toBe("attached");
+
+    const specHash = `sha256:${"b".repeat(64)}`;
+    const ownerClaimId = crypto.randomUUID();
+    const siblingClaimId = crypto.randomUUID();
+    expect(
+      (
+        await claimSandboxSharedPreparation(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          expectedLeaseEpoch: warmLeaseEpoch,
+          expectedInstanceId: instanceId,
+          specHash,
+          holderId: ownerHolderId,
+          claimId: ownerClaimId,
+          ownerAttemptId,
+          timeoutMs: 60_000,
+        })
+      ).role,
+    ).toBe("owner");
+    expect(
+      (
+        await claimSandboxSharedPreparation(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          expectedLeaseEpoch: warmLeaseEpoch,
+          expectedInstanceId: instanceId,
+          specHash,
+          holderId: siblingHolderId,
+          claimId: siblingClaimId,
+          ownerAttemptId: siblingAttemptId,
+          timeoutMs: 60_000,
+        })
+      ).role,
+    ).toBe("joined");
+
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: ownerHolderId,
+      idleGraceMs: 30_000,
+    });
+    const stillRunning = await readSandboxSharedPreparation(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedLeaseEpoch: warmLeaseEpoch,
+      expectedInstanceId: instanceId,
+      specHash,
+      holderId: siblingHolderId,
+    });
+    expect(stillRunning.status).toBe("available");
+    if (stillRunning.status === "available") {
+      expect(stillRunning.preparation.status).toBe("running");
+    }
+
+    // The proof-bearing pass remains effective after the eager release already
+    // removed the owner holder.
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: ownerHolderId,
+      idleGraceMs: 30_000,
+      workspaceWritersQuiesced: true,
+    });
+    const failed = await readSandboxSharedPreparation(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedLeaseEpoch: warmLeaseEpoch,
+      expectedInstanceId: instanceId,
+      specHash,
+      holderId: siblingHolderId,
+    });
+    expect(failed.status).toBe("available");
+    if (failed.status === "available") {
+      expect(failed.preparation.status).toBe("failed");
+    }
+
+    const takeover = await claimSandboxSharedPreparation(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedLeaseEpoch: warmLeaseEpoch,
+      expectedInstanceId: instanceId,
+      specHash,
+      holderId: siblingHolderId,
+      claimId: siblingClaimId,
+      ownerAttemptId: siblingAttemptId,
+      timeoutMs: 60_000,
+    });
+    expect(takeover.role).toBe("owner");
+    if (takeover.role === "owner") {
+      expect(takeover.preparation.attempt).toBe(2);
+      expect(takeover.preparation.ownerAttemptId).toBe(siblingAttemptId);
+    }
+  }, 60_000);
+
   test("(0281) a viewer acquire records the authority claims; re-acquire is monotone", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
