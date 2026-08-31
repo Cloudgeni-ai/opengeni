@@ -59,6 +59,7 @@ describe("Connected Machine to managed-home turn transition", () => {
       rotationReason: "operator",
     } as never);
     const acknowledgeRecoveryQuiescence = mock(() => undefined);
+    const publishDurable = mock(async () => undefined);
     const control = {
       cancellationRequestedAt: null,
       activityStatus: "unknown",
@@ -97,7 +98,7 @@ describe("Connected Machine to managed-home turn transition", () => {
           triggerType: "user",
         },
         billingState: {},
-        eventing: { publish: async () => [], turnStartedPublished: true },
+        eventing: { publish: async () => [], publishDurable, turnStartedPublished: true },
         providerTurn: {},
         leases: {},
         historySink: { reconcileConversationTruth: async () => undefined },
@@ -131,6 +132,7 @@ describe("Connected Machine to managed-home turn transition", () => {
         },
       });
       expect(acknowledgeRecoveryQuiescence).toHaveBeenCalledTimes(1);
+      expect(publishDurable).toHaveBeenCalledWith([]);
       expect(control.activityStatus).toBe("recovering");
       expect(control.turnMetricOutcome).toBe("recovering");
     } finally {
@@ -193,6 +195,7 @@ describe("Connected Machine to managed-home turn transition", () => {
     const reconcileConversationTruth = mock(async () => undefined);
     const acknowledgeRecoveryQuiescence = mock(() => undefined);
     const acknowledgeLostAttemptOwnership = mock(() => undefined);
+    const publishDurable = mock(async () => undefined);
     const control = {
       cancellationRequestedAt: null,
       activityStatus: "unknown",
@@ -231,7 +234,7 @@ describe("Connected Machine to managed-home turn transition", () => {
           triggerType: "user",
         },
         billingState: {},
-        eventing: { publish: async () => [], turnStartedPublished: true },
+        eventing: { publish: async () => [], publishDurable, turnStartedPublished: true },
         providerTurn: {},
         leases: {},
         historySink: { reconcileConversationTruth },
@@ -264,6 +267,7 @@ describe("Connected Machine to managed-home turn transition", () => {
         },
       });
       expect(acknowledgeRecoveryQuiescence).toHaveBeenCalledTimes(1);
+      expect(publishDurable).toHaveBeenCalledWith([]);
       expect(acknowledgeLostAttemptOwnership).not.toHaveBeenCalled();
       expect(control.activityStatus).toBe("recovering");
       expect(control.turnMetricOutcome).toBe("recovering");
