@@ -169,6 +169,7 @@ import {
   getManagedSession,
   hasPermission,
   requireAccessGrant,
+  requireCanonicalLocalAccountAdministrator,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
@@ -229,8 +230,17 @@ async function requireOrganizationCodexHuman(
 ): Promise<ManagedCookieHuman> {
   const parsed = z.string().uuid().safeParse(organizationId);
   if (!parsed.success) throw new HTTPException(422, { message: "invalid organization id" });
-  const human = await managedCookieHuman(c, deps);
-  if (!human) throw new HTTPException(401, { message: "managed human session required" });
+  let human = await managedCookieHuman(c, deps);
+  if (!human && deps.settings.productAccessMode === "local") {
+    const local = await requireCanonicalLocalAccountAdministrator(c, deps, organizationId);
+    human = {
+      subjectId: local.subjectId,
+      browserSessionHash: await hashCodexBrowserSession(`local:${local.subjectId}`),
+    };
+  }
+  if (!human) {
+    throw new HTTPException(401, { message: "organization administrator session required" });
+  }
   try {
     await getOrganizationCodexRotationSettings(deps.db, {
       organizationId,
@@ -271,13 +281,17 @@ function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void 
       message: "JSON browser request required",
     });
   }
-  if (!deps.settings.publicBaseUrl) {
+  if (deps.settings.productAccessMode !== "local" && !deps.settings.publicBaseUrl) {
     throw new HTTPException(503, {
       message: "managed browser origin is not configured",
     });
   }
-  const expectedOrigin = new URL(deps.settings.publicBaseUrl).origin;
-  if (c.req.header("origin") !== expectedOrigin) {
+  const origin = c.req.header("origin");
+  if (
+    deps.settings.productAccessMode === "local"
+      ? !localBrowserOriginMatchesRequest(c, origin)
+      : origin !== new URL(deps.settings.publicBaseUrl!).origin
+  ) {
     throw new HTTPException(403, {
       message: "same-origin browser request required",
     });
@@ -287,6 +301,41 @@ function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void 
       message: "same-origin fetch metadata required",
     });
   }
+}
+
+function localBrowserOriginMatchesRequest(c: Context, value: string | undefined): boolean {
+  if (!value) return false;
+  let origin: URL;
+  try {
+    origin = new URL(value);
+  } catch {
+    return false;
+  }
+  if (
+    origin.origin !== value ||
+    origin.origin === "null" ||
+    (origin.protocol !== "http:" && origin.protocol !== "https:")
+  ) {
+    return false;
+  }
+
+  const forwardedProtocol = c.req.header("x-forwarded-proto")?.trim().toLowerCase();
+  const protocol = forwardedProtocol ? `${forwardedProtocol}:` : new URL(c.req.url).protocol;
+  if (protocol !== "http:" && protocol !== "https:") return false;
+  const forwardedHost = c.req.header("x-forwarded-host") ?? c.req.header("host");
+  if (!forwardedHost || /[\s,/?#@\\]/u.test(forwardedHost)) return false;
+
+  let request: URL;
+  try {
+    request = new URL(`${protocol}//${forwardedHost}`);
+  } catch {
+    return false;
+  }
+  return (
+    origin.protocol === request.protocol &&
+    origin.hostname === request.hostname &&
+    (request.port === "" || origin.port === request.port)
+  );
 }
 
 async function requireRedemptionHuman(

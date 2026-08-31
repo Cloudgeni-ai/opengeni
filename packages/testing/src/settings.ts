@@ -205,6 +205,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     modalImageRef: undefined,
     modalImageId: undefined,
     modalTimeoutSeconds: 3600,
+    modalSandboxCpu: undefined,
+    modalSandboxMemoryMiB: undefined,
     modalTokenId: undefined,
     modalTokenSecret: undefined,
     modalEnvironment: undefined,

@@ -2654,6 +2654,92 @@ describe("clean session control plane", () => {
     ).toMatchObject({ action: "stale", events: [] });
   });
 
+  test("a completed current model request resets only the consecutive provider recovery budget", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "continue through intermittent provider overloads");
+    const firstAttemptId = crypto.randomUUID();
+    const first = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: firstAttemptId },
+    );
+    if (!first) throw new Error("provider recovery reset test turn was not claimed");
+
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: first.id,
+        triggerEventId: first.triggerEventId,
+        attemptId: firstAttemptId,
+        reason: "provider_unavailable",
+        providerRecoveryCount: 4,
+        detail: {
+          code: "provider_unavailable",
+          retryable: true,
+          continueDelayMs: 30_000,
+          providerRecoveryCount: 4,
+        },
+      }),
+    ).toMatchObject({ action: "recovering" });
+
+    const secondAttemptId = crypto.randomUUID();
+    const second = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: secondAttemptId },
+    );
+    if (!second) throw new Error("provider recovery reset test turn was not reclaimed");
+    expect(await getSessionTurn(client.db, grant.workspaceId!, second.id)).toMatchObject({
+      metadata: { providerRecoveryCount: 4 },
+    });
+
+    const rejectedLateCompletion = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      first.id,
+      first.executionGeneration,
+      firstAttemptId,
+      [{ type: "agent.model.request", payload: { phase: "completed" } }],
+    );
+    expect(rejectedLateCompletion.accepted).toBe(false);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, second.id)).toMatchObject({
+      metadata: { providerRecoveryCount: 4 },
+    });
+
+    const failedCurrentRequest = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      second.id,
+      second.executionGeneration,
+      secondAttemptId,
+      [{ type: "agent.model.request", payload: { phase: "failed" } }],
+    );
+    expect(failedCurrentRequest.accepted).toBe(true);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, second.id)).toMatchObject({
+      metadata: { providerRecoveryCount: 4 },
+    });
+
+    const completedCurrentRequest = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      second.id,
+      second.executionGeneration,
+      secondAttemptId,
+      [{ type: "agent.model.request", payload: { phase: "completed" } }],
+    );
+    expect(completedCurrentRequest.accepted).toBe(true);
+    expect(
+      (await getSessionTurn(client.db, grant.workspaceId!, second.id))?.metadata,
+    ).not.toHaveProperty("providerRecoveryCount");
+  });
+
   test("recovery preserves reverse-completed parallel results and interrupts only their unresolved sibling", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run A and B in parallel");

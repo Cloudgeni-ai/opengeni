@@ -300,8 +300,10 @@ describe("organization billing StrictMode ownership", () => {
       'input[name="company-profile-agent-policy"][value="automatic"]',
     );
     if (!automatic) throw new Error("Missing Autonomous policy option");
-    await act(async () => automatic.click());
-    await act(async () => button(container, "Save autonomy mode").click());
+    await act(async () => {
+      automatic.click();
+      await Promise.resolve();
+    });
     await flush();
 
     expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledTimes(1);
@@ -382,8 +384,10 @@ describe("organization billing StrictMode ownership", () => {
         'input[name="company-profile-agent-policy"][value="off"]',
       );
       if (!off) throw new Error("Missing Off policy option");
-      await act(async () => off.click());
-      await act(async () => button(container, "Save autonomy mode").click());
+      await act(async () => {
+        off.click();
+        await Promise.resolve();
+      });
       await flush();
       expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledWith(
         otherWorkspaceId,

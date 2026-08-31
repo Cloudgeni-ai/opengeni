@@ -5,9 +5,15 @@ import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import type { FrameworkUiSoakChunkReport } from "../../scripts/framework-ui-soak-browser";
+import {
+  FRAMEWORK_UI_SOAK_DEFAULT_DURATION_MILLISECONDS,
+  FRAMEWORK_UI_SOAK_TEST_HEADROOM_MILLISECONDS,
+} from "../../scripts/framework-ui-soak-contract";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const durationMilliseconds = Number(process.env.OPENGENI_FRAMEWORK_UI_SOAK_MS ?? 1_800_000);
+const durationMilliseconds = Number(
+  process.env.OPENGENI_FRAMEWORK_UI_SOAK_MS ?? FRAMEWORK_UI_SOAK_DEFAULT_DURATION_MILLISECONDS,
+);
 const evidenceRoot =
   process.env.OPENGENI_FRAMEWORK_UI_SOAK_EVIDENCE_DIR ??
   join(repoRoot, ".agent/evidence/framework-ui/development/soak");
@@ -171,7 +177,7 @@ describe("framework UI deterministic browser soak", () => {
       const warmMinimum = Math.min(...warmHeap.map((sample) => sample.usedBytes));
       expect(finalUsage.usedSize - warmMinimum).toBeLessThan(16 * 1024 * 1024);
     },
-    durationMilliseconds + 300_000,
+    durationMilliseconds + FRAMEWORK_UI_SOAK_TEST_HEADROOM_MILLISECONDS,
   );
 });
 

@@ -337,6 +337,8 @@ try {
   }
   const reactTarballContents = await run(["tar", "-tzf", react.tarball], consumerRoot, true);
   for (const artifact of [
+    "package/dist/accounts.js",
+    "package/dist/accounts.d.ts",
     "package/dist/artifacts.js",
     "package/dist/artifacts.d.ts",
     "package/dist/artifacts-document.js",
@@ -356,6 +358,15 @@ try {
     if (!reactTarballContents.split("\n").includes(artifact)) {
       throw new Error(`react tarball is missing ${artifact}`);
     }
+  }
+  const reactAccountsExport = react.manifest.exports?.["./accounts"];
+  if (
+    !reactAccountsExport ||
+    typeof reactAccountsExport === "string" ||
+    reactAccountsExport.types !== "./dist/accounts.d.ts" ||
+    reactAccountsExport.import !== "./dist/accounts.js"
+  ) {
+    throw new Error("react tarball has an invalid ./accounts export");
   }
   const ui = await stageTarball("packages/ui", stagingRoot, tarballRoot, versions);
   const uiTarballContents = await run(["tar", "-tzf", ui.tarball], consumerRoot, true);
@@ -653,6 +664,7 @@ try {
         'import type { DocumentEditorProps as DocumentOnlyProps } from "@opengeni/react/artifacts/document";',
         'import type { PresentationEditorProps as PresentationOnlyProps } from "@opengeni/react/artifacts/presentation";',
         'import type { SpreadsheetGridProps as SpreadsheetOnlyProps } from "@opengeni/react/artifacts/spreadsheet";',
+        'import type { BrowserAccountsContextValue } from "@opengeni/react/accounts";',
         'import type { BrowserViewerProps, ComputerViewerProps } from "@opengeni/react/interaction";',
         'import type { BrowserSessionResource, ComputerSessionResource } from "@opengeni/sdk/interaction";',
         'import type { CodemodeClient, CodemodeToolsNamespace, OpenGeniCodemode } from "@opengeni/codemode";',
@@ -662,7 +674,7 @@ try {
         'import type { installBrowserArtifactWorkerEntry } from "@opengeni/sdk/editable-artifacts/worker";',
         "type Assert<T extends true> = T;",
         'type RootOmitsInteraction = Assert<"BrowserViewer" extends keyof typeof ReactRoot ? false : "ComputerViewer" extends keyof typeof ReactRoot ? false : true>;',
-        "export type PackedNodeNextSurface = [Document, Workbook, ReferenceWorkbook, NativeSpreadsheetSession, ArtifactKernelRuntime, typeof locateVerifiedArtifactRuntime, DocumentEntry, typeof renderDocument, typeof exportDocx, PresentationEntry, typeof executePresentationRender, typeof exportPresentationPptx, SpreadsheetEntry, typeof renderWorkbook, SpreadsheetXlsxCodec, EditableArtifactMutationIntent, typeof encodeEditableArtifactMutationIntent, EditableArtifactLiveServerFrame, typeof decodeEditableArtifactLiveServerWireFrame, DocumentEditorProps, SpreadsheetGridProps, DocumentOnlyProps, PresentationOnlyProps, SpreadsheetOnlyProps, BrowserViewerProps, ComputerViewerProps, BrowserSessionResource, ComputerSessionResource, CodemodeClient, CodemodeToolsNamespace, OpenGeniCodemode, RootOmitsInteraction, EditableArtifactSyncController, BrowserEditableArtifactWorkerKernel, CreateEditableArtifactHttpLiveTransportOptions, ArtifactApiClient, EditableArtifactResource, typeof installBrowserArtifactWorkerEntry];",
+        "export type PackedNodeNextSurface = [Document, Workbook, ReferenceWorkbook, NativeSpreadsheetSession, ArtifactKernelRuntime, typeof locateVerifiedArtifactRuntime, DocumentEntry, typeof renderDocument, typeof exportDocx, PresentationEntry, typeof executePresentationRender, typeof exportPresentationPptx, SpreadsheetEntry, typeof renderWorkbook, SpreadsheetXlsxCodec, EditableArtifactMutationIntent, typeof encodeEditableArtifactMutationIntent, EditableArtifactLiveServerFrame, typeof decodeEditableArtifactLiveServerWireFrame, DocumentEditorProps, SpreadsheetGridProps, DocumentOnlyProps, PresentationOnlyProps, SpreadsheetOnlyProps, BrowserAccountsContextValue, BrowserViewerProps, ComputerViewerProps, BrowserSessionResource, ComputerSessionResource, CodemodeClient, CodemodeToolsNamespace, OpenGeniCodemode, RootOmitsInteraction, EditableArtifactSyncController, BrowserEditableArtifactWorkerKernel, CreateEditableArtifactHttpLiveTransportOptions, ArtifactApiClient, EditableArtifactResource, typeof installBrowserArtifactWorkerEntry];",
         "",
       ].join("\n"),
     ),

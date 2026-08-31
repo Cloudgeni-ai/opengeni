@@ -7371,9 +7371,10 @@ export async function materializeSandboxFileDownloads(
     return { failures: [] };
   }
   const failures: SandboxFileDownloadFailure[] = [];
+  const workspaceRoot = sandboxSessionWorkspaceRoot(session);
   for (const download of normalizedDownloads) {
     const targetRelativePath = sandboxDownloadRelativePath(download);
-    const targetPath = sandboxDownloadLogicalPath(download);
+    const targetPath = sandboxDownloadLogicalPath(download, workspaceRoot);
     const payload = {
       fileId: download.fileId,
       path: targetPath,
@@ -7407,7 +7408,7 @@ export async function materializeSandboxFileDownloads(
         session,
         {
           cmd: sandboxFileDownloadCommand(download, targetRelativePath),
-          workdir: "/workspace",
+          workdir: workspaceRoot,
           ...(context.runAs ? { runAs: context.runAs } : {}),
           yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
           maxOutputTokens: 20_000,
@@ -7760,8 +7761,16 @@ function sandboxDownloadRelativePath(download: SandboxFileDownload): string {
   return posixPath.join(download.mountPath, download.filename);
 }
 
-function sandboxDownloadLogicalPath(download: SandboxFileDownload): string {
-  return posixPath.join("/workspace", sandboxDownloadRelativePath(download));
+function sandboxSessionWorkspaceRoot(session: SandboxSessionLike): string {
+  const root = (session as { state?: { manifest?: { root?: unknown } } }).state?.manifest?.root;
+  return typeof root === "string" && posixPath.isAbsolute(root) ? root : "/workspace";
+}
+
+function sandboxDownloadLogicalPath(
+  download: SandboxFileDownload,
+  workspaceRoot = "/workspace",
+): string {
+  return posixPath.join(workspaceRoot, sandboxDownloadRelativePath(download));
 }
 
 function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: string): string {
