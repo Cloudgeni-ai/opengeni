@@ -6,7 +6,7 @@ import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
 const migrationUrl = new URL(
-  "../drizzle/0388_durable_rig_provider_image_cleanup.sql",
+  "../drizzle/0389_durable_rig_provider_image_cleanup.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -18,7 +18,7 @@ const providerBinding = {
 };
 const providerBindingKey = JSON.stringify(providerBinding);
 
-describe("migration 0388 durable Rig provider image cleanup", () => {
+describe("migration 0389 durable Rig provider image cleanup", () => {
   test("persists pre-creation identity and protects registered artifacts from cleanup", async () => {
     const source = await Bun.file(migrationUrl).text();
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -32,11 +32,11 @@ describe("migration 0388 durable Rig provider image cleanup", () => {
     expect(source).toContain("artifact.state <> 'deleted'");
     expect(source).toContain("state = 'settled'");
 
-    const blank = await acquireBlankTestDatabase("migration-0388-rig-provider-image-cleanup");
+    const blank = await acquireBlankTestDatabase("migration-0389-rig-provider-image-cleanup");
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0388 PostgreSQL harness is unavailable",
+          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0389 PostgreSQL harness is unavailable",
         );
       }
       return;

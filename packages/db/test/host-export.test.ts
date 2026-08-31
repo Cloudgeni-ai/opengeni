@@ -292,6 +292,69 @@ describe("durable host export (real PostgreSQL)", () => {
       leaseToken: futureBatch!.leaseToken,
     });
 
+    const largeOutput = `large-output:${"x".repeat(160_000)}`;
+    const [largeEvent] = await appendSessionEvents(
+      app.db,
+      active.grant.workspaceId!,
+      active.session.id,
+      [
+        {
+          type: "agent.toolCall.output",
+          payload: { id: "large-call", output: largeOutput, isError: false },
+          turnId: active.turn.id,
+        },
+      ],
+    );
+    const [storedLargeEvent] = await shared.admin<
+      Array<{ payloadBytes: number; output: string; payloadCodecVersion: number | null }>
+    >`
+      select octet_length(payload::text)::integer as "payloadBytes",
+        payload ->> 'output' as output,
+        payload_codec_version as "payloadCodecVersion"
+      from session_events where id = ${largeEvent!.id}::uuid`;
+    expect(storedLargeEvent?.payloadBytes).toBeGreaterThan(150_000);
+    expect(storedLargeEvent?.output).toBe(largeOutput);
+    expect(storedLargeEvent?.payloadCodecVersion).toBe(1);
+
+    const [boundedOutbox] = await shared.admin<
+      Array<{
+        envelopeBytes: number;
+        payloadBytes: number;
+        payloadCodecVersion: number | null;
+        truncated: boolean;
+        originalBytes: number;
+      }>
+    >`
+      select envelope_bytes as "envelopeBytes",
+        pg_column_size(payload)::integer as "payloadBytes",
+        payload_codec_version as "payloadCodecVersion",
+        (payload #>> '{_hostExport,payloadTruncated}')::boolean as truncated,
+        (payload #>> '{_hostExport,originalBytes}')::integer as "originalBytes"
+      from host_export_outbox
+      where export_kind = 'session_event' and source_id = ${largeEvent!.id}::uuid`;
+    expect(boundedOutbox?.envelopeBytes).toBeLessThanOrEqual(98_304);
+    expect(boundedOutbox?.payloadBytes).toBeLessThanOrEqual(73_728);
+    expect(boundedOutbox?.payloadCodecVersion).toBeNull();
+    expect(boundedOutbox?.truncated).toBe(true);
+    expect(boundedOutbox?.originalBytes).toBe(storedLargeEvent?.payloadBytes);
+
+    const largeBatch = await claim("session_event", "host-test-events");
+    const largeExport = largeBatch?.events.find((item) => item.event.id === largeEvent!.id);
+    expect(largeExport?.event.payload).toMatchObject({
+      _hostExport: {
+        payloadMode: "summary",
+        payloadTruncated: true,
+        sourceEventId: largeEvent!.id,
+        fullPayload: "retained in canonical session event",
+      },
+    });
+    expect(JSON.stringify(largeExport?.event.payload)).not.toContain("large-output:");
+    await acknowledgeHostExportBatch(exporter.db, {
+      kind: "session_event",
+      consumerId: "host-test-events",
+      leaseToken: largeBatch!.leaseToken,
+    });
+
     const foreignSession = await createSession(app.db, {
       accountId: active.grant.accountId,
       workspaceId: active.grant.workspaceId!,

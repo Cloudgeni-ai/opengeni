@@ -11165,8 +11165,9 @@ export const hostExportConfig = pgTable(
 /**
  * Transactional delivery buffer. It intentionally has no tenant/source FKs:
  * a workspace deletion must not erase an already-committed, unacknowledged
- * host fact. Session-event payloads retain their exact storage bytes plus
- * explicit codec truth; usage payloads remain ordinary JSON.
+ * host fact. Session-event rows retain exact storage bytes while they fit the
+ * bounded host wire; larger canonical events carry an explicit content-free
+ * projection plus literal-JSON codec truth. Usage payloads remain ordinary JSON.
  */
 export const hostExportOutbox = pgTable(
   "host_export_outbox",

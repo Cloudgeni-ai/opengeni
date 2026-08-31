@@ -428,14 +428,6 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (candidates.length === 0) {
         return redirectToGitHubInstallation(c, deps, selectionState);
       }
-      if (candidates.length === 1) {
-        return redirectToExactGitHubAuthorization(
-          c,
-          deps,
-          selectionState,
-          candidates[0]!.installation.installationId,
-        );
-      }
       setGitHubStateCookie(c, deps, selectionState);
       return c.html(
         githubInstallationChooserHtml(

@@ -932,6 +932,11 @@ Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit
 boundaries.
 
+GitHub App binding keeps account selection explicit whenever owner-authorized
+installations already exist: the owner may choose one of them or enter GitHub's
+new-installation flow for another personal account or organization. Both paths
+retain the same signed-state and exact owner revalidation boundaries.
+
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
