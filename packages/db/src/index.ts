@@ -17738,6 +17738,29 @@ function assertRigUsesPlatformImage(input: RigVersionContentInput | undefined): 
   }
 }
 
+function rigProviderImagesMatchSurfaceValidation(
+  images: RigProviderImages,
+  receipt: RigPlatformSurfaceValidationReceipt,
+  expected: { targetKind?: "change" | "version"; targetId: string },
+): boolean {
+  if (!hasTrustedRigPlatformSurfaceValidationProvenance(receipt)) return false;
+  const backend = receipt.binding.backendId as SandboxBackend;
+  const image = images[backend];
+  const imageIdentity = image?.imageId ?? image?.imageDigest ?? null;
+  return (
+    image?.backend === backend &&
+    image.status === "ready" &&
+    image.coldBootValidation?.version === RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION &&
+    (expected.targetKind === undefined || image.provenance.targetKind === expected.targetKind) &&
+    image.provenance.targetId === expected.targetId &&
+    receipt.binding.rigVersionId === expected.targetId &&
+    receipt.binding.sandboxGroupId === image.buildRequestId &&
+    imageIdentity !== null &&
+    receipt.provenance.providerImage === imageIdentity &&
+    receipt.provenance.providerImageId === imageIdentity
+  );
+}
+
 function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion {
   return {
     id: row.id,
@@ -19200,9 +19223,10 @@ export async function createRigVersionForChangePromotion(
         : null;
     if (
       !validationReceipt?.success ||
-      !hasTrustedRigPlatformSurfaceValidationProvenance(validationReceipt.data) ||
-      validationReceipt.data.binding.sandboxGroupId !== changeId ||
-      validationReceipt.data.binding.rigVersionId !== changeId
+      !rigProviderImagesMatchSurfaceValidation(input.providerImages ?? {}, validationReceipt.data, {
+        targetKind: "change",
+        targetId: changeId,
+      })
     ) {
       throw new RigVersionVerificationRequiredError(changeId);
     }
@@ -19246,6 +19270,14 @@ export async function createRigVersionForChangePromotion(
       input.providerImages ?? {},
       { targetKind: "change", targetId: changeId },
     );
+    if (
+      !rigProviderImagesMatchSurfaceValidation(providerImages, validationReceipt.data, {
+        targetKind: "change",
+        targetId: changeId,
+      })
+    ) {
+      throw new RigVersionVerificationRequiredError(changeId);
+    }
     await scopedDb
       .update(schema.rigVersions)
       .set({ active: false })
@@ -19809,7 +19841,11 @@ export async function activateRigVersion(
       throw new Error(`Rig not found: ${rigId}`);
     }
     const [target] = await scopedDb
-      .select({ id: schema.rigVersions.id, verification: schema.rigVersions.verification })
+      .select({
+        id: schema.rigVersions.id,
+        verification: schema.rigVersions.verification,
+        providerImages: schema.rigVersions.providerImages,
+      })
       .from(schema.rigVersions)
       .where(
         and(
@@ -19830,9 +19866,9 @@ export async function activateRigVersion(
           : null;
       if (
         !receipt?.success ||
-        !hasTrustedRigPlatformSurfaceValidationProvenance(receipt.data) ||
-        receipt.data.binding.sandboxGroupId !== versionId ||
-        receipt.data.binding.rigVersionId !== versionId
+        !rigProviderImagesMatchSurfaceValidation(target.providerImages, receipt.data, {
+          targetId: versionId,
+        })
       ) {
         throw new RigVersionVerificationRequiredError(versionId);
       }
@@ -20327,7 +20363,6 @@ export async function completeRigVersionVerification(
   const receipt = RigPlatformSurfaceValidationReceiptSchema.parse(input.receipt);
   if (
     !hasTrustedRigPlatformSurfaceValidationProvenance(receipt) ||
-    receipt.binding.sandboxGroupId !== input.versionId ||
     receipt.binding.rigVersionId !== input.versionId
   ) {
     throw new Error("Rig version validation receipt targets another version");
@@ -20353,6 +20388,14 @@ export async function completeRigVersionVerification(
       .for("update")
       .limit(1);
     if (!target) throw new Error(`Rig version not found: ${input.versionId}`);
+    if (
+      !rigProviderImagesMatchSurfaceValidation(target.providerImages, receipt, {
+        targetKind: "version",
+        targetId: input.versionId,
+      })
+    ) {
+      throw new RigVersionVerificationRequiredError(input.versionId);
+    }
     const state = target.verification;
     if (
       state.status === "passed" &&

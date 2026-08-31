@@ -25,6 +25,7 @@ function sameOperation(
     input.backendId === binding.backendId &&
     input.instanceId === binding.instanceId &&
     input.providerImage === binding.providerImage &&
+    input.providerImageId === binding.providerImageId &&
     input.leaseId === binding.leaseId &&
     input.leaseEpoch === binding.leaseEpoch &&
     input.workspaceGeneration === binding.workspaceGeneration &&

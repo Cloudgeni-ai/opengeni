@@ -199,7 +199,8 @@ async function createDockerSidecar(
   const providerImageId = inspected.stdout.trim();
   if (
     !DOCKER_IMAGE_ID.test(providerImageId) ||
-    (input.trustedProviderImageId && input.trustedProviderImageId !== providerImageId)
+    (input.expectedProviderImageId !== undefined &&
+      input.expectedProviderImageId !== providerImageId)
   ) {
     throw new Error("Docker trusted Rig validation resolved no immutable image id");
   }
@@ -395,7 +396,12 @@ export async function createDockerTrustedRigPlatformSurface(
   if (!DOCKER_IMAGE_ID.test(providerImageId)) {
     throw new Error("Docker trusted Rig validation requires an immutable image id");
   }
-  const trustedInput = { ...input, trustedProviderImageId: providerImageId };
+  if (
+    input.expectedProviderImageId !== undefined &&
+    input.expectedProviderImageId !== providerImageId
+  ) {
+    throw new Error("Docker trusted Rig validation resolved another immutable image id");
+  }
   return createTrustedRigPlatformSurface({
     binding: {
       authority: "deployment_control_plane",
@@ -410,6 +416,6 @@ export async function createDockerTrustedRigPlatformSurface(
       rigVersionId: input.rigVersionId,
     },
     desktopEnabled: input.settings.sandboxDesktopEnabled,
-    createSidecar: async (operation) => await createDockerSidecar(trustedInput, operation),
+    createSidecar: async (operation) => await createDockerSidecar(input, operation),
   });
 }

@@ -54,7 +54,8 @@ type FailureMode =
   | "lease_image_mismatch"
   | "trusted_authority_missing"
   | "trusted_authority_mismatch"
-  | "trusted_image_mismatch";
+  | "trusted_image_mismatch"
+  | "trusted_image_id_mismatch";
 
 function lease(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
   return {
@@ -413,7 +414,10 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
         mode === "trusted_image_mismatch"
           ? "example.invalid/opengeni:other"
           : "example.invalid/opengeni:test",
-      providerImageId: "im-trusted-platform-image",
+      providerImageId:
+        mode === "trusted_image_id_mismatch"
+          ? "im-other-platform-image"
+          : "im-trusted-platform-image",
       leaseId: LEASE_ID,
       leaseEpoch: 8,
       workspaceGeneration: 3,
@@ -444,6 +448,7 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       backendId: string;
       instanceId: string;
       providerImage: string;
+      providerImageId: string;
     }) => {
       events.push("controller:provision");
       operationOptions.push({ stage: "controller:provision", ...options });
@@ -451,6 +456,7 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
         backendId: "modal",
         instanceId: "sandbox-exact",
         providerImage: "example.invalid/opengeni:test",
+        providerImageId: "im-trusted-platform-image",
       });
       return { client: controller };
     },
@@ -486,6 +492,7 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
     sandboxGroupId: GROUP_ID,
     rigVersionId: VERSION_ID,
     providerImage: "example.invalid/opengeni:test",
+    providerImageId: "im-trusted-platform-image",
     established,
     ownership: {
       leaseId: LEASE_ID,
@@ -531,6 +538,7 @@ describe("mandatory Rig platform surface validation", () => {
     expect(receipt.provenance).toEqual({
       authority: "deployment_control_plane",
       providerImage: "example.invalid/opengeni:test",
+      providerImageId: "im-trusted-platform-image",
     });
     expect(receipt.terminal.status).toBe("passed");
     expect(receipt.browser.status).toBe("passed");
@@ -597,6 +605,7 @@ describe("mandatory Rig platform surface validation", () => {
     ["trusted_authority_missing", "no deployment-owned"],
     ["trusted_authority_mismatch", "another provider binding"],
     ["trusted_image_mismatch", "another provider binding"],
+    ["trusted_image_id_mismatch", "another provider binding"],
   ] as const) {
     test(`fails closed for ${mode}`, async () => {
       const state = harness(mode);

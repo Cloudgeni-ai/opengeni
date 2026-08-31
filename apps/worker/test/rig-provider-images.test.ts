@@ -87,7 +87,7 @@ function readyImage(settings: Settings, definition: RigVersion): RigProviderImag
     artifactId: "44444444-4444-4444-8444-444444444444",
     providerBindingKeyHash: rigProviderImageProviderBindingKeyHash(PROVIDER_BINDING_KEY),
     coldBootValidation: {
-      version: 2,
+      version: 3,
       checkedAt: "2026-08-10T00:00:00.500Z",
     },
     provenance: {
@@ -232,6 +232,7 @@ describe("build-once rig provider image runtime", () => {
       expect(input.settings.modalImageId).toBe("im-built-rig-image");
       expect(input.settings.modalWorkspacePersistence).toBe("snapshot_directory");
       expect(input.sandboxGroupId).toBe("33333333-3333-4333-8333-333333333333");
+      expect(input.expectedProviderImageId).toBe("im-built-rig-image");
       return await run(
         {
           backendId: "modal",
@@ -255,7 +256,34 @@ describe("build-once rig provider image runtime", () => {
         },
       );
     };
-    const checkedAt = await verifyRigProviderImageColdBoot(
+    const surfaceReceipt = {
+      version: 3 as const,
+      checkedAt: "2026-08-10T00:00:00.400Z",
+      binding: {
+        leaseId: "11111111-1111-4111-8111-111111111111",
+        sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+        leaseEpoch: 2,
+        workspaceGeneration: 0,
+        instanceId: "sb-cold-boot",
+        backendId: "modal",
+        rigVersionId: VERSION_ID,
+      },
+      provenance: {
+        authority: "deployment_control_plane" as const,
+        providerImage: "im-built-rig-image",
+        providerImageId: "im-built-rig-image",
+      },
+      terminal: { status: "disabled" as const },
+      browser: {
+        status: "passed" as const,
+        browserSessionId: "22222222-2222-4222-8222-222222222222",
+        controllerGeneration: "sb-cold-boot",
+        targetId: "page-1",
+        observedTargetGeneration: "page-generation-1",
+      },
+      computer: { status: "disabled" as const },
+    };
+    const validation = await verifyRigProviderImageColdBoot(
       {
         settings: platformSettings(),
         db: {} as never,
@@ -289,14 +317,19 @@ describe("build-once rig provider image runtime", () => {
             instanceId: input.established.instanceId,
             leaseId: input.ownership.leaseId,
             leaseEpoch: input.ownership.leaseEpoch,
+            providerImage: input.providerImage,
+            providerImageId: input.providerImageId,
           });
-          return {} as never;
+          return surfaceReceipt;
         },
         now: () => new Date("2026-08-10T00:00:00.500Z"),
       },
     );
 
-    expect(checkedAt).toBe("2026-08-10T00:00:00.500Z");
+    expect(validation).toEqual({
+      checkedAt: "2026-08-10T00:00:00.500Z",
+      platformSurfaceValidation: surfaceReceipt,
+    });
     expect(commands[0]).toBe(`test -f '/var/opengeni/rig-setup-content-${"a".repeat(64)}.done'`);
     expect(commands.some((command) => command.includes("opengeni-browserd-up"))).toBe(true);
     expect(commands.some((command) => command.includes("opengeni-terminal-up"))).toBe(true);
@@ -307,11 +340,90 @@ describe("build-once rig provider image runtime", () => {
         instanceId: "sb-cold-boot",
         leaseId: "lease-cold-boot",
         leaseEpoch: 2,
+        providerImage: "im-built-rig-image",
+        providerImageId: "im-built-rig-image",
       },
     ]);
     expect(commands.at(-2)).toBe("bash --version");
     expect(commands.at(-1)).toBe("git --version");
   });
+
+  for (const [surface, replacedCommand, expectedCheck] of [
+    ["Browser", "opengeni-browserd-up", "opengeni-platform-browser"],
+    ["Terminal", "opengeni-terminal-up", "opengeni-platform-terminal"],
+  ] as const) {
+    test(`rejects a derived image whose setup replaced the ${surface} binary`, async () => {
+      const commands: string[] = [];
+      let surfaceValidationCalls = 0;
+      const runOwnedSandbox: RigProviderImageColdBootDependencies["runOwnedSandbox"] = async <T>(
+        _input,
+        run,
+      ): Promise<T> =>
+        await run(
+          {
+            backendId: "modal",
+            client: {},
+            instanceId: "sb-replaced-platform-binary",
+            session: {},
+            sessionState: {},
+          },
+          {
+            signal: new AbortController().signal,
+            commandRunner: async (_session, args) => {
+              commands.push(args.cmd);
+              return args.cmd.includes(replacedCommand)
+                ? {
+                    exitCode: 1,
+                    output: `setup replaced ${replacedCommand} inside the derived image`,
+                  }
+                : { exitCode: 0, output: "ok" };
+            },
+            ownership: {
+              leaseId: "lease-replaced-platform-binary",
+              leaseEpoch: 2,
+              workspaceGeneration: 0,
+              instanceId: "sb-replaced-platform-binary",
+            },
+          },
+        );
+
+      await expect(
+        verifyRigProviderImageColdBoot(
+          {
+            settings: platformSettings(),
+            db: {} as never,
+            observability: {} as never,
+            accountId: "11111111-1111-4111-8111-111111111111",
+            workspaceId: "22222222-2222-4222-8222-222222222222",
+            buildRequestId: "33333333-3333-4333-8333-333333333333",
+            rigVersionId: VERSION_ID,
+            verificationAttemptId: "55555555-5555-4555-8555-555555555555",
+            verificationExecutionGeneration: 2,
+            sessionIdPrefix: "rig-provider-image-replaced-platform-binary",
+            imageId: "im-derived-with-replaced-platform-binary",
+            contentHash: `sha256:${"a".repeat(64)}`,
+            checks: [],
+            lifecycle: {
+              signal: new AbortController().signal,
+              workDeadlineAtMs: null,
+              cleanupDeadlineAtMs: null,
+              dispose: () => undefined,
+            },
+          },
+          {
+            runOwnedSandbox,
+            runSurfaceValidation: async () => {
+              surfaceValidationCalls += 1;
+              return {} as never;
+            },
+            now: () => new Date("2026-08-31T12:00:00.000Z"),
+          },
+        ),
+      ).rejects.toThrow(`failed mandatory platform check ${JSON.stringify(expectedCheck)}`);
+      expect(commands.some((command) => command.includes(replacedCommand))).toBe(true);
+      expect(surfaceValidationCalls).toBe(0);
+    });
+  }
 
   test("two fresh boxes select the same immutable image and skip setup from its content marker", async () => {
     const logicalSettings = platformSettings();

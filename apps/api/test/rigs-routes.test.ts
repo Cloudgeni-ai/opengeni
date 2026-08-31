@@ -21,7 +21,10 @@ import {
   acquireSharedTestDatabase,
   createVerifiedTestRig,
   createVerifiedTestRigVersion,
+  installTestRigProviderImage,
   testSettings,
+  testRigProviderImage,
+  testRigSurfaceReceipt,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
@@ -131,41 +134,6 @@ async function rigVersionState(versionId: string): Promise<{
   return row;
 }
 
-function surfaceReceipt(versionId: string, sandboxGroupId = versionId) {
-  return {
-    version: 2 as const,
-    checkedAt: "2026-08-30T12:00:00.000Z",
-    binding: {
-      leaseId: "11111111-2222-4333-8444-555555555555",
-      sandboxGroupId,
-      leaseEpoch: 2,
-      workspaceGeneration: 1,
-      instanceId: "sandbox-test",
-      backendId: "modal",
-      rigVersionId: versionId,
-    },
-    provenance: {
-      authority: "deployment_control_plane" as const,
-      providerImage: "example.invalid/opengeni:test",
-    },
-    terminal: {
-      status: "passed" as const,
-      cwd: "/workspace" as const,
-      uid: 0 as const,
-      bunVersion: "1.4.0" as const,
-      interactive: true as const,
-    },
-    browser: {
-      status: "passed" as const,
-      browserSessionId: "22222222-3333-4444-8555-666666666666",
-      controllerGeneration: "rig-test",
-      targetId: "page-1",
-      observedTargetGeneration: "page-generation-1",
-    },
-    computer: { status: "disabled" as const },
-  };
-}
-
 async function activateInitialVersion(workspaceId: string, rigId: string) {
   const [version] = await listRigVersions(client.db, workspaceId, rigId);
   if (!version) throw new Error("initial version missing");
@@ -174,13 +142,14 @@ async function activateInitialVersion(workspaceId: string, rigId: string) {
     { workspaceId, rigId, versionId: version.id },
     { allowAlreadyPending: true },
   );
+  const image = await installTestRigProviderImage(client.db, workspaceId, version.id);
   const result = await completeRigVersionVerification(client.db, {
     workspaceId,
     rigId,
     versionId: version.id,
     attemptId: attempt.attemptId,
     executionGeneration: attempt.executionGeneration,
-    receipt: surfaceReceipt(version.id),
+    receipt: testRigSurfaceReceipt(version.id, image),
   });
   expect(result.activated).toBe(true);
   return version;
@@ -977,11 +946,13 @@ describe("rig route permission matrix", () => {
       }),
     });
     const change = await proposed.json();
+    const providerImage = testRigProviderImage(change.id, "change");
     await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
       status: "proposed",
       verification: {
         passed: true,
-        platformSurfaceValidation: surfaceReceipt(change.id),
+        providerImage,
+        platformSurfaceValidation: testRigSurfaceReceipt(change.id, providerImage),
       },
     });
     await createVerifiedTestRigVersion(client.db, ws.workspaceId, rig.id, {

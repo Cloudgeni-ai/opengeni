@@ -302,8 +302,10 @@ maintenance-only Rig writer-protocol cutover described below. Its trigger keeps
 the boundary fail-closed after activation by rejecting an active insert or new
 activation without exact current proof, while the replaced scoped-create
 function defaults omitted activation to inactive. It also removes obsolete
-version-1 Rig provider-image cold-boot proof and rejects any stale finalizer that
-tries to restore it. Existing active versions and unrelated updates remain
+version-1/version-2 Rig provider-image cold-boot proof and rejects any stale
+finalizer that tries to restore an obsolete ready image. New activation requires
+one version-3 receipt matched to the exact immutable provider image, backend,
+build request, and Rig version. Existing active versions and unrelated updates remain
 available after the cutover. Never restart a pre-0388 workload; remain in
 maintenance and fix forward instead of reversing the ledger, dropping either
 trigger, restoring the old active default, or fabricating verification JSON.

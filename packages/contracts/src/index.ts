@@ -7973,9 +7973,10 @@ export type RigCheck = z.infer<typeof RigCheck>;
 export const RigProviderImageBuildStatus = z.enum(["building", "ready", "failed", "unsupported"]);
 export type RigProviderImageBuildStatus = z.infer<typeof RigProviderImageBuildStatus>;
 
-/** Current proof protocol for immutable provider images. Version 1 remains
- * readable during rolling upgrades, but it is never eligible for reuse. */
-export const RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION = 2 as const;
+/** Current proof protocol for immutable provider images. Versions 1 and 2
+ * remain readable during rolling upgrades, but they are never eligible for
+ * reuse because neither binds activation evidence to the exact derived image. */
+export const RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION = 3 as const;
 
 export const RigProviderImage = z
   .object({
@@ -8002,6 +8003,7 @@ export const RigProviderImage = z
       .object({
         version: z.union([
           z.literal(1),
+          z.literal(2),
           z.literal(RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION),
         ]),
         checkedAt: z.string().datetime(),
@@ -8176,6 +8178,7 @@ export const RigChangeVerification = /* @__PURE__ */ (() =>
       log: z.string().optional(),
       platformCheckResults: z.array(RigCheckResult).optional(),
       checkResults: z.array(RigCheckResult).optional(),
+      platformSurfacePreflight: RigPlatformSurfaceValidationReceiptSchema.optional(),
       platformSurfaceValidation: RigPlatformSurfaceValidationReceiptSchema.optional(),
     })
     .passthrough())();

@@ -5071,7 +5071,7 @@ export type RigProviderImage = {
   providerBindingKeyHash: string | null;
   coldBootValidation?:
     | {
-        version: 1 | 2;
+        version: 1 | 2 | 3;
         checkedAt: string;
       }
     | undefined;

@@ -105,7 +105,7 @@ describe("rig contracts", () => {
 
   test("platform-surface validation receipts remain strict on the server-only subpath", () => {
     const receipt = {
-      version: 2,
+      version: 3,
       checkedAt: "2026-08-30T12:00:00.000Z",
       binding: {
         leaseId: "11111111-2222-4333-8444-555555555555",
@@ -119,6 +119,7 @@ describe("rig contracts", () => {
       provenance: {
         authority: "deployment_control_plane",
         providerImage: "example.invalid/opengeni:test",
+        providerImageId: "im-derived-rig-image",
       },
       terminal: {
         status: "passed",
@@ -186,7 +187,7 @@ describe("rig contracts", () => {
 
   test("RigChange validates an embedded platform-surface receipt with the canonical strict schema", () => {
     const receipt = {
-      version: 2,
+      version: 3,
       checkedAt: "2026-08-30T12:00:00.000Z",
       binding: {
         leaseId: "11111111-2222-4333-8444-555555555555",
@@ -200,6 +201,7 @@ describe("rig contracts", () => {
       provenance: {
         authority: "deployment_control_plane",
         providerImage: "example.invalid/opengeni:test",
+        providerImageId: "im-derived-rig-image",
       },
       terminal: { status: "disabled" },
       browser: {

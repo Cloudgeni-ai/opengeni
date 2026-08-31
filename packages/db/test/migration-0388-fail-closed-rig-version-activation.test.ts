@@ -26,26 +26,26 @@ describe("migration 0388 fail-closed Rig activation", () => {
     expect(source).toContain("rig_versions_active_verification_check");
     expect(source).toContain("binding' ->> 'sandboxGroupId'");
     expect(source).toContain("binding' ->> 'rigVersionId'");
-    expect(source).toContain("receipt' ->> 'version' IS DISTINCT FROM '2'");
+    expect(source).toContain("receipt' ->> 'version' IS DISTINCT FROM '3'");
     expect(source).toContain("provenance' ->> 'authority'");
     expect(source).toContain("deployment_control_plane");
     expect(source).toContain("provenance' ->> 'providerImage'");
+    expect(source).toContain("provenance' ->> 'providerImageId'");
+    expect(source).toContain("jsonb_each(NEW.provider_images)");
+    expect(source).toContain("image.value ->> 'buildRequestId'");
   });
 
   test("removes complete obsolete artifact references while preserving current proof", () => {
     expect(source).toContain("jsonb_object_agg(image.key, image.value) FILTER");
-    expect(source).toContain(
-      "image.value -> 'coldBootValidation' ->> 'version' IS DISTINCT FROM '1'",
-    );
+    expect(source).toContain("NOT IN ('1', '2')");
     expect(source).toContain("SET verification = verification - 'providerImage'");
-    expect(source).toContain("verification #>> '{providerImage,coldBootValidation,version}' = '1'");
+    expect(source).toContain(
+      "verification #>> '{providerImage,coldBootValidation,version}' IN ('1', '2')",
+    );
     expect(source).toContain("rig_versions_provider_image_proof_trigger");
     expect(source).toContain("rig_versions_provider_image_proof_version_check");
-    expect(source).toContain("coldBootValidation' ->> 'version' = '1'");
+    expect(source).toContain("coldBootValidation' ->> 'version' IS DISTINCT FROM '3'");
     expect(source).not.toMatch(/jsonb_set\([\s\S]*\{coldBootValidation\}[\s\S]*'null'::jsonb/iu);
-    expect(source).not.toContain(
-      "image.value -> 'coldBootValidation' ->> 'version' IS DISTINCT FROM '2'",
-    );
   });
 
   test("retains the scoped creation security boundary", () => {

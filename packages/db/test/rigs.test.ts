@@ -9,6 +9,9 @@ import {
   acquireSharedTestDatabase,
   createVerifiedTestRig,
   createVerifiedTestRigVersion,
+  installTestRigProviderImage,
+  testRigProviderImage,
+  testRigSurfaceReceipt,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createHash, randomUUID } from "node:crypto";
@@ -137,7 +140,7 @@ function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProvide
     ...(status === "ready"
       ? {
           coldBootValidation: {
-            version: 2 as const,
+            version: 3 as const,
             checkedAt: new Date().toISOString(),
           },
         }
@@ -161,39 +164,8 @@ function rigProviderImage(overrides: Partial<RigProviderImage> = {}): RigProvide
   };
 }
 
-function surfaceReceipt(versionId: string) {
-  return {
-    version: 2 as const,
-    checkedAt: "2026-08-30T12:00:00.000Z",
-    binding: {
-      leaseId: "11111111-2222-4333-8444-555555555555",
-      sandboxGroupId: versionId,
-      leaseEpoch: 2,
-      workspaceGeneration: 1,
-      instanceId: "sandbox-test",
-      backendId: "modal",
-      rigVersionId: versionId,
-    },
-    provenance: {
-      authority: "deployment_control_plane" as const,
-      providerImage: "example.invalid/opengeni:test",
-    },
-    terminal: {
-      status: "passed" as const,
-      cwd: "/workspace" as const,
-      uid: 0 as const,
-      bunVersion: "1.4.0" as const,
-      interactive: true as const,
-    },
-    browser: {
-      status: "passed" as const,
-      browserSessionId: "22222222-3333-4444-8555-666666666666",
-      controllerGeneration: "rig-test",
-      targetId: "page-1",
-      observedTargetGeneration: "page-generation-1",
-    },
-    computer: { status: "disabled" as const },
-  };
+function surfaceReceipt(versionId: string, image = testRigProviderImage(versionId)) {
+  return testRigSurfaceReceipt(versionId, image);
 }
 
 async function markChangeVerifiedForPromotion(workspaceId: string, changeId: string) {
@@ -203,6 +175,7 @@ async function markChangeVerifiedForPromotion(workspaceId: string, changeId: str
   const attemptId = verifying.verification?.attemptId;
   const executionGeneration = verifying.verification?.executionGeneration ?? 1;
   if (typeof attemptId !== "string") throw new Error("missing test verification attempt id");
+  const providerImage = testRigProviderImage(changeId, "change");
   const change = await updateRigChangeStatus(db, workspaceId, changeId, {
     status: "proposed",
     verification: {
@@ -212,10 +185,11 @@ async function markChangeVerifiedForPromotion(workspaceId: string, changeId: str
       finishedAt: "2026-08-30T12:01:00.000Z",
       passed: true,
       checkResults: [],
-      platformSurfaceValidation: surfaceReceipt(changeId),
+      providerImage,
+      platformSurfaceValidation: surfaceReceipt(changeId, providerImage),
     },
   });
-  return { change, attemptId, executionGeneration };
+  return { change, attemptId, executionGeneration, providerImage };
 }
 
 async function registerRigProviderImageArtifact(
@@ -536,7 +510,7 @@ describe("rig version invariants", () => {
           })}::jsonb
           where id = ${version!.id}`,
       ),
-    ).rejects.toThrow(/proof version 1 is obsolete/iu);
+    ).rejects.toThrow(/require cold-boot proof version 3/iu);
     expect((await getRigVersionById(db, ws.workspaceId, version!.id))?.active).toBe(false);
   });
 
@@ -560,13 +534,14 @@ describe("rig version invariants", () => {
     const [v1] = await listRigVersions(db, ws.workspaceId, rig.id);
     expect(v1?.active).toBe(false);
 
+    const initialImage = await installTestRigProviderImage(db, ws.workspaceId, v1!.id);
     const initial = await completeRigVersionVerification(db, {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
       versionId: v1!.id,
       attemptId: initialAttemptId,
       executionGeneration: 1,
-      receipt: surfaceReceipt(v1!.id),
+      receipt: surfaceReceipt(v1!.id, initialImage),
     });
     expect(initial).toMatchObject({ activated: true, stale: false });
     expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(v1!.id);
@@ -602,13 +577,14 @@ describe("rig version invariants", () => {
       rigId: rig.id,
       versionId: v2.id,
     });
+    const directImage = await installTestRigProviderImage(db, ws.workspaceId, v2.id);
     const direct = await completeRigVersionVerification(db, {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
       versionId: v2.id,
       attemptId: retry.attemptId,
       executionGeneration: retry.executionGeneration,
-      receipt: surfaceReceipt(v2.id),
+      receipt: surfaceReceipt(v2.id, directImage),
     });
     expect(direct).toMatchObject({ activated: true, stale: false });
     expect((await getRig(db, ws.workspaceId, rig.id))?.activeVersion?.id).toBe(v2.id);
@@ -653,21 +629,23 @@ describe("rig version invariants", () => {
         },
       },
     );
+    const newerImage = await installTestRigProviderImage(db, ws.workspaceId, newer.id);
     await completeRigVersionVerification(db, {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
       versionId: newer.id,
       attemptId: newerAttemptId,
       executionGeneration: 1,
-      receipt: surfaceReceipt(newer.id),
+      receipt: surfaceReceipt(newer.id, newerImage),
     });
+    const pendingImage = await installTestRigProviderImage(db, ws.workspaceId, pending.id);
     const completed = await completeRigVersionVerification(db, {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
       versionId: pending.id,
       attemptId: pendingAttemptId,
       executionGeneration: 1,
-      receipt: surfaceReceipt(pending.id),
+      receipt: surfaceReceipt(pending.id, pendingImage),
     });
     expect(completed).toMatchObject({ activated: false, stale: true });
     expect((await getRigVersionById(db, ws.workspaceId, pending.id))?.active).toBe(false);
@@ -822,6 +800,7 @@ describe("rig version invariants", () => {
         { status: "failed", verification: { error: "late generation one" } },
       ),
     ).toMatchObject({ applied: false, stale: true });
+    const providerImage = testRigProviderImage(change.id, "change");
     const passed = await updateRigChangeStatusForVerificationAttempt(
       db,
       ws.workspaceId,
@@ -833,7 +812,8 @@ describe("rig version invariants", () => {
         verification: {
           passed: true,
           finishedAt: "2026-08-31T12:01:00.000Z",
-          platformSurfaceValidation: surfaceReceipt(change.id),
+          providerImage,
+          platformSurfaceValidation: surfaceReceipt(change.id, providerImage),
         },
       },
     );
@@ -852,6 +832,7 @@ describe("rig version invariants", () => {
         expectedVerificationAttemptId: changeAttemptId,
         expectedVerificationExecutionGeneration: 2,
         setupScript: "echo generation two",
+        providerImages: { [providerImage.backend]: providerImage },
       }),
     ).resolves.toMatchObject({ version: { id: change.id }, change: { status: "merged" } });
   });
@@ -1401,13 +1382,14 @@ describe("rig change lifecycle", () => {
         },
       },
     );
+    const newerImage = await installTestRigProviderImage(db, ws.workspaceId, newer.id);
     await completeRigVersionVerification(db, {
       workspaceId: ws.workspaceId,
       rigId: rig.id,
       versionId: newer.id,
       attemptId: newerAttemptId,
       executionGeneration: 1,
-      receipt: surfaceReceipt(newer.id),
+      receipt: surfaceReceipt(newer.id, newerImage),
     });
 
     await expect(
@@ -1416,6 +1398,7 @@ describe("rig change lifecycle", () => {
         expectedVerificationAttemptId: verified.attemptId,
         expectedVerificationExecutionGeneration: verified.executionGeneration,
         setupScript: "base plus append",
+        providerImages: { [verified.providerImage.backend]: verified.providerImage },
       }),
     ).rejects.toBeInstanceOf(RigActiveVersionChangedError);
 
@@ -1531,6 +1514,7 @@ describe("rig change lifecycle", () => {
         expectedVerificationExecutionGeneration: verified.executionGeneration,
         setupScript: "echo v2",
         changelog: "verified edit",
+        providerImages: { [verified.providerImage.backend]: verified.providerImage },
       });
     const results = await Promise.allSettled([promote(), promote()]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
@@ -1554,8 +1538,11 @@ describe("rig change lifecycle", () => {
       status: "passed",
       attemptId: verified.attemptId,
       receipt: {
-        version: 2,
-        binding: { sandboxGroupId: change.id, rigVersionId: change.id },
+        version: 3,
+        binding: {
+          sandboxGroupId: verified.providerImage.buildRequestId,
+          rigVersionId: change.id,
+        },
       },
     });
   });
@@ -1584,6 +1571,7 @@ describe("rig change lifecycle", () => {
       proposedBy: "session:s1",
     });
     const attemptId = randomUUID();
+    const providerImage = testRigProviderImage(change.id, "change");
     await updateRigChangeStatus(db, ws.workspaceId, change.id, {
       status: "proposed",
       verification: {
@@ -1592,7 +1580,8 @@ describe("rig change lifecycle", () => {
         finishedAt: "2026-07-08T00:01:00.000Z",
         passed: true,
         checkResults: [],
-        platformSurfaceValidation: surfaceReceipt(change.id),
+        providerImage,
+        platformSurfaceValidation: surfaceReceipt(change.id, providerImage),
       },
     });
     const promoted = await createRigVersionForChangePromotion(
@@ -1605,6 +1594,7 @@ describe("rig change lifecycle", () => {
         expectedVerificationAttemptId: attemptId,
         expectedVerificationExecutionGeneration: 1,
         setupScript: "mkdir -p /opt/health\ntouch /opt/health/tool",
+        providerImages: { [providerImage.backend]: providerImage },
       },
     );
 

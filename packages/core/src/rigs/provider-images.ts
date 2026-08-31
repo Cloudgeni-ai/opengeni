@@ -9,6 +9,11 @@ import {
   type RigVersion,
   type SandboxBackend,
 } from "@opengeni/contracts";
+import {
+  hasTrustedRigPlatformSurfaceValidationProvenance,
+  RigPlatformSurfaceValidationReceipt,
+  type RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptValue,
+} from "@opengeni/contracts/rig-platform-surface-validation";
 
 export type RigProviderImageDefinition = Pick<
   RigVersion,
@@ -55,14 +60,15 @@ export function rigProviderImageContentHash(input: {
 }
 
 /** Modal's patched snapshot API accepts a caller-owned UUID idempotency key.
- * v3 denotes images proven under the current post-surface-validation protocol. */
+ * v4 denotes images whose activation receipt is bound to the exact derived
+ * provider image rather than the mutable source verifier or platform base. */
 export function rigProviderImageBuildRequestId(input: {
   targetId: string;
   backend: SandboxBackend;
   contentHash: string;
 }): string {
   const bytes = createHash("sha256")
-    .update("opengeni-rig-provider-image-build-v3\0", "utf8")
+    .update("opengeni-rig-provider-image-build-v4\0", "utf8")
     .update(input.targetId, "utf8")
     .update("\0", "utf8")
     .update(input.backend, "utf8")
@@ -93,6 +99,31 @@ export function rigProviderImageMatchesDefinition(
   );
 }
 
+/** Match activation evidence to the exact immutable image that was booted.
+ * The build request owns the cold-boot sandbox group, while rigVersionId and
+ * provider-image provenance bind that observation to the promoted target. */
+export function rigProviderImageMatchesSurfaceValidation(
+  image: RigProviderImage,
+  receipt: RigPlatformSurfaceValidationReceiptValue,
+  expectedTargetId: string,
+  expectedTargetKind?: "change" | "version",
+): boolean {
+  const imageIdentity = image.imageId ?? image.imageDigest;
+  return (
+    hasTrustedRigPlatformSurfaceValidationProvenance(receipt) &&
+    image.status === "ready" &&
+    image.coldBootValidation?.version === RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION &&
+    image.provenance.targetId === expectedTargetId &&
+    (expectedTargetKind === undefined || image.provenance.targetKind === expectedTargetKind) &&
+    receipt.binding.rigVersionId === expectedTargetId &&
+    receipt.binding.sandboxGroupId === image.buildRequestId &&
+    receipt.binding.backendId === image.backend &&
+    imageIdentity !== null &&
+    receipt.provenance.providerImage === imageIdentity &&
+    receipt.provenance.providerImageId === imageIdentity
+  );
+}
+
 /**
  * Promotion copies only a finalized, structurally valid build record whose
  * hashes match the exact version definition being inserted. A malformed or
@@ -105,11 +136,13 @@ export function rigProviderImagesFromVerification(
   expectedTargetId: string,
 ): RigProviderImages {
   const parsed = RigProviderImageContract.safeParse(verification?.providerImage);
+  const receipt = RigPlatformSurfaceValidationReceipt.safeParse(
+    verification?.platformSurfaceValidation,
+  );
   if (
     !parsed.success ||
-    parsed.data.status !== "ready" ||
-    parsed.data.coldBootValidation?.version !== RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION ||
-    parsed.data.provenance.targetId !== expectedTargetId
+    !receipt.success ||
+    !rigProviderImageMatchesSurfaceValidation(parsed.data, receipt.data, expectedTargetId, "change")
   ) {
     return {};
   }

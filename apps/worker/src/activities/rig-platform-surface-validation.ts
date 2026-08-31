@@ -69,6 +69,7 @@ export type RigPlatformSurfaceValidationInput = {
   sandboxGroupId: string;
   rigVersionId: string;
   providerImage: string;
+  providerImageId: string;
   established: EstablishedSandboxSession;
   ownership: {
     leaseId: string;
@@ -142,7 +143,7 @@ function trustedSurface(input: RigPlatformSurfaceValidationInput): TrustedRigPla
     surface.binding.backendId !== input.established.backendId ||
     surface.binding.instanceId !== input.established.instanceId ||
     surface.binding.providerImage !== input.providerImage ||
-    !surface.binding.providerImageId ||
+    surface.binding.providerImageId !== input.providerImageId ||
     surface.binding.leaseId !== input.ownership.leaseId ||
     surface.binding.leaseEpoch !== input.ownership.leaseEpoch ||
     surface.binding.workspaceGeneration !== input.ownership.workspaceGeneration ||
@@ -163,6 +164,7 @@ function trustedOperation(
     backendId: input.established.backendId,
     instanceId: input.established.instanceId,
     providerImage: input.providerImage,
+    providerImageId: input.providerImageId,
     leaseId: input.ownership.leaseId,
     leaseEpoch: input.ownership.leaseEpoch,
     workspaceGeneration: input.ownership.workspaceGeneration,
@@ -692,6 +694,7 @@ export async function runRigPlatformSurfaceValidation(
       provenance: {
         authority: surface.binding.authority,
         providerImage: input.providerImage,
+        providerImageId: input.providerImageId,
       },
       terminal,
       browser,

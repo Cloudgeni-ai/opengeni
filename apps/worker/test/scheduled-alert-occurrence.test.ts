@@ -22,6 +22,7 @@ import {
   createVerifiedTestRig as createRig,
   createVerifiedTestRigVersion,
   MemoryEventBus,
+  testRigProviderImage,
   testRigSurfaceReceipt,
   testSettings,
   type SharedTestDatabase,
@@ -1145,6 +1146,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       payload: { credentialHooks: ["azure-monitor"] },
     });
     const attemptId = crypto.randomUUID();
+    const providerImage = testRigProviderImage(change.id, "change");
     await updateRigChangeStatus(client.db, workspace.workspaceId, change.id, {
       status: "proposed",
       verification: {
@@ -1153,7 +1155,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         finishedAt: "2026-08-14T00:01:00.000Z",
         passed: true,
         checkResults: [],
-        platformSurfaceValidation: testRigSurfaceReceipt(change.id),
+        providerImage,
+        platformSurfaceValidation: testRigSurfaceReceipt(change.id, providerImage),
       },
     });
     const promoted = await createRigVersionForChangePromotion(
@@ -1166,6 +1169,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         expectedVerificationAttemptId: attemptId,
         expectedVerificationExecutionGeneration: 1,
         credentialHooks: ["azure-monitor"],
+        providerImages: { [providerImage.backend]: providerImage },
       },
     );
     const responder = await createSession(client.db, {
@@ -1270,6 +1274,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       payload: { credentialHooks: ["azure-monitor"] },
     });
     const attemptId = crypto.randomUUID();
+    const providerImage = testRigProviderImage(change.id, "change");
     await updateRigChangeStatus(client.db, personalWorkspace!.id, change.id, {
       status: "proposed",
       verification: {
@@ -1278,7 +1283,8 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         finishedAt: "2026-08-16T20:01:00.000Z",
         passed: true,
         checkResults: [],
-        platformSurfaceValidation: testRigSurfaceReceipt(change.id),
+        providerImage,
+        platformSurfaceValidation: testRigSurfaceReceipt(change.id, providerImage),
       },
     });
     const frozen = await createRigVersionForChangePromotion(
@@ -1291,6 +1297,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
         expectedVerificationAttemptId: attemptId,
         expectedVerificationExecutionGeneration: 1,
         credentialHooks: ["azure-monitor"],
+        providerImages: { [providerImage.backend]: providerImage },
       },
     );
     const responder = await createSession(client.db, {

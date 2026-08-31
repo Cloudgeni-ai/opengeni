@@ -51,7 +51,9 @@ export type ProviderTrustedRigPlatformSurfaceInput = {
   session: unknown;
   instanceId: string;
   providerImage: string;
-  trustedProviderImageId?: string;
+  /** Optional assertion only. Providers must discover the image identity from
+   * the exact live instance and must never use this value to select an image. */
+  expectedProviderImageId?: string;
   leaseId: string;
   leaseEpoch: number;
   workspaceGeneration: number;

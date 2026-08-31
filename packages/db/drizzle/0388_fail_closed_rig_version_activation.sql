@@ -89,7 +89,7 @@ $rig_version_writer_drain_after_lock$;
 ALTER TABLE rig_versions
   ADD COLUMN verification jsonb NOT NULL DEFAULT '{"status":"unverified"}'::jsonb;
 
--- Version-1 provider-image proof predates exact Browser/Computer target
+-- Provider-image proof versions 1 and 2 predate exact derived-image surface
 -- binding. Remove the complete ready artifact reference, not only its proof,
 -- so global checkpoint GC can collect the now-untrusted provider artifact.
 ALTER TABLE rig_versions NO FORCE ROW LEVEL SECURITY;
@@ -97,7 +97,8 @@ UPDATE rig_versions
 SET provider_images = (
   SELECT coalesce(
     jsonb_object_agg(image.key, image.value) FILTER (
-      WHERE image.value -> 'coldBootValidation' ->> 'version' IS DISTINCT FROM '1'
+      WHERE coalesce(image.value -> 'coldBootValidation' ->> 'version', '')
+        NOT IN ('1', '2')
     ),
     '{}'::jsonb
   )
@@ -106,14 +107,14 @@ SET provider_images = (
 WHERE EXISTS (
   SELECT 1
   FROM jsonb_each(rig_versions.provider_images) AS image
-  WHERE image.value -> 'coldBootValidation' ->> 'version' = '1'
+  WHERE image.value -> 'coldBootValidation' ->> 'version' IN ('1', '2')
 );
 ALTER TABLE rig_versions FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE rig_changes NO FORCE ROW LEVEL SECURITY;
 UPDATE rig_changes
 SET verification = verification - 'providerImage'
-WHERE verification #>> '{providerImage,coldBootValidation,version}' = '1';
+WHERE verification #>> '{providerImage,coldBootValidation,version}' IN ('1', '2');
 ALTER TABLE rig_changes FORCE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION opengeni_private.reject_obsolete_rig_provider_image_proof()
@@ -125,9 +126,10 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM pg_catalog.jsonb_each(NEW.provider_images) AS image
-    WHERE image.value -> 'coldBootValidation' ->> 'version' = '1'
+    WHERE image.value ->> 'status' = 'ready'
+      AND image.value -> 'coldBootValidation' ->> 'version' IS DISTINCT FROM '3'
   ) THEN
-    RAISE EXCEPTION 'rig provider image cold-boot proof version 1 is obsolete'
+    RAISE EXCEPTION 'ready rig provider images require cold-boot proof version 3'
       USING ERRCODE = '23514',
         CONSTRAINT = 'rig_versions_provider_image_proof_version_check';
   END IF;
@@ -156,14 +158,31 @@ BEGIN
   IF NEW.active = true AND (TG_OP = 'INSERT' OR OLD.active IS DISTINCT FROM true) THEN
     IF NEW.verification ->> 'status' IS DISTINCT FROM 'passed'
       OR NEW.verification ->> 'attemptId' IS NULL
-      OR NEW.verification -> 'receipt' ->> 'version' IS DISTINCT FROM '2'
+      OR NEW.verification -> 'receipt' ->> 'version' IS DISTINCT FROM '3'
       OR NEW.verification -> 'receipt' -> 'provenance' ->> 'authority'
         IS DISTINCT FROM 'deployment_control_plane'
       OR coalesce(NEW.verification -> 'receipt' -> 'provenance' ->> 'providerImage', '') = ''
-      OR NEW.verification -> 'receipt' -> 'binding' ->> 'sandboxGroupId'
-        IS DISTINCT FROM NEW.id::text
+      OR coalesce(
+        NEW.verification -> 'receipt' -> 'provenance' ->> 'providerImageId', ''
+      ) = ''
       OR NEW.verification -> 'receipt' -> 'binding' ->> 'rigVersionId'
         IS DISTINCT FROM NEW.id::text
+      OR NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_each(NEW.provider_images) AS image
+        WHERE image.key = NEW.verification -> 'receipt' -> 'binding' ->> 'backendId'
+          AND image.value ->> 'backend' = image.key
+          AND image.value ->> 'status' = 'ready'
+          AND image.value -> 'coldBootValidation' ->> 'version' = '3'
+          AND image.value -> 'provenance' ->> 'targetKind' IN ('change', 'version')
+          AND image.value -> 'provenance' ->> 'targetId' = NEW.id::text
+          AND image.value ->> 'buildRequestId'
+            = NEW.verification -> 'receipt' -> 'binding' ->> 'sandboxGroupId'
+          AND coalesce(image.value ->> 'imageId', image.value ->> 'imageDigest')
+            = NEW.verification -> 'receipt' -> 'provenance' ->> 'providerImageId'
+          AND NEW.verification -> 'receipt' -> 'provenance' ->> 'providerImage'
+            = NEW.verification -> 'receipt' -> 'provenance' ->> 'providerImageId'
+      )
     THEN
       RAISE EXCEPTION 'rig version activation requires an exact passing platform-surface receipt'
         USING ERRCODE = '23514',

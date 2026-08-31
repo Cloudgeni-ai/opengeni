@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const RIG_PLATFORM_SURFACE_VALIDATION_VERSION = 2 as const;
+export const RIG_PLATFORM_SURFACE_VALIDATION_VERSION = 3 as const;
 
 export const RIG_PLATFORM_SURFACE_VALIDATION_AUTHORITY = "deployment_control_plane" as const;
 
@@ -8,6 +8,7 @@ export const RigPlatformSurfaceValidationProvenance = z
   .object({
     authority: z.literal(RIG_PLATFORM_SURFACE_VALIDATION_AUTHORITY),
     providerImage: z.string().min(1).max(2_048),
+    providerImageId: z.string().min(1).max(512),
   })
   .strict();
 export type RigPlatformSurfaceValidationProvenance = z.infer<
@@ -31,9 +32,13 @@ export type RigPlatformSurfaceValidationBinding = z.infer<
 
 export const RigPlatformSurfaceValidationReceipt = z
   .object({
-    // Version 1 remains readable for durable history, but activation and
-    // promotion boundaries require the current version 2 proof.
-    version: z.union([z.literal(1), z.literal(RIG_PLATFORM_SURFACE_VALIDATION_VERSION)]),
+    // Versions 1 and 2 remain readable for durable history, but activation and
+    // promotion boundaries require the current exact-image-bound proof.
+    version: z.union([
+      z.literal(1),
+      z.literal(2),
+      z.literal(RIG_PLATFORM_SURFACE_VALIDATION_VERSION),
+    ]),
     checkedAt: z.string().datetime(),
     binding: RigPlatformSurfaceValidationBinding,
     // Optional only so historical v1/v2 receipts remain readable. Every new

@@ -421,6 +421,7 @@ export type TrustedRigPlatformSurfaceOperation = {
   backendId: string;
   instanceId: string;
   providerImage: string;
+  providerImageId: string;
   leaseId: string;
   leaseEpoch: number;
   workspaceGeneration: number;

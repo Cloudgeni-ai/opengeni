@@ -5,10 +5,8 @@
 // auto-merge / promotion on top of the change substrate created here.
 
 import { randomUUID } from "node:crypto";
-import {
-  hasTrustedRigPlatformSurfaceValidationProvenance,
-  RigPlatformSurfaceValidationReceipt,
-} from "@opengeni/contracts/rig-platform-surface-validation";
+import { RigProviderImage as RigProviderImageContract } from "@opengeni/contracts";
+import { RigPlatformSurfaceValidationReceipt } from "@opengeni/contracts/rig-platform-surface-validation";
 import type {
   AccessGrant,
   CreateRigRequest,
@@ -47,7 +45,10 @@ import {
 import { HTTPException } from "hono/http-exception";
 import { boundedParallelMap } from "@opengeni/runtime/mcp-network";
 import { requirePermission } from "../access";
-import { rigProviderImagesFromVerification } from "./provider-images";
+import {
+  rigProviderImageMatchesSurfaceValidation,
+  rigProviderImagesFromVerification,
+} from "./provider-images";
 
 export * from "./provider-images";
 
@@ -448,18 +449,15 @@ function requirePlatformSurfaceValidation(change: RigChange) {
   const parsed = RigPlatformSurfaceValidationReceipt.safeParse(
     change.verification.platformSurfaceValidation,
   );
-  if (!parsed.success) {
-    throw new HTTPException(422, {
-      message: "rig change has no exact passing platform-surface validation receipt",
-    });
-  }
+  const providerImage = RigProviderImageContract.safeParse(change.verification.providerImage);
   if (
-    !hasTrustedRigPlatformSurfaceValidationProvenance(parsed.data) ||
-    parsed.data.binding.sandboxGroupId !== change.id ||
-    parsed.data.binding.rigVersionId !== change.id
+    !parsed.success ||
+    !providerImage.success ||
+    !rigProviderImageMatchesSurfaceValidation(providerImage.data, parsed.data, change.id, "change")
   ) {
     throw new HTTPException(422, {
-      message: "rig change platform-surface receipt targets another verification sandbox",
+      message:
+        "rig change has no exact immutable-provider-image platform-surface validation receipt",
     });
   }
   return parsed.data;

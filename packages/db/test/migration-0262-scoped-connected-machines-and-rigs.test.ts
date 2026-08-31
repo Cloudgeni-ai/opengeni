@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase, testRigSurfaceReceipt } from "@opengeni/testing";
+import {
+  acquireBlankTestDatabase,
+  installTestRigProviderImage,
+  testRigSurfaceReceipt,
+} from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import {
@@ -182,13 +186,18 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
         rigId: organizationRig.id,
         versionId: organizationVersion.id,
       });
+      const organizationImage = await installTestRigProviderImage(
+        db.db,
+        ownerA.workspaceId,
+        organizationVersion.id,
+      );
       const organizationActivation = await completeRigVersionVerification(db.db, {
         workspaceId: ownerA.workspaceId,
         rigId: organizationRig.id,
         versionId: organizationVersion.id,
         attemptId: organizationAttempt.attemptId,
         executionGeneration: organizationAttempt.executionGeneration,
-        receipt: testRigSurfaceReceipt(organizationVersion.id),
+        receipt: testRigSurfaceReceipt(organizationVersion.id, organizationImage),
       });
       expect(organizationActivation.activated).toBe(true);
 

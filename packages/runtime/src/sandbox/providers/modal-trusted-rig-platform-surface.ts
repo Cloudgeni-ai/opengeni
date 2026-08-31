@@ -131,12 +131,13 @@ async function createModalSidecar(
 ): Promise<TrustedRigPlatformSidecar> {
   const session = input.session as ModalRigSession;
   const sandboxId = session.state?.sandboxId;
-  const imageId = input.trustedProviderImageId ?? session.state?.imageId;
+  const imageId = session.state?.imageId;
   const images = session.modal?.images;
   const sidecars = session.sandbox?.experimentalSidecars;
   if (
     sandboxId !== input.instanceId ||
     !imageId ||
+    (input.expectedProviderImageId !== undefined && input.expectedProviderImageId !== imageId) ||
     typeof images?.fromId !== "function" ||
     !sidecars ||
     typeof sidecars.create !== "function" ||
@@ -238,8 +239,12 @@ export async function createModalTrustedRigPlatformSurface(
   input: ProviderTrustedRigPlatformSurfaceInput,
 ): Promise<TrustedRigPlatformSurface> {
   const session = input.session as ModalRigSession;
-  const providerImageId = input.trustedProviderImageId ?? session.state?.imageId;
-  if (!providerImageId) {
+  const providerImageId = session.state?.imageId;
+  if (
+    !providerImageId ||
+    (input.expectedProviderImageId !== undefined &&
+      input.expectedProviderImageId !== providerImageId)
+  ) {
     throw new Error("Modal trusted Rig validation requires an immutable provider image id");
   }
   return createTrustedRigPlatformSurface({
