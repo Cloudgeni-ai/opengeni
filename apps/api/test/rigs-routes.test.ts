@@ -19,6 +19,7 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  createVerifiedTestRig,
   createVerifiedTestRigVersion,
   testSettings,
   type SharedTestDatabase,
@@ -174,6 +175,7 @@ async function activateInitialVersion(workspaceId: string, rigId: string) {
     rigId,
     versionId: version.id,
     attemptId: attempt.attemptId,
+    executionGeneration: attempt.executionGeneration,
     receipt: surfaceReceipt(version.id),
   });
   expect(result.activated).toBe(true);
@@ -848,7 +850,6 @@ describe("rig route permission matrix", () => {
       error: {
         code: "conflict",
         retryable: false,
-        outcomeUnknown: false,
         details: { code: "RIG_DEFERRED_VERIFICATION_AMBIGUOUS", candidateCount: 2 },
       },
     });
@@ -894,7 +895,13 @@ describe("rig route permission matrix", () => {
       } as never,
       managedAuth: null,
     } as never);
-    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const manage = {
+      authorization: await bearer(ws, "user:m", [
+        "rigs:use",
+        "rigs:manage",
+        "variable-sets:attach",
+      ]),
+    };
     const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
     const created = await http.request(base, {
       method: "POST",
@@ -1028,7 +1035,13 @@ describe("rig route permission matrix", () => {
     const ws = await freshWorkspace();
     const calls: unknown[] = [];
     const http = appWithWorkflow(calls);
-    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const manage = {
+      authorization: await bearer(ws, "user:m", [
+        "rigs:use",
+        "rigs:manage",
+        "variable-sets:attach",
+      ]),
+    };
     const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
     const created = await http.request(base, {
       method: "POST",
@@ -1125,6 +1138,85 @@ describe("rig route permission matrix", () => {
     });
     expect(cleared.status).toBe(200);
     expect((await cleared.json()).defaultRigId).toBeNull();
+  });
+
+  test("workspace defaults reject personal Rigs while shared scopes remain resolvable", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const managerSubject = `user:${crypto.randomUUID()}`;
+    const memberSubject = `user:${crypto.randomUUID()}`;
+    const [memberPersonalWorkspace] = await shared!.admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${ws.accountId}, 'member personal workspace') returning id
+    `;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${memberPersonalWorkspace!.id}, ${ws.accountId})
+    `;
+    await shared!.admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values
+        (${ws.accountId}, ${managerSubject}, 'active', ${ws.workspaceId}, 1),
+        (${ws.accountId}, ${memberSubject}, 'active', ${memberPersonalWorkspace!.id}, 1)
+    `;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${ws.accountId}, ${ws.workspaceId}, ${managerSubject}),
+        (${ws.accountId}, ${ws.workspaceId}, ${memberSubject})
+    `;
+    const personal = await createVerifiedTestRig(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      scope: "user",
+      subjectId: managerSubject,
+      name: "manager personal rig",
+    });
+    const workspaceRig = await createVerifiedTestRig(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      scope: "workspace",
+      subjectId: managerSubject,
+      name: "shared workspace rig",
+    });
+    const organizationRig = await createVerifiedTestRig(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      scope: "organization",
+      subjectId: managerSubject,
+      allowOrganization: true,
+      name: "shared organization rig",
+    });
+    const base = `/v1/workspaces/${ws.workspaceId}`;
+    const manager = {
+      authorization: await bearer(ws, managerSubject, ["rigs:manage", "rigs:use"]),
+    };
+    const member = { authorization: await bearer(ws, memberSubject, ["rigs:use"]) };
+
+    const personalDefault = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: manager,
+      body: JSON.stringify({ rigId: personal.id }),
+    });
+    expect(personalDefault.status).toBe(422);
+    expect(await personalDefault.text()).toContain("personal rig");
+    const hiddenPersonal = await app().request(`${base}/rigs/${personal.id}`, {
+      headers: member,
+    });
+    expect(hiddenPersonal.status).toBe(404);
+
+    for (const sharedRig of [workspaceRig, organizationRig]) {
+      const set = await app().request(`${base}/default-rig`, {
+        method: "PUT",
+        headers: manager,
+        body: JSON.stringify({ rigId: sharedRig.id }),
+      });
+      expect(set.status).toBe(200);
+      expect((await set.json()).defaultRigId).toBe(sharedRig.id);
+      const resolved = await app().request(`${base}/rigs/${sharedRig.id}`, { headers: member });
+      expect(resolved.status).toBe(200);
+      expect((await resolved.json()).id).toBe(sharedRig.id);
+    }
   });
 
   test("name collision is a 409; unknown defaultVariableSetId is a 422", async () => {

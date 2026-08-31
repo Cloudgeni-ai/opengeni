@@ -505,6 +505,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: `unknown rigId: ${payload.rigId}`,
         });
       }
+      if (rig.scope === "user") {
+        throw new HTTPException(422, {
+          message: `personal rig ${payload.rigId} cannot be the workspace default`,
+        });
+      }
       if (!rig.activeVersion) {
         throw new HTTPException(422, {
           message: `rig ${payload.rigId} has no active version and cannot be the workspace default`,

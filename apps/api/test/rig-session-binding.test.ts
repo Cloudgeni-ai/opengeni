@@ -104,11 +104,12 @@ function grant(
   workspaceId: string,
   fromSessionId?: string,
   extraPermissions: Permission[] = [],
+  subjectId = "subject",
 ): AccessGrant {
   return {
     accountId,
     workspaceId,
-    subjectId: "subject",
+    subjectId,
     permissions: ["sessions:create", "sessions:read", ...extraPermissions],
     ...(fromSessionId
       ? { metadata: { sessionId: fromSessionId, firstPartyMcpTools: ["session_create"] } }
@@ -251,6 +252,73 @@ describe("M3 rig binding: freeze at create", () => {
     );
     expect(rigless.rigId).toBeNull();
     expect(rigless.rigVersionId).toBeNull();
+  }, 60_000);
+
+  test("a shared member inherits workspace and organization defaults but never a personal Rig", async () => {
+    if (!available) return;
+    const bus = new MemoryEventBus();
+    const { accountId, workspaceId } = await freshWorkspace();
+    const managerSubject = `user:${crypto.randomUUID()}`;
+    const memberSubject = `user:${crypto.randomUUID()}`;
+    const [memberPersonalWorkspace] = await admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${accountId}, 'member personal workspace') returning id
+    `;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${memberPersonalWorkspace!.id}, ${accountId})
+    `;
+    await admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values
+        (${accountId}, ${managerSubject}, 'active', ${workspaceId}, 1),
+        (${accountId}, ${memberSubject}, 'active', ${memberPersonalWorkspace!.id}, 1)
+    `;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${accountId}, ${workspaceId}, ${managerSubject}),
+        (${accountId}, ${workspaceId}, ${memberSubject})
+    `;
+    const personal = await createRig(db, {
+      accountId,
+      workspaceId,
+      scope: "user",
+      subjectId: managerSubject,
+      name: "manager personal default",
+    });
+    const workspaceRig = await createRig(db, {
+      accountId,
+      workspaceId,
+      scope: "workspace",
+      subjectId: managerSubject,
+      name: "member workspace default",
+    });
+    const organizationRig = await createRig(db, {
+      accountId,
+      workspaceId,
+      scope: "organization",
+      subjectId: managerSubject,
+      allowOrganization: true,
+      name: "member organization default",
+    });
+    const memberGrant = grant(accountId, workspaceId, undefined, ["rigs:use"], memberSubject);
+
+    await admin`update workspaces set default_rig_id = ${personal.id} where id = ${workspaceId}`;
+    await expect(
+      createSessionForRequest(deps(bus), memberGrant, workspaceId, {
+        initialMessage: "personal default must stay private",
+      }),
+    ).rejects.toThrow(/unknown rigId/u);
+
+    for (const sharedRig of [workspaceRig, organizationRig]) {
+      await admin`update workspaces set default_rig_id = ${sharedRig.id} where id = ${workspaceId}`;
+      const session = await createSessionForRequest(deps(bus), memberGrant, workspaceId, {
+        initialMessage: `use ${sharedRig.scope} default`,
+      });
+      expect(session.rigId).toBe(sharedRig.id);
+      expect(session.rigVersionId).toBe(sharedRig.activeVersion!.id);
+    }
   }, 60_000);
 
   test("a session with no rig and no workspace default is rig-less (both null)", async () => {

@@ -174,10 +174,14 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
               variant="ghost"
               size="sm"
               className="h-9"
-              disabled={rig.mutating || (!isDefaultRig && !active)}
+              disabled={rig.mutating || (!isDefaultRig && (!active || current.scope === "user"))}
               title={
-                !isDefaultRig && !active
-                  ? "Only an active Rig can be the workspace default"
+                !isDefaultRig
+                  ? current.scope === "user"
+                    ? "Personal Rigs cannot be a workspace default"
+                    : !active
+                      ? "Only an active Rig can be the workspace default"
+                      : undefined
                   : undefined
               }
               onClick={async () => {
@@ -329,6 +333,11 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
               deferredVerification={deferredRigVerificationView(versions.versions)}
               onRecoverDeferred={async () => {
                 const result = await rig.recoverDeferredVerification();
+                if (result) await Promise.all([versions.refresh(), changes.refresh()]);
+                return result;
+              }}
+              onVerifyVersion={async (versionId) => {
+                const result = await rig.verifyVersion(versionId);
                 if (result) await Promise.all([versions.refresh(), changes.refresh()]);
                 return result;
               }}

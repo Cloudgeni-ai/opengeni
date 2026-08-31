@@ -53,6 +53,7 @@ export async function createVerifiedTestRig(db: Database, input: Parameters<type
     rigId: rig.id,
     versionId: version.id,
     attemptId: attempt.attemptId,
+    executionGeneration: attempt.executionGeneration,
     receipt: testRigSurfaceReceipt(version.id),
   });
   const activated = await getRig(db, input.workspaceId, rig.id);
@@ -77,6 +78,7 @@ export async function createVerifiedTestRigVersion(
     rigId,
     versionId: version.id,
     attemptId: attempt.attemptId,
+    executionGeneration: attempt.executionGeneration,
     receipt: testRigSurfaceReceipt(version.id),
   });
   return completed.version;

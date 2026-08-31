@@ -8113,6 +8113,7 @@ export const RigChangeVerification = /* @__PURE__ */ (() =>
     .object({
       attemptId: z.string().uuid().optional(),
       attempt: z.number().int().positive().optional(),
+      executionGeneration: z.number().int().positive().optional(),
       startedAt: z.string().optional(),
       finishedAt: z.string().optional(),
       log: z.string().optional(),

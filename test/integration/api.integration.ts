@@ -4241,6 +4241,7 @@ describe("API component integration", () => {
         rigId,
         versionId: version!.id,
         attemptId: attempt.attemptId,
+        executionGeneration: attempt.executionGeneration,
         receipt: rigSurfaceReceipt(version!.id),
       });
       expect(activation).toMatchObject({ activated: true, stale: false });

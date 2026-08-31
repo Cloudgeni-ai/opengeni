@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { handleRigVersionVerificationActivityFailure } from "../src/activities/rig-verification";
+import {
+  handleRigVersionVerificationActivityFailure,
+  RigVerificationLeaseUnavailableError,
+} from "../src/activities/rig-verification";
 
 describe("Rig version verification settlement", () => {
   test("an audit failure after successful completion never invokes failure settlement", async () => {
@@ -40,5 +43,26 @@ describe("Rig version verification settlement", () => {
       }),
     ).rejects.toBe(activityError);
     expect(details).toEqual(["fail:sandbox setup failed", "audit:sandbox setup failed"]);
+  });
+
+  test("lease contention leaves the current attempt pending for generation recovery", async () => {
+    const leaseError = new RigVerificationLeaseUnavailableError("version-1", "attached");
+    let failureSettlements = 0;
+    let failureAudits = 0;
+    await expect(
+      handleRigVersionVerificationActivityFailure({
+        error: leaseError,
+        terminalStateCommitted: false,
+        failVerification: async () => {
+          failureSettlements += 1;
+          return { applied: true, stale: false };
+        },
+        recordFailureAudit: async () => {
+          failureAudits += 1;
+        },
+      }),
+    ).rejects.toBe(leaseError);
+    expect(failureSettlements).toBe(0);
+    expect(failureAudits).toBe(0);
   });
 });

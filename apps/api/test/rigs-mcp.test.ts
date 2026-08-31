@@ -534,7 +534,10 @@ describe("rig MCP tools", () => {
       name: `mcp-replacement-${crypto.randomUUID()}`,
       activateInitialVersion: false,
     });
-    const server = buildOpenGeniMcpServer(deps(workflow), grant(["rigs:use", "rigs:manage"]));
+    const server = buildOpenGeniMcpServer(
+      deps(workflow),
+      grant(["rigs:use", "rigs:manage", "variable-sets:attach"]),
+    );
 
     await expect(
       callMcpTool(server, "rig_create_version", {

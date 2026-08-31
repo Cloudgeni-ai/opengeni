@@ -74,12 +74,14 @@ export type RigVersionVerificationState =
   | {
       status: "pending";
       attemptId: string;
+      executionGeneration?: number;
       expectedActiveVersionId: string | null;
       requestedAt: string;
     }
   | {
       status: "passed";
       attemptId: string;
+      executionGeneration?: number;
       expectedActiveVersionId: string | null;
       verifiedAt: string;
       receipt: RigPlatformSurfaceValidationReceipt;
@@ -87,6 +89,7 @@ export type RigVersionVerificationState =
   | {
       status: "failed";
       attemptId: string;
+      executionGeneration?: number;
       expectedActiveVersionId: string | null;
       verifiedAt: string;
       error: string;

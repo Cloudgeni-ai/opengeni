@@ -1164,6 +1164,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       {
         expectedActiveVersionId: rig.activeVersion!.id,
         expectedVerificationAttemptId: attemptId,
+        expectedVerificationExecutionGeneration: 1,
         credentialHooks: ["azure-monitor"],
       },
     );
@@ -1288,6 +1289,7 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       {
         expectedActiveVersionId: rig.activeVersion!.id,
         expectedVerificationAttemptId: attemptId,
+        expectedVerificationExecutionGeneration: 1,
         credentialHooks: ["azure-monitor"],
       },
     );

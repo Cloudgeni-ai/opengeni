@@ -7,6 +7,7 @@ import type { Observability } from "@opengeni/observability";
 import type { EstablishedSandboxSession } from "@opengeni/runtime";
 import {
   RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE,
+  rigVerificationLeaseHolderId,
   runWithOwnedRigVerificationSandbox,
   type RigVerificationActivityLifecycle,
   type RigVerificationOwnershipDependencies,
@@ -17,7 +18,13 @@ const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
 const GROUP_ID = "33333333-3333-4333-8333-333333333333";
 const VERSION_ID = "44444444-4444-4444-8444-444444444444";
-const HOLDER_UUID = "55555555-5555-4555-8555-555555555555";
+const ATTEMPT_ID = "55555555-5555-4555-8555-555555555555";
+const HOLDER_ID = rigVerificationLeaseHolderId({
+  targetKind: "version",
+  targetId: VERSION_ID,
+  attemptId: ATTEMPT_ID,
+  executionGeneration: 3,
+});
 const db = {} as Database;
 
 const settings = testSettings({
@@ -110,12 +117,12 @@ function harness(options: HarnessOptions = {}) {
   })) as unknown as RigVerificationOwnershipDependencies["createCancellationController"];
 
   const dependencies = {
-    randomUUID: () => HOLDER_UUID,
     acquire: async (_db, input) => {
       events.push("acquire");
       expect(input.sandboxGroupId).toBe(GROUP_ID);
       expect(input.image).toBe(settings.modalImageRef);
       expect(input.rigVersionId).toBe(VERSION_ID);
+      expect(input.holderId).toBe(HOLDER_ID);
       return {
         role: options.acquireRole ?? "spawner",
         lease: snapshot(),
@@ -214,6 +221,7 @@ function harness(options: HarnessOptions = {}) {
         sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
         sessionIdPrefix: "rig-verification-test",
+        holderId: HOLDER_ID,
         ...(lifecycle ? { lifecycle } : {}),
       },
       callback,
@@ -224,6 +232,25 @@ function harness(options: HarnessOptions = {}) {
 }
 
 describe("rig verification canonical lease ownership", () => {
+  test("derives a stable holder from the exact target, attempt, and generation", () => {
+    expect(
+      rigVerificationLeaseHolderId({
+        targetKind: "version",
+        targetId: VERSION_ID,
+        attemptId: ATTEMPT_ID,
+        executionGeneration: 3,
+      }),
+    ).toBe(HOLDER_ID);
+    expect(
+      rigVerificationLeaseHolderId({
+        targetKind: "version",
+        targetId: VERSION_ID,
+        attemptId: ATTEMPT_ID,
+        executionGeneration: 4,
+      }),
+    ).not.toBe(HOLDER_ID);
+  });
+
   test("the default-off rollout gate fails before lease acquire or provider create", async () => {
     const state = harness({ ownersEnabled: false });
     await expect(state.run(async () => true)).rejects.toThrow(

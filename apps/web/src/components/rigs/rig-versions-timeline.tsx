@@ -24,6 +24,7 @@ export function RigVersionsTimeline({
   mutating,
   deferredVerification,
   onRecoverDeferred,
+  onVerifyVersion,
   onActivate,
 }: {
   versions: RigVersion[];
@@ -33,6 +34,7 @@ export function RigVersionsTimeline({
   mutating: boolean;
   deferredVerification: DeferredRigVerificationView;
   onRecoverDeferred: () => Promise<unknown>;
+  onVerifyVersion: (versionId: string) => Promise<unknown>;
   onActivate: (versionId: string) => Promise<unknown>;
 }) {
   const [confirmVersion, setConfirmVersion] = useState<RigVersion | null>(null);
@@ -66,6 +68,7 @@ export function RigVersionsTimeline({
               deferredVerification.state === "ambiguous" && version.verificationStatus === "pending"
             }
             onRecoverDeferred={onRecoverDeferred}
+            onVerifyVersion={() => onVerifyVersion(version.id)}
             onRequestActivate={() => setConfirmVersion(version)}
           />
         ))}
@@ -103,6 +106,7 @@ function VersionRow({
   canRecover,
   recoveryAmbiguous,
   onRecoverDeferred,
+  onVerifyVersion,
   onRequestActivate,
 }: {
   version: RigVersion;
@@ -113,6 +117,7 @@ function VersionRow({
   canRecover: boolean;
   recoveryAmbiguous: boolean;
   onRecoverDeferred: () => Promise<unknown>;
+  onVerifyVersion: () => Promise<unknown>;
   onRequestActivate: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -155,7 +160,7 @@ function VersionRow({
           </span>
         </button>
         <div className="flex shrink-0 items-center gap-1.5">
-          {canRecover ? (
+          {canRecover && !canManage ? (
             <Button
               type="button"
               variant="secondary"
@@ -175,6 +180,32 @@ function VersionRow({
                 <RotateCwIcon className="size-3.5" />
               )}
               Resume verification
+            </Button>
+          ) : null}
+          {!isActive &&
+          canManage &&
+          (version.verificationStatus === "pending" || version.verificationStatus === "failed") ? (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-8"
+              disabled={mutating}
+              onClick={async () => {
+                const result = await onVerifyVersion();
+                if (result) {
+                  toast.success(
+                    `${version.verificationStatus === "failed" ? "Retried" : "Started"} verification for version ${version.version}`,
+                  );
+                }
+              }}
+            >
+              {mutating ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
+                <RotateCwIcon className="size-3.5" />
+              )}
+              {version.verificationStatus === "failed" ? "Retry" : "Verify"}
             </Button>
           ) : null}
           {!isActive && canManage && version.verificationStatus === "passed" ? (

@@ -286,6 +286,7 @@ export async function createRigForApi(
     initialVerification: {
       status: "pending",
       attemptId: randomUUID(),
+      executionGeneration: 1,
       expectedActiveVersionId: null,
       requestedAt: new Date().toISOString(),
     },
@@ -474,6 +475,20 @@ function requireRigChangeVerificationAttemptId(change: RigChange): string {
   return attemptId;
 }
 
+function requireRigChangeVerificationExecutionGeneration(change: RigChange): number {
+  const executionGeneration = change.verification?.executionGeneration;
+  if (
+    typeof executionGeneration !== "number" ||
+    !Number.isInteger(executionGeneration) ||
+    executionGeneration < 1
+  ) {
+    // Verification records committed before execution generations existed are
+    // generation one by definition.
+    return 1;
+  }
+  return executionGeneration;
+}
+
 async function promoteChangeWithActiveCas(
   deps: RigServices,
   workspaceId: string,
@@ -546,6 +561,8 @@ export async function promoteSetupAppendChange(
     {
       expectedActiveVersionId: change.baseVersionId,
       expectedVerificationAttemptId: requireRigChangeVerificationAttemptId(change),
+      expectedVerificationExecutionGeneration:
+        requireRigChangeVerificationExecutionGeneration(change),
       ...nextDefinition,
       changelog:
         typeof payload.note === "string" && payload.note.trim()
@@ -633,6 +650,8 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     {
       expectedActiveVersionId: change.baseVersionId,
       expectedVerificationAttemptId: requireRigChangeVerificationAttemptId(change),
+      expectedVerificationExecutionGeneration:
+        requireRigChangeVerificationExecutionGeneration(change),
       ...nextDefinition,
       changelog:
         typeof payload.changelog === "string" && payload.changelog.trim()

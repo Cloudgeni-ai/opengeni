@@ -1402,6 +1402,19 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ok: true, versionId: candidates[0]!.id };
   }
 
+  async verifyRigVersion(
+    _workspaceId: string,
+    rigId: string,
+    versionId: string,
+  ): Promise<{ ok: boolean; versionId: string }> {
+    const version = this.rigVersions.find(
+      (candidate) => candidate.rigId === rigId && candidate.id === versionId,
+    );
+    if (!version) throw new Error(`rig version not found: ${versionId}`);
+    version.verificationStatus = "pending";
+    return { ok: true, versionId };
+  }
+
   async activateRigVersion(
     _workspaceId: string,
     rigId: string,

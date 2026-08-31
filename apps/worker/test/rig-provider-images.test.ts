@@ -152,6 +152,8 @@ describe("build-once rig provider image runtime", () => {
         workspaceId: "22222222-2222-4222-8222-222222222222",
         buildRequestId: "33333333-3333-4333-8333-333333333333",
         rigVersionId: VERSION_ID,
+        verificationAttemptId: "55555555-5555-4555-8555-555555555555",
+        verificationExecutionGeneration: 2,
         sessionIdPrefix: "rig-provider-image-test",
         imageId: "im-built-rig-image",
         contentHash: `sha256:${"a".repeat(64)}`,

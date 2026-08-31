@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import { RigOverview } from "@/components/rigs/rig-overview";
 import { RigSetupSection } from "@/components/rigs/rig-setup-section";
+import { RigVersionsTimeline } from "@/components/rigs/rig-versions-timeline";
 import { deferredRigVerificationView } from "@/lib/rig-status";
 import type { CreateRigVersionRequest, Rig, RigVersion } from "@/types";
 import { RigScopeChip } from "./rigs";
@@ -108,6 +109,76 @@ describe("Rigs access scope", () => {
         ),
       ).toBe(false);
       expect(recoveries).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("gives managers exact pending/failed version actions and hides them from non-managers", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const pending = pendingVersion("11111111-1111-4111-8111-111111111111", 1);
+    const failed = {
+      ...pendingVersion("22222222-2222-4222-8222-222222222222", 2),
+      verificationStatus: "failed" as const,
+    };
+    const verified: string[] = [];
+    try {
+      await act(async () =>
+        root.render(
+          <RigVersionsTimeline
+            versions={[pending, failed]}
+            activeVersionId={null}
+            variableSetName={() => "Variable set"}
+            canManage
+            mutating={false}
+            deferredVerification={deferredRigVerificationView([pending, failed])}
+            onRecoverDeferred={async () => null}
+            onVerifyVersion={async (versionId) => {
+              verified.push(versionId);
+              return { ok: true, versionId };
+            }}
+            onActivate={async () => null}
+          />,
+        ),
+      );
+      expect(container.textContent).toContain("Verify");
+      expect(container.textContent).toContain("Retry");
+      expect(container.textContent).not.toContain("Resume verification");
+      const buttons = [...container.querySelectorAll("button")];
+      const verify = buttons.find((button) => button.textContent?.trim() === "Verify");
+      const retry = buttons.find((button) => button.textContent?.trim() === "Retry");
+      expect(verify).toBeDefined();
+      expect(retry).toBeDefined();
+      await act(async () => {
+        verify!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+      expect(verified).toEqual([pending.id, failed.id]);
+
+      await act(async () =>
+        root.render(
+          <RigVersionsTimeline
+            versions={[pending, failed]}
+            activeVersionId={null}
+            variableSetName={() => "Variable set"}
+            canManage={false}
+            mutating={false}
+            deferredVerification={deferredRigVerificationView([pending, failed])}
+            onRecoverDeferred={async () => null}
+            onVerifyVersion={async () => null}
+            onActivate={async () => null}
+          />,
+        ),
+      );
+      expect(
+        [...container.querySelectorAll("button")].some((button) =>
+          ["Verify", "Retry"].includes(button.textContent?.trim() ?? ""),
+        ),
+      ).toBe(false);
     } finally {
       await act(async () => root.unmount());
       container.remove();

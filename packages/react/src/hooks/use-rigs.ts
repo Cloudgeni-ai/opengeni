@@ -158,6 +158,8 @@ export type UseRigResult = {
   promoteChange: (changeId: string) => Promise<RigVersion | null>;
   /** Resume the one unique inactive verification attempt already pending. */
   recoverDeferredVerification: () => Promise<{ ok: boolean; versionId: string } | null>;
+  /** Start or retry verification for one exact historical version. */
+  verifyVersion: (versionId: string) => Promise<{ ok: boolean; versionId: string } | null>;
   /** Re-verify the active version's checks in a clean throwaway sandbox. */
   verify: () => Promise<{ ok: boolean; versionId: string } | null>;
   mutating: boolean;
@@ -265,6 +267,17 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
     return result;
   }, [client, workspaceId, rigId, run, refresh]);
 
+  const verifyVersion = useCallback(
+    async (versionId: string): Promise<{ ok: boolean; versionId: string } | null> => {
+      const result = await run(() => client.verifyRigVersion(workspaceId, rigId, versionId));
+      if (result) {
+        await refresh();
+      }
+      return result;
+    },
+    [client, workspaceId, rigId, run, refresh],
+  );
+
   const verify = useCallback(async (): Promise<{ ok: boolean; versionId: string } | null> => {
     return await run(() => client.verifyRig(workspaceId, rigId));
   }, [client, workspaceId, rigId, run]);
@@ -282,6 +295,7 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
     verifyChange,
     promoteChange,
     recoverDeferredVerification,
+    verifyVersion,
     verify,
     mutating,
     mutationError,

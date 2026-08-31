@@ -7,6 +7,7 @@ import type {
   RigVersion,
   SandboxBackend,
 } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
 import { RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION } from "@opengeni/contracts";
 import { sandboxLifecycleTransitionWaitMs } from "@opengeni/config";
 import {
@@ -83,8 +84,20 @@ type SandboxLifecycleCommandRunner = (
 ) => Promise<unknown>;
 
 export type RigVerificationWorkflowInput =
-  | { workspaceId: string; changeId: string; attemptId: string; versionId?: never }
-  | { workspaceId: string; versionId: string; attemptId: string; changeId?: never };
+  | {
+      workspaceId: string;
+      changeId: string;
+      attemptId: string;
+      executionGeneration: number;
+      versionId?: never;
+    }
+  | {
+      workspaceId: string;
+      versionId: string;
+      attemptId: string;
+      executionGeneration: number;
+      changeId?: never;
+    };
 
 type CommandResult = {
   exitCode: number | null;
@@ -401,7 +414,6 @@ export type RigVerificationOwnershipDependencies = {
   tag: typeof tagModalSandbox;
   terminate: typeof terminateThrowaway;
   createCancellationController: typeof createTurnToolCancellationController;
-  randomUUID: () => string;
 };
 
 const defaultOwnershipDependencies: RigVerificationOwnershipDependencies = {
@@ -417,8 +429,23 @@ const defaultOwnershipDependencies: RigVerificationOwnershipDependencies = {
   tag: tagModalSandbox,
   terminate: terminateThrowaway,
   createCancellationController: createTurnToolCancellationController,
-  randomUUID: () => crypto.randomUUID(),
 };
+
+export function rigVerificationLeaseHolderId(input: {
+  targetKind: "change" | "version" | "provider_image";
+  targetId: string;
+  attemptId: string;
+  executionGeneration: number;
+}): string {
+  const digest = createHash("sha256")
+    .update(
+      `${input.targetKind}:${input.targetId}:${input.attemptId}:${input.executionGeneration}`,
+      "utf8",
+    )
+    .digest("hex")
+    .slice(0, 32);
+  return `rig-verification:${digest}`;
+}
 
 export type RigVerificationSandboxRunContext = {
   signal: AbortSignal;
@@ -466,6 +493,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     sandboxGroupId: string;
     rigVersionId: string;
     sessionIdPrefix: string;
+    holderId: string;
     lifecycle?: RigVerificationActivityLifecycle;
   },
   run: (
@@ -481,7 +509,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     throw new Error(RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE);
   }
 
-  const holderId = `rig-verification:${dependencies.randomUUID()}`;
+  const holderId = input.holderId;
   const fallbackController = new AbortController();
   const signal = input.lifecycle?.signal ?? fallbackController.signal;
   const commandController = dependencies.createCancellationController(signal);
@@ -952,6 +980,8 @@ export async function verifyRigProviderImageColdBoot(
     workspaceId: string;
     buildRequestId: string;
     rigVersionId: string;
+    verificationAttemptId: string;
+    verificationExecutionGeneration: number;
     sessionIdPrefix: string;
     imageId: string;
     contentHash: string;
@@ -977,6 +1007,12 @@ export async function verifyRigProviderImageColdBoot(
       sandboxGroupId: input.buildRequestId,
       rigVersionId: input.rigVersionId,
       sessionIdPrefix: input.sessionIdPrefix,
+      holderId: rigVerificationLeaseHolderId({
+        targetKind: "provider_image",
+        targetId: input.buildRequestId,
+        attemptId: input.verificationAttemptId,
+        executionGeneration: input.verificationExecutionGeneration,
+      }),
       lifecycle: input.lifecycle,
     },
     async (established, runContext) => {
@@ -1040,6 +1076,8 @@ export async function buildVerifiedRigProviderImage(input: {
   existingVersionId?: string;
   definition: RigProviderImageDefinition;
   target: { kind: "change" | "version"; id: string };
+  verificationAttemptId: string;
+  verificationExecutionGeneration: number;
   established: EstablishedSandboxSession;
   ownership: RigVerificationSandboxRunContext["ownership"];
   lifecycle: RigVerificationActivityLifecycle;
@@ -1221,6 +1259,8 @@ export async function buildVerifiedRigProviderImage(input: {
         workspaceId: input.workspaceId,
         buildRequestId: building.buildRequestId,
         rigVersionId: input.target.id,
+        verificationAttemptId: input.verificationAttemptId,
+        verificationExecutionGeneration: input.verificationExecutionGeneration,
         sessionIdPrefix: `rig-provider-image-${input.target.id}`,
         imageId: built.imageId,
         contentHash,
@@ -1367,6 +1407,9 @@ export async function handleRigVersionVerificationActivityFailure(input: {
   failVerification: (detail: string) => Promise<{ applied: boolean; stale: boolean }>;
   recordFailureAudit: (detail: string) => Promise<void>;
 }): Promise<never> {
+  if (input.error instanceof RigVerificationLeaseUnavailableError) {
+    throw input.error;
+  }
   const detail = input.error instanceof Error ? input.error.message : String(input.error);
   if (!input.terminalStateCommitted) {
     const failure = await input
@@ -1379,7 +1422,12 @@ export async function handleRigVersionVerificationActivityFailure(input: {
 
 export function createRigVerificationActivities(services: () => Promise<ControlActivityServices>) {
   return {
-    verifyRigChange: (input: { workspaceId: string; changeId: string; attemptId: string }) =>
+    verifyRigChange: (input: {
+      workspaceId: string;
+      changeId: string;
+      attemptId: string;
+      executionGeneration: number;
+    }) =>
       withRigVerificationActivityLifecycle(async (lifecycle) => {
         const { settings, db, observability } = await services();
         throwIfAborted(lifecycle.signal);
@@ -1393,6 +1441,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
             workspaceId: input.workspaceId,
             changeId: change.id,
             attemptId: input.attemptId,
+            executionGeneration: input.executionGeneration,
           }))
         ) {
           throw new Error(`Rig change verification attempt is stale: ${input.attemptId}`);
@@ -1403,11 +1452,16 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           grant,
           action: "rig.verification.started",
           rigId: rig.id,
-          metadata: { changeId: change.id, attemptId: input.attemptId },
+          metadata: {
+            changeId: change.id,
+            attemptId: input.attemptId,
+            executionGeneration: input.executionGeneration,
+          },
         });
 
         const verification: Record<string, unknown> = {
           attemptId: input.attemptId,
+          executionGeneration: input.executionGeneration,
           startedAt,
           checkResults: [],
         };
@@ -1417,6 +1471,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
             input.workspaceId,
             change.id,
             input.attemptId,
+            input.executionGeneration,
             { status, verification },
           );
         try {
@@ -1447,6 +1502,12 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               sandboxGroupId: change.id,
               rigVersionId: candidateVersion.id,
               sessionIdPrefix: `rig-verification-${change.id}`,
+              holderId: rigVerificationLeaseHolderId({
+                targetKind: "change",
+                targetId: change.id,
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+              }),
               lifecycle,
             },
             async (established, runContext) => {
@@ -1484,13 +1545,22 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     grant,
                     action: "rig.verification.failed",
                     rigId: rig.id,
-                    metadata: { changeId: change.id, status: "rejected" },
+                    metadata: {
+                      changeId: change.id,
+                      status: "rejected",
+                      attemptId: input.attemptId,
+                      executionGeneration: input.executionGeneration,
+                    },
                   });
                   await recordRigAuditEvent(db, {
                     grant,
                     action: "rig.change.rejected",
                     rigId: rig.id,
-                    metadata: { changeId: change.id },
+                    metadata: {
+                      changeId: change.id,
+                      attemptId: input.attemptId,
+                      executionGeneration: input.executionGeneration,
+                    },
                   });
                   return settlement.change;
                 }
@@ -1543,6 +1613,8 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   workspaceId: input.workspaceId,
                   definition: providerImageDefinition,
                   target: { kind: "change", id: change.id },
+                  verificationAttemptId: input.attemptId,
+                  verificationExecutionGeneration: input.executionGeneration,
                   established,
                   ownership: runContext.ownership,
                   lifecycle,
@@ -1568,7 +1640,11 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   grant,
                   action: "rig.verification.passed",
                   rigId: rig.id,
-                  metadata: { changeId: change.id },
+                  metadata: {
+                    changeId: change.id,
+                    attemptId: input.attemptId,
+                    executionGeneration: input.executionGeneration,
+                  },
                 });
                 return merged;
               }
@@ -1578,20 +1654,30 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 grant,
                 action: passed ? "rig.verification.passed" : "rig.verification.failed",
                 rigId: rig.id,
-                metadata: { changeId: change.id, status: classified.status },
+                metadata: {
+                  changeId: change.id,
+                  status: classified.status,
+                  attemptId: input.attemptId,
+                  executionGeneration: input.executionGeneration,
+                },
               });
               if (!passed) {
                 await recordRigAuditEvent(db, {
                   grant,
                   action: "rig.change.rejected",
                   rigId: rig.id,
-                  metadata: { changeId: change.id },
+                  metadata: {
+                    changeId: change.id,
+                    attemptId: input.attemptId,
+                    executionGeneration: input.executionGeneration,
+                  },
                 });
               }
               return settlement.change;
             },
           );
         } catch (error) {
+          if (error instanceof RigVerificationLeaseUnavailableError) throw error;
           verification.finishedAt = new Date().toISOString();
           verification.passed = false;
           verification.error = error instanceof Error ? error.message : String(error);
@@ -1601,13 +1687,22 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               grant,
               action: "rig.verification.failed",
               rigId: rig.id,
-              metadata: { changeId: change.id, status: "failed", attemptId: input.attemptId },
+              metadata: {
+                changeId: change.id,
+                status: "failed",
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+              },
             });
             await recordRigAuditEvent(db, {
               grant,
               action: "rig.change.failed",
               rigId: rig.id,
-              metadata: { changeId: change.id, attemptId: input.attemptId },
+              metadata: {
+                changeId: change.id,
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+              },
             });
           }
           if (lifecycle.signal.aborted) throw abortReason(lifecycle.signal);
@@ -1615,7 +1710,12 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
         }
       }),
 
-    verifyRigVersion: (input: { workspaceId: string; versionId: string; attemptId: string }) =>
+    verifyRigVersion: (input: {
+      workspaceId: string;
+      versionId: string;
+      attemptId: string;
+      executionGeneration: number;
+    }) =>
       withRigVerificationActivityLifecycle(async (lifecycle) => {
         const { settings, db, observability } = await services();
         throwIfAborted(lifecycle.signal);
@@ -1626,6 +1726,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
             rigId: rig.id,
             versionId: version.id,
             attemptId: input.attemptId,
+            executionGeneration: input.executionGeneration,
           }))
         ) {
           throw new Error(`Rig version verification attempt is stale: ${input.attemptId}`);
@@ -1636,7 +1737,11 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           grant,
           action: "rig.verification.started",
           rigId: rig.id,
-          metadata: { versionId: version.id, attemptId: input.attemptId },
+          metadata: {
+            versionId: version.id,
+            attemptId: input.attemptId,
+            executionGeneration: input.executionGeneration,
+          },
         });
         let terminalStateCommitted = false;
         try {
@@ -1657,6 +1762,12 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               sandboxGroupId: version.id,
               rigVersionId: version.id,
               sessionIdPrefix: `rig-version-verification-${version.id}`,
+              holderId: rigVerificationLeaseHolderId({
+                targetKind: "version",
+                targetId: version.id,
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+              }),
               lifecycle,
             },
             async (established, runContext) => {
@@ -1722,6 +1833,8 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     existingVersionId: version.id,
                     definition: version,
                     target: { kind: "version", id: version.id },
+                    verificationAttemptId: input.attemptId,
+                    verificationExecutionGeneration: input.executionGeneration,
                     established,
                     ownership: runContext.ownership,
                     lifecycle,
@@ -1734,6 +1847,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     rigId: rig.id,
                     versionId: version.id,
                     attemptId: input.attemptId,
+                    executionGeneration: input.executionGeneration,
                     receipt: platformSurfaceValidation,
                   })
                 : null;
@@ -1744,6 +1858,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     rigId: rig.id,
                     versionId: version.id,
                     attemptId: input.attemptId,
+                    executionGeneration: input.executionGeneration,
                     error: "one or more mandatory Rig checks failed",
                   });
               terminalStateCommitted = activation?.applied ?? failure?.applied ?? false;
@@ -1767,6 +1882,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 metadata: {
                   versionId: version.id,
                   attemptId: input.attemptId,
+                  executionGeneration: input.executionGeneration,
                   startedAt,
                   finishedAt: new Date().toISOString(),
                   passed,
@@ -1816,6 +1932,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 rigId: rig.id,
                 versionId: version.id,
                 attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
                 error: detail,
               }),
             recordFailureAudit: async (detail) =>
@@ -1826,6 +1943,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 metadata: {
                   versionId: version.id,
                   attemptId: input.attemptId,
+                  executionGeneration: input.executionGeneration,
                   startedAt,
                   finishedAt: new Date().toISOString(),
                   passed: false,
