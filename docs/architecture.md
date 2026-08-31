@@ -343,6 +343,17 @@ or turn use it. This is an intentional user route change, not an
 offline-machine fallback; deployments configured with only `none` or
 `selfhosted` expose no managed group.
 
+Connected Machine event ingestion cannot make every runner wait behind one
+global database queue. The API drains the NATS event subscription immediately
+into exact-process queues: different connection subjects progress concurrently
+within a fixed database-concurrency bound, each subject preserves event order,
+and only consecutive pending heartbeats collapse latest-wins. GoingOffline and
+update-progress events remain ordering barriers. A database slowdown can
+therefore delay current telemetry, but a backlog of old heartbeats from a killed
+runner cannot renew its short ownership lease once per stale sample for minutes.
+Canonical:
+`apps/api/src/sandbox/metrics-ingestion.ts`.
+
 Canonical: `packages/runtime/src/sandbox/selfhosted/`,
 `apps/worker/src/activities/agent-turn/sandbox-establish.ts`,
 `packages/core/src/domain/scheduled-tasks.ts`,
