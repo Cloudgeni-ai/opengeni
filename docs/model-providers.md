@@ -104,7 +104,7 @@ The strict document rejects keys, billing, pricing policy, enabled flags,
 bands, unknown note IDs, duplicate product IDs, and reserved provider IDs.
 Notes are at most 500 characters and cannot contain a newline or `|`.
 
-Migration 0383 is a drained maintenance cutover because it changes the exact
+Migration 0387 is a drained maintenance cutover because it changes the exact
 runtime-posture table/grant contract. Stop every API and worker, supply the
 complete application-login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply the migration with the
@@ -143,14 +143,16 @@ not a hard delete. The slug leaves new model selection immediately, while an
 already accepted turn or an existing-session continuation can still resolve
 its retained definition. Re-adding the same slug creates a fresh row identity;
 stale mutations against an older generation cannot affect the replacement.
-Fresh session admission, an explicit follow-up switch from another model, and a
-new or materially reaccepted scheduled task, automation trigger, or PR-review
-repository binding recheck the active row under the custom-model shared
-transaction lock in the same commit that inserts the session, accepts the turn,
-or writes the task/trigger/binding. A committed keyed session shell is detected
-before active-only catalog validation and reopens its persisted model only as a
-retained definition, so the same key can finish initialization after retirement
-without reopening fresh-selection authority.
+Fresh session admission, an explicit follow-up switch from another model, a new
+or materially reaccepted scheduled task, automation trigger, or PR-review
+repository binding, and a fresh generated-session scheduled occurrence recheck
+the active row under the custom-model shared transaction lock in the same commit
+that inserts the session, accepts the turn, writes the task/trigger/binding, or
+accepts the occurrence. A committed keyed session shell or exact producer
+occurrence is detected before active-only catalog validation and reopens its
+persisted model only as a retained definition, so the same key can finish
+initialization or replay after retirement without reopening fresh-selection
+authority.
 Retirement takes the exclusive counterpart, so a successful removal cannot be
 followed by new work committing from a stale pre-removal catalog snapshot.
 Deployment-curated workspace Gateway products share the public prefix but have

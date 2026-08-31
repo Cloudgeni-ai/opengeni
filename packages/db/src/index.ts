@@ -16500,23 +16500,25 @@ export async function createScheduledTaskRun(
     scheduledAt?: Date | null;
     firedAt?: Date;
     acceptedExecutionSnapshot?: ScheduledTaskRunAcceptedExecutionType | null;
+    /**
+     * Trusted database-only admission seam for a fresh agent occurrence.
+     * Throwing rolls back the run insert; exact producer replay skips it.
+     */
+    beforeFreshAgentRunCommit?: (tx: Database) => Promise<void>;
   },
 ): Promise<ScheduledTaskRun> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     if ((input.taskAuthorityRevision == null) !== (input.taskExecutionDigest == null)) {
       throw new Error("scheduled task run execution binding is incomplete");
     }
-    const [taskRow] = await scopedDb
-      .select()
-      .from(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
-          eq(schema.scheduledTasks.id, input.taskId),
-          isNull(schema.scheduledTasks.deletedAt),
-        ),
-      )
-      .limit(1);
+    const taskFilter = and(
+      eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+      eq(schema.scheduledTasks.id, input.taskId),
+      isNull(schema.scheduledTasks.deletedAt),
+    );
+    const [taskRow] = input.beforeFreshAgentRunCommit
+      ? await scopedDb.select().from(schema.scheduledTasks).where(taskFilter).for("update").limit(1)
+      : await scopedDb.select().from(schema.scheduledTasks).where(taskFilter).limit(1);
     if (!taskRow) {
       throw new Error(`Scheduled task not found: ${input.taskId}`);
     }
@@ -16535,6 +16537,47 @@ export async function createScheduledTaskRun(
         acceptedExecutionSnapshot.task.executionDigest !== input.taskExecutionDigest)
     ) {
       throw new Error("scheduled task accepted execution binding changed");
+    }
+    let replayedProducerRow: typeof schema.scheduledTaskRuns.$inferSelect | undefined;
+    if (input.beforeFreshAgentRunCommit) {
+      if (actionKind !== "agent_turn" || !input.producerKey || !acceptedExecutionSnapshot) {
+        throw new Error(
+          "scheduled fresh agent run commit guard requires a producer-bound accepted execution",
+        );
+      }
+      [replayedProducerRow] = await scopedDb
+        .select()
+        .from(schema.scheduledTaskRuns)
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
+          ),
+        )
+        .limit(1);
+      if (replayedProducerRow) {
+        if (
+          replayedProducerRow.actionKind !== "agent_turn" ||
+          replayedProducerRow.taskId !== input.taskId ||
+          replayedProducerRow.triggerType !== input.triggerType
+        ) {
+          throw new Error("scheduled task run producer identity changed");
+        }
+        if (
+          replayedProducerRow.taskAuthorityRevision !== input.taskAuthorityRevision ||
+          replayedProducerRow.taskExecutionDigest !== input.taskExecutionDigest
+        ) {
+          throw new Error("scheduled task run execution binding changed");
+        }
+        if (
+          stableJson(replayedProducerRow.acceptedExecutionSnapshot) !==
+          stableJson(acceptedExecutionSnapshot)
+        ) {
+          throw new Error("scheduled task run accepted execution changed");
+        }
+      } else {
+        await input.beforeFreshAgentRunCommit(scopedDb);
+      }
     }
     const values = {
       ...(input.runId ? { id: input.runId } : {}),
@@ -16556,42 +16599,47 @@ export async function createScheduledTaskRun(
           )}::jsonb::text, 'UTF8'), 'sha256'), 'hex')`
         : null,
     };
-    let inserted: typeof schema.scheduledTaskRuns.$inferSelect | undefined;
-    if (actionKind === "agent_turn" && input.producerKey && acceptedExecutionSnapshot) {
-      const [created] = await rawRows<{ id: string }>(
-        scopedDb,
-        sql`select create_scheduled_agent_run_with_admission(
-          ${input.runId ?? randomUUID()}::uuid,
-          ${taskRow.accountId}::uuid,
-          ${taskRow.workspaceId}::uuid,
-          ${input.taskId}::uuid,
-          ${input.taskAuthorityRevision}::bigint,
-          ${input.taskExecutionDigest}::text,
-          ${input.triggerType}::text,
-          ${input.producerKey}::text,
-          ${input.scheduledAt?.toISOString() ?? null}::timestamptz,
-          ${(input.firedAt ?? new Date()).toISOString()}::timestamptz,
-          ${JSON.stringify(acceptedExecutionSnapshot)}::jsonb
-        ) as id`,
-      );
-      if (created) {
-        [inserted] = await scopedDb
-          .select()
-          .from(schema.scheduledTaskRuns)
-          .where(eq(schema.scheduledTaskRuns.id, created.id))
-          .limit(1);
+    let inserted = replayedProducerRow;
+    if (!inserted) {
+      if (actionKind === "agent_turn" && input.producerKey && acceptedExecutionSnapshot) {
+        const [created] = await rawRows<{ id: string }>(
+          scopedDb,
+          sql`select create_scheduled_agent_run_with_admission(
+            ${input.runId ?? randomUUID()}::uuid,
+            ${taskRow.accountId}::uuid,
+            ${taskRow.workspaceId}::uuid,
+            ${input.taskId}::uuid,
+            ${input.taskAuthorityRevision}::bigint,
+            ${input.taskExecutionDigest}::text,
+            ${input.triggerType}::text,
+            ${input.producerKey}::text,
+            ${input.scheduledAt?.toISOString() ?? null}::timestamptz,
+            ${(input.firedAt ?? new Date()).toISOString()}::timestamptz,
+            ${JSON.stringify(acceptedExecutionSnapshot)}::jsonb
+          ) as id`,
+        );
+        if (created) {
+          [inserted] = await scopedDb
+            .select()
+            .from(schema.scheduledTaskRuns)
+            .where(eq(schema.scheduledTaskRuns.id, created.id))
+            .limit(1);
+        }
+      } else {
+        [inserted] = input.producerKey
+          ? await scopedDb
+              .insert(schema.scheduledTaskRuns)
+              .values(values)
+              .onConflictDoNothing({
+                target: [
+                  schema.scheduledTaskRuns.workspaceId,
+                  schema.scheduledTaskRuns.producerKey,
+                ],
+                where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+              })
+              .returning()
+          : await scopedDb.insert(schema.scheduledTaskRuns).values(values).returning();
       }
-    } else {
-      [inserted] = input.producerKey
-        ? await scopedDb
-            .insert(schema.scheduledTaskRuns)
-            .values(values)
-            .onConflictDoNothing({
-              target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
-              where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
-            })
-            .returning()
-        : await scopedDb.insert(schema.scheduledTaskRuns).values(values).returning();
     }
     const [row] = inserted
       ? [inserted]

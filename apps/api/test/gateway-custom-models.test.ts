@@ -13,6 +13,7 @@ import {
   createAutomationSource,
   createConnection,
   createDb,
+  createScheduledTask,
   createSession,
   MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS,
   MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS,

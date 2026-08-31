@@ -2085,15 +2085,24 @@ const DeploymentRegistryBaseUrl = z
 
 const DeploymentRegistryProviderKind = z.enum(["api-key", "anonymous"]);
 
+const DeploymentRegistryModelSchema = RegistryModelSchema.safeExtend({
+  pricing: z.never().optional(),
+}).strict();
+
 const DeploymentRegistryProviderSchema = RegistryProviderSchema.safeExtend({
   kind: DeploymentRegistryProviderKind.default("api-key"),
   baseUrl: DeploymentRegistryBaseUrl,
+  models: z.array(DeploymentRegistryModelSchema).min(1),
   apiKey: z.never().optional(),
   apiKeyEnv: z.never().optional(),
   defaultHeaders: z.never().optional(),
   defaultQuery: z.never().optional(),
   publicDefaultHeaderNames: z.never().optional(),
   publicDefaultQueryNames: z.never().optional(),
+}).strict();
+
+const DeploymentGatewayCatalogModelSchema = GatewayCatalogModel.safeExtend({
+  pricing: z.never().optional(),
 }).strict();
 
 export const ModelCatalogDocument = z
@@ -2105,7 +2114,7 @@ export const ModelCatalogDocument = z
     defaultModel: z.string().min(1).optional(),
     builtInModels: z.array(z.string().min(1)).min(1),
     registryProviders: z.array(DeploymentRegistryProviderSchema).default([]),
-    gatewayModels: z.array(GatewayCatalogModel).default([]),
+    gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).default([]),
     openrouterModels: z.array(OpenRouterCatalogModel).default([]),
     modelNotes: z.record(z.string().min(1), ModelNote).default({}),
     billing: z.never().optional(),
@@ -2697,12 +2706,13 @@ function objectStorageConfiguredForWorkspaceArchives(settings: Settings): boolea
   }
 }
 
-function optional(name: string): string | undefined {
-  const value = process.env[name];
+function optionalEnvironmentValue(name: string, source: NodeJS.ProcessEnv): string | undefined {
+  const value = source[name];
   return value && value.trim().length > 0 ? value : undefined;
 }
 
-export function getSettings(): Settings {
+export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
+  const optional = (name: string): string | undefined => optionalEnvironmentValue(name, source);
   const modelCatalogSource = optional("OPENGENI_MODEL_CATALOG_SOURCE");
   const modelCostPolicyJson =
     optional("OPENGENI_MODEL_COST_POLICY_JSON") ??
@@ -3131,7 +3141,7 @@ export function getSettings(): Settings {
         : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
   };
-  validateSettings(settings);
+  validateSettings(settings, source);
   return settings;
 }
 
@@ -4173,7 +4183,10 @@ function builtinProviderLabel(settings: Pick<Settings, "openaiProvider">): strin
  * registry entry for the rest. Registry ids may not collide with the built-in
  * id — validateSettings rejects that at boot.
  */
-export function configuredProviders(settings: Settings): ResolvedModelProvider[] {
+export function configuredProviders(
+  settings: Settings,
+  source: NodeJS.ProcessEnv = process.env,
+): ResolvedModelProvider[] {
   const credentialSource = builtinCredentialSource(settings);
   const builtin: ResolvedModelProvider = {
     id: builtinProviderId(settings),
@@ -4204,7 +4217,7 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
       wireProfile: provider.wireProfile,
       builtin: false,
       baseUrl: provider.baseUrl,
-      apiKey: resolveProviderApiKey(provider),
+      apiKey: resolveProviderApiKey(provider, source),
       defaultQuery: provider.defaultQuery,
       defaultHeaders: provider.defaultHeaders,
       publicDefaultQueryNames: provider.publicDefaultQueryNames,
@@ -4440,10 +4453,13 @@ function assertUniqueModelIdentities(models: ConfiguredModel[]): void {
  * default false). De-duplicated by id (first wins) so the default model stays
  * first and the built-in allow-list takes precedence over registry entries.
  */
-export function configuredModels(settings: Settings): ConfiguredModel[] {
+export function configuredModels(
+  settings: Settings,
+  source: NodeJS.ProcessEnv = process.env,
+): ConfiguredModel[] {
   const builtinId = builtinProviderId(settings);
   const builtinLabel = builtinProviderLabel(settings);
-  const providers = configuredProviders(settings);
+  const providers = configuredProviders(settings, source);
   const providerById = new Map(providers.map((provider) => [provider.id, provider]));
   const pricingSchedules = configuredModelPricingSchedules(settings);
   // The built-in (OpenAI/Azure) provider must NEVER claim a registry-namespaced
@@ -5921,7 +5937,7 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
   );
 }
 
-function validateSettings(settings: Settings): void {
+function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   if (settings.goalIdleBackoffMs.some((delayMs) => delayMs > settings.goalIdleBackoffMaxMs)) {
     throw new Error(
@@ -6524,7 +6540,7 @@ function validateSettings(settings: Settings): void {
     );
   }
   if (settings.modelCatalogSource === "code") {
-    validateModelCatalogSettings(settings);
+    validateModelCatalogSettings(settings, source);
   } else {
     // Database mode resolves membership asynchronously. Only the independent
     // deployment funding JSON is parsed here; env catalog and note inputs are
@@ -6534,7 +6550,10 @@ function validateSettings(settings: Settings): void {
 }
 
 /** Validate one fully resolved, secret-bearing executable catalog. */
-export function validateModelCatalogSettings(settings: Settings): ConfiguredModel[] {
+export function validateModelCatalogSettings(
+  settings: Settings,
+  source: NodeJS.ProcessEnv = process.env,
+): ConfiguredModel[] {
   const costPolicy = parseModelCostPolicyJson(settings.modelCostPolicyJson);
   const notes = parseModelNotesJson(settings.modelNotesJson);
   const registryProviders = parseModelProvidersJson(settings.modelProvidersJson);
@@ -6569,7 +6588,7 @@ export function validateModelCatalogSettings(settings: Settings): ConfiguredMode
     if (
       provider.kind !== "codex-subscription" &&
       provider.kind !== "anonymous" &&
-      !resolveProviderApiKey(provider)
+      !resolveProviderApiKey(provider, source)
     ) {
       throw new Error(
         `OPENGENI_MODEL_PROVIDERS_JSON provider ${provider.id} requires a resolvable API key (set apiKey or apiKeyEnv)`,

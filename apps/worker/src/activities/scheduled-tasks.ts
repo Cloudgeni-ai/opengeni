@@ -20,6 +20,7 @@ import {
   requireOpenGeniSlackBotConnection,
   resolveWorkspaceCatalogSettings,
   resolveSessionToolPolicy,
+  isWorkspaceGatewayCustomModelId,
   scheduledSlackBotConnectionId,
   swapActiveSandbox,
 } from "@opengeni/core";
@@ -51,6 +52,7 @@ import {
   getVariableSet,
   isCodexBilledModel,
   initializeSessionStartAtomically,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
   materializeScheduledTaskReusableSessionFromRun,
   listEnabledMcpCapabilityServerIds,
   listInstalledApiIntegrationServerIdsForDelegations,
@@ -69,7 +71,11 @@ import {
   withSessionActivityRlsContext,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { resolveFirstPartyMcpToolPolicy, resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import {
+  resolveFirstPartyMcpToolPolicy,
+  resolveTurnExecutionPolicyV1,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+} from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import {
   assertReusableSessionRevivable,
@@ -770,6 +776,22 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const acceptedModel = targetSessionExecution?.model ?? model;
       const acceptedReasoningEffort = targetSessionExecution?.reasoningEffort ?? reasoningEffort;
       const acceptedLatencyMode = targetSessionExecution?.latencyMode ?? "standard";
+      const beforeFreshAgentRunCommit =
+        generatedTarget && isWorkspaceGatewayCustomModelId(settings, acceptedModel)
+          ? async (tx: Database): Promise<void> => {
+              const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+                upstreamModelId: acceptedModel.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length),
+              });
+              if (!active) {
+                throw new ScheduledRunTerminalAuthorityError(
+                  "scheduled_model_unavailable",
+                  `model is not available: ${acceptedModel}`,
+                );
+              }
+            }
+          : undefined;
       const turnExecutionPolicy: TurnExecutionPolicyV1 = resolveTurnExecutionPolicyV1(settings, {
         modelId: acceptedModel,
         requestedModelId: generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
@@ -884,6 +906,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           producerKey: stableProducerKey,
           scheduledAt: null,
           acceptedExecutionSnapshot: acceptedExecution,
+          ...(beforeFreshAgentRunCommit ? { beforeFreshAgentRunCommit } : {}),
         });
         await recordScheduledTaskFiredUsage(dispatchDb, acceptedExecution, run);
         if (run.status === "failed" && run.error === "scheduled_authority_exhausted") {
@@ -1622,6 +1645,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       } catch (error) {
         if (error instanceof IncidentTelemetryPreflightBlockedError) {
           return { action: "blocked", reason: error.reason };
+        }
+        const terminalError = scheduledRunRecoveryTerminalError(error);
+        if (terminalError?.code === "scheduled_model_unavailable") {
+          return scheduledRunTerminalResult(terminalError.code);
         }
         throw error;
       }

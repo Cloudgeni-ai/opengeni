@@ -80,14 +80,24 @@ mock.module("@/components/ui/confirm-dialog", () => ({
   ConfirmDialog: ({
     open,
     confirmLabel,
+    onOpenChange,
     onConfirm,
   }: {
     open: boolean;
     confirmLabel: string;
+    onOpenChange: (open: boolean) => void;
     onConfirm: () => Promise<void | boolean>;
   }) =>
     open ? (
-      <button type="button" onClick={() => void onConfirm()}>
+      <button
+        type="button"
+        onClick={() => {
+          void (async () => {
+            const result = await onConfirm();
+            if (result !== false) onOpenChange(false);
+          })();
+        }}
+      >
         {confirmLabel}
       </button>
     ) : null,

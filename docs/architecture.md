@@ -713,16 +713,18 @@ tool/connection delegations. Recovery reuses that accepted truth rather than
 sampling mutable workspace defaults again.
 
 A fresh session selecting a workspace Gateway custom model, an existing session
-explicitly switching from another model, or a new/materially reaccepted
-scheduled task, automation trigger, or PR-review binding rechecks that exact
-active slug under the model catalog's shared transaction lock before the
-session, turn, task, trigger, or binding can commit. Adapter-rendered automation
-templates are the acceptance authority, so Pack parameters cannot hide a model
-override from this gate. Deployment-curated workspace Gateway models use the
-same public prefix but no mutable custom row, so they do not enter this fence.
-Custom-model retirement holds the exclusive counterpart; already accepted
-work, same-model/existing-session continuations, and administrative-only task,
-trigger, or binding edits use retained definitions instead of reopening
+explicitly switching from another model, a new/materially reaccepted scheduled
+task, automation trigger, or PR-review binding, or a fresh generated-session
+scheduled occurrence rechecks that exact active slug under the model catalog's
+shared transaction lock before the session, turn, task, trigger, binding, or
+accepted occurrence can commit. Adapter-rendered automation templates are the
+acceptance authority, so Pack parameters cannot hide a model override from this
+gate. Deployment-curated workspace Gateway models use the same public prefix
+but no mutable custom row, so they do not enter this fence. Custom-model
+retirement holds the exclusive counterpart; already accepted work, exact
+occurrence replay, same-model/existing-session continuations, and
+administrative-only task, trigger, or binding edits use retained definitions
+instead of reopening
 fresh-selection authority. A committed keyed session shell is also replayed as
 retained before active-only catalog checks so initialization remains repairable.
 

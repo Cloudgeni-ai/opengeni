@@ -1788,7 +1788,7 @@ const HELM_APPLICATION_DRAIN_ARGS = [
   "--set migrations.enabled=false",
 ].join(" ");
 
-export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0383_model_catalog_and_gateway_custom_models";
+export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0387_model_catalog_and_gateway_custom_models";
 
 const MAINTENANCE_IMAGE_DIGEST_ENV = {
   api: "OPENGENI_API_IMAGE_DIGEST",
@@ -1912,7 +1912,7 @@ function deployCommands(
       : "";
     const drainUpgradeCommand =
       `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} ` +
-      `${HELM_APPLICATION_DRAIN_ARGS} --wait --timeout 10m`;
+      `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageValuesArg} --wait --timeout 10m`;
     return [
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
       "bun run deployment:single-node-secrets -- --out-dir .agent/generated/single-node/secrets",
@@ -1928,7 +1928,7 @@ function deployCommands(
         drainUpgradeCommand,
         env,
       }),
-      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} --wait --timeout 15m`,
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageValuesArg} --wait --timeout 15m`,
     ];
   }
   if (contract.profile === "local-kubernetes") {
@@ -2367,7 +2367,7 @@ function planNotes(
   }
   if (requestedMaintenanceCutover(env)) {
     notes.push(
-      `This plan includes the explicit ${MODEL_CATALOG_MAINTENANCE_CUTOVER} application drain; keep the application stopped until migration 0383 and the final exact-digest upgrade succeed.`,
+      `This plan includes the explicit ${MODEL_CATALOG_MAINTENANCE_CUTOVER} application drain; keep the application stopped until migration 0387 and the final exact-digest upgrade succeed.`,
     );
   }
   return notes;

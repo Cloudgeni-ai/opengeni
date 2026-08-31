@@ -2,16 +2,16 @@
 
 Status: implementation specification captured on 2026-08-27.
 
-Implementation correction on 2026-08-28: migration 0383 is maintenance-only.
+Implementation correction on 2026-08-28: migration 0387 is maintenance-only.
 Although its tables are additive, it changes OpenGeni's exact runtime-posture
-table/grant contract, so already-running pre-0369 processes become unready after
+table/grant contract, so already-running pre-0387 processes become unready after
 commit. The rolling-migration requirements in the original specification are
 superseded by the drained procedure in `docs/deployment.md`.
 
 Repository observation at capture time: this checkout already contained
 `0364_workspace_learning_policy_snapshot_lock_order.sql`. The migration was subsequently
 renumbered against the eventual PR base to
-`0383_model_catalog_and_gateway_custom_models.sql` with
+`0387_model_catalog_and_gateway_custom_models.sql` with
 `bun run migration:renumber --next`. The original next-free-ordinal guidance below is retained as
 part of the supplied specification.
 

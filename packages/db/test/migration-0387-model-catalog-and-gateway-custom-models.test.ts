@@ -22,7 +22,7 @@ import {
 } from "../src/runtime-posture";
 
 const migrationUrl = new URL(
-  "../drizzle/0383_model_catalog_and_gateway_custom_models.sql",
+  "../drizzle/0387_model_catalog_and_gateway_custom_models.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -31,9 +31,9 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0383-model-catalog");
+  shared = await acquireSharedTestDatabase("migration-0384-model-catalog");
   if (!shared && requireRealDatabase) {
-    throw new Error("migration 0383 requires real PostgreSQL");
+    throw new Error("migration 0387 requires real PostgreSQL");
   }
   if (shared) client = createDb(shared.appUrl, { max: 8 });
 }, 180_000);
@@ -43,7 +43,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0383 model catalog and Gateway custom models", () => {
+describe("migration 0387 model catalog and Gateway custom models", () => {
   test("pins maintenance posture, runtime drain, least privilege, and secret-free storage", async () => {
     const migration = await readFile(migrationUrl, "utf8");
     expect(migration).toContain("-- deployment-mode: maintenance");
@@ -105,14 +105,14 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
   });
 
   test("uses the rotation role list only for drain detection", async () => {
-    const rotation = await acquireSharedTestDatabase("migration-0381-role-rotation");
+    const rotation = await acquireSharedTestDatabase("migration-0384-role-rotation");
     if (!rotation) {
-      if (requireRealDatabase) throw new Error("migration 0381 requires real PostgreSQL");
+      if (requireRealDatabase) throw new Error("migration 0387 requires real PostgreSQL");
       return;
     }
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
-    const oldRole = `og_381_old_${suffix}`;
-    const newRole = `og_381_new_${suffix}`;
+    const oldRole = `og_384_old_${suffix}`;
+    const newRole = `og_384_new_${suffix}`;
     const newPassword = randomUUID().replaceAll("-", "");
 
     const privileges = async () => {
@@ -164,7 +164,7 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
         DROP TABLE deployment_model_catalog;
         DROP INDEX session_command_receipts_prompt_actor_operation_idx;
         DELETE FROM schema_migrations
-        WHERE name = '0381_model_catalog_and_gateway_custom_models.sql';
+        WHERE name = '0387_model_catalog_and_gateway_custom_models.sql';
       `);
 
       await migrate(rotation.adminUrl, undefined, {
@@ -244,7 +244,7 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
         upstreamModelId: "anthropic|claude",
         operationId: randomUUID(),
         requestHash: "1".repeat(64),
-        createdBySubjectId: "user:migration-0383",
+        createdBySubjectId: "user:migration-0384",
       }),
     ).rejects.toThrow();
     const created = await createWorkspaceGatewayCustomModel(client.db, {
@@ -253,7 +253,7 @@ describe("migration 0383 model catalog and Gateway custom models", () => {
       upstreamModelId: "anthropic/claude-sonnet-4.6",
       operationId: randomUUID(),
       requestHash: "2".repeat(64),
-      createdBySubjectId: "user:migration-0383",
+      createdBySubjectId: "user:migration-0384",
     });
     if (!created) throw new Error("custom model create unexpectedly conflicted");
     expect(created.upstreamModelId).toBe("anthropic/claude-sonnet-4.6");
