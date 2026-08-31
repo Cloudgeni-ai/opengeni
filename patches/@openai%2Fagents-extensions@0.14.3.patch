@@ -279,6 +279,174 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..ed17d24f7090696b15fadc826d719d80
  }
  function validateOptions(options) {
      readE2BWorkspacePersistence(options.workspacePersistence);
+diff --git a/dist/sandbox/modal/sandbox.d.ts b/dist/sandbox/modal/sandbox.d.ts
+index 0d118abe05044cca502e167daaee6eb10b46793b..d36d1c9a82d3b38f5bd0cfdd6865aec68e27b00c 100644
+--- a/dist/sandbox/modal/sandbox.d.ts
++++ b/dist/sandbox/modal/sandbox.d.ts
+@@ -115,6 +115,8 @@ export interface ModalSandboxClientOptions extends SandboxClientOptions {
+     env?: Record<string, string>;
+     timeoutMs?: number;
+     idleTimeoutMs?: number;
++    cpu?: number;
++    memoryMiB?: number;
+     gpu?: string;
+     exposedPorts?: number[];
+     environment?: string;
+@@ -139,6 +141,8 @@ export interface ModalSandboxSessionState extends SandboxSessionState {
+     environment: Record<string, string>;
+     timeoutMs?: number;
+     idleTimeoutMs?: number;
++    cpu?: number;
++    memoryMiB?: number;
+     gpu?: string;
+     configuredExposedPorts?: number[];
+     modalEnvironment?: string;
+diff --git a/dist/sandbox/modal/sandbox.js b/dist/sandbox/modal/sandbox.js
+index ca96b807fe5661ee9e60fbddf145fa1150a19cd0..04c49fdad333abfa96fb936345e1fbc2bc22367f 100644
+--- a/dist/sandbox/modal/sandbox.js
++++ b/dist/sandbox/modal/sandbox.js
+@@ -525,6 +525,10 @@ class ModalSandboxSession {
+             ...(typeof this.state.idleTimeoutMs === 'number'
+                 ? { idleTimeoutMs: this.state.idleTimeoutMs }
+                 : {}),
++            ...(typeof this.state.cpu === 'number' ? { cpu: this.state.cpu } : {}),
++            ...(typeof this.state.memoryMiB === 'number'
++                ? { memoryMiB: this.state.memoryMiB }
++                : {}),
+             ...(this.state.gpu ? { gpu: this.state.gpu } : {}),
+             ...(this.state.configuredExposedPorts
+                 ? { encryptedPorts: this.state.configuredExposedPorts }
+@@ -816,6 +820,12 @@ class ModalSandboxClient {
+                     ...(typeof resolvedOptions.idleTimeoutMs === 'number'
+                         ? { idleTimeoutMs: resolvedOptions.idleTimeoutMs }
+                         : {}),
++                    ...(typeof resolvedOptions.cpu === 'number'
++                        ? { cpu: resolvedOptions.cpu }
++                        : {}),
++                    ...(typeof resolvedOptions.memoryMiB === 'number'
++                        ? { memoryMiB: resolvedOptions.memoryMiB }
++                        : {}),
+                     ...(resolvedOptions.gpu ? { gpu: resolvedOptions.gpu } : {}),
+                     ...(resolvedOptions.exposedPorts
+                         ? { encryptedPorts: resolvedOptions.exposedPorts }
+@@ -838,6 +848,8 @@ class ModalSandboxClient {
+                 environment,
+                 timeoutMs: resolvedOptions.timeoutMs,
+                 idleTimeoutMs: resolvedOptions.idleTimeoutMs,
++                cpu: resolvedOptions.cpu,
++                memoryMiB: resolvedOptions.memoryMiB,
+                 gpu: resolvedOptions.gpu,
+                 configuredExposedPorts: resolvedOptions.exposedPorts,
+                 modalEnvironment: resolvedOptions.environment,
+@@ -894,6 +906,8 @@ class ModalSandboxClient {
+             snapshotFilesystemRestoreTimeoutMs: (0, shared_1.readOptionalNumber)(state, 'snapshotFilesystemRestoreTimeoutMs'),
+             timeoutMs: (0, shared_1.readOptionalNumber)(state, 'timeoutMs'),
+             idleTimeoutMs: (0, shared_1.readOptionalNumber)(state, 'idleTimeoutMs'),
++            cpu: (0, shared_1.readOptionalNumber)(state, 'cpu'),
++            memoryMiB: (0, shared_1.readOptionalNumber)(state, 'memoryMiB'),
+             gpu: (0, shared_1.readOptionalString)(state, 'gpu'),
+             configuredExposedPorts: (0, shared_1.readOptionalNumberArray)(state.configuredExposedPorts),
+             modalEnvironment: (0, shared_1.readOptionalString)(state, 'modalEnvironment'),
+@@ -923,6 +937,8 @@ class ModalSandboxClient {
+             snapshotFilesystemRestoreTimeoutMs: state.snapshotFilesystemRestoreTimeoutMs,
+             timeoutMs: state.timeoutMs,
+             idleTimeoutMs: state.idleTimeoutMs,
++            cpu: state.cpu,
++            memoryMiB: state.memoryMiB,
+             gpu: state.gpu,
+             exposedPorts: state.configuredExposedPorts,
+             environment: state.modalEnvironment ?? this.options.environment,
+@@ -1275,6 +1291,8 @@ function resolveOptions(defaults, overrides) {
+         },
+         timeoutMs: overrides?.timeoutMs ?? defaults.timeoutMs,
+         idleTimeoutMs: overrides?.idleTimeoutMs ?? defaults.idleTimeoutMs,
++        cpu: overrides?.cpu ?? defaults.cpu,
++        memoryMiB: overrides?.memoryMiB ?? defaults.memoryMiB,
+         gpu: overrides?.gpu ?? defaults.gpu,
+         exposedPorts: overrides?.exposedPorts ?? defaults.exposedPorts,
+         environment: overrides?.environment ?? defaults.environment,
+@@ -1320,6 +1338,8 @@ function validateOptions(options) {
+         ],
+         ['timeoutMs', options.timeoutMs],
+         ['idleTimeoutMs', options.idleTimeoutMs],
++        ['cpu', options.cpu],
++        ['memoryMiB', options.memoryMiB],
+     ]) {
+         if (value !== undefined &&
+             (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
+diff --git a/dist/sandbox/modal/sandbox.mjs b/dist/sandbox/modal/sandbox.mjs
+index da2ef8d7ae856e81b0903a0d09f0c45a7e0b44b7..c6d13f1cafefb99bac4ec6e7a806dbdb7f602d1b 100644
+--- a/dist/sandbox/modal/sandbox.mjs
++++ b/dist/sandbox/modal/sandbox.mjs
+@@ -487,6 +487,10 @@ export class ModalSandboxSession {
+             ...(typeof this.state.idleTimeoutMs === 'number'
+                 ? { idleTimeoutMs: this.state.idleTimeoutMs }
+                 : {}),
++            ...(typeof this.state.cpu === 'number' ? { cpu: this.state.cpu } : {}),
++            ...(typeof this.state.memoryMiB === 'number'
++                ? { memoryMiB: this.state.memoryMiB }
++                : {}),
+             ...(this.state.gpu ? { gpu: this.state.gpu } : {}),
+             ...(this.state.configuredExposedPorts
+                 ? { encryptedPorts: this.state.configuredExposedPorts }
+@@ -777,6 +781,12 @@ export class ModalSandboxClient {
+                     ...(typeof resolvedOptions.idleTimeoutMs === 'number'
+                         ? { idleTimeoutMs: resolvedOptions.idleTimeoutMs }
+                         : {}),
++                    ...(typeof resolvedOptions.cpu === 'number'
++                        ? { cpu: resolvedOptions.cpu }
++                        : {}),
++                    ...(typeof resolvedOptions.memoryMiB === 'number'
++                        ? { memoryMiB: resolvedOptions.memoryMiB }
++                        : {}),
+                     ...(resolvedOptions.gpu ? { gpu: resolvedOptions.gpu } : {}),
+                     ...(resolvedOptions.exposedPorts
+                         ? { encryptedPorts: resolvedOptions.exposedPorts }
+@@ -799,6 +809,8 @@ export class ModalSandboxClient {
+                 environment,
+                 timeoutMs: resolvedOptions.timeoutMs,
+                 idleTimeoutMs: resolvedOptions.idleTimeoutMs,
++                cpu: resolvedOptions.cpu,
++                memoryMiB: resolvedOptions.memoryMiB,
+                 gpu: resolvedOptions.gpu,
+                 configuredExposedPorts: resolvedOptions.exposedPorts,
+                 modalEnvironment: resolvedOptions.environment,
+@@ -855,6 +867,8 @@ export class ModalSandboxClient {
+             snapshotFilesystemRestoreTimeoutMs: readOptionalNumber(state, 'snapshotFilesystemRestoreTimeoutMs'),
+             timeoutMs: readOptionalNumber(state, 'timeoutMs'),
+             idleTimeoutMs: readOptionalNumber(state, 'idleTimeoutMs'),
++            cpu: readOptionalNumber(state, 'cpu'),
++            memoryMiB: readOptionalNumber(state, 'memoryMiB'),
+             gpu: readOptionalString(state, 'gpu'),
+             configuredExposedPorts: readOptionalNumberArray(state.configuredExposedPorts),
+             modalEnvironment: readOptionalString(state, 'modalEnvironment'),
+@@ -884,6 +898,8 @@ export class ModalSandboxClient {
+             snapshotFilesystemRestoreTimeoutMs: state.snapshotFilesystemRestoreTimeoutMs,
+             timeoutMs: state.timeoutMs,
+             idleTimeoutMs: state.idleTimeoutMs,
++            cpu: state.cpu,
++            memoryMiB: state.memoryMiB,
+             gpu: state.gpu,
+             exposedPorts: state.configuredExposedPorts,
+             environment: state.modalEnvironment ?? this.options.environment,
+@@ -1235,6 +1251,8 @@ function resolveOptions(defaults, overrides) {
+         },
+         timeoutMs: overrides?.timeoutMs ?? defaults.timeoutMs,
+         idleTimeoutMs: overrides?.idleTimeoutMs ?? defaults.idleTimeoutMs,
++        cpu: overrides?.cpu ?? defaults.cpu,
++        memoryMiB: overrides?.memoryMiB ?? defaults.memoryMiB,
+         gpu: overrides?.gpu ?? defaults.gpu,
+         exposedPorts: overrides?.exposedPorts ?? defaults.exposedPorts,
+         environment: overrides?.environment ?? defaults.environment,
+@@ -1280,6 +1298,8 @@ function validateOptions(options) {
+         ],
+         ['timeoutMs', options.timeoutMs],
+         ['idleTimeoutMs', options.idleTimeoutMs],
++        ['cpu', options.cpu],
++        ['memoryMiB', options.memoryMiB],
+     ]) {
+         if (value !== undefined &&
+             (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
 diff --git a/dist/sandbox/runloop/sandbox.d.ts b/dist/sandbox/runloop/sandbox.d.ts
 index 99e9131d49c18987c997adf493795a648cd8f261..7484dd5d704ca3b22b095eaffdf43b2823258eb1 100644
 --- a/dist/sandbox/runloop/sandbox.d.ts

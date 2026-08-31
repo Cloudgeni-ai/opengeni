@@ -259,7 +259,10 @@ AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORA
 For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
 registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
 `OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot and remains the logical base
-for every Rig. A verified Rig provider image may accelerate physical cold create,
+image identity for every Rig. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
+`OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
+memory for every new box and remain stable through resume and replacement.
+A verified Rig provider image may accelerate physical cold create,
 but never replaces that logical lease identity. V2 capability Packs select a Rig
 for setup/check composition and cannot require an explicit sandbox image while
 Rig image overrides are disabled. Rig-less pre-v2 Pack rows retain their
