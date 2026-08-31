@@ -38,6 +38,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -114,6 +115,7 @@ import {
   notifySessionAttentionChanged,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
+  shouldProjectActiveSessionRead,
 } from "@/lib/session-attention";
 import {
   mergeSessionContextProjection,
@@ -204,7 +206,6 @@ export function SessionRoute({
     loadNewer,
     loadingOldest,
     loadOldest,
-    loadingLatest,
     lastSequence: renderedThroughSequence,
     jumpToLatest,
     error: streamError,
@@ -330,6 +331,7 @@ export function SessionRoute({
     sessionEventFeedStore,
   } = context;
   const acknowledgedProjectionRef = useRef<string | null>(null);
+  const confirmedProjectionRef = useRef<string | null>(null);
   const retriedProjectionRef = useRef<string | null>(null);
   const [foreground, setForeground] = useState(() => ({
     documentVisible: document.visibilityState === "visible",
@@ -393,92 +395,135 @@ export function SessionRoute({
       document.removeEventListener("visibilitychange", reconcileForeground);
     };
   }, []);
-  useEffect(() => {
-    const projectionKey = session
-      ? sessionReadProjectionKey(session.id, renderedThroughSequence)
-      : null;
-    const unreadProjection = session
-      ? {
-          ...session,
-          unread:
-            (session.unread || renderedThroughSequence > session.lastSequence) &&
-            projectionKey !== acknowledgedProjectionRef.current,
-        }
-      : null;
-    const liveTipLoaded =
-      !initialLoading && !hasNewer && !loadingNewer && !loadingOldest && !loadingLatest;
+  const projectSessionAttention = useCallback(
+    (projection: Parameters<typeof notifySessionAttentionChanged>[0]) => {
+      notifySessionAttentionChanged(projection);
+      setContextSession((current) =>
+        current?.id === projection.id
+          ? applySessionAttentionProjection(current, projection)
+          : current,
+      );
+    },
+    [setContextSession],
+  );
+  const readThroughSequence = session
+    ? Math.max(session.lastSequence, renderedThroughSequence)
+    : renderedThroughSequence;
+  const activeReadProjectionKey = session
+    ? sessionReadProjectionKey(session.id, readThroughSequence)
+    : null;
+  const routeUnreadProjection = useMemo(
+    () =>
+      session
+        ? {
+            ...session,
+            unread: session.unread || readThroughSequence > session.lastSequence,
+          }
+        : null,
+    [readThroughSequence, session],
+  );
+  useLayoutEffect(() => {
+    if (!session || !activeReadProjectionKey) return;
     if (
-      !session ||
-      !projectionKey ||
-      !shouldAcknowledgeActiveSession({
+      confirmedProjectionRef.current === activeReadProjectionKey ||
+      !shouldProjectActiveSessionRead({
         activeSessionId: sessionId,
         workspaceId,
-        session: unreadProjection,
-        liveTipLoaded,
+        session: routeUnreadProjection,
         ...foreground,
       })
     ) {
       return;
     }
-    const targetSession = session;
-    let cancelled = false;
-    const timer = window.setTimeout(() => {
-      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
-      const acceptedTransition = captureWorkspaceInvocation(workspaceId);
-      if (!acceptedTransition) return;
-      acknowledgedProjectionRef.current = projectionKey;
-      void client
-        .updateSessionAttention(workspaceId, targetSession.id, {
-          unread: false,
-          acknowledgedThroughSequence: renderedThroughSequence,
-        })
-        .then((updated) => {
-          if (cancelled || !ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
-          // The rail owns separately polled page objects. Keep this exact
-          // frontier result there so a stale list poll cannot resurrect or
-          // prematurely clear the unread dot.
-          notifySessionAttentionChanged(updated);
-          setContextSession((current) =>
-            current?.id === updated.id
-              ? applySessionAttentionProjection(current, updated)
-              : current,
-          );
-        })
-        .catch(() => {
-          // Retry one transient failure for this exact frontier. Keeping the
-          // receipt after the second failure prevents a permanent 4xx/5xx from
-          // becoming an unbounded request and log loop.
-          if (
-            !cancelled &&
-            ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
-            acknowledgedProjectionRef.current === projectionKey &&
-            retriedProjectionRef.current !== projectionKey
-          ) {
-            retriedProjectionRef.current = projectionKey;
-            acknowledgedProjectionRef.current = null;
-            setAttentionRetryRevision((revision) => revision + 1);
-          }
-        });
-    }, 750);
+
+    const optimisticProjection = {
+      id: session.id,
+      workspaceId: session.workspaceId,
+      unread: false,
+      attentionVersion: session.attentionVersion,
+      lastSequence: readThroughSequence,
+    };
+    projectSessionAttention(optimisticProjection);
+  }, [
+    activeReadProjectionKey,
+    foreground,
+    projectSessionAttention,
+    readThroughSequence,
+    routeUnreadProjection,
+    session,
+    sessionId,
+    workspaceId,
+  ]);
+  useEffect(() => {
+    const projectionKey = activeReadProjectionKey;
+    if (
+      !session ||
+      !projectionKey ||
+      acknowledgedProjectionRef.current === projectionKey ||
+      !shouldAcknowledgeActiveSession({
+        activeSessionId: sessionId,
+        workspaceId,
+        session: routeUnreadProjection,
+        ...foreground,
+      })
+    ) {
+      return;
+    }
+    let active = true;
+    const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    acknowledgedProjectionRef.current = projectionKey;
+    void client
+      .updateSessionAttention(workspaceId, session.id, {
+        unread: false,
+        acknowledgedThroughSequence: readThroughSequence,
+      })
+      .then((updated) => {
+        if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+        confirmedProjectionRef.current = projectionKey;
+        // The rail owns separately polled page objects. Keep this exact
+        // frontier result there so a stale list poll cannot resurrect or
+        // prematurely clear the unread dot.
+        projectSessionAttention(updated);
+      })
+      .catch(() => {
+        // Retry one transient failure for this exact frontier. Keeping the
+        // receipt after the second failure prevents a permanent 4xx/5xx from
+        // becoming an unbounded request and log loop.
+        if (
+          active &&
+          ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
+          acknowledgedProjectionRef.current === projectionKey &&
+          retriedProjectionRef.current !== projectionKey
+        ) {
+          retriedProjectionRef.current = projectionKey;
+          acknowledgedProjectionRef.current = null;
+          setAttentionRetryRevision((revision) => revision + 1);
+          return;
+        }
+        // A transient failure must never resurrect a dot the user already
+        // cleared. Release the attempt receipt so a later focus/navigation
+        // can retry this exact frontier; a reload still reads durable truth
+        // if both attempts failed.
+        if (acknowledgedProjectionRef.current === projectionKey) {
+          acknowledgedProjectionRef.current = null;
+        }
+      });
     return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
+      active = false;
     };
   }, [
     attentionRetryRevision,
+    activeReadProjectionKey,
     captureWorkspaceInvocation,
     client,
     foreground,
-    hasNewer,
-    initialLoading,
-    loadingLatest,
-    loadingNewer,
-    loadingOldest,
     ownsWorkspaceInvocation,
-    renderedThroughSequence,
+    projectSessionAttention,
+    readThroughSequence,
+    routeUnreadProjection,
     session,
     sessionId,
-    setContextSession,
     workspaceId,
   ]);
   useEffect(() => {

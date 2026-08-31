@@ -49,6 +49,7 @@ import {
   recordModelInputTokens,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
+  recordSandboxSharedPreparation,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
 } from "../../observability-metrics";
@@ -121,6 +122,7 @@ import {
   requireAgentStreamFinalOutput,
 } from "./quiescence";
 import { waitForTurnOperation } from "./sandbox-provision";
+import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 
 import type { CompactionSummarizer } from "../context-compaction";
 import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
@@ -213,6 +215,7 @@ export type TurnStreamAttemptDeps = {
   turn: { executionGeneration: number; model: string };
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
+  attachPendingUpdatesAfterOpenSuffix: () => Promise<boolean>;
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]>;
   resolvedModel: ReturnType<ActivityServices["runtime"]["resolveTurnModel"]>;
   providerApi: HistoryProviderApi;
@@ -237,6 +240,16 @@ export type TurnStreamAttemptDeps = {
   runCredentialResolver: BoundRunCredentialResolver | null;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
 };
+
+export async function attachPendingUpdatesBeforePreparingModelInput(input: {
+  shouldAttach: boolean;
+  attachPendingUpdates: () => Promise<boolean>;
+  prepareModelInput: () => Promise<void>;
+}): Promise<boolean> {
+  if (input.shouldAttach && !(await input.attachPendingUpdates())) return false;
+  await input.prepareModelInput();
+  return true;
+}
 
 export async function runTurnStreamAttempt(
   deps: TurnStreamAttemptDeps,
@@ -294,6 +307,7 @@ export async function runTurnStreamAttempt(
     turn,
     trigger,
     humanInputResume,
+    attachPendingUpdatesAfterOpenSuffix,
     agent,
     resolvedModel,
     providerApi,
@@ -555,12 +569,13 @@ export async function runTurnStreamAttempt(
     const ownedEstablished =
       sandboxState.resolvedSandbox?.established ?? sandboxState.lazyOwnedSandbox;
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
+      const eagerResolvedSandbox = sandboxState.resolvedSandbox;
       // Eager owned sessions must settle the exact platform-setup provider
       // promise before the long model stream starts; otherwise one admission
       // would remain in flight for the entire turn and suppress every
       // heartbeat capture. Lazy setup already runs under the same wrapper in
       // its first-operation provisioner above.
-      if (sandboxState.resolvedSandbox && !sandboxState.lazyOwnedSandbox && ownedEstablished) {
+      if (eagerResolvedSandbox && !sandboxState.lazyOwnedSandbox && ownedEstablished) {
         const ownedSandboxSetupStartedAt = performance.now();
         let ownedSandboxSetupOutcome: "completed" | "failed" = "completed";
         try {
@@ -573,13 +588,13 @@ export async function runTurnStreamAttempt(
           await attachRunCredentialRenewal(
             eagerSetupSession as RunCredentialCommandSession,
             initialRunCredentialMaterial,
-            sandboxState.resolvedSandbox,
+            eagerResolvedSandbox,
           );
           const eagerCredentialSetupSession = initialRunCredentialMaterial
             ? withRunCredentialsSession(eagerSetupSession as object, input.sessionId)
             : eagerSetupSession;
           await runWorkspaceMutationForSandbox(
-            sandboxState.resolvedSandbox,
+            eagerResolvedSandbox,
             "eagerOwnedSandboxSetup",
             async () =>
               await runOwnedSandboxSetup(
@@ -604,6 +619,24 @@ export async function runTurnStreamAttempt(
                           eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
                             eventing.toolCancellationFenceRef.current,
                           ),
+                      }
+                    : {}),
+                  ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
+                    ? {
+                        coordinateSharedRigSetup: createSharedRigSetupCoordinator({
+                          db,
+                          accountId: input.accountId,
+                          workspaceId: input.workspaceId,
+                          sandboxGroupId: sandboxState.sandboxGroupId,
+                          attemptId: input.attemptId,
+                          holderId: sandboxState.sandboxHolderId,
+                          sandbox: eagerResolvedSandbox,
+                          ...(runtimeCancellationSignal
+                            ? { signal: runtimeCancellationSignal }
+                            : {}),
+                          observe: (measurement) =>
+                            recordSandboxSharedPreparation(observability, measurement),
+                        }),
                       }
                     : {}),
                 },
@@ -1553,8 +1586,16 @@ export async function runTurnStreamAttempt(
     control.activityStatus = "requires_action";
     return claimedResult({ status: "requires_action" });
   }
-
-  await prepareRunAttemptInput();
+  if (
+    !(await attachPendingUpdatesBeforePreparingModelInput({
+      shouldAttach:
+        trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse",
+      attachPendingUpdates: attachPendingUpdatesAfterOpenSuffix,
+      prepareModelInput: prepareRunAttemptInput,
+    }))
+  ) {
+    return claimedResult({ status: "cancelled" });
+  }
   let retriedAfterCompaction = false;
   while (true) {
     try {

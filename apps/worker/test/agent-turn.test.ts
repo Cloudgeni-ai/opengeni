@@ -1,6 +1,6 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
-import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
+import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
 import { TurnExecutionPolicyV1, type ResourceRef } from "@opengeni/contracts";
@@ -61,7 +61,6 @@ import {
   clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
   completedToolCallFromSdkEvent,
-  computerToolModeForTurn,
   createCompactionModelUsageEventState,
   createModelResponseEventState,
   createTurnSandboxProvisioner,
@@ -116,7 +115,6 @@ import {
   shouldPrefetchManagedSandbox,
   shouldDeferNonEagerToolPreparation,
   shouldRecoverCompactionProviderFailure,
-  shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
   shouldStartPeriodicWorkspaceSnapshot,
   stableHumanInputRequestId,
@@ -140,6 +138,7 @@ import {
 } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
+import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
 
@@ -166,6 +165,41 @@ describe("approval RunState materialization boundary", () => {
     expect(source).toContain("OPEN_SUFFIX_RUN_STATE_BLOB");
     expect(source).toContain("historySink.reconcileConversationTruth({ requireDurable: true })");
     expect(source).toContain("settleOpenSuffixResumeIfNeeded");
+  });
+
+  test("resume attaches blocked machine input after the open suffix and before model input", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
+    const suffixAt = source.indexOf(
+      "const openSuffixResume = await settleOpenSuffixResumeIfNeeded",
+    );
+    const preparationAt = source.indexOf(
+      "await attachPendingUpdatesBeforePreparingModelInput",
+      suffixAt,
+    );
+    const history = ["function_call", "function_call_result"];
+    const eligiblePendingInput = ["PRE-BOUNDARY"];
+    const laterPendingInput = "NEXT-TURN-ONLY";
+    let modelInput: string[] = [];
+
+    const prepared = await attachPendingUpdatesBeforePreparingModelInput({
+      shouldAttach: true,
+      attachPendingUpdates: async () => {
+        history.push(...eligiblePendingInput.splice(0));
+        return true;
+      },
+      prepareModelInput: async () => {
+        modelInput = [...history];
+      },
+    });
+
+    expect(suffixAt).toBeGreaterThan(-1);
+    expect(preparationAt).toBeGreaterThan(suffixAt);
+    expect(prepared).toBe(true);
+    expect(modelInput).toEqual(["function_call", "function_call_result", "PRE-BOUNDARY"]);
+    expect(modelInput.filter((item) => item === "PRE-BOUNDARY")).toHaveLength(1);
+    expect(modelInput).not.toContain(laterPendingInput);
   });
 
   test("approval and human-input resume require open-suffix rows", async () => {
@@ -592,6 +626,7 @@ describe("turn exact-content boundaries", () => {
   test("retains intentional screenshot and view-image outputs, not incidental action frames", () => {
     expect(toolCallProducesRetainableSessionImage("computer_screenshot")).toBe(true);
     expect(toolCallProducesRetainableSessionImage("view_image")).toBe(true);
+    expect(toolCallProducesRetainableSessionImage("interaction__computer_observe")).toBe(true);
     expect(toolCallProducesRetainableSessionImage("computer_click")).toBe(false);
     expect(toolCallProducesRetainableSessionImage("computer_scroll")).toBe(false);
   });
@@ -2659,64 +2694,6 @@ describe("sandbox artifact runtime admission", () => {
         production: true,
       }).available,
     ).toBe(false);
-  });
-});
-
-describe("on-turn recording gate (selfhosted machines have no in-box capture plumbing)", () => {
-  const base: Parameters<typeof shouldStartOnTurnRecording>[0] = {
-    recordingEnabled: true,
-    desktopEnabled: true,
-    establishedBackendId: "modal",
-    effectiveBackend: undefined,
-  };
-
-  test("modal cloud box: records (unchanged behavior)", () => {
-    expect(shouldStartOnTurnRecording({ ...base })).toBe(true);
-  });
-
-  test("selfhosted EFFECTIVE backend: does NOT start recording (no recording.started emitted)", () => {
-    // The machine-primary turn establishes the SelfhostedSession (backendId
-    // "selfhosted", which is desktop-capable), so the desktop-capable check alone
-    // would over-trigger. The effective-backend gate is what suppresses it.
-    expect(
-      shouldStartOnTurnRecording({
-        ...base,
-        establishedBackendId: "selfhosted",
-        effectiveBackend: "selfhosted",
-      }),
-    ).toBe(false);
-  });
-
-  test("modal-home session swapped ONTO a machine: skips (gate is the effective backend, not home)", () => {
-    // Home backend is a cloud box (established could even still read modal in the
-    // degraded no-enrollment edge), but the ACTIVE pointer resolves selfhosted —
-    // recording must skip.
-    expect(
-      shouldStartOnTurnRecording({
-        ...base,
-        establishedBackendId: "modal",
-        effectiveBackend: "selfhosted",
-      }),
-    ).toBe(false);
-  });
-
-  test("machine-home turn degraded back to its cloud group box: records (effective backend undefined)", () => {
-    expect(
-      shouldStartOnTurnRecording({
-        ...base,
-        establishedBackendId: "modal",
-        effectiveBackend: undefined,
-      }),
-    ).toBe(true);
-  });
-
-  test("recording disabled by policy: skips regardless of backend", () => {
-    expect(shouldStartOnTurnRecording({ ...base, recordingEnabled: false })).toBe(false);
-    expect(shouldStartOnTurnRecording({ ...base, desktopEnabled: false })).toBe(false);
-  });
-
-  test("headless / non-desktop established backend: skips (existing static feasibility gate holds)", () => {
-    expect(shouldStartOnTurnRecording({ ...base, establishedBackendId: "none" })).toBe(false);
   });
 });
 
@@ -4977,6 +4954,76 @@ describe("transient provider error classifier", () => {
     }
   });
 
+  test("classifies exact Modal TaskExecStart DNS failure as typed same-turn recovery", () => {
+    const details =
+      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443";
+    const clientError = Object.assign(
+      new Error(
+        `/modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: ${details}`,
+      ),
+      {
+        name: "ClientError",
+        path: "/modal.task_command_router.TaskCommandRouter/TaskExecStart",
+        code: 14,
+        details,
+      },
+    );
+    const wrapped = new ToolCallError("Failed to run function tools", clientError);
+
+    expect(isTransientProviderError(wrapped)).toBe(false);
+    expect(agentRunFailurePayload(wrapped)).toEqual({
+      error:
+        "The managed sandbox command transport was temporarily unreachable before the command started. The same turn will retry after a short delay.",
+      code: "sandbox_command_start_unavailable",
+      retryable: true,
+    });
+    expect(
+      providerRecoveryResult({
+        failureCode: "sandbox_command_start_unavailable",
+        attemptNumber: 1,
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+  });
+
+  test("keeps status-tagged, mixed-sibling, and shutdown Modal failures terminal", () => {
+    const path = "/modal.task_command_router.TaskCommandRouter/TaskExecStart";
+    const details =
+      "Name resolution failed for target dns:task-72zioucmtnmt4av4osz7bk19t.w.modal.host:443";
+    const clientError = (overrides: Record<string, unknown> = {}) =>
+      Object.assign(new Error(`${path} UNAVAILABLE: ${details}`), {
+        name: "ClientError",
+        path,
+        code: 14,
+        details,
+        ...overrides,
+      });
+    const statusTagged = new ToolCallError(
+      "Failed to run function tools",
+      clientError({ status: 503 }),
+    );
+    const mixed = new AggregateError(
+      [
+        new ToolCallError("DNS tool failed", clientError()),
+        new Error("another tool may have started"),
+      ],
+      "parallel tools failed",
+    );
+    const shutdownDetails = "Modal Sandbox is shutting down";
+    const shutdown = new ToolCallError(
+      "Failed to run function tools",
+      clientError({
+        code: 9,
+        details: shutdownDetails,
+        message: `${path} FAILED_PRECONDITION: ${shutdownDetails}`,
+      }),
+    );
+
+    for (const terminal of [statusTagged, mixed, shutdown]) {
+      expect(isTransientProviderError(terminal)).toBe(false);
+      expect(agentRunFailurePayload(terminal)).toEqual({ error: terminal.message });
+    }
+  });
+
   test("classifies node/undici network fault codes as transient", () => {
     for (const code of ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "EPIPE"]) {
       expect(isTransientProviderError(Object.assign(new Error("socket"), { code }))).toBe(true);
@@ -5134,6 +5181,7 @@ describe("transient provider error classifier", () => {
     for (const failureCode of [
       "provider_unavailable",
       "upstream_connectivity_unavailable",
+      "sandbox_command_start_unavailable",
       "mcp_transport_timeout",
       "mcp_transport_unavailable",
       POST_COMPACTION_CONTINUATION_EMPTY_CODE,
@@ -5385,62 +5433,6 @@ describe("transient provider error classifier", () => {
   });
 });
 
-// The worker is the ONE place provider identity is authoritative, so it derives the
-// EXPLICIT computer-use tool transport there instead of letting the runtime string-sniff
-// the model instance's constructor name. This seam pins the provider→mode mapping.
-describe("computerToolModeForTurn (explicit computer-use transport derivation)", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi, image = true) =>
-    ({
-      provider: { kind, api },
-      configured: { capabilities: { inputModalities: image ? ["text", "image"] : ["text"] } },
-    }) as Parameters<typeof computerToolModeForTurn>[0];
-
-  test("codex-subscription → function-image", () => {
-    // api is irrelevant once kind is codex-subscription — image input wins.
-    expect(computerToolModeForTurn(resolved("codex-subscription", "responses"))).toBe(
-      "function-image",
-    );
-    expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
-  });
-
-  test("a chat-wire provider cannot receive screenshot tool results as images → disabled", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("disabled");
-  });
-
-  test("a registry responses provider → function-image", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("function-image");
-  });
-
-  test("any text-only model → disabled before provider transport selection", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "responses", false))).toBe("disabled");
-    expect(computerToolModeForTurn(resolved("codex-subscription", "responses", false))).toBe(
-      "disabled",
-    );
-    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses", false))).toBe(
-      "disabled",
-    );
-  });
-
-  test("Gateway Responses vision models use computer_* function tools", () => {
-    expect(computerToolModeForTurn(resolved("vercel-gateway-managed", "responses"))).toBe(
-      "function-image",
-    );
-    expect(computerToolModeForTurn(resolved("vercel-gateway-workspace", "responses"))).toBe(
-      "function-image",
-    );
-  });
-
-  test("SuperGrok Responses vision models use computer_* function tools", () => {
-    expect(computerToolModeForTurn(resolved("xai-subscription", "responses"))).toBe(
-      "function-image",
-    );
-  });
-
-  test("the LEGACY global-client fallback (resolveTurnModel → null) → function-image", () => {
-    expect(computerToolModeForTurn(null)).toBe("function-image");
-  });
-});
-
 describe("structuredToolTransportForTurn", () => {
   const resolved = (kind: RegistryProviderKind, api: ModelProviderApi = "responses") =>
     ({ provider: { kind, api } }) as Parameters<typeof structuredToolTransportForTurn>[0];
@@ -5564,13 +5556,13 @@ describe("shouldDeferNonEagerToolPreparation", () => {
     ).toBe(true);
   });
 
-  test("keeps approval resumes, editable artifacts, and disabled disclosure eager", () => {
+  test("keeps approval resumes and disabled disclosure eager while artifacts share the wait", () => {
     expect(shouldDeferNonEagerToolPreparation({ ...eligible, triggerKind: "approval" })).toBe(
       false,
     );
     expect(
       shouldDeferNonEagerToolPreparation({ ...eligible, artifactRuntimeAvailable: true }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       shouldDeferNonEagerToolPreparation({
         ...eligible,

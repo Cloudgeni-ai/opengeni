@@ -14,8 +14,16 @@ export function destructiveActionFocusTarget(
   trigger: HTMLElement | null,
   fallback: HTMLElement | null,
 ): HTMLElement | null {
-  if (trigger?.isConnected) return trigger;
-  return fallback?.isConnected ? fallback : null;
+  if (focusTargetAvailable(trigger)) return trigger;
+  return focusTargetAvailable(fallback) ? fallback : null;
+}
+
+function focusTargetAvailable(target: HTMLElement | null): target is HTMLElement {
+  return Boolean(
+    target?.isConnected &&
+    !target.matches(":disabled, [aria-disabled='true'], [inert]") &&
+    !target.closest("[inert]"),
+  );
 }
 
 /* ----------------------------------------------------------------------------

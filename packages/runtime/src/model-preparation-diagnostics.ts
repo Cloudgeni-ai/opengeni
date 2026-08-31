@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { addTraceProcessor, type Span, type Trace, type TracingProcessor } from "@openai/agents";
+import { setTraceProcessors, type Span, type Trace, type TracingProcessor } from "@openai/agents";
 
 export type ModelPreparationPhase =
   | "sandbox_agent_preparation"
@@ -84,7 +84,12 @@ class ModelPreparationTraceProcessor implements TracingProcessor {
   async forceFlush(): Promise<void> {}
 }
 
-addTraceProcessor(new ModelPreparationTraceProcessor());
+// OpenGeni exports observability through its own OTLP pipeline. Replace the
+// Agents SDK default batch exporter instead of adding to it: the default has no
+// OpenAI tracing key on Azure/Codex deployments and its async timer can leak a
+// rejected export promise into the SDK's process-global unhandled-rejection
+// listener. Keep only the in-process preparation processor we actually consume.
+setTraceProcessors([new ModelPreparationTraceProcessor()]);
 
 export function withModelPreparationObserver<T>(
   observer: ModelPreparationObserver | undefined,

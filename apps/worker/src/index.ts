@@ -9,6 +9,7 @@ import {
 } from "@opengeni/config";
 import {
   assertRuntimeDatabasePosture,
+  countSessionRecoveryBacklog,
   createDb,
   markSessionWorkflowWakeDelivered,
   type Database,
@@ -58,6 +59,7 @@ import {
   initializeWorkerOutcomeMetrics,
   normalizeTurnTaskQueueStats,
   observabilityEventLogger,
+  startSessionRecoveryMonitor,
   startTurnCapacityMonitor,
   type TurnTaskQueueStats,
 } from "./observability-metrics";
@@ -87,6 +89,7 @@ import {
   type TurnWorkerMemoryPressureGuard,
 } from "./memory-pressure-guard";
 import { assertSandboxReaperActivityTimeout } from "./sandbox-reaper-timeout";
+import { installWorkerUnhandledRejectionBoundary } from "./unhandled-rejection-boundary";
 import {
   SANDBOX_REAPER_V2_WORKFLOW_ID,
   sandboxLifecycleTaskQueue,
@@ -795,6 +798,7 @@ export async function createOpenGeniWorkerService(
   let signaler: Awaited<ReturnType<typeof createWorkerWorkflowSignaler>> | undefined;
   let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
   let turnCapacityMonitor: ReturnType<typeof startTurnCapacityMonitor> | undefined;
+  let sessionRecoveryMonitor: ReturnType<typeof startSessionRecoveryMonitor> | undefined;
   const schedules: Array<{ close: () => Promise<void> }> = [];
   let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
   let memoryPressureGuard: TurnWorkerMemoryPressureGuard | undefined;
@@ -868,6 +872,11 @@ export async function createOpenGeniWorkerService(
         observability,
         read: signaler.getTurnTaskQueueStats,
       });
+    } else {
+      sessionRecoveryMonitor = startSessionRecoveryMonitor({
+        observability,
+        read: async () => await countSessionRecoveryBacklog(options.activityDependencies.db),
+      });
     }
 
     if (workerOwnsInternalSchedules(options.role, options.internalSchedules)) {
@@ -921,6 +930,7 @@ export async function createOpenGeniWorkerService(
     httpServer?.stop(true);
     await Promise.allSettled([
       turnCapacityMonitor?.close(),
+      sessionRecoveryMonitor?.close(),
       workerBundle?.connection.close(),
       signaler?.close(),
       ...schedules.map((schedule) => schedule.close()),
@@ -943,6 +953,7 @@ export async function createOpenGeniWorkerService(
       httpServer?.stop(true);
       await Promise.allSettled([
         turnCapacityMonitor?.close(),
+        sessionRecoveryMonitor?.close(),
         activeWorkerBundle.connection.close(),
         activeSignaler?.close(),
         ...schedules.map((schedule) => schedule.close()),
@@ -1034,6 +1045,11 @@ export async function startWorker() {
   }
   const settings = getSettings();
   const observability = createObservability(settings, { component: `worker-${role}` });
+  // The Agents SDK also listens for unhandled rejections and exits the process.
+  // Keep detached SDK/transport promises observational here: durable turn
+  // activity boundaries own failures, while process exit causes cross-session
+  // lease loss for every turn assigned to this shared worker pod.
+  const disposeUnhandledRejectionBoundary = installWorkerUnhandledRejectionBoundary();
   const retryOptions = startupRetryOptions(settings);
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
@@ -1092,6 +1108,7 @@ export async function startWorker() {
     });
   } finally {
     await Promise.allSettled([bus?.close(), readinessDbClient.close(), dbClient.close()]);
+    disposeUnhandledRejectionBoundary();
   }
 }
 

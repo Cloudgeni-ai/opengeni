@@ -14,6 +14,7 @@ import {
   stableJson,
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
+  MemorySlackPublicationDistribution,
   SessionMcpCredentialUpdateInput,
   ToolAuthNeededPayload,
   VariableSetVariableName,
@@ -90,6 +91,8 @@ import {
   readVariableSetSecretAtomically,
   recordSyncedSocialPosts,
   listVariableSets,
+  MEMORY_CORRECT_TOOL_DESCRIPTION,
+  MEMORY_SAVE_TOOL_DESCRIPTION,
   MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireScheduledTask,
   requireSession,
@@ -119,7 +122,11 @@ import {
   acceptSessionHumanInputResponse,
   HumanInputResponseValidationError,
 } from "@opengeni/db";
-import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import {
+  appendAndPublishEvents,
+  appendAndPublishTurnEventsFenced,
+  publishDurableSessionEvents,
+} from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
@@ -141,12 +148,14 @@ import {
   authorizedSocialConnectionsForGrant,
   authorizedAtlassianConnectionsForGrant,
   buildCapabilityCatalog,
+  correctWorkspaceMemoryWithSlackPublication,
   nativeConnectionCapabilityRecommendations,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  saveWorkspaceMemoryWithSlackPublication,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
@@ -191,6 +200,7 @@ import {
   ScheduledTaskSyncError,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
+  validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   updateScheduledTaskForApi,
   validatedScheduledTaskUpdate,
@@ -228,11 +238,13 @@ import {
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
 import {
+  SESSION_WAIT_COMPLETION_EVENT_TYPES,
   SESSION_WAIT_DEFAULT_SECONDS,
   SESSION_WAIT_EVENT_TYPES,
   SESSION_WAIT_EVENTS_PER_TARGET,
   SESSION_WAIT_MAX_SECONDS,
   SESSION_WAIT_MAX_TARGETS,
+  sessionWaitCompletionEventMatches,
   waitForSessionChanges,
 } from "./session-wait";
 import {
@@ -275,6 +287,12 @@ export type McpServerOptions = {
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
 const ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
+// Keep pathological raw MCP payloads away from Unicode normalization while
+// leaving the shared DB normalizer authoritative for the exact post-NFKC
+// code-point limit. The multiplier admits supplementary-plane characters,
+// decomposed forms, and ordinary whitespace folding without reopening the
+// API-wide request-body ceiling for this 200-code-point field.
+const MCP_DISCOVERY_QUERY_MAX_UTF16_CODE_UNITS = WORK_DISCOVERY_QUERY_MAX_CHARS * 8;
 
 type OrchestrationToolName = "session_create" | "session_send_message";
 
@@ -409,9 +427,6 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
-  // Retired: never registered, so these are never consulted. The map must stay
-  // total over the tool-name union, which still carries both names so that
-  // previously written scheduled-task snapshots keep parsing.
   memory_save: { sessionRequired: true, allOf: ["documents:search"] },
   memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
   preference_registry_summary: {
@@ -1713,6 +1728,14 @@ export function buildOpenGeniMcpServer(
             rigId: task.rigId,
             agentConfig: task.agentConfig,
             missingTargetStatus: 404,
+          });
+          await validateScheduledTaskMachineTarget({
+            settings: deps.settings,
+            db: deps.db,
+            grant,
+            runMode: task.runMode,
+            agentConfig: task.agentConfig,
+            requireOnline: true,
           });
           await requireLimit(deps, {
             accountId: grant.accountId,
@@ -3425,6 +3448,7 @@ function registerPreferenceRegistryTools(
 }
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
+const MemoryWriteKindSchema = z4.enum(["semantic", "decision", "episodic"]);
 
 function scheduledTaskReceipt(
   operation: string,
@@ -3516,6 +3540,11 @@ export function memorySlackPublicationActor(
   };
 }
 
+function memoryPreview(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length <= 120 ? normalized : `${normalized.slice(0, 119)}…`;
+}
+
 function registerMemoryTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -3524,10 +3553,17 @@ function registerMemoryTools(
   json: JsonResult,
   promptMode: WorkspaceMemoryPromptMode,
 ): void {
+  const publicationInputSchema = z4.object({
+    importance: z4.enum(["major", "normal", "minor"]),
+    audience: z4.literal("workspace"),
+    slackMode: z4.enum(["auto", "review", "never"]),
+    shareSummary: z4.string().trim().min(1).max(4_096),
+  });
+
   server.registerTool(
     "memory_search",
     {
-      description: `${MEMORY_SEARCH_TOOL_DESCRIPTION} Legacy preference-kind records are excluded from this tool because structured preferences are the only behavioral authority. To save something the user explicitly asked to keep, use \`remember\`; for your own findings use task notes and their promotion tools.`,
+      description: `${MEMORY_SEARCH_TOOL_DESCRIPTION} All existing Memory kinds are searchable. Legacy preference and procedure records are historical context, not active instructions; Skills and workspace instructions remain the behavioral authorities. When workspace Memory is enabled, use memory_save autonomously for durable facts, decisions, incidents, fixes, and outcomes, and memory_correct when an existing record is wrong or outdated.`,
       inputSchema: {
         query: z4.string().min(1),
         kind: MemoryKindSchema.optional(),
@@ -3550,10 +3586,239 @@ function registerMemoryTools(
       }),
   );
 
-  // Memory V1 writes are retired. Explicit user-directed knowledge goes
-  // through `remember`; an agent's own findings go through task notes and
-  // governed promotion. `memory_search` stays: reading the existing record
-  // set is still how an agent recalls what a workspace already knows.
+  // Memory writes are agent-only. Human creation and curation use the REST/UI
+  // surface; a non-attempt MCP principal may search but cannot mutate Memory.
+  if (exactAgentAttemptClaims(grant) === null) return;
+
+  server.registerTool(
+    "memory_save",
+    {
+      description: MEMORY_SAVE_TOOL_DESCRIPTION,
+      inputSchema: {
+        text: z4.string().min(1),
+        kind: MemoryWriteKindSchema,
+        confidence: z4.number().min(0).max(1).optional(),
+        replaces_id: z4.string().min(1).optional(),
+        slack_publication: publicationInputSchema.optional(),
+      },
+    },
+    async ({ text, kind, confidence, replaces_id, slack_publication }) => {
+      const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+      const result = await saveWorkspaceMemoryWithSlackPublication(
+        deps.db,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          text,
+          kind,
+          ...(confidence !== undefined ? { confidence } : {}),
+          ...(replaces_id ? { replacesId: replaces_id } : {}),
+          origin: "agent",
+        },
+        slack_publication
+          ? {
+              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
+              actor: memorySlackPublicationActor(actor, sessionId, grant.subjectLabel ?? null)
+                .actor,
+              ownerLabel: actor.initiator.label ?? grant.subjectLabel ?? null,
+            }
+          : null,
+        deps.getDocumentServices().embedder,
+      );
+      let timelineWarning: string | null = null;
+      try {
+        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+          {
+            type: "memory.saved",
+            payload: {
+              memoryId: result.memory.id,
+              kind: result.memory.kind,
+              preview: memoryPreview(result.memory.text),
+              deduped: result.deduped,
+              ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
+            },
+          },
+        ]);
+      } catch {
+        timelineWarning = "Memory committed, but its session timeline event could not be recorded.";
+        console.warn("workspace memory save: committed without session timeline event", {
+          errorClass: "MemoryTimelineOperationError",
+          errorCode: "memory_save_timeline_append_failed",
+          origin: "api",
+          workspaceId: grant.workspaceId,
+          sessionId,
+          memoryId: result.memory.id,
+        });
+      }
+      const changed = !result.deduped || result.updated || result.superseded !== null;
+      const outcome =
+        result.updated || result.superseded !== null
+          ? "updated"
+          : result.deduped
+            ? "unchanged"
+            : "created";
+      return json(
+        mcpMutationReceipt({
+          operation: "memory_save",
+          committed: true,
+          outcome,
+          changed,
+          resource: {
+            type: "knowledge_memory",
+            id: result.memory.id,
+            state: result.memory.status,
+          },
+          relatedResources: result.superseded
+            ? [
+                {
+                  type: "knowledge_memory",
+                  id: result.superseded.id,
+                  state: result.superseded.status,
+                },
+              ]
+            : undefined,
+          timestamp: result.memory.updatedAt,
+          idempotency: { status: "not_supported" },
+          warnings: [
+            ...(!result.embedded
+              ? ["Memory committed without a vector embedding; keyword search remains available."]
+              : []),
+            ...(timelineWarning ? [timelineWarning] : []),
+          ],
+          facts: {
+            deduped: result.deduped,
+            dedupeReason: result.dedupeReason,
+            updatedInPlace: result.updated,
+            embedded: result.embedded,
+            slackPublicationDecision: result.slackPublication.decision?.eligible
+              ? "eligible"
+              : (result.slackPublication.decision?.reason ?? "not_requested"),
+            slackPublicationId:
+              result.slackPublication.enqueue?.kind === "enqueued" ||
+              result.slackPublication.enqueue?.kind === "replayed"
+                ? result.slackPublication.enqueue.publication.id
+                : null,
+            slackPublicationState:
+              result.slackPublication.enqueue?.kind === "enqueued" ||
+              result.slackPublication.enqueue?.kind === "replayed"
+                ? result.slackPublication.enqueue.publication.state
+                : null,
+          },
+        }),
+      );
+    },
+  );
+
+  server.registerTool(
+    "memory_correct",
+    {
+      description: MEMORY_CORRECT_TOOL_DESCRIPTION,
+      inputSchema: {
+        id: z4.string().min(1),
+        reason: z4.string().min(1).optional(),
+        replacement_text: z4.string().min(1).optional(),
+        slack_publication: publicationInputSchema.optional(),
+      },
+    },
+    async ({ id, reason, replacement_text, slack_publication }) => {
+      const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+      const result = await correctWorkspaceMemoryWithSlackPublication(
+        deps.db,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          id,
+          ...(reason ? { reason } : {}),
+          ...(replacement_text ? { replacementText: replacement_text } : {}),
+          origin: "agent",
+        },
+        slack_publication
+          ? {
+              distribution: MemorySlackPublicationDistribution.parse(slack_publication),
+              actor: memorySlackPublicationActor(actor, sessionId, grant.subjectLabel ?? null)
+                .actor,
+              ownerLabel: actor.initiator.label ?? grant.subjectLabel ?? null,
+            }
+          : null,
+        deps.getDocumentServices().embedder,
+      );
+      let timelineWarning: string | null = null;
+      try {
+        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+          {
+            type: "memory.corrected",
+            payload: {
+              memoryId: result.memory.id,
+              kind: result.memory.kind,
+              preview: memoryPreview(result.memory.text),
+              action: result.action,
+              ...(reason ? { reason: memoryPreview(reason) } : {}),
+              ...(result.replacement
+                ? {
+                    replacementMemoryId: result.replacement.id,
+                    replacementPreview: memoryPreview(result.replacement.text),
+                  }
+                : {}),
+            },
+          },
+        ]);
+      } catch {
+        timelineWarning =
+          "Memory correction committed, but its session timeline event could not be recorded.";
+        console.warn("workspace memory correction: committed without session timeline event", {
+          errorClass: "MemoryTimelineOperationError",
+          errorCode: "memory_correct_timeline_append_failed",
+          origin: "api",
+          workspaceId: grant.workspaceId,
+          sessionId,
+          memoryId: result.memory.id,
+        });
+      }
+      return json(
+        mcpMutationReceipt({
+          operation: "memory_correct",
+          committed: true,
+          outcome: "updated",
+          changed: true,
+          resource: {
+            type: "knowledge_memory",
+            id: result.memory.id,
+            state: result.memory.status,
+          },
+          relatedResources: result.replacement
+            ? [
+                {
+                  type: "knowledge_memory",
+                  id: result.replacement.id,
+                  state: result.replacement.status,
+                },
+              ]
+            : undefined,
+          timestamp: (result.replacement ?? result.memory).updatedAt,
+          idempotency: { status: "not_supported" },
+          warnings: timelineWarning ? [timelineWarning] : [],
+          facts: {
+            correctionAction: result.action,
+            slackPublicationDecision: result.slackPublication.decision?.eligible
+              ? "eligible"
+              : (result.slackPublication.decision?.reason ?? "not_requested"),
+            slackPublicationId:
+              result.slackPublication.enqueue?.kind === "enqueued" ||
+              result.slackPublication.enqueue?.kind === "replayed"
+                ? result.slackPublication.enqueue.publication.id
+                : null,
+            slackPublicationState:
+              result.slackPublication.enqueue?.kind === "enqueued" ||
+              result.slackPublication.enqueue?.kind === "replayed"
+                ? result.slackPublication.enqueue.publication.state
+                : null,
+          },
+        }),
+      );
+    },
+  );
 }
 
 // Fleet tools (M7 bring-your-own-compute). Session-scoped (they steer THIS
@@ -4155,7 +4420,7 @@ function registerWorkspaceOrchestrationTools(
           includeLastMessage: z4.boolean().optional(),
           orderBy: z4.enum(["createdAt", "updatedAt", "relevance"]).optional(),
           updatedAfter: z4.string().max(64).optional(),
-          query: z4.string().max(WORK_DISCOVERY_QUERY_MAX_CHARS).optional(),
+          query: z4.string().max(MCP_DISCOVERY_QUERY_MAX_UTF16_CODE_UNITS).optional(),
           statuses: z4
             .array(
               z4.enum([
@@ -4443,7 +4708,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session); returns immediately when anything already changed. Only turn lifecycle, agent.message.completed, blocking failures, goal facts, and session status/control changes count as a change; raw deltas, tool receipts, and sandbox diagnostics never wake it. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
+        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session). waitFor=change is the backward-compatible default and returns on turn lifecycle, agent.message.completed, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
         inputSchema: {
           targets: z4
             .array(
@@ -4460,10 +4725,16 @@ function registerWorkspaceOrchestrationTools(
             .describe(
               "Also return when your own session has pending machine input (default true).",
             ),
+          waitFor: z4
+            .enum(["change", "completion"])
+            .optional()
+            .describe(
+              "change (default) returns on relevant activity; completion ignores messages, goal/progress, maintenance, and continuation segments until a result-bearing final turn or blocker.",
+            ),
           maxWaitSeconds: z4.number().int().min(1).max(SESSION_WAIT_MAX_SECONDS).optional(),
         },
       },
-      async ({ targets, includeOwnPendingUpdates, maxWaitSeconds }, extra) => {
+      async ({ targets, includeOwnPendingUpdates, waitFor, maxWaitSeconds }, extra) => {
         const distinct = new Set(targets.map((target) => target.sessionId));
         if (distinct.size !== targets.length) {
           throw new Error("session_wait targets must name distinct sessions");
@@ -4475,6 +4746,8 @@ function registerWorkspaceOrchestrationTools(
           await requireSession(deps.db, grant.workspaceId, target.sessionId);
         }
         const ownSessionId = includeOwnPendingUpdates === false ? null : callerSessionId;
+        const targetEventTypes =
+          waitFor === "completion" ? SESSION_WAIT_COMPLETION_EVENT_TYPES : SESSION_WAIT_EVENT_TYPES;
         // The API serves one transport per POST, so the worker's MCP cancel
         // notification never reaches this handler; the route binds the HTTP
         // request's abort to transport.close() (mcp/request-abort.ts), which
@@ -4491,6 +4764,9 @@ function registerWorkspaceOrchestrationTools(
             targets,
             ownSessionId,
             maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
+            targetEventTypes,
+            targetEventMatches:
+              waitFor === "completion" ? sessionWaitCompletionEventMatches : undefined,
             signal,
             source: {
               reauthorizeTargets: async (sessionIds) => {
@@ -4509,7 +4785,7 @@ function registerWorkspaceOrchestrationTools(
                   direction: "after",
                   limit: SESSION_WAIT_EVENTS_PER_TARGET,
                   payloadMode: "full",
-                  includeTypes: SESSION_WAIT_EVENT_TYPES,
+                  includeTypes: targetEventTypes,
                   maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
                 });
                 return { events: page.events, hasMore: page.hasMore };
@@ -4620,7 +4896,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker). The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. The child inherits this session's visibility; a private session can only create a same-owner private child. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {

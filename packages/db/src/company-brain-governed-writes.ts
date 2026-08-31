@@ -15,7 +15,11 @@ import {
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, setSubjectRlsContext, withRlsContext } from "./database";
-import { sanitizePreferenceDescriptorText } from "./preference-registry";
+import {
+  PreferenceRegistryStableKeyConflictError,
+  sanitizePreferenceDescriptorText,
+} from "./preference-registry";
+import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import {
   appendKnowledgeClaim,
   appendKnowledgeClaimReview,
@@ -847,6 +851,26 @@ function isInstructionPolicyProposal(
   );
 }
 
+function isPreferenceProposal(
+  request: CompanyBrainGovernedWriteRequestType,
+): request is PreferenceProposalRequest {
+  return request.kind === "propose_preference" || request.kind === "promote_task_note_preference";
+}
+
+const PREFERENCE_PROPOSAL_STABLE_KEY_CONFLICT_DIAGNOSTIC =
+  "workspace preference key is bound to another proposal";
+
+function isPreferenceProposalStableKeyConflict(error: unknown): boolean {
+  if (nestedPostgresSqlState(error) !== "23505") return false;
+  const constraint = safeDatabaseErrorFacts(error).constraint ?? "";
+  if (constraint.startsWith("preference_registry_preferences_")) return true;
+  for (let current = error, depth = 0; current instanceof Error && depth < 8; depth += 1) {
+    if (current.message.includes(PREFERENCE_PROPOSAL_STABLE_KEY_CONFLICT_DIAGNOSTIC)) return true;
+    current = current.cause;
+  }
+  return false;
+}
+
 async function materializeWaysOfWorkingProposal(
   db: Database,
   input: {
@@ -1007,6 +1031,11 @@ export async function writeCompanyBrainGovernedProposal(
       error instanceof CompanyBrainGovernedWriteInvalidOperationError
     ) {
       throw error;
+    }
+    if (isPreferenceProposal(request) && isPreferenceProposalStableKeyConflict(error)) {
+      throw new PreferenceRegistryStableKeyConflictError(
+        "A preference with this stable key already exists for the workspace",
+      );
     }
     if (error instanceof ScopedKnowledgeAuthorityError) {
       throw new CompanyBrainGovernedWriteAuthorityError(error.message);

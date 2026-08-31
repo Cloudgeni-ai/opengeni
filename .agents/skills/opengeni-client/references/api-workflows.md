@@ -1,16 +1,29 @@
 # OpenGeni API Workflows
 
-This reference is intentionally pattern-level. Check the live service or source contracts for exact schemas before generating SDK code.
+This reference is intentionally pattern-level. Check the live service or source
+contracts for exact schemas before generating SDK code. When the repository is
+available, `docs/product-integration.md` is the canonical organization-key,
+workspace-mapping, and Skill-ownership guide.
 
 ## Access Setup
 
-Use one of these product credentials:
+Choose one credential deliberately:
 
-- Managed SaaS: create an OpenGeni API key in the web console and send `Authorization: Bearer <api-key>`.
-- Configured/self-hosted: send the configured bearer key or delegated token chosen by the operator.
+- Managed SaaS product integration: create an organization API key through
+  `POST /v1/organizations/:organizationId/api-keys` /
+  `createOrganizationApiKey`, store the one-time token on the product server,
+  and send `Authorization: Bearer <api-key>`.
+- One-workspace automation: use a workspace API key and do not call
+  organization provisioning routes.
+- User/workspace delegation: use a short-lived delegated token with explicit
+  authority rather than a standing organization key.
+- Configured/self-hosted perimeter: a deployment access key may gate the
+  deployment, but it is not tenant identity.
 - Local development: the service may resolve a default dev subject/workspace without external auth.
 
-Only add `x-opengeni-access-key` when the operator says the deployment shared-key boundary is enabled. It is not a replacement for product API keys in managed SaaS.
+Only add `x-opengeni-access-key` when the operator says the deployment
+shared-key boundary is enabled. It is not a replacement for organization API
+keys in managed SaaS.
 
 ## Minimal Server-Side Session Client
 
@@ -19,19 +32,28 @@ import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_API_KEY!,
+  apiKey: process.env.OPENGENI_ORGANIZATION_API_KEY!,
 });
 
-const access = await client.getAccessContext();
-const workspaceId = process.env.OPENGENI_WORKSPACE_ID ?? access.defaultWorkspaceId;
-if (!workspaceId) throw new Error("No OpenGeni workspace is available");
+const organizationId = process.env.OPENGENI_ORGANIZATION_ID!;
+const { workspace } = await client.ensureWorkspace({
+  accountId: organizationId,
+  externalSource: "acme-product",
+  externalId: productTenant.id,
+  name: productTenant.displayName,
+});
+if (workspace.kind !== "shared") {
+  throw new Error("Product integrations require an organization workspace");
+}
 
-const created = await client.createSession(workspaceId, {
+const skills = await productSkillStore.resolveForSession(productTenant.id);
+const created = await client.createSession(workspace.id, {
   initialMessage: "Inspect the uploaded logs and summarize the failing deploy step.",
   idempotencyKey: crypto.randomUUID(),
+  skills,
 });
 
-for await (const event of client.streamEvents(workspaceId, created.id)) {
+for await (const event of client.streamEvents(workspace.id, created.id)) {
   if (event.type === "agent.message.delta") {
     process.stdout.write((event.payload as { text?: string }).text ?? "");
   }
@@ -42,6 +64,18 @@ This code belongs on the product server, not in a browser bundle. For a browser
 timeline, expose a tenant-scoped same-origin route and use the SDK's
 `proxySessionEventStream` helper. Authenticate the product user and resolve the
 allowed workspace/session before opening the upstream stream.
+
+`ensureWorkspace` maps through `PUT /v1/workspaces/external`. Use a stable
+external source/id pair and persist the returned opaque id. The returned
+organization workspace has wire `kind: "shared"`. Personal workspaces are
+excluded; do not fall back to `/v1/access/me`'s default/personal workspace.
+The method returns `{ workspace, created }`; use `workspace.id`, and treat
+`created: false` as the normal idempotent replay result.
+
+The product backend stores and versions Skills outside OpenGeni and passes the
+selected definitions inline in `CreateSessionRequest.skills`. There is no
+organization-wide Skill registry or Skill inheritance in this integration
+contract.
 
 ## Session Creation Options
 
@@ -116,10 +150,18 @@ Managed SaaS uses prepaid Stripe credits and local usage/cost accounting. Client
 
 When generating a customer-specific agent skill that teaches their coding agents how to call OpenGeni:
 
-- Include only their non-secret base URL, workspace naming convention, and safe API examples.
+- Include only their non-secret base URL, organization-workspace mapping
+  convention, and safe API examples.
 - Tell the agent to read API keys from the customer's secret manager or environment, never from the skill.
+- State that the backend uses an organization API key, organization workspaces
+  have wire `kind: "shared"`, and Personal workspaces are excluded.
+- State where the external product stores Skills and that it passes selected
+  definitions inline per session; never invent an organization-wide Skill
+  registry or inheritance layer.
 - Keep the skill versioned with their integration code and add a quick smoke command that calls `/v1/config/client` and `/v1/access/me`.
 - State which integration shape the product chose and where its tenant-safe
   proxy/client lives; do not teach every possible shape in every customer skill.
 - Describe only primitives proven by the installed SDK and live deployment; do
   not turn roadmap assumptions into customer instructions.
+- Start from `customer-skill-template.md` in this directory so the generated
+  skill records the chosen shape and smoke probes without copying credentials.

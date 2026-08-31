@@ -96,21 +96,6 @@ export interface RoutableBackendSession {
    * accepted every settled result. Routing proxies aggregate this hook across
    * every Connected Machine backend reached during their lifetime. */
   finalizeOpStreamOps?(): Promise<void>;
-  // The native-desktop control-plane surface (self-hosted / macOS): a backend that
-  // drives the desktop NATIVELY (input inject + frame capture) instead of shelling
-  // xdotool/scrot over `exec`. Optional like the rest — only a `SelfhostedSession`
-  // implements these; a Modal box does not. The computer-use capability duck-types
-  // on their PRESENCE (`isNativeDesktopSession`) to pick the native vs exec Computer.
-  // `event` is kept `unknown` (mirroring the interface's structural style + avoiding
-  // a proto import into the leaf); the SelfhostedSession takes `DesktopInputRequest["event"]`.
-  desktopInput?(event: unknown): Promise<void>;
-  screenshot?(): Promise<{
-    png: Uint8Array;
-    width: number;
-    height: number;
-    nativeWidth: number;
-    nativeHeight: number;
-  }>;
 }
 
 /** The resolved active backend for an epoch: the live session + the sandbox id it
@@ -513,6 +498,55 @@ function retainedProcessTerminalProof(
   return exitCode === null ? null : { outcome: "exited", exitCode, reason: "provider_exit_banner" };
 }
 
+type DurableRetainedProcessTerminal = {
+  state: "exited" | "lost";
+  exitCode: number | null;
+};
+
+/** Recognize the structural DB fence without importing @opengeni/db into this
+ * routing leaf. Property reads are guarded so a hostile thrown Proxy cannot
+ * replace the original routing outcome. */
+function durableRetainedProcessTerminal(error: unknown): DurableRetainedProcessTerminal | null {
+  try {
+    if (!error || typeof error !== "object") return null;
+    const terminal = error as {
+      name?: unknown;
+      code?: unknown;
+      state?: unknown;
+      exitCode?: unknown;
+    };
+    if (
+      terminal.name !== "SandboxRetainedProcessTerminalError" ||
+      terminal.code !== "process_fenced" ||
+      (terminal.state !== "exited" && terminal.state !== "lost") ||
+      (terminal.exitCode !== null &&
+        (typeof terminal.exitCode !== "number" || !Number.isSafeInteger(terminal.exitCode)))
+    ) {
+      return null;
+    }
+    if (terminal.state === "lost" && terminal.exitCode !== null) return null;
+    return { state: terminal.state, exitCode: terminal.exitCode };
+  } catch {
+    return null;
+  }
+}
+
+function terminalResult(
+  terminal: DurableRetainedProcessTerminal,
+  providerSessionId: number,
+): string {
+  return terminal.state === "exited" && terminal.exitCode !== null
+    ? `Process exited with code ${terminal.exitCode}\n\nOutput:\n`
+    : `write_stdin failed: session not found: ${providerSessionId}`;
+}
+
+function terminalMatchesProof(
+  terminal: DurableRetainedProcessTerminal,
+  proof: RoutingRetainedProcessTerminalProof,
+): boolean {
+  return terminal.state === proof.outcome && terminal.exitCode === proof.exitCode;
+}
+
 function formatExecResult(result: unknown): string {
   if (typeof result === "string") return result;
   if (!result || typeof result !== "object") {
@@ -621,56 +655,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * previous command actually ran on. */
   private readonly opStreamBackends = new Set<RoutableBackendSession>();
 
-  // The native-desktop control-plane ops (self-hosted / macOS). Declared as OPTIONAL
-  // INSTANCE fields — NOT prototype methods — because their PRESENCE is the selection
-  // signal `isNativeDesktopSession` (sandbox-computer.ts) uses to pick the native vs
-  // exec-shelling Computer. If they were unconditional prototype methods, this proxy
-  // would ALWAYS duck-type as native — misclassifying a Modal-fronting proxy (whose
-  // real backend has no native surface) and driving CGEvent/screenshot ops at a box
-  // that cannot serve them. So the constructor assigns them ONLY when the
-  // construction-time default backend actually implements the native surface (below).
-  desktopInput?: (event: unknown) => Promise<void>;
-  screenshot?: () => Promise<{
-    png: Uint8Array;
-    width: number;
-    height: number;
-    nativeWidth: number;
-    nativeHeight: number;
-  }>;
-
   constructor(deps: RoutingSandboxSessionDeps) {
     this.deps = deps;
     this.maxFenceRetries = deps.maxFenceRetries ?? 3;
     this.boundWorkspaceRoot = workspaceRootForBackend(deps.defaultResolved?.session);
     this.rememberOpStreamBackend(deps.defaultResolved?.session);
-
-    // Conditionally expose the native-desktop surface. Presence = the computer-use
-    // native/exec selection signal (isNativeDesktopSession duck-types on
-    // desktopInput+screenshot being functions); unconditional presence would
-    // misclassify Modal-fronting proxies as native. So we mint these per-INSTANCE
-    // arrow properties ONLY when the default backend resolved at construction is
-    // itself native-capable — the machine-primary (selfhosted) case. Each dispatches
-    // to the ACTIVE backend at call-time; if a mid-turn swap lands on a backend that
-    // lacks the op (a cross-kind swap to a Modal box), dispatch throws
-    // RoutingUnsupportedError — a legible tool failure, never a silent Linux-tool
-    // shell onto a Mac.
-    const def = deps.defaultResolved?.session;
-    if (typeof def?.desktopInput === "function" && typeof def?.screenshot === "function") {
-      this.desktopInput = (event: unknown) =>
-        this.dispatch("desktopInput", true, async (s) => {
-          if (!s.desktopInput) {
-            throw new RoutingUnsupportedError("desktopInput", this.cached?.kind ?? "unknown");
-          }
-          return s.desktopInput(event);
-        });
-      this.screenshot = () =>
-        this.dispatch("screenshot", false, async (s) => {
-          if (!s.screenshot) {
-            throw new RoutingUnsupportedError("screenshot", this.cached?.kind ?? "unknown");
-          }
-          return s.screenshot();
-        });
-    }
   }
 
   private rememberOpStreamBackend(session: RoutableBackendSession | undefined): void {
@@ -945,6 +934,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     try {
       await record.settlement;
     } catch (error) {
+      const durableTerminal = durableRetainedProcessTerminal(error);
+      if (durableTerminal && terminalMatchesProof(durableTerminal, pending.proof)) {
+        // Another authority settled the same physical terminal outcome first.
+        // The reason may differ (for example provider-instance loss versus the
+        // local provider-session-lost banner), but state + exit code are the
+        // immutable physical truth. Forget the local route without replaying.
+        record.settlement = null;
+        record.pendingTerminal = null;
+        this.retainedProcesses.delete(record.process.providerSessionId);
+        return;
+      }
       // A failed DB settlement is not permission to forget the physical process.
       // Keep the exact route and immutable proof so the next control poll retries
       // settlement without issuing a command against a new backend.
@@ -993,11 +993,22 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
     await this.ensureParentPromotion(record);
     const op = "writeStdin";
-    const admission = await this.deps.beforeProcessMutation?.({
-      op,
-      backend: record.backend,
-      process: record.process,
-    });
+    let admission: unknown;
+    try {
+      admission = await this.deps.beforeProcessMutation?.({
+        op,
+        backend: record.backend,
+        process: record.process,
+      });
+    } catch (error) {
+      const durableTerminal = durableRetainedProcessTerminal(error);
+      if (!durableTerminal) throw error;
+      // Durable settlement won the race before this model-visible mutation was
+      // admitted. Never call the provider; return the stored result through the
+      // ordinary output path so the turn controller drops its shell registration.
+      this.retainedProcesses.delete(providerSessionId);
+      return terminalResult(durableTerminal, providerSessionId);
+    }
     const write = record.backend.session.writeStdin;
     if (!write) throw new RoutingUnsupportedError(op, record.backend.kind);
     let result: string;

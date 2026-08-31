@@ -417,9 +417,10 @@ projection of legacy workspace instructions in one immutable turn-context
 snapshot. The first exact attempt creates a content-free selection receipt that
 binds that snapshot to the accepted logical turn. Its default `retrieval_only`
 (migration 0271; absent settings resolve to it) removes
-the broad Memory V1 working-set block and
-legacy preference-kind agent retrieval; canonical rows and human surfaces are
-unchanged. The former `legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
+the broad Memory V1 working-set block. Every existing Memory kind remains
+available through explicit agent search; legacy preference and procedure rows
+are historical context rather than behavioral authority. The former
+`legacy_standing` opt-out is retired. A root still receives the bounded company profile, while a child
 omits it and retains mandatory instruction policy plus the always-visible
 structured preference and configured Skill descriptors. At the ordinary model
 request boundary, metadata-only telemetry records the exact attempt, existing
@@ -452,7 +453,15 @@ duration-based caps on legitimate run length; fix the pathology instead.
 Recoverable conditions preserve context instead of failing the session, so a
 long run survives them. Retryable provider connectivity, 5xx failures, and typed
 required-MCP connectivity failures resume the same accepted turn after a pacing
-delay. Required first-party connect/tools-list also treats a rolling API
+delay. The exact Modal `TaskExecStart` `ClientError` for DNS resolution of a
+`task-*.w.modal.host:443` command router is also recovery-safe after Modal's own
+ten `UNAVAILABLE` retries: DNS failed before the command transport connected, so
+OpenGeni resumes the same accepted turn through the connectivity backoff.
+Generic `TaskExecStart` `UNAVAILABLE`, mixed failure batches, message-only
+lookalikes, any attached HTTP status metadata, and the exact
+`FAILED_PRECONDITION: Modal Sandbox is shutting down` condition remain
+non-retryable because pre-command safety is not proven. Required first-party
+connect/tools-list also treats a rolling API
 replacement's temporary `404` or statusless plain transport `Error` as
 recovery-safe. That narrow exception does not apply to external MCP servers,
 tool invocation, explicit non-404 client responses, or typed
@@ -806,6 +815,11 @@ deadlock; the session lock excludes competing mutation while remaining compatibl
 with FK key-share checks. Start, requires-action, ordinary terminal, recoverable interruption,
 supersession, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
+Migration 0374 also advances `session_event_cursors` from an AFTER INSERT
+statement trigger and rejects any non-contiguous batch. This is a rolling
+dual-write/parity phase, not the allocator cutover: writers must keep locking
+and updating `sessions.lastSequence` until Pause/Steer admission and every event
+writer share the narrow cursor lock.
 Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQL
 `40P01`/`40001` only around their bounded, idempotent persistence transaction.
 The pre-inference turn claim follows the same rule around its complete
@@ -931,6 +945,15 @@ parent are settled authority: the result stays pending for a later human/new-goa
 turn and cannot manufacture a new inference or rewrite the settled public status
 by itself. A result arriving while the parent turn is live remains available to
 that turn's ordinary loop.
+The provider-neutral coordination contract creates a child only for concrete,
+bounded, independently useful work with a defined integration point. Parent
+work must stay disjoint from the delegated scope. A parent joining a child uses
+`session_wait` with `waitFor: "completion"` before committing or publishing
+dependent work. `goal.completed` is a durable goal fact, not proof that the
+child has emitted its final result. Completed commentary messages, maintenance
+turns, and continuation segment settlements are also ignored until an ordinary
+result-bearing turn settles. The ordinary `waitFor: "change"` mode remains
+available for progress monitoring.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
@@ -1025,6 +1048,14 @@ original tool call, while an explicitly short yield or a command still running
 after the requested window returns the retained session id. Empty internal
 polls use the exact process-control route and never create another model turn or
 workspace mutation admission.
+If that process's durable row already records exit or loss, a later model-visible
+`write_stdin` remains fenced before provider dispatch but returns the stored
+terminal exit/loss banner. It never labels a permanently dead handle as a
+retryable platform fault or calls the provider again. If provider polling and a
+lease-loss reconciler race to settle the same terminal state, the first durable
+state and evidence reason win; a later matching state/exit proof is idempotent
+and unpins the local route even when its bounded evidence reason differs, while
+a contradictory state or exit code remains outcome-unknown and pinned.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
@@ -1091,6 +1122,19 @@ and truthful durations; a command-readiness failure is never rewritten as a
 rolls only the exact warming epoch back to cold, and fails the turn rather than
 rapidly creating sibling boxes. Any later display/setup failure follows the same
 owned cleanup path.
+
+After a managed lease is warm, immutable Rig setup has a second, setup-specific
+single-flight boundary. One worker claims the exact `(lease epoch, provider
+instance, setup spec hash)` receipt and runs the existing marker-guarded script;
+sibling turns join or reuse its durable completion instead of entering the
+sandbox concurrently. Join reads back off from 100 ms to a two-second ceiling
+and reset when the durable revision advances. If provider execution succeeds
+but database settlement is unavailable, the current turn does not replay the
+script; after the bounded claim deadline, a successor re-enters the same
+box-local marker and records completion. Failed setup remains fail-closed and
+retryable. Per-turn Git/run credentials, Codemode tokens, Azure login,
+repository clone authority, file resources, and generated media are always
+prepared privately after the shared Rig boundary.
 
 Lazy establishment observes one correlation-qualified logical provision at a
 time. Its terminal durable `sandbox.provision` event records a closed structural
@@ -1293,6 +1337,14 @@ single in-flight model step is lost, the same bound as a crash. This is an
 explicit checkpoint/resume, not an automatic Temporal retry. A newer control
 revision, terminal state, or successor attempt wins instead of being
 overwritten.
+
+The shared worker process owns its own fatality policy. The pinned Agents SDK
+is patched so its MCP lifecycle queue settles every submitted command even when
+an internal error value is hostile, and its tracing provider does not register
+process-global `unhandledRejection` termination behavior. No SDK background
+promise may escape into the process boundary. The worker listener remains an
+observational last resort; a genuinely unhealthy worker stops polling and uses
+the normal drain path rather than letting a dependency call `process.exit(1)`.
 
 An active-route filesystem-root change uses the same durable same-logical-turn
 boundary. A machine-primary attempt never pre-leases home. Clearing its pointer
@@ -1500,8 +1552,11 @@ audit reads may return it, so it is never a secret boundary.
    (human-input response, approval invoke through the existing MCP execute-once
    fence, or rejection), promotes reasoning + call + bounded result as one pair,
    and either stays `requires_action` without a model call or continues from
-   history. Missing suffix rows fail closed. It does not reconstruct SDK
-   `RunState`.
+   history. Before that continued model call, the exact resumed attempt
+   idempotently attaches machine input inside its frozen pending-event sequence
+   boundary, after the paired result in canonical history; input accepted later
+   remains pending for the next turn. Missing suffix rows fail closed. It does
+   not reconstruct SDK `RunState`.
    Historical sandbox envelopes receive one exact-path compatibility repair before
    SDK validation: invalid non-record `exposedPorts` values are removed only from
    the root and `sessionsByAgent[*]` session envelopes, while provider state and

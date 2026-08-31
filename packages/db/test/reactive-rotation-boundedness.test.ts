@@ -33,7 +33,10 @@ let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [a] = await admin<
     { id: string }[]
   >`insert into managed_accounts (name) values ('acct') returning id`;
@@ -61,7 +64,7 @@ async function seedSession(ws: { accountId: string; workspaceId: string }): Prom
   return id;
 }
 
-// Append a session_event as the superuser at the next per-session sequence.
+// Append a session_event as the superuser at the next durable cursor sequence.
 async function appendEvent(
   ws: { accountId: string; workspaceId: string },
   sessionId: string,
@@ -69,8 +72,9 @@ async function appendEvent(
   payload: Record<string, unknown>,
   turnId: string | null = null,
 ): Promise<void> {
-  const [{ next } = { next: 0 }] = await admin<{ next: number }[]>`
-    select coalesce(max(sequence), -1) + 1 as next from session_events
+  const [{ next } = { next: 1 }] = await admin<{ next: number }[]>`
+    select last_sequence + 1 as next
+    from session_event_cursors
     where workspace_id = ${ws.workspaceId} and session_id = ${sessionId}`;
   await admin`
     insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
@@ -153,7 +157,9 @@ describe("Finding 1b — countConsecutiveReactiveRotations", () => {
     const ws = await freshWorkspace();
     const sessionId = await seedSession(ws);
     await appendEvent(ws, sessionId, "turn.failed", { rotated: true });
-    await appendEvent(ws, sessionId, "turn.failed", { recovery: "provider_backpressure" }); // no rotated marker
+    await appendEvent(ws, sessionId, "turn.failed", {
+      recovery: "provider_backpressure",
+    }); // no rotated marker
     expect(await countConsecutiveReactiveRotations(db, ws.workspaceId, sessionId)).toBe(1);
   });
 
@@ -216,7 +222,11 @@ describe("Finding 2 — evaluateGoalContinuation freezes the rotation-wait on BO
       ws,
       sessionId,
       "turn.failed",
-      { rotated: true, recovery: "goal_continuation", code: "codex_usage_limit_reached" },
+      {
+        rotated: true,
+        recovery: "goal_continuation",
+        code: "codex_usage_limit_reached",
+      },
       turnId,
     );
     const decision = await evaluateGoalContinuation(db, {

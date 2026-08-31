@@ -1,5 +1,95 @@
 # @opengeni/core
 
+## 2.6.2
+
+### Patch Changes
+
+- 3a7fe2f: Reconcile retained-process terminal settlement races without leaving completed routes pinned.
+- 478f572: Harden organization API keys with explicit credential provenance, fail-closed revocation of ambiguous legacy account keys, bounded delegation, atomic organization-key and workspace limits, and safer rotation and one-time-secret UI behavior.
+- Updated dependencies [59b286a]
+- Updated dependencies [3a7fe2f]
+- Updated dependencies [7e67729]
+- Updated dependencies [9b844c8]
+- Updated dependencies [4fb337b]
+- Updated dependencies [478f572]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/runtime@2.0.1
+  - @opengeni/db@3.7.2
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+  - @opengeni/documents@0.8.12
+  - @opengeni/storage@0.2.115
+  - @opengeni/events@0.4.10
+  - @opengeni/observability@0.8.14
+
+## 2.6.1
+
+### Patch Changes
+
+- 4bacdd3: Add fixed-scope organization API keys, idempotent external tenant workspace provisioning, Personal-workspace exclusion, and the matching SDK and integration guidance.
+- Updated dependencies [c3b43a5]
+- Updated dependencies [fab355b]
+- Updated dependencies [b471a90]
+- Updated dependencies [973b1dd]
+- Updated dependencies [e41285f]
+- Updated dependencies [1f289a0]
+- Updated dependencies [c9ac869]
+- Updated dependencies [96624a7]
+- Updated dependencies [fab355b]
+- Updated dependencies [fab355b]
+- Updated dependencies [4bacdd3]
+- Updated dependencies [72de39c]
+  - @opengeni/db@3.7.1
+  - @opengeni/contracts@2.9.1
+  - @opengeni/runtime@2.0.0
+  - @opengeni/events@0.4.9
+  - @opengeni/config@0.22.4
+  - @opengeni/documents@0.8.11
+  - @opengeni/observability@0.8.13
+  - @opengeni/storage@0.2.114
+
+## 2.6.0
+
+### Minor Changes
+
+- 699477a: Restore autonomous agent Workspace Memory writes whenever workspace Memory is enabled. Agents can save and correct active facts, decisions, incidents, fixes, and outcomes independently of Learning mode while all existing Memory kinds remain retrieval-only through search. Autonomous learning may activate eligible concise Workspace instructions and focused Skills through their governed, auditable, undoable lifecycles; Review first keeps proposals inactive and Off creates no derived change.
+- ddce5cc: Allow scheduled generated sessions and nested workers to target an exact Connected Machine, and fail closed without leaving an unstarted generated session behind when that route cannot be established.
+- 132c8d3: Require self-hosted-only session defaults to resolve to a reachable Connected Machine. Keep the composer blocked when no eligible machine exists instead of submitting an unroutable session.
+- 88b6b48: Share Variable Set reserved-name validation between the API and web UI, and make Variable Set editing and variable management clearer and more actionable.
+
+### Patch Changes
+
+- Updated dependencies [699477a]
+- Updated dependencies [ec1aebc]
+- Updated dependencies [3ef2488]
+- Updated dependencies [ddce5cc]
+- Updated dependencies [132c8d3]
+- Updated dependencies [88b6b48]
+  - @opengeni/contracts@2.9.0
+  - @opengeni/db@3.7.0
+  - @opengeni/runtime@1.5.0
+  - @opengeni/config@0.22.3
+  - @opengeni/documents@0.8.10
+  - @opengeni/events@0.4.8
+  - @opengeni/observability@0.8.12
+  - @opengeni/storage@0.2.113
+
+## 2.5.7
+
+### Patch Changes
+
+- 06460ae: Return governed-learning activation receipts before optional Slack publication settles, so exact retries recover durable outcomes even when notification dispatch stalls.
+- Updated dependencies [3c75347]
+- Updated dependencies [551cead]
+- Updated dependencies [06fda28]
+- Updated dependencies [499cc48]
+- Updated dependencies [37faec3]
+  - @opengeni/runtime@1.4.6
+  - @opengeni/db@3.6.3
+  - @opengeni/documents@0.8.9
+  - @opengeni/events@0.4.7
+
 ## 2.5.6
 
 ### Patch Changes

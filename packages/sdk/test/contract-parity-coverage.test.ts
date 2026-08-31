@@ -10,6 +10,7 @@ import {
   CapabilityPack as ContractCapabilityPack,
   CapabilitySource as ContractCapabilitySource,
   CreateApiKeyRequest as ContractCreateApiKeyRequest,
+  CreateOrganizationApiKeyRequest as ContractCreateOrganizationApiKeyRequest,
   CreateCapabilityCatalogItemRequest as ContractCreateCapabilityCatalogItemRequest,
   CreateCheckoutRequest as ContractCreateCheckoutRequest,
   CreateCheckoutResponse as ContractCreateCheckoutResponse,
@@ -19,6 +20,7 @@ import {
   CreateScheduledTaskRequest as ContractCreateScheduledTaskRequest,
   CreateWorkspaceEnvironmentRequest as ContractCreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest as ContractCreateWorkspaceRequest,
+  EnsureWorkspaceRequest as ContractEnsureWorkspaceRequest,
   Document as ContractDocument,
   DocumentBase as ContractDocumentBase,
   DocumentSearchResult as ContractDocumentSearchResult,
@@ -85,6 +87,7 @@ import type {
   CapabilityPack,
   CapabilitySource,
   CreateApiKeyRequest,
+  CreateOrganizationApiKeyRequest,
   CreateCapabilityCatalogItemRequest,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
@@ -95,6 +98,7 @@ import type {
   CreateScheduledTaskRequest,
   CreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest,
+  EnsureWorkspaceRequest,
   Document,
   DocumentBase,
   DocumentSearchResult,
@@ -318,6 +322,9 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptCreateWorkspace = (
       value: CreateWorkspaceRequest,
     ): z.input<typeof ContractCreateWorkspaceRequest> => value;
+    const acceptEnsureWorkspace = (
+      value: EnsureWorkspaceRequest,
+    ): z.input<typeof ContractEnsureWorkspaceRequest> => value;
     const acceptUpdateWorkspace = (
       value: UpdateWorkspaceRequest,
     ): z.input<typeof ContractUpdateWorkspaceRequest> => value;
@@ -329,6 +336,9 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptCreateApiKey = (
       value: Omit<CreateApiKeyRequest, "permissions">,
     ): z.input<typeof ContractCreateApiKeyBody> => value;
+    const acceptCreateOrganizationApiKey = (
+      value: CreateOrganizationApiKeyRequest,
+    ): z.input<typeof ContractCreateOrganizationApiKeyRequest> => value;
     const acceptUpdateGoal = (
       value: UpdateSessionGoalRequest,
     ): z.input<typeof ContractUpdateSessionGoalRequest> => value;
@@ -373,8 +383,10 @@ describe("SDK / contracts parity (full coverage)", () => {
     ): z.input<typeof ContractCreateCheckoutRequest> => value;
     const checks = [
       acceptCreateWorkspace,
+      acceptEnsureWorkspace,
       acceptUpdateWorkspace,
       acceptCreateApiKey,
+      acceptCreateOrganizationApiKey,
       acceptUpdateGoal,
       acceptCreateTask,
       acceptUpdateTask,

@@ -631,6 +631,13 @@ describe("API helpers", () => {
     ).toBe(
       "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation",
     );
+    expect(
+      routeLabel(
+        `/v1/workspaces/${workspace}/computer-sessions/computer-1/targets/window-1/screenshot`,
+      ),
+    ).toBe(
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/screenshot",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/computer-sessions/computer-1/clipboard`)).toBe(
       "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/clipboard",
     );
@@ -824,6 +831,50 @@ describe("API helpers", () => {
     expect(body.error.message).toBe("OpenGeni could not complete the request.");
     expect(body.error.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
+  });
+
+  test("health omits configuration warnings when GitHub App bot identity is available", async () => {
+    const app = createApp({
+      settings: testSettings({ githubAppId: "12345", githubAppSlug: "opengeni-test-app" }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+
+    const response = await app.request("http://localhost/healthz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      service: "opengeni",
+      environment: "test",
+      deploymentRevision: "dev",
+      ok: true,
+    });
+  });
+
+  test("health exposes incomplete GitHub App bot identity without failing liveness", async () => {
+    const settings = {
+      ...testSettings(),
+      gitAuthorName: undefined,
+      gitAuthorEmail: undefined,
+      githubAppId: undefined,
+      githubAppSlug: undefined,
+      githubClientId: "configured-client",
+    };
+    const app = createApp({
+      settings,
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+
+    const response = await app.request("http://localhost/healthz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      warnings: ["github_app_bot_identity_unavailable"],
+    });
   });
 
   test("readyz reports a failing dependency", async () => {
@@ -1730,6 +1781,7 @@ describe("GET /v1/config/client", () => {
 
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(config.managedAuthSessionSetMode).toBe("legacy");
+    expect(config.defaultSandboxBackend).toBe(settings.sandboxBackend);
     expect(config.models.length).toBeGreaterThan(0);
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
     // Built-in deployment topology stays private in the client projection.

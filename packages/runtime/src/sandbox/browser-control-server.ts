@@ -52,9 +52,11 @@ type ExecCapableSession = {
   }) => Promise<string>;
 };
 
-// Image-backed controller spawn uses absolute /tmp paths. Do not inherit a
-// session working directory; a missing cwd makes spawn fail with ENOENT.
-const PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
+// Image-backed controller commands use absolute private paths under /tmp, but
+// managed sandbox exec confines `workdir` to the canonical workspace root.
+// Keep the cwd stable without asking the provider to validate /tmp as a
+// workspace path.
+const PLACEMENT_CONTROLLER_WORKDIR = "/workspace";
 
 export type EnsureBrowserControlServerOptions = {
   port?: number;

@@ -10,9 +10,9 @@
 //   - reconnecting        → a transient blip (a recent lastSeenAt but the probe
 //                           missed): agent_reconnecting.
 //   - consent_required    → enrolled but whole-machine / screen-control not acked:
-//                           consent_required on the desktop/computer-use cells.
+//                           the interactive desktop stream becomes read-only.
 //   - display_unavailable → online but the machine has no display (headless, no
-//                           Xvfb): the desktop/computer-use cells degrade with
+//                           Xvfb): desktop and recording degrade with
 //                           display_unavailable.
 //
 // It REUSES `negotiateCapabilities` for the descriptor-shaped cells (so the
@@ -157,13 +157,11 @@ export interface SelfhostedNegotiationInput {
   session?: Pick<SelfhostedSession, "ping">;
   /** Explicit probe outcome (when no session is given, e.g. a pure read). */
   probeResponded?: boolean;
-  /** The deployment desktop/terminal/computer-use policy toggles (threaded
-   *  through to the base negotiation). */
+  /** The deployment desktop/terminal policy toggles (threaded through to the
+   *  base negotiation). */
   desktopEnabled?: boolean;
   desktopInteractive?: boolean;
   terminalEnabled?: boolean;
-  computerUseEnabled?: boolean;
-  computerUseReadOnly?: boolean;
   streamTokenSecretAvailable?: boolean;
   /** Whether the calling principal acknowledged the un-redacted desktop. */
   desktopAcknowledged?: boolean;
@@ -204,8 +202,6 @@ export async function negotiateSelfhostedCapabilities(
     desktopEnabled: input.desktopEnabled ?? true,
     desktopInteractive: input.desktopInteractive ?? true,
     terminalEnabled: input.terminalEnabled ?? true,
-    computerUseEnabled: input.computerUseEnabled ?? true,
-    computerUseReadOnly: input.computerUseReadOnly ?? false,
     streamTokenSecretAvailable: input.streamTokenSecretAvailable ?? true,
     ...(input.desktopAcknowledged !== undefined
       ? { desktopAcknowledged: input.desktopAcknowledged }
@@ -259,7 +255,6 @@ export async function negotiateSelfhostedCapabilities(
         reason,
       },
       Recording: { ...caps.Recording, available: false, modes: [], codecs: [], reason },
-      ComputerUse: { ...caps.ComputerUse, available: false, reason },
     };
   }
 
@@ -270,8 +265,8 @@ export async function negotiateSelfhostedCapabilities(
   //    screen itself), so passive viewing is within the exposure the user already
   //    consented to; a missing display (headless, no Xvfb / no macOS Screen
   //    Recording grant) is the only blocker.
-  //  - CONTROL — driving input (ComputerUse) or an INTERACTIVE stream —
-  //    additionally requires the explicit allowScreenControl consent (`consented`).
+  //  - CONTROL — an INTERACTIVE stream — additionally requires the explicit
+  //    allowScreenControl consent (`consented`).
   // Precedence: a headless machine blocks everything (display_unavailable); a
   // displayed-but-unconsented machine can be VIEWED (read-only) + RECORDED but not
   // CONTROLLED (consent_required). (If the base already degraded a cell for a
@@ -301,15 +296,12 @@ export async function negotiateSelfhostedCapabilities(
       Recording: caps.Recording.available
         ? { ...caps.Recording, available: false, modes: [], codecs: [], reason }
         : caps.Recording,
-      ComputerUse: caps.ComputerUse.available
-        ? { ...caps.ComputerUse, available: false, reason }
-        : caps.ComputerUse,
     };
   }
 
   if (!liveness.consented) {
     // Displayed but no screen-CONTROL consent: VIEW (read-only) + Recording stay
-    // available; only CONTROL (input) is withheld. Force the stream to read-only
+    // available; only interactive viewer CONTROL is withheld. Force the stream to read-only
     // so no input is forwarded even if the base offered an interactive mode.
     return {
       ...caps,
@@ -317,13 +309,10 @@ export async function negotiateSelfhostedCapabilities(
         caps.DesktopStream.transport !== null
           ? { ...caps.DesktopStream, mode: "read-only" }
           : caps.DesktopStream,
-      ComputerUse: caps.ComputerUse.available
-        ? { ...caps.ComputerUse, available: false, reason: "consent_required" }
-        : caps.ComputerUse,
     };
   }
 
   // Fully online + displayed + consented: the base negotiation already produced
-  // the correct available cells (desktop vnc-ws, computer-use available, etc.).
+  // the correct available viewer and recording cells.
   return caps;
 }

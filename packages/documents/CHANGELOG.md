@@ -1,5 +1,61 @@
 # @opengeni/documents
 
+## 0.8.12
+
+### Patch Changes
+
+- Updated dependencies [59b286a]
+- Updated dependencies [3a7fe2f]
+- Updated dependencies [4fb337b]
+- Updated dependencies [478f572]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/db@3.7.2
+  - @opengeni/contracts@2.9.2
+  - @opengeni/storage@0.2.115
+
+## 0.8.11
+
+### Patch Changes
+
+- Updated dependencies [c3b43a5]
+- Updated dependencies [fab355b]
+- Updated dependencies [b471a90]
+- Updated dependencies [e41285f]
+- Updated dependencies [1f289a0]
+- Updated dependencies [c9ac869]
+- Updated dependencies [96624a7]
+- Updated dependencies [fab355b]
+- Updated dependencies [fab355b]
+- Updated dependencies [4bacdd3]
+- Updated dependencies [72de39c]
+  - @opengeni/db@3.7.1
+  - @opengeni/contracts@2.9.1
+  - @opengeni/config@0.22.4
+  - @opengeni/storage@0.2.114
+
+## 0.8.10
+
+### Patch Changes
+
+- Updated dependencies [699477a]
+- Updated dependencies [3ef2488]
+- Updated dependencies [ddce5cc]
+- Updated dependencies [132c8d3]
+- Updated dependencies [88b6b48]
+  - @opengeni/contracts@2.9.0
+  - @opengeni/db@3.7.0
+  - @opengeni/config@0.22.3
+  - @opengeni/storage@0.2.113
+
+## 0.8.9
+
+### Patch Changes
+
+- Updated dependencies [551cead]
+- Updated dependencies [06fda28]
+  - @opengeni/db@3.6.3
+
 ## 0.8.8
 
 ### Patch Changes

@@ -196,6 +196,106 @@ const MODAL_EXEC_STDIN_WRITE_PATH =
   "/modal.task_command_router.TaskCommandRouter/TaskExecStdinWrite";
 const MODAL_EXEC_ALREADY_COMPLETED_DETAILS =
   /^Exec has already completed; stdin is no longer accepting writes(?: \(Error code: [A-Z0-9]+\))?$/;
+const MODAL_TASK_EXEC_START_PATH = "/modal.task_command_router.TaskCommandRouter/TaskExecStart";
+const MODAL_TASK_EXEC_START_DNS_RESOLUTION_DETAILS =
+  /^Name resolution failed for target dns:task-[a-z0-9]+\.w\.modal\.host:443$/;
+const MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH = 8;
+const MODAL_TASK_EXEC_START_ERROR_MAX_NODES = 64;
+const MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS = 32;
+
+function modalHttpStatus(value: unknown): number | null {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const status = Number(value);
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+
+function hasContradictoryModalHttpStatus(record: Record<string, unknown>): boolean {
+  const values = [record.status, record.statusCode, record.httpStatus, record.httpStatusCode];
+  const response = record.response;
+  if (response && typeof response === "object") {
+    values.push(
+      Reflect.get(response, "status"),
+      Reflect.get(response, "statusCode"),
+      Reflect.get(response, "httpStatus"),
+      Reflect.get(response, "httpStatusCode"),
+    );
+  }
+  return values.some((value) => modalHttpStatus(value) !== null);
+}
+
+function isModalTaskExecStartDnsResolutionLeaf(record: Record<string, unknown>): boolean {
+  return (
+    record.name === "ClientError" &&
+    record.path === MODAL_TASK_EXEC_START_PATH &&
+    (record.code === 14 || record.code === "UNAVAILABLE") &&
+    typeof record.details === "string" &&
+    MODAL_TASK_EXEC_START_DNS_RESOLUTION_DETAILS.test(record.details)
+  );
+}
+
+/**
+ * Modal exhausted its own retries before failing to resolve the exact command
+ * router DNS name, so TaskExecStart never connected and replay is safe. Keep
+ * this fail-closed across Agents SDK wrappers: every reachable structural leaf
+ * must be that exact ClientError with no HTTP status metadata, and any incomplete
+ * or mixed graph is rejected.
+ */
+export function isModalTaskExecStartDnsResolutionError(error: unknown): boolean {
+  const pending: Array<{ depth: number; value: unknown }> = [{ depth: 0, value: error }];
+  const seen = new WeakSet<object>();
+  let inspected = 0;
+  let matchingLeaves = 0;
+
+  while (pending.length > 0) {
+    if (inspected >= MODAL_TASK_EXEC_START_ERROR_MAX_NODES) return false;
+    const current = pending.shift()!;
+    inspected += 1;
+    if (!current.value || typeof current.value !== "object" || seen.has(current.value)) {
+      return false;
+    }
+    if (current.depth > MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH) return false;
+    seen.add(current.value);
+
+    let nested: unknown[];
+    try {
+      const record = current.value as Record<string, unknown>;
+      if (hasContradictoryModalHttpStatus(record)) return false;
+
+      nested = [];
+      for (const key of ["cause", "error"] as const) {
+        const value = record[key];
+        if (value !== undefined) nested.push(value);
+      }
+
+      if (current.value instanceof AggregateError || record.name === "AggregateError") {
+        const errors = record.errors;
+        if (
+          !Array.isArray(errors) ||
+          errors.length === 0 ||
+          errors.length > MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS
+        ) {
+          return false;
+        }
+        nested.push(...errors);
+      }
+
+      if (nested.length === 0) {
+        if (!isModalTaskExecStartDnsResolutionLeaf(record)) return false;
+        matchingLeaves += 1;
+        continue;
+      }
+    } catch {
+      return false;
+    }
+
+    if (current.depth >= MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH) return false;
+    for (const value of nested) {
+      pending.push({ depth: current.depth + 1, value });
+    }
+  }
+
+  return matchingLeaves > 0;
+}
 
 /**
  * Modal proves that the exact exec has already terminated with a typed
@@ -603,6 +703,12 @@ export const modalProvider: ProviderRegistration = {
     // and the reaper — not Modal's idle-reap — governs teardown (and snapshots
     // /workspace first).
     options.idleTimeoutMs = effectiveModalIdleTimeoutSeconds(settings) * 1000;
+    if (settings.modalSandboxCpu !== undefined) {
+      options.cpu = settings.modalSandboxCpu;
+    }
+    if (settings.modalSandboxMemoryMiB !== undefined) {
+      options.memoryMiB = settings.modalSandboxMemoryMiB;
+    }
     if (settings.modalWorkspacePersistence) {
       options.workspacePersistence = settings.modalWorkspacePersistence;
     }

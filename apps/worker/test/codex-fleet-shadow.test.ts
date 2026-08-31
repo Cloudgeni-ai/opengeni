@@ -38,6 +38,7 @@ function account(
     secondaryResetAt: new Date(NOW.getTime() + 7 * 24 * 60 * 60_000),
     usageCheckedAt: new Date(NOW.getTime() - 60_000),
     exhaustedUntil: null,
+    exhaustedKind: null,
     activeLeaseCount: 0,
     selectionCount: 99,
     lastSelectedAt: NOW,

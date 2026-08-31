@@ -96,9 +96,6 @@ describe("workspace capture revisions (real PostgreSQL + FORCE RLS)", () => {
          'user.message', ${JSON.stringify({ text: "capture repositories" })}::jsonb)
       returning id`;
     expect(trigger).toBeDefined();
-    await admin`
-      update sessions set last_sequence = 1
-      where workspace_id = ${workspace.workspaceId} and id = ${session.id}`;
     const [turn] = await admin<{ id: string; execution_generation: number }[]>`
       insert into session_turns
         (account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,

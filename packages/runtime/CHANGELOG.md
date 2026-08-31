@@ -1,5 +1,68 @@
 # @opengeni/runtime
 
+## 2.0.1
+
+### Patch Changes
+
+- 59b286a: Add optional Modal CPU and memory reservations and preserve them through sandbox creation, exact resume, and snapshot replacement.
+- 3a7fe2f: Reconcile retained-process terminal settlement races without leaving completed routes pinned.
+- 7e67729: Prevent parent agents from duplicating delegated work. Child creation now requires an independent integration plan, and `session_wait` can ignore messages, goal/progress events, maintenance turns, and continuation segments until a child produces a result-bearing final turn or blocks.
+- 9b844c8: Recover Modal command starts that fail on task-router DNS before connecting, while leaving generic unavailable, HTTP-status-bearing, mixed-tool, and sandbox-shutdown failures non-retryable.
+- Updated dependencies [59b286a]
+- Updated dependencies [4fb337b]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+  - @opengeni/sdk@3.3.2
+  - @opengeni/codemode@0.4.22
+
+## 2.0.0
+
+### Major Changes
+
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. The legacy runtime desktop API remains exported only as a deprecated, fail-closed migration shell; because direct sandbox desktop control and model-bound tools are no longer functional, release `@opengeni/runtime` as the next major. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+
+### Patch Changes
+
+- 973b1dd: Keep a rejected best-effort MCP connection group fail-open and preparation-telemetered without downgrading required MCP connection failures.
+- e41285f: Overlap optional MCP preparation with first inference even when artifact tooling is enabled, keep optional eager integrations off the first-token critical path, reuse immutable large-history projections incrementally, and expose fenced event-append phase latency without changing durable ordering.
+- Updated dependencies [b471a90]
+- Updated dependencies [96624a7]
+- Updated dependencies [4bacdd3]
+  - @opengeni/contracts@2.9.1
+  - @opengeni/sdk@3.3.1
+  - @opengeni/config@0.22.4
+  - @opengeni/codemode@0.4.21
+
+## 1.5.0
+
+### Minor Changes
+
+- 699477a: Restore autonomous agent Workspace Memory writes whenever workspace Memory is enabled. Agents can save and correct active facts, decisions, incidents, fixes, and outcomes independently of Learning mode while all existing Memory kinds remain retrieval-only through search. Autonomous learning may activate eligible concise Workspace instructions and focused Skills through their governed, auditable, undoable lifecycles; Review first keeps proposals inactive and Off creates no derived change.
+
+### Patch Changes
+
+- ec1aebc: Use the provider-valid workspace root for managed Browser and Computer controller commands while preserving the native `/tmp` cwd for Connected Machines.
+- 3ef2488: Coordinate immutable Rig setup once per exact sandbox lease epoch and provider instance while keeping credentials, repositories, and files turn-private.
+- Updated dependencies [699477a]
+- Updated dependencies [ddce5cc]
+- Updated dependencies [132c8d3]
+- Updated dependencies [88b6b48]
+  - @opengeni/contracts@2.9.0
+  - @opengeni/sdk@3.3.0
+  - @opengeni/codemode@0.4.20
+  - @opengeni/config@0.22.3
+
+## 1.4.6
+
+### Patch Changes
+
+- 3c75347: Keep Agents SDK MCP lifecycle failures inside owned promises and reserve shared-worker process termination policy for OpenGeni.
+- 551cead: Return durable retained-process exit or loss results to shell tools instead of rendering a retryable platform fault for an already-terminal command handle.
+- 499cc48: Keep MCP lifecycle work on the awaited SDK path so optional server failures cannot leak from detached parallel workers.
+- 37faec3: Replace the Agents SDK default batch trace exporter with OpenGeni's in-process preparation processor.
+
 ## 1.4.5
 
 ### Patch Changes

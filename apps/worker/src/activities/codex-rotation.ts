@@ -15,6 +15,23 @@ import type {
 
 export type CodexRotationAccount = CodexAccountStatus | CodexLeaseAccountStatus;
 
+/** Capacity metadata worth an authoritative live read before/all through an idle. */
+export function codexAccountNeedsLiveCapacityRefresh(
+  account: Pick<
+    CodexAccountStatus,
+    "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil" | "exhaustedKind"
+  >,
+  now: Date,
+): boolean {
+  return (
+    (account.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
+    (account.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
+    (account.exhaustedKind === "quota" &&
+      account.exhaustedUntil !== null &&
+      account.exhaustedUntil > now)
+  );
+}
+
 export type CodexRotationStrategy =
   | "most_remaining"
   | "round_robin"

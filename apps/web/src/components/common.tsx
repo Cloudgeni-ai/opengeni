@@ -152,20 +152,22 @@ export function LoadErrorState({
   onRetry: () => void;
 }) {
   return (
-    <div className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-status-failed">
-      <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-fg"
+    >
+      <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium">{title}</div>
         {error?.message ? (
-          <div className="mt-0.5 break-words text-xs leading-4 text-status-failed/80">
-            {error.message}
-          </div>
+          <div className="mt-0.5 break-words text-xs leading-4 text-fg-muted">{error.message}</div>
         ) : null}
       </div>
       <button
         type="button"
         onClick={onRetry}
-        className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/40 px-2 text-xs font-medium text-status-failed transition-colors hover:bg-status-failed/20"
+        className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/50 px-2 text-xs font-medium text-fg transition-colors hover:bg-status-failed/20"
       >
         <RefreshCwIcon className="size-3" />
         Retry

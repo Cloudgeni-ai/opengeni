@@ -23,6 +23,7 @@ import {
 } from "./workspace-live-stream";
 import {
   OpenGeniInteractionClient,
+  decodeComputerFrameMetadataHeader,
   type AuthRun,
   type AuthRunListOptions,
   type AuthRunListResponse,
@@ -57,6 +58,7 @@ import {
   type ComputerActionReceipt,
   type ComputerActionRequest,
   type ComputerClipboard,
+  type ComputerFrame,
   type ComputerObservation,
   type ComputerSession,
   type ComputerSessionAttachment,
@@ -184,6 +186,7 @@ import type {
   VerifyPersonalGitHubRepositorySelectionsRequest,
   CreateApiKeyRequest,
   CreateApiKeyResponse,
+  CreateOrganizationApiKeyRequest,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -216,6 +219,8 @@ import type {
   ResolveVariableSetAttachmentsResponse,
   CreateRigRequest,
   CreateWorkspaceRequest,
+  EnsureWorkspaceRequest,
+  EnsureWorkspaceResponse,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
   // enroll-token mint.
   DeviceEnrollmentApproveRequest,
@@ -506,6 +511,7 @@ import type {
 } from "./workspace-learning";
 import type {
   ActivateCompanyProfileRevisionRequest,
+  CompanyProfileAgentPolicy,
   CompanyProfileDiffRequest,
   CompanyProfileDiffResponse,
   CompanyProfileListOptions,
@@ -514,6 +520,7 @@ import type {
   CompanyProfileRevision,
   RollbackCompanyProfileRequest,
   UpdateCompanyProfileRequest,
+  UpdateCompanyProfileAgentPolicyRequest,
 } from "./company-profile";
 import type {
   WorkspaceStateExportResponse,
@@ -704,6 +711,29 @@ export type FinalizeTranscriptionRecordingInput = {
   totalDurationMilliseconds: number;
   signal?: AbortSignal | undefined;
 };
+
+function normalizeScheduledTaskMachineTarget<
+  T extends CreateScheduledTaskRequest | UpdateScheduledTaskRequest,
+>(request: T): T {
+  if (!("agentConfig" in request) || !request.agentConfig?.machineTarget) {
+    return request;
+  }
+  const { workingDir, ...machineTarget } = request.agentConfig.machineTarget;
+  if (workingDir === undefined) {
+    return request;
+  }
+  const normalizedWorkingDir = workingDir.trim();
+  return {
+    ...request,
+    agentConfig: {
+      ...request.agentConfig,
+      machineTarget: {
+        ...machineTarget,
+        ...(normalizedWorkingDir ? { workingDir: normalizedWorkingDir } : {}),
+      },
+    },
+  };
+}
 
 /**
  * Typed client for the OpenGeni public API. Framework-agnostic: only needs
@@ -3859,6 +3889,48 @@ export class OpenGeniClient {
     );
   }
 
+  async captureComputerTarget(
+    workspaceId: string,
+    computerSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerFrame> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot`,
+      {},
+      options,
+    );
+    const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    if (mediaType !== "image/jpeg" && mediaType !== "image/png") {
+      await cancelResponseBody(response, "computer frame media type is invalid");
+      throw new OpenGeniApiError(502, "computer frame media type is invalid");
+    }
+    const metadataHeader = response.headers.get("x-opengeni-computer-frame");
+    if (!metadataHeader || metadataHeader.length > 32 * 1024) {
+      await cancelResponseBody(response, "computer frame metadata is invalid");
+      throw new OpenGeniApiError(502, "computer frame metadata is invalid");
+    }
+    let metadata: ReturnType<typeof decodeComputerFrameMetadataHeader>;
+    try {
+      metadata = decodeComputerFrameMetadataHeader(metadataHeader);
+    } catch {
+      await cancelResponseBody(response, "computer frame metadata is invalid");
+      throw new OpenGeniApiError(502, "computer frame metadata is invalid");
+    }
+    const bytes = await readBoundedResponseBytes(response, 256 * 1024, null);
+    const mismatchReason = computerFrameEvidenceMismatchReason(metadata, {
+      computerSessionId,
+      targetId,
+      mediaType,
+      sha256: await sha256Hex(bytes),
+    });
+    if (mismatchReason) {
+      throw new OpenGeniApiError(502, "computer frame evidence does not match its request");
+    }
+    return { ...metadata, data: bytes };
+  }
+
   async actInComputer(
     workspaceId: string,
     computerSessionId: string,
@@ -4359,6 +4431,18 @@ export class OpenGeniClient {
     return await this.requestJson<Workspace>("POST", "/v1/workspaces", request);
   }
 
+  /**
+   * Create an organization workspace once for a stable external tenant
+   * identity, or return the existing workspace without overwriting it.
+   */
+  async ensureWorkspace(request: EnsureWorkspaceRequest): Promise<EnsureWorkspaceResponse> {
+    return await this.requestJson<EnsureWorkspaceResponse>(
+      "PUT",
+      "/v1/workspaces/external",
+      request,
+    );
+  }
+
   async getWorkspace(workspaceId: string): Promise<Workspace> {
     return await this.requestJson<Workspace>("GET", `/v1/workspaces/${workspaceId}`);
   }
@@ -4616,6 +4700,24 @@ export class OpenGeniClient {
     return await this.requestJson<CompanyProfileRevision>(
       "GET",
       `/v1/workspaces/${workspaceId}/company-profile/revisions/${encodeURIComponent(revisionId)}`,
+    );
+  }
+
+  async getCompanyProfileAgentPolicy(workspaceId: string): Promise<CompanyProfileAgentPolicy> {
+    return await this.requestJson<CompanyProfileAgentPolicy>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/company-profile/agent-policy`,
+    );
+  }
+
+  async updateCompanyProfileAgentPolicy(
+    workspaceId: string,
+    request: UpdateCompanyProfileAgentPolicyRequest,
+  ): Promise<CompanyProfileAgentPolicy> {
+    return await this.requestJson<CompanyProfileAgentPolicy>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/company-profile/agent-policy`,
+      request,
     );
   }
 
@@ -4944,7 +5046,7 @@ export class OpenGeniClient {
     return await this.requestJson<ScheduledTask>(
       "POST",
       `/v1/workspaces/${workspaceId}/scheduled-tasks`,
-      request,
+      normalizeScheduledTaskMachineTarget(request),
     );
   }
 
@@ -4956,7 +5058,7 @@ export class OpenGeniClient {
     return await this.requestJson<ScheduledTask>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`,
-      request,
+      normalizeScheduledTaskMachineTarget(request),
     );
   }
 
@@ -6851,6 +6953,34 @@ export class OpenGeniClient {
     );
   }
 
+  async listOrganizationApiKeys(organizationId: string): Promise<ApiKey[]> {
+    const response = await this.requestJson<ListApiKeysResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/api-keys`,
+    );
+    return response.apiKeys;
+  }
+
+  /** The returned `token` is shown once; only its prefix is stored. */
+  async createOrganizationApiKey(
+    organizationId: string,
+    request: CreateOrganizationApiKeyRequest,
+  ): Promise<CreateApiKeyResponse> {
+    return await this.requestJson<CreateApiKeyResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/api-keys`,
+      request,
+    );
+  }
+
+  /** Revoke an organization-scoped API key. Returns the revoked key. */
+  async deleteOrganizationApiKey(organizationId: string, apiKeyId: string): Promise<ApiKey> {
+    return await this.requestJson<ApiKey>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
+    );
+  }
+
   // --- Billing (account-scoped) --------------------------------------------------------------------
 
   async getBilling(options: { accountId?: string } = {}): Promise<BillingSummary> {
@@ -7586,6 +7716,30 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const owned = Uint8Array.from(bytes);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", owned.buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+type ComputerFrameEvidenceMismatchReason =
+  | "frame_session_mismatch"
+  | "frame_target_mismatch"
+  | "frame_media_mismatch"
+  | "frame_digest_mismatch";
+
+function computerFrameEvidenceMismatchReason(
+  metadata: ReturnType<typeof decodeComputerFrameMetadataHeader>,
+  expected: {
+    computerSessionId: string;
+    targetId: string;
+    mediaType: "image/jpeg" | "image/png";
+    sha256: string;
+  },
+): ComputerFrameEvidenceMismatchReason | null {
+  if (metadata.computerSessionId !== expected.computerSessionId) {
+    return "frame_session_mismatch";
+  }
+  if (metadata.targetId !== expected.targetId) return "frame_target_mismatch";
+  if (metadata.mediaType !== expected.mediaType) return "frame_media_mismatch";
+  if (metadata.sha256 !== expected.sha256) return "frame_digest_mismatch";
+  return null;
 }
 
 async function cancelResponseBody(response: Response, reason: string): Promise<void> {

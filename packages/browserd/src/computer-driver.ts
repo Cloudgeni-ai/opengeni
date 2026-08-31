@@ -167,11 +167,23 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     }
   }
 
-  async capture(targetId: string): Promise<ComputerImageFrame> {
+  async capture(
+    targetId: string,
+    options: ComputerFrameStreamOptions = {},
+  ): Promise<ComputerImageFrame> {
     this.assertOpen();
+    const normalized = normalizeComputerFrameStreamOptions(options);
     try {
       return this.projectFrame(
-        await this.readWithRecovery(async (client) => await client.capture(targetId)),
+        await this.readWithRecovery(
+          async (client) =>
+            await client.capture(targetId, {
+              format: normalized.format,
+              quality: normalized.quality,
+              maxWidth: normalized.maxWidth,
+              maxHeight: normalized.maxHeight,
+            }),
+        ),
         0,
       );
     } catch (error) {

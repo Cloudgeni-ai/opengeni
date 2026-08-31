@@ -168,6 +168,33 @@ spec:
             severity: critical
           annotations:
             summary: OpenGeni has an agent turn without durable progress for more than 15 minutes
+        - alert: OpenGeniSessionRecoveryBacklogStale
+          expr: |
+            max(
+              opengeni_session_recovery_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} > 0
+              and on(namespace, release, environment, component, instance)
+              opengeni_session_recovery_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} == 1
+              and on(namespace, release, environment, component, instance)
+              time() - opengeni_session_recovery_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} < 240
+            ) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni has a durable recovering session with no active attempt for more than 10 minutes
+            description: Inspect the bounded state label. quiescence_missing requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction.
+        - alert: OpenGeniSessionRecoveryMonitorStale
+          expr: |
+            absent(opengeni_session_recovery_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}) == 1
+            or
+            min(opengeni_session_recovery_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}) < 1
+            or
+            time() - min(opengeni_session_recovery_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}) > 240
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni durable session-recovery monitoring is stale
         - alert: OpenGeniTurnStartupQueueP95High
           expr: |
             histogram_quantile(

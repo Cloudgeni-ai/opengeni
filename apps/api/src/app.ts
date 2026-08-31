@@ -44,6 +44,7 @@ import {
   withSessionRlsActorContext,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
+import { githubAppBotIdentityWarnings } from "@opengeni/github";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -734,15 +735,17 @@ export function createAppComposition(deps: AppDependencies): {
     });
   }
 
-  app.get("/healthz", (c) =>
-    c.json({
+  app.get("/healthz", (c) => {
+    const warnings = githubAppBotIdentityWarnings(deps.settings);
+    return c.json({
       service: deps.settings.serviceName,
       environment: deps.settings.environment,
       deploymentRevision: deps.settings.deploymentRevision,
       ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
       ok: true,
-    }),
-  );
+    });
+  });
 
   app.get("/readyz", async (c) => {
     const result = await runReadinessChecks(readinessChecks(deps), 2_000);
@@ -783,6 +786,7 @@ export function createAppComposition(deps: AppDependencies): {
         models: configuredModels(catalogSettings).map(projectClientModel),
         defaultReasoningEffort: deps.settings.openaiReasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
+        defaultSandboxBackend: deps.settings.sandboxBackend,
         mcpServers: deps.settings.mcpServers.map((server) => ({
           id: server.id,
           name: server.name ?? server.id,
@@ -1470,6 +1474,22 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/codex/status",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/codex\/source$/,
+    label: "/v1/workspaces/:workspaceId/codex/source",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/(accounts|settings)$/,
+    label: (match) => `/v1/organizations/:organizationId/codex/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/connect\/(start|poll)$/,
+    label: (match) => `/v1/organizations/:organizationId/codex/connect/${match[1]}`,
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/codex\/accounts\/[^/]+(?:\/activate)?$/,
+    label: "/v1/organizations/:organizationId/codex/accounts/:accountId",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/supergrok\/connect\/(start|poll)$/,
     label: (match) => `/v1/workspaces/:workspaceId/supergrok/connect/${match[1]}`,
   },
@@ -1627,6 +1647,11 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/targets\/[^/]+\/observation$/,
     label:
       "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/observation",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/targets\/[^/]+\/screenshot$/,
+    label:
+      "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/screenshot",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/computer-sessions\/[^/]+\/operations\/[^/]+$/,
@@ -1803,6 +1828,18 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/api-keys\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/api-keys/:id",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/api-keys$/,
+    label: "/v1/organizations/:organizationId/api-keys",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/api-keys\/[^/]+$/,
+    label: "/v1/organizations/:organizationId/api-keys/:id",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/external$/,
+    label: "/v1/workspaces/external",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks$/,

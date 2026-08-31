@@ -178,8 +178,13 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     // "frames" canvas client — never noVNC (that's Modal's x11vnc path).
     expect(caps.DesktopStream.transport).toBe("relay-frames");
     expect(caps.DesktopStream.reason).toBeNull();
-    expect(caps.ComputerUse.available).toBe(true);
+    expect(caps.ComputerUse).toEqual({
+      available: false,
+      readOnly: true,
+      reason: "disabled_by_policy",
+    });
     expect(caps.Recording.available).toBe(true);
+    expect(caps.Recording.modes).toEqual(["manual", "on-verify"]);
   });
 
   test("OFFLINE (no enrollment): every cell agent_offline", async () => {
@@ -198,7 +203,7 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     expect(caps.DesktopStream.transport).toBeNull();
     expect(caps.DesktopStream.reason).toBe("agent_offline");
     expect(caps.Recording.reason).toBe("agent_offline");
-    expect(caps.ComputerUse.reason).toBe("agent_offline");
+    expect(caps.ComputerUse.reason).toBe("disabled_by_policy");
   });
 
   test("OFFLINE (enrolled but no responder, stale): every cell agent_offline", async () => {
@@ -225,10 +230,10 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     expect(caps.Terminal.reason).toBe("agent_reconnecting");
     expect(caps.Git.reason).toBe("agent_reconnecting");
     expect(caps.DesktopStream.reason).toBe("agent_reconnecting");
-    expect(caps.ComputerUse.reason).toBe("agent_reconnecting");
+    expect(caps.ComputerUse.reason).toBe("disabled_by_policy");
   });
 
-  test("CONSENT_REQUIRED (online + displayed but not consented): VIEW (read-only) + Recording stay available, only CONTROL is gated", async () => {
+  test("CONSENT_REQUIRED (online + displayed but not consented): viewer becomes read-only while Recording stays available", async () => {
     const caps = await negotiateSelfhostedCapabilities({
       sessionId: SESSION_ID,
       leaseEpoch: 1,
@@ -242,15 +247,15 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     expect(caps.Git.available).toBe(true);
     // VIEW decouples from CONTROL: with a display alone the screen can be VIEWED
     // (read-only stream) + RECORDED — the agent already has whole-machine exec, so
-    // passive viewing adds no capability. Only INPUT (ComputerUse / an interactive
-    // stream) requires the explicit allowScreenControl consent.
+    // passive viewing adds no capability. Only an interactive stream requires
+    // the explicit allowScreenControl consent.
     expect(caps.DesktopStream.transport).toBe("relay-frames");
     expect(caps.DesktopStream.mode).toBe("read-only");
     expect(caps.DesktopStream.reason).toBeNull();
     expect(caps.Recording.available).toBe(true);
     expect(caps.Recording.reason).toBeNull();
     expect(caps.ComputerUse.available).toBe(false);
-    expect(caps.ComputerUse.reason).toBe("consent_required");
+    expect(caps.ComputerUse.reason).toBe("disabled_by_policy");
   });
 
   test("DISPLAY_UNAVAILABLE (online but headless, no display): desktop degraded, Channel-A available", async () => {
@@ -266,7 +271,7 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     expect(caps.DesktopStream.transport).toBeNull();
     expect(caps.DesktopStream.reason).toBe("display_unavailable");
     expect(caps.ComputerUse.available).toBe(false);
-    expect(caps.ComputerUse.reason).toBe("display_unavailable");
+    expect(caps.ComputerUse.reason).toBe("disabled_by_policy");
     expect(caps.Recording.reason).toBe("display_unavailable");
   });
 

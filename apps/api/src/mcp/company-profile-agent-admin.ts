@@ -109,12 +109,12 @@ function boundedIssueMessage(error: z.ZodError): string {
 }
 
 /**
- * Register the explicit owner-confirmed organization profile path. This is
- * administration, not derived learning: workspace learning mode is never
- * consulted, the initiating human must be the organization's active owner (the
- * same authority as the manual `account:admin` route), and the proposal cannot
- * become active without the exact bound human-input response returned by the
- * first call.
+ * Register the organization profile administration path. This is not derived
+ * workspace learning: the initiating human must be the organization's active
+ * owner (the same authority as the manual `account:admin` route). The separate
+ * organization policy either blocks the proposal, keeps the exact bound
+ * human-confirmation path, or permits immediate activation through the native
+ * company-profile lifecycle.
  */
 export function registerCompanyProfileAgentAdminTools(
   input: RegisterCompanyProfileAgentAdminToolsInput,
@@ -127,7 +127,7 @@ export function registerCompanyProfileAgentAdminTools(
         "Prepare the organization's small, stable identity: identity says who the organization is, and mission says why it exists. " +
         "Once activated, both fields are mandatory prompt context in every root session for the whole organization, so use one plain descriptive statement per field with no products, customers, goals, constraints, procedures, or marketing copy. Those details belong in organization-scoped Documents and are retrieved only when relevant. " +
         `Each field is bounded to ${AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS} characters for agent-authored proposals. ` +
-        "This creates only an immutable inactive proposal for the exact live turn initiated by the organization owner and does not use workspace learning policy. The receipt returns the exact `humanInput` payload; call `request_human_input` with it verbatim, then call `company_profile_confirm` with the returned requestId.",
+        "This is independent of workspace learning policy and follows the organization owner's Agent-managed identity mode. Off creates nothing. Review first returns status=confirmation_required with the exact `humanInput` payload; call `request_human_input` with it verbatim, then call `company_profile_confirm` with the returned requestId. Autonomous may return status=activated immediately after exact live-owner, stale-head, and compare-and-swap checks; do not ask for another confirmation in that case.",
       inputSchema: {
         operationId: z.string().uuid(),
         identity: scalar,

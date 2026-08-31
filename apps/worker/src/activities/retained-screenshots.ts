@@ -150,16 +150,21 @@ function imageBytesFromSdkToolOutput(
     for (const entry of output) {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
       const record = entry as Record<string, unknown>;
-      if (record.type !== "input_image") continue;
-      const decoded = imageBytesFromSdkImageSource(
-        record.image ?? record.image_url ?? record.imageUrl,
-      );
+      const decoded =
+        record.type === "input_image"
+          ? imageBytesFromSdkImageSource(record.image ?? record.image_url ?? record.imageUrl)
+          : record.type === "image"
+            ? decodeInlineMcpImage(record.data, record.mimeType)
+            : null;
       if (decoded) return decoded;
     }
     return null;
   }
   if (!output || typeof output !== "object") return null;
   const outputRecord = output as Record<string, unknown>;
+  if (Array.isArray(outputRecord.content)) {
+    return imageBytesFromSdkToolOutput(outputRecord.content);
+  }
   if (
     outputRecord.type !== "image" ||
     !outputRecord.image ||
@@ -202,14 +207,42 @@ export function toolOutputContainsInlineImage(output: unknown): boolean {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
       const record = entry as Record<string, unknown>;
       return (
-        record.type === "input_image" &&
-        sdkImageSourceContainsInlineImage(record.image ?? record.image_url ?? record.imageUrl)
+        (record.type === "input_image" &&
+          sdkImageSourceContainsInlineImage(record.image ?? record.image_url ?? record.imageUrl)) ||
+        (record.type === "image" && decodeInlineMcpImage(record.data, record.mimeType) !== null)
       );
     });
   }
   if (!output || typeof output !== "object") return false;
   const record = output as Record<string, unknown>;
+  if (Array.isArray(record.content)) return toolOutputContainsInlineImage(record.content);
   return record.type === "image" && sdkImageSourceContainsInlineImage(record.image);
+}
+
+function decodeInlineMcpImage(
+  data: unknown,
+  mimeType: unknown,
+): { bytes: Uint8Array; mediaType: string } | null {
+  if (
+    typeof data !== "string" ||
+    typeof mimeType !== "string" ||
+    !["image/png", "image/jpeg", "image/webp"].includes(mimeType)
+  ) {
+    return null;
+  }
+  const maxEncodedLength = Math.ceil(COMPUTER_SCREENSHOT_MAX_BYTES / 3) * 4;
+  if (
+    data.length === 0 ||
+    data.length > maxEncodedLength ||
+    data.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/u.test(data)
+  ) {
+    return null;
+  }
+  const bytes = Uint8Array.from(Buffer.from(data, "base64"));
+  return bytes.byteLength > 0 && bytes.byteLength <= COMPUTER_SCREENSHOT_MAX_BYTES
+    ? { bytes, mediaType: mimeType }
+    : null;
 }
 
 function decodeInlineImageDataUrl(value: unknown): { bytes: Uint8Array; mediaType: string } | null {
@@ -680,18 +713,43 @@ export function compactRetainedScreenshotHistory(
         output: { type: RETAINED_IMAGE_MARKER, artifact: receipt },
       };
     }
+    if (
+      item.output &&
+      typeof item.output === "object" &&
+      !Array.isArray(item.output) &&
+      Array.isArray((item.output as Record<string, unknown>).content)
+    ) {
+      const result = item.output as Record<string, unknown>;
+      const content = compactInlineImageContent(result.content as unknown[], receipt);
+      return content.changed ? { ...item, output: { ...result, content: content.entries } } : item;
+    }
     if (!Array.isArray(item.output)) return item;
-    let changed = false;
-    const output = item.output.map((entry) => {
-      if (!isInlineImageContent(entry)) return entry;
-      changed = true;
+    const output = compactInlineImageContent(item.output, receipt);
+    return output.changed ? { ...item, output: output.entries } : item;
+  });
+}
+
+function compactInlineImageContent(
+  entries: unknown[],
+  receipt: RetainedArtifactMetadata,
+): { entries: unknown[]; changed: boolean } {
+  let changed = false;
+  const compacted = entries.map((entry) => {
+    if (!isInlineImageContent(entry)) return entry;
+    changed = true;
+    const record = entry as Record<string, unknown>;
+    if (record.type === "image") {
       return {
-        ...(entry as Record<string, unknown>),
+        type: "input_image",
         image: { type: RETAINED_IMAGE_MARKER, artifact: receipt },
       };
-    });
-    return changed ? { ...item, output } : item;
+    }
+    return {
+      ...record,
+      image: { type: RETAINED_IMAGE_MARKER, artifact: receipt },
+    };
   });
+  return { entries: compacted, changed };
 }
 
 /** Collect durable screenshot receipts before their provider-only expansion. */
@@ -707,8 +765,16 @@ export function collectRetainedScreenshotReceipts(
       target.set(callId, direct);
       continue;
     }
-    if (!Array.isArray(item.output)) continue;
-    for (const entry of item.output) {
+    const outputEntries = Array.isArray(item.output)
+      ? item.output
+      : item.output &&
+          typeof item.output === "object" &&
+          !Array.isArray(item.output) &&
+          Array.isArray((item.output as Record<string, unknown>).content)
+        ? ((item.output as Record<string, unknown>).content as unknown[])
+        : null;
+    if (!outputEntries) continue;
+    for (const entry of outputEntries) {
       const receipt = retainedReceiptFromImageContent(entry);
       if (receipt) {
         target.set(callId, receipt);
@@ -872,18 +938,34 @@ async function materializeRetainedScreenshotHistoryWithCache(
       });
       continue;
     }
-    if (!Array.isArray(item.output)) {
+    const resultOutput =
+      item.output && typeof item.output === "object" && !Array.isArray(item.output)
+        ? (item.output as Record<string, unknown>)
+        : null;
+    const outputEntries = Array.isArray(item.output)
+      ? item.output
+      : resultOutput && Array.isArray(resultOutput.content)
+        ? resultOutput.content
+        : null;
+    if (!outputEntries) {
       materialized.push(item);
       continue;
     }
     let changed = false;
     const output: unknown[] = [];
-    for (const entry of item.output) {
+    for (const entry of outputEntries) {
       const next = await materializeEntry(entry);
       changed ||= next !== entry;
       output.push(next);
     }
-    materialized.push(changed ? { ...item, output } : item);
+    materialized.push(
+      changed
+        ? {
+            ...item,
+            output: resultOutput ? { ...resultOutput, content: output } : output,
+          }
+        : item,
+    );
   }
   return materialized;
 }
@@ -1045,9 +1127,10 @@ function isInlineImageContent(entry: unknown): boolean {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
   const record = entry as Record<string, unknown>;
   return (
-    record.type === "input_image" &&
-    typeof record.image === "string" &&
-    record.image.startsWith("data:image/")
+    (record.type === "input_image" &&
+      typeof record.image === "string" &&
+      record.image.startsWith("data:image/")) ||
+    (record.type === "image" && decodeInlineMcpImage(record.data, record.mimeType) !== null)
   );
 }
 

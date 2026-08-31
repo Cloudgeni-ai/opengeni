@@ -220,11 +220,26 @@ export function composeCallModelInputFilters(
  */
 function memoizedInputItemProjectionFilter(
   project: (item: AgentInputItem) => AgentInputItem,
+  options: { appendOnlyInput?: boolean } = {},
 ): CallModelInputFilter {
   const cache = new WeakMap<object, AgentInputItem>();
+  let appendOnlyPrefixLength = 0;
+  let appendOnlyPrefixFirstItem: AgentInputItem | undefined;
+  let appendOnlyPrefixLastItem: AgentInputItem | undefined;
+  let appendOnlyProjectedPrefix: AgentInputItem[] | null = null;
   return ({ modelData }) => {
-    let projected: AgentInputItem[] | null = null;
-    for (const [index, item] of modelData.input.entries()) {
+    const input = modelData.input;
+    const canReuseAppendOnlyPrefix =
+      options.appendOnlyInput === true &&
+      appendOnlyPrefixLength > 0 &&
+      input.length >= appendOnlyPrefixLength &&
+      input[0] === appendOnlyPrefixFirstItem &&
+      input[appendOnlyPrefixLength - 1] === appendOnlyPrefixLastItem;
+    const startIndex = canReuseAppendOnlyPrefix ? appendOnlyPrefixLength : 0;
+    let projected: AgentInputItem[] | null =
+      canReuseAppendOnlyPrefix && appendOnlyProjectedPrefix ? [...appendOnlyProjectedPrefix] : null;
+    for (let index = startIndex; index < input.length; index += 1) {
+      const item = input[index]!;
       let next = item;
       if (item && typeof item === "object") {
         const cached = cache.get(item);
@@ -235,10 +250,19 @@ function memoizedInputItemProjectionFilter(
           cache.set(item, next);
         }
       }
-      if (next !== item && projected === null) projected = modelData.input.slice(0, index);
+      if (next !== item && projected === null) {
+        projected = canReuseAppendOnlyPrefix ? input.slice(0, startIndex) : input.slice(0, index);
+      }
       projected?.push(next);
     }
-    return projected ? { ...modelData, input: projected } : modelData;
+    const nextInput = projected ?? input;
+    if (options.appendOnlyInput === true) {
+      appendOnlyPrefixLength = input.length;
+      appendOnlyPrefixFirstItem = input[0];
+      appendOnlyPrefixLastItem = input.at(-1);
+      appendOnlyProjectedPrefix = nextInput === input ? null : nextInput;
+    }
+    return nextInput === input ? modelData : { ...modelData, input: nextInput };
   };
 }
 
@@ -474,11 +498,17 @@ export function callModelInputFilterForSettings(
 /** Rules that normalize history but do not impose final bounds/accounting. */
 export function baseModelInputFilterForSettings(settings: Settings): CallModelInputFilter {
   const stripProviderIds = settings.openaiProviderItemIds === "strip";
-  return memoizedInputItemProjectionFilter((source) => {
-    let item = restoreGenericDispatchHistoryItem(source);
-    item = normalizeComputerCallAction(
-      item as unknown as Record<string, unknown>,
-    ) as unknown as AgentInputItem;
-    return stripProviderIds ? stripProviderItemId(item) : item;
-  });
+  return memoizedInputItemProjectionFilter(
+    (source) => {
+      let item = restoreGenericDispatchHistoryItem(source);
+      item = normalizeComputerCallAction(
+        item as unknown as Record<string, unknown>,
+      ) as unknown as AgentInputItem;
+      return stripProviderIds ? stripProviderItemId(item) : item;
+    },
+    // The SDK's externally-owned run history is immutable and append-only.
+    // Retain the exact projected prefix and inspect only items appended by the
+    // latest model/tool step instead of walking a six-figure history again.
+    { appendOnlyInput: true },
+  );
 }

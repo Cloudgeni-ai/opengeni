@@ -12,6 +12,7 @@ import { makeEvent, SESSION_ID, WORKSPACE_ID } from "./helpers";
 
 const ENVIRONMENT_ID = "33333333-3333-4333-8333-333333333333";
 const TASK_ID = "44444444-4444-4444-8444-444444444444";
+const SANDBOX_ID = "44444444-4444-4444-8444-444444444445";
 const FILE_ID = "55555555-5555-4555-8555-555555555555";
 const UPLOAD_ID = "66666666-6666-4666-8666-666666666666";
 const BASE_ID = "77777777-7777-4777-8777-777777777777";
@@ -716,6 +717,36 @@ describe("OpenGeniClient access + workspaces", () => {
 });
 
 describe("OpenGeniClient scheduled tasks", () => {
+  test("normalizes Connected Machine working directories before sending", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
+    await client.createScheduledTask(WORKSPACE_ID, {
+      name: "machine root",
+      schedule: { type: "interval", everySeconds: 3600 },
+      agentConfig: {
+        prompt: "check drift",
+        machineTarget: { targetSandboxId: SANDBOX_ID, workingDir: "   " },
+      },
+    });
+    await client.updateScheduledTask(WORKSPACE_ID, TASK_ID, {
+      agentConfig: {
+        prompt: "check drift",
+        machineTarget: { targetSandboxId: SANDBOX_ID, workingDir: "  repos/app  " },
+      },
+    });
+
+    expect(JSON.parse(requests[0]!.body!)).toMatchObject({
+      agentConfig: { machineTarget: { targetSandboxId: SANDBOX_ID } },
+    });
+    expect(JSON.parse(requests[0]!.body!).agentConfig.machineTarget).not.toHaveProperty(
+      "workingDir",
+    );
+    expect(JSON.parse(requests[1]!.body!)).toMatchObject({
+      agentConfig: {
+        machineTarget: { targetSandboxId: SANDBOX_ID, workingDir: "repos/app" },
+      },
+    });
+  });
+
   test("create, update, pause, resume, trigger, delete, and runs", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
     await client.createScheduledTask(WORKSPACE_ID, {
@@ -1855,7 +1886,7 @@ describe("OpenGeniClient github", () => {
 });
 
 describe("OpenGeniClient api keys", () => {
-  test("list unwraps apiKeys; create and delete hit the expected endpoints", async () => {
+  test("workspace and organization key lifecycle methods hit the expected endpoints", async () => {
     const apiKey = { id: "key-1", name: "ci" };
     const { client, requests } = makeClient((request) => {
       if (request.method === "GET") {
@@ -1880,13 +1911,59 @@ describe("OpenGeniClient api keys", () => {
       permissions: ["sessions:read"],
     });
     await client.deleteApiKey(WORKSPACE_ID, "key-1");
+    const organizationKeys = await client.listOrganizationApiKeys("org-1");
+    expect(organizationKeys).toEqual([apiKey as never]);
+    const organizationCreated = await client.createOrganizationApiKey("org-1", {
+      name: "product backend",
+      description: "Provisions external tenant workspaces",
+    });
+    expect(organizationCreated.token).toBe("ogk_secret");
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
+      name: "product backend",
+      description: "Provisions external tenant workspaces",
+    });
+    await client.deleteOrganizationApiKey("org-1", "key-1");
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/api-keys`,
         `POST /v1/workspaces/${WORKSPACE_ID}/api-keys`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/api-keys/key-1`,
+        "GET /v1/organizations/org-1/api-keys",
+        "POST /v1/organizations/org-1/api-keys",
+        "DELETE /v1/organizations/org-1/api-keys/key-1",
       ],
     );
+  });
+});
+
+describe("OpenGeniClient external workspace provisioning", () => {
+  test("ensureWorkspace sends the stable external identity and accepts create/replay responses", async () => {
+    let invocation = 0;
+    const workspace = {
+      id: WORKSPACE_ID,
+      accountId: "11111111-1111-4111-8111-111111111111",
+      kind: "shared",
+      name: "Acme tenant",
+    };
+    const { client, requests } = makeClient(() => {
+      invocation += 1;
+      return jsonResponse({ workspace, created: invocation === 1 }, invocation === 1 ? 201 : 200);
+    });
+    const request = {
+      accountId: workspace.accountId,
+      externalSource: "acme-product",
+      externalId: "tenant-42",
+      name: workspace.name,
+      slug: "acme-tenant",
+    };
+
+    expect(await client.ensureWorkspace(request)).toMatchObject({ created: true, workspace });
+    expect(await client.ensureWorkspace(request)).toMatchObject({ created: false, workspace });
+    expect(requests.map((entry) => `${entry.method} ${new URL(entry.url).pathname}`)).toEqual([
+      "PUT /v1/workspaces/external",
+      "PUT /v1/workspaces/external",
+    ]);
+    expect(JSON.parse(requests[0]!.body!)).toEqual(request);
   });
 });
 

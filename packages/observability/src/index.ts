@@ -470,7 +470,6 @@ const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
   "oauth",
   "observability",
   "runtime",
-  "sandbox-computer",
   "sandbox-resume",
   "codemode",
   "worker",

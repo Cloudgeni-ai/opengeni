@@ -253,6 +253,37 @@ describe("turn-capacity Prometheus alerts", () => {
     );
   });
 
+  test("alerts on durable recovery backlog only while its global projection is fresh", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const backlog = alertExpression(template, "OpenGeniSessionRecoveryBacklogStale");
+    const stale = alertExpression(template, "OpenGeniSessionRecoveryMonitorStale");
+
+    expect(backlog).toContain("opengeni_session_recovery_backlog");
+    expect(backlog).toContain("opengeni_session_recovery_monitor_fresh");
+    expect(backlog.split(SCRAPE_IDENTITY)).toHaveLength(3);
+    expect(backlog.trimStart()).toStartWith("max(");
+    expect(backlog).not.toContain("and on()");
+    expect(backlog).toContain('component="worker-control"');
+    expect(backlog).not.toMatch(/session_id|workspace_id|attempt_id/);
+    expect(stale).toContain("absent(opengeni_session_recovery_monitor_fresh");
+    expect(stale).toContain("min(opengeni_session_recovery_monitor_fresh");
+    expect(stale).toContain(
+      "time() - min(opengeni_session_recovery_monitor_last_success_timestamp_seconds",
+    );
+    expect(stale).not.toContain("max(opengeni_session_recovery_monitor_fresh");
+    expect(stale).not.toContain(
+      "max(opengeni_session_recovery_monitor_last_success_timestamp_seconds",
+    );
+    for (const expression of [backlog, stale]) {
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+    }
+  });
+
   test("fences the complete OpenSandbox failure catalog to the selected backend", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),

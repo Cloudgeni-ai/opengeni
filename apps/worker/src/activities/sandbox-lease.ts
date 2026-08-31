@@ -1429,7 +1429,7 @@ async function reconcileTerminalRetainedProcesses(
     }
 
     try {
-      await settleRetainedProcess(db, {
+      const settlement = await settleRetainedProcess(db, {
         accountId: process.accountId,
         workspaceId: process.workspaceId,
         sessionId: process.sessionId,
@@ -1441,14 +1441,17 @@ async function reconcileTerminalRetainedProcesses(
         reason: proof.reason,
         idleGraceMs: settings.sandboxIdleGraceMs,
       });
+      if (settlement.process.state === "active") {
+        throw new Error("Retained-process reconciliation returned an active durable process");
+      }
       await settleSessionBackgroundCommandForRetainedProcess(db, {
         accountId: process.accountId,
         workspaceId: process.workspaceId,
         sessionId: process.sessionId,
         retainedProcessId: process.id,
-        outcome: proof.outcome,
-        exitCode: proof.exitCode,
-        reason: proof.reason,
+        outcome: settlement.process.state,
+        exitCode: settlement.process.exitCode,
+        reason: settlement.process.settlementReason ?? proof.reason,
       });
       recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
     } catch (error) {

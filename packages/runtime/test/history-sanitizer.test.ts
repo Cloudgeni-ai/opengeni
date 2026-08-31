@@ -436,7 +436,7 @@ describe("computerCallNormalizingFetch", () => {
 
 describe("rewriteEmptyComputerCallOutputImageUrls", () => {
   // ROOT CAUSE: when an action (click/type/scroll/drag) times out at the 15 s
-  // yield window, SandboxComputer.x() throws ComputerActionError; agents-core
+  // yield window, the retired desktop adapter threw; agents-core
   // toolExecution.mjs catch sets output='' and builds the wire item:
   //   {type:"computer_call_output",output:{type:"computer_screenshot",image_url:""}}
   // Azure rejects the whole request: "400 Invalid input[N].output.image_url".

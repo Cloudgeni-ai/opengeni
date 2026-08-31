@@ -28,7 +28,11 @@
 // Both consumers are BEST-EFFORT and fail-soft: a decode/DB error for one message
 // is logged + swallowed (the bus subscription already swallows handler throws) so
 // a metrics blip / a display-refresh write failure never tears down the consumer,
-// back-pressures the agent, or breaks its connect.
+// back-pressures the agent, or breaks its connect. Event ingestion drains the NATS
+// subscription immediately into exact-subject queues: different runner connections
+// progress concurrently, one runner's ordering is preserved, and consecutive queued
+// heartbeats collapse latest-wins. A delayed heartbeat backlog therefore cannot keep
+// renewing a dead runner's short connection lease one stale message at a time.
 
 import {
   clearEnrollmentWentOffline,
@@ -73,6 +77,141 @@ export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
 
 /** The wildcard subject the agent publishes its connect Hello on. */
 export const AGENT_HELLO_SUBJECT = "agent.*.*.connection.*.hello";
+
+type QueuedAgentEvent = {
+  payload: Uint8Array;
+  subject: string;
+  heartbeat: boolean;
+};
+
+type AgentEventQueueState = {
+  scheduled: boolean;
+  pending: QueuedAgentEvent[];
+};
+
+type ScheduledAgentEventQueue = {
+  subject: string;
+  state: AgentEventQueueState;
+};
+
+export type AgentEventIngestionScheduler = {
+  enqueue: (payload: Uint8Array, subject: string) => void;
+  whenIdle: () => Promise<void>;
+  close: () => void;
+};
+
+function payloadIsHeartbeat(payload: Uint8Array): boolean {
+  try {
+    return AgentEvent.decode(payload).event?.$case === "heartbeat";
+  } catch {
+    // Preserve the normal decoder/logging path for malformed events. They are
+    // barriers rather than heartbeat-coalescing candidates.
+    return false;
+  }
+}
+
+/**
+ * Drain agent events without making every Connected Machine wait behind one
+ * deployment-wide serial DB queue. Each exact process subject retains FIFO order;
+ * separate subjects drain concurrently. Consecutive pending heartbeats for one
+ * subject are latest-wins because they are point-in-time liveness/metrics samples,
+ * while GoingOffline and update-progress events remain ordered barriers.
+ */
+export function createAgentEventIngestionScheduler(
+  handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+  options: { maxConcurrentSubjects?: number; onHeartbeatCoalesced?: () => void } = {},
+): AgentEventIngestionScheduler {
+  const maxConcurrentSubjects = options.maxConcurrentSubjects ?? 32;
+  if (!Number.isSafeInteger(maxConcurrentSubjects) || maxConcurrentSubjects <= 0) {
+    throw new RangeError("maxConcurrentSubjects must be a positive safe integer");
+  }
+
+  const states = new Map<string, AgentEventQueueState>();
+  const readySubjects: ScheduledAgentEventQueue[] = [];
+  const idleWaiters = new Set<() => void>();
+  let accepting = true;
+  let activeSubjects = 0;
+
+  const resolveIdleWaiters = (): void => {
+    if (states.size !== 0) return;
+    for (const resolve of idleWaiters) resolve();
+    idleWaiters.clear();
+  };
+
+  async function drain(subject: string, state: AgentEventQueueState): Promise<void> {
+    while (true) {
+      const event = state.pending.shift();
+      if (!event) break;
+      try {
+        await handler(event.payload, event.subject);
+      } catch {
+        // Agent-event ingestion is best-effort. One bad event must not strand the
+        // exact-subject queue or prevent later heartbeats from restoring liveness.
+      }
+    }
+
+    activeSubjects -= 1;
+    state.scheduled = false;
+    if (state.pending.length > 0) {
+      schedule(subject, state);
+    } else {
+      if (states.get(subject) === state) states.delete(subject);
+      resolveIdleWaiters();
+    }
+    pump();
+  }
+
+  function pump(): void {
+    while (activeSubjects < maxConcurrentSubjects) {
+      const next = readySubjects.shift();
+      if (!next) return;
+      if (states.get(next.subject) !== next.state || !next.state.scheduled) continue;
+      activeSubjects += 1;
+      void drain(next.subject, next.state);
+    }
+  }
+
+  function schedule(subject: string, state: AgentEventQueueState): void {
+    if (state.scheduled) return;
+    state.scheduled = true;
+    readySubjects.push({ subject, state });
+    pump();
+  }
+
+  return {
+    enqueue(payload, subject) {
+      if (!accepting) return;
+      const heartbeat = payloadIsHeartbeat(payload);
+      let state = states.get(subject);
+      if (!state) {
+        state = { scheduled: false, pending: [] };
+        states.set(subject, state);
+      }
+
+      const queued = { payload, subject, heartbeat };
+      const lastIndex = state.pending.length - 1;
+      if (heartbeat && lastIndex >= 0 && state.pending[lastIndex]!.heartbeat) {
+        state.pending[lastIndex] = queued;
+        options.onHeartbeatCoalesced?.();
+      } else {
+        state.pending.push(queued);
+      }
+
+      schedule(subject, state);
+    },
+    async whenIdle() {
+      if (states.size === 0) return;
+      await new Promise<void>((resolve) => idleWaiters.add(resolve));
+    },
+    close() {
+      accepting = false;
+      for (const state of states.values()) {
+        state.pending.length = 0;
+      }
+      resolveIdleWaiters();
+    },
+  };
+}
 
 /**
  * Parse `agent.<ws>.<id>.connection.<instance>.<tail>` into its exact authority,
@@ -521,9 +660,24 @@ export function startMetricsIngestion(deps: {
   bus: EventBus;
   observability?: Observability;
 }): () => void {
-  return deps.bus.subscribeAgentEvents(AGENT_EVENTS_SUBJECT, (payload, subject) =>
-    handleAgentEventPayload(deps.db, deps.observability, payload, subject, deps.bus),
+  const scheduler = createAgentEventIngestionScheduler(
+    (payload, subject) =>
+      handleAgentEventPayload(deps.db, deps.observability, payload, subject, deps.bus),
+    {
+      onHeartbeatCoalesced: () =>
+        deps.observability?.incrementCounter({
+          name: "opengeni_machine_heartbeat_coalesced_total",
+          help: "Connected Machine heartbeats collapsed while an exact runner event queue was busy.",
+        }),
+    },
   );
+  const unsubscribe = deps.bus.subscribeAgentEvents(AGENT_EVENTS_SUBJECT, (payload, subject) => {
+    scheduler.enqueue(payload, subject);
+  });
+  return () => {
+    unsubscribe();
+    scheduler.close();
+  };
 }
 
 // ── Connect-Hello display refresh ─────────────────────────────────────────────

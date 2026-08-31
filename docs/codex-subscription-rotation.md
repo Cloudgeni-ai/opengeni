@@ -8,41 +8,50 @@ over ChatGPT/Codex subscription credentials. The implementation sources are
 
 ## Security and scope
 
-The **workspace is the complete scheduling boundary**.
+The **effective credential pool is the complete scheduling boundary**.
 
-- Credential rows, usage snapshots, cooldowns, fairness cursors, active pointers,
-  session pins/last-used pointers, and leases are workspace-local and protected by
-  FORCE RLS.
-- OpenGeni does not create an account-global/provider-global subscription identity
-  or correlate the same ChatGPT account across workspaces or managed accounts.
-- If a user connects the same external subscription in two workspaces, both
-  workspaces may use it concurrently. A lease/cooldown in one workspace never
-  blocks or mutates the other.
-- A selected credential id is revalidated against the transaction's RLS-visible
-  candidate set. Composite `(workspace_id, credential_id)` lease FKs and triggers
-  on legacy id-only pin/last/active references provide schema-level defense in
-  depth against malformed internal writes.
+- Personal workspaces always use their own workspace pool.
+- Shared workspaces choose one source: `automatic`, `workspace`, `organization`,
+  or `disabled`. `automatic` uses a workspace pool when any local credential is
+  connected, otherwise it inherits the organization pool. The allocator never
+  union-ranks organization and workspace credentials.
+- Organization credentials have one encrypted row, usage snapshot, cooldown,
+  fairness cursor, and organization rotation row across every inheriting shared
+  workspace. New shared workspaces therefore inherit an already-connected pool
+  without copying or reconnecting credentials.
+- Session pins, last-used pointers, capacity waiters, and lease rows remain in
+  the target workspace. Schema guards accept an organization credential only
+  while that shared workspace's effective source is `organization`.
+- Workspace-local duplicate connections remain independent. OpenGeni does not
+  correlate a ChatGPT account connected separately in multiple workspace pools
+  or across managed organizations.
+- Organization rows are visible at management time only to active organization
+  owners/admins using a managed-cookie session, and at runtime only from shared
+  workspaces in the same organization. Personal workspaces cannot inherit them.
 
-This scope protects tenant isolation. Provider-side allowance is naturally
-shared when the same external account is connected twice; each workspace learns
-provider exhaustion independently and rotates among its own alternatives.
+This preserves workspace session isolation while making provider quota,
+refresh, health, cooldown, and cumulative fairness truthful for the one shared
+organization credential row.
 
 ## Atomic selection and fairness
 
 When `OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED=true`, every Codex turn calls
 `acquireCodexCredentialLease` before model/tool preparation:
 
-1. Start one RLS-scoped Postgres transaction and materialize/lock that
-   workspace's `codex_rotation_settings` row with
-   `FOR UPDATE`. Concurrent replicas wait; they do not `SKIP LOCKED`.
+1. Start one RLS-scoped Postgres transaction, resolve the workspace's effective
+   source, and materialize/lock its serialization row with `FOR UPDATE`:
+   `codex_rotation_settings` for a workspace pool or
+   `organization_codex_rotation_settings` for an organization pool. Concurrent
+   replicas using the same pool wait; they do not `SKIP LOCKED`.
 2. Lock the durable turn for share and verify it belongs to the exact
    account/workspace. If a downstream policy supplies an opaque accepted-turn
    scope resolver, resolve it from that locked turn metadata while the rotation
    transaction remains held.
-3. Reap expired workspace leases and read all workspace credentials plus the
-   count of unexpired leases held by other turns.
+3. Reap expired leases for the target workspace and read every credential in
+   the one effective pool. Organization decisions share the organization lock
+   and cumulative selection cursor across workspaces.
 4. Offer an exact live same-turn lease to the pure strategy against the complete
-   workspace rows. A saved approval RunState does not own a credential. Only if this is a new
+   pool rows. A saved approval RunState does not own a credential. Only if this is a new
    allocation may an optional downstream policy filter the candidate rows. Run
    the strategy and revalidate its chosen id against that resulting set.
 5. Upsert the unique `(workspace_id, turn_id)` lease and increment the selected
@@ -64,11 +73,15 @@ burst sees earlier reservations and spreads before delayed usage headers move.
 Usage percentages never create a configurable "near exhaustion" cliff. Accounts
 remain eligible through 99% in either provider window; 90% is presentation-only
 warning state. Cached usage excludes an account only at 100%, while an explicit
-provider refusal installs the authoritative cooldown. Sharded policy pins remain
+provider refusal installs the authoritative cooldown. A later live usage read
+may reconcile an older quota cooldown only when the provider reports an open
+base allowance, every surfaced feature-specific window is below exhaustion,
+and the cooldown revision proves no newer refusal raced the read. Generic
+provider backpressure is never cleared by quota telemetry. Sharded policy pins remain
 sticky throughout 90–99% and are rewritten only after actual exhaustion or another
 definitive health failure.
 
-The workspace active credential is a cursor, not a sticky lease. Pin source is
+The effective pool's active credential is a cursor, not a sticky lease. Pin source is
 load-bearing: a `manual` (or defensively unlabeled) pin is user intent and never
 silently fails over; if it is capped, the turn enters the same durable capacity
 wait. A `policy` pin is a sharded cache-affinity home and may be re-sharded over
@@ -117,6 +130,12 @@ Codex quota adds three deliberately separate product seams:
   view-only. Valid quota windows advance `usage_checked_at` independently from
   valid reset-summary data advancing `reset_credits_checked_at`; a malformed or
   timed-out reset inventory cannot erase fresh five-hour/weekly provider truth.
+  An authoritative open response also clears the exact older typed quota
+  cooldown observed before provider I/O. The revision makes a concurrent newer
+  refusal win; legacy-unknown and generic rate-limit cooldowns remain intact.
+  All-capped turn admission refreshes those typed quota cooldowns immediately;
+  a durable wait then retries the control-plane read with bounded backoff so an
+  already-waiting turn also notices an allowance cycle replaced before reset.
 - **Allocator control** writes only `allocator_enabled` plus its independent
   `allocator_version`/actor/timestamp. Same desired state is idempotent even with
   a stale expected version; a conflicting stale transition returns the current
@@ -169,8 +188,10 @@ for that provider credit. `nothingToReset`/`noCredit` remain visible as history
 but do not suppress a later newly confirmed attempt when the provider again
 reports exact actionable detail; that later action receives a fresh logical and
 upstream idempotency key.
-Only `reset`/`alreadyRedeemed` clear provider-exhaustion cooldown, and no outcome
-changes allocator eligibility. The one-credit fence remains permanent only for
+`reset`/`alreadyRedeemed` clear provider-exhaustion cooldown without usage
+readback; an independently fresh open usage response may also reconcile an
+older typed quota cooldown through the revision fence above. No redemption
+outcome changes allocator eligibility. The one-credit fence remains permanent only for
 those successful outcomes; `nothingToReset`/`noCredit` permit a later, newly
 confirmed logical attempt. Provider bodies, bearer tokens, opaque credit ids and
 upstream keys never enter logs/events/audit metadata.
@@ -235,11 +256,12 @@ a competing terminal settlement/requeue. A second timer/signal observes the
 waiter as resumed/stale and performs no work.
 
 `withCodexCapacityMutation` is the same-transaction mutation/outbox seam for any
-eligibility or future pool membership/default write: it locks the workspace
-rotation row first, applies the mutation, increments matching waiter wake
+eligibility or future pool membership/default write: it locks the effective
+workspace or organization rotation row first, applies the mutation, increments matching waiter wake
 revisions only when truth changed, and returns secret-safe signal targets.
 Refreshing only `usage_checked_at` or reset-credit display metadata is not a
-capacity-truth change; an identical quota snapshot must not advance waiter or
+capacity-truth change; clearing a future typed quota cooldown is. An identical
+quota snapshot that leaves cooldown state unchanged must not advance waiter or
 workflow wake revisions. With rotation disabled, an unpinned turn considers only
 the workspace active pointer: a capped pointer enters the same durable wait and
 never becomes “available” merely because it remains connected, while healthy
@@ -301,7 +323,7 @@ new-allocation policy.
 ## Rollout and rollback
 
 Migration `0053_codex_credential_leases.sql` is additive. It creates the
-workspace-local lease table and fairness columns, strengthens workspace reference
+lease table and fairness columns, strengthens workspace reference
 integrity, and adds a separate `lease_rotation_enabled` cutover bit. Both that bit
 and the legacy `rotation_enabled` column keep a database default of `false`, so a
 schema-first migration or an older binary can never opt a workspace into mixed-mode
@@ -337,6 +359,12 @@ rotation-off settings write clears both generations). Do that before rolling the
 deployment flag back to `false`; every replica immediately returns to the legacy
 path without a schema rollback. The additive table/columns remain inert. An older
 binary is also compatible with the additive schema.
+
+Migration `0383_codex_cooldown_reconciliation.sql` is rolling. It adds typed
+cooldown provenance and an independent revision. During mixed-version rollout,
+its trigger preserves a legacy writer's `exhausted_until` change, advances the
+revision, and clears only typed provenance so a new usage reader cannot
+misclassify an unknown old-writer cooldown as quota.
 
 ## Secret-safe observability
 

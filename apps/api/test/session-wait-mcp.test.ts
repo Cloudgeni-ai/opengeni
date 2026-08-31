@@ -18,9 +18,11 @@ import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { SESSION_EVENT_MCP_MAX_BYTES } from "../src/mcp/session-view";
 import {
+  SESSION_WAIT_COMPLETION_EVENT_TYPES,
   SESSION_WAIT_EVENT_TYPES,
   SESSION_WAIT_EVENTS_PER_TARGET,
   SESSION_WAIT_MAX_SECONDS,
+  sessionWaitCompletionEventMatches,
 } from "../src/mcp/session-wait";
 
 type SessionWaitResult = {
@@ -284,6 +286,60 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
     });
     expect(again.changed).toEqual([]);
     expect(again.timedOut).toBe(true);
+  }, 30_000);
+
+  test("completion mode ignores progress and continuation settlements until a result-bearing turn", async () => {
+    const target = await newSession(workspaceId, "completion-aware child fixture");
+    const cursor = await lastSequence(target);
+    const progressEvents = await appendSessionEvents(client.db, workspaceId, target, [
+      { type: "goal.completed", payload: { summary: "goal state settled before output" } },
+      {
+        type: "agent.message.completed",
+        payload: { text: "commentary is not the final child result", phase: "commentary" },
+      },
+      { type: "turn.completed", payload: { output: "", segmentLimit: "max_turns" } },
+      {
+        type: "turn.completed",
+        payload: { maintenance: "context_compaction", result: "compacted" },
+      },
+    ]);
+    await bus.publish(workspaceId, target, progressEvents);
+
+    const early = await callSessionWait({
+      targets: [{ sessionId: target, afterSequence: cursor }],
+      waitFor: "completion",
+      includeOwnPendingUpdates: false,
+      maxWaitSeconds: 1,
+    });
+    expect(early.timedOut).toBe(true);
+    expect(early.changed).toEqual([]);
+    expect(progressEvents.some(sessionWaitCompletionEventMatches)).toBe(false);
+
+    const resultEvents = await appendSessionEvents(client.db, workspaceId, target, [
+      { type: "agent.message.completed", payload: { text: "detailed child result" } },
+      { type: "turn.completed", payload: { output: "detailed child result" } },
+    ]);
+    await bus.publish(workspaceId, target, resultEvents);
+    const completed = await callSessionWait({
+      targets: [{ sessionId: target, afterSequence: cursor }],
+      waitFor: "completion",
+      includeOwnPendingUpdates: false,
+      maxWaitSeconds: SESSION_WAIT_MAX_SECONDS,
+    });
+    expect(completed.timedOut).toBe(false);
+    expect(completed.changed[0]!.events).toEqual([
+      expect.objectContaining({
+        sequence: resultEvents[1]!.sequence,
+        type: "turn.completed",
+        text: "detailed child result",
+      }),
+    ]);
+    expect(
+      completed.changed[0]!.events.every((event) =>
+        SESSION_WAIT_COMPLETION_EVENT_TYPES.includes(event.type as never),
+      ),
+    ).toBeTrue();
+    expect(sessionWaitCompletionEventMatches(resultEvents[1]!)).toBe(true);
   }, 30_000);
 
   test("ignores non-wait event types and times out truthfully at the deadline", async () => {

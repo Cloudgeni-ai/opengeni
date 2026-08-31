@@ -3,7 +3,9 @@ import {
   ArrowLeftIcon,
   BrainCircuitIcon,
   Building2Icon,
+  Code2Icon,
   CreditCardIcon,
+  CpuIcon,
   DatabaseIcon,
   LayoutDashboardIcon,
   ShieldCheckIcon,
@@ -24,9 +26,11 @@ type OrganizationSettingsItem = {
 const ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboardIcon },
   { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon },
+  { id: "models", label: "Models", icon: CpuIcon },
   { id: "people", label: "People & invitations", icon: UsersIcon },
   { id: "recovery", label: "Recovery", icon: ShieldCheckIcon },
   { id: "retention", label: "Retention", icon: DatabaseIcon },
+  { id: "developer", label: "Developer", icon: Code2Icon },
   { id: "billing", label: "Billing", icon: CreditCardIcon },
 ];
 
@@ -40,6 +44,10 @@ const COPY: Record<OrganizationAdminSection, { title: string; description: strin
     description:
       "Set the small identity agents always know and explore company knowledge they retrieve when relevant.",
   },
+  models: {
+    title: "Models",
+    description: "Connect organization-funded model subscriptions inherited by shared workspaces.",
+  },
   people: {
     title: "People & invitations",
     description: "Manage organization membership, roles, invitations, and workspace access.",
@@ -52,6 +60,10 @@ const COPY: Record<OrganizationAdminSection, { title: string; description: strin
     title: "Retention",
     description: "Control how long organization data is retained.",
   },
+  developer: {
+    title: "Developer",
+    description: "Connect your product to every organization workspace.",
+  },
   billing: {
     title: "Billing",
     description: "Credits, usage, plan entitlements, and payment settings.",
@@ -62,11 +74,13 @@ export function OrganizationSettingsShell({
   workspaceId,
   organizationLabel,
   section,
+  showModels,
   children,
 }: {
   workspaceId: string;
   organizationLabel: string;
   section: OrganizationAdminSection;
+  showModels: boolean;
   children: ReactNode;
 }) {
   const copy = COPY[section];
@@ -122,9 +136,9 @@ export function OrganizationSettingsShell({
 
           <nav
             aria-label="Organization settings"
-            className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-6 lg:flex lg:flex-col"
+            className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-4 lg:flex lg:flex-col"
           >
-            {ITEMS.map((item) => {
+            {ITEMS.filter((item) => item.id !== "models" || showModels).map((item) => {
               const Icon = item.icon;
               const selected = item.id === section;
               return (

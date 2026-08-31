@@ -352,28 +352,3 @@ export function sandboxArtifactRuntimeAdmission(
     },
   };
 }
-
-/**
- * Decide whether the first actual computer action may start a proof recording.
- *
- * On-turn recording runs ffmpeg/x11grab INSIDE the box and reads the .mp4 back
- * out of the box's /tmp — plumbing that exists only for OpenGeni-operated cloud
- * boxes (the Modal desktop backend). A turn whose EFFECTIVE backend is a connected
- * machine ("selfhosted") runs on the user's REAL computer, which has none of that
- * capture plumbing (and the platform must never shell ffmpeg onto a user's machine
- * — the same reason the runtime skips its setup hooks for selfhosted). Left ungated
- * it films nothing, finds no /tmp file, and emits recording.started followed by
- * recording.failed{box-death} on EVERY machine-primary turn — misleading timeline
- * noise + wasted work. So gate it off, exactly like a recording-disabled deployment:
- * skip silently, emit nothing (no new event shape).
- *
- * `effectiveBackend` is the resolved ACTIVE backend for the turn
- * (resolveActiveSandboxBackend) — NOT the session's home backend. A modal-home
- * session actively swapped onto a machine resolves to "selfhosted" here and
- * correctly skips; a machine-home turn that degraded back to its cloud group box
- * (swap-away / flag-off) resolves to undefined and records as before.
- *
- * EDGE — mid-turn swap: this is evaluated once when computer-use first runs. A swap
- * after recording starts is deliberately ignored; the partial recording already has
- * defined failure semantics, so there is no stop/restart machinery.
- */

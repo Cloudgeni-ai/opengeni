@@ -45,6 +45,58 @@ const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null
 const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
 const canonicalLocalHumanContexts = new WeakSet<AccessContext>();
 const resolvedAccessGrantAuthorizations = new WeakSet<object>();
+const accountScopedApiKeyContexts = new WeakMap<
+  AccessContext,
+  Readonly<{ accountId: string; permissions: readonly Permission[] }>
+>();
+
+const accountScopedApiKeyAccountPermissions = new Set<Permission>([
+  "account:read",
+  "account:admin",
+  "workspace:create",
+  "billing:read",
+  "billing:manage",
+  "api_keys:manage",
+]);
+const accountScopedApiKeyWorkspaceExcludedPermissions = new Set<Permission>([
+  "account:read",
+  "account:admin",
+  "workspace:create",
+  "billing:read",
+  "billing:manage",
+]);
+
+export type AccountScopedApiKeyWorkspaceAuthority = Readonly<{
+  accountId: string;
+  permissions: Permission[];
+}>;
+
+/**
+ * Return account-scoped API-key workspace authority only for the exact
+ * AccessContext object stamped by successful API-key authentication. Subject
+ * shape alone is deliberately insufficient.
+ */
+export function accountScopedApiKeyWorkspaceAuthority(
+  context: AccessContext,
+): AccountScopedApiKeyWorkspaceAuthority | null {
+  const authority = accountScopedApiKeyContexts.get(context);
+  if (!authority) return null;
+  const matchingAccountGrants = context.accountGrants.filter(
+    (grant) => grant.accountId === authority.accountId && grant.subjectId === context.subjectId,
+  );
+  if (
+    !context.subjectId.startsWith("api_key:") ||
+    matchingAccountGrants.length !== 1 ||
+    context.defaultAccountId !== authority.accountId ||
+    context.defaultWorkspaceId !== null
+  ) {
+    return null;
+  }
+  return {
+    accountId: authority.accountId,
+    permissions: [...authority.permissions],
+  };
+}
 
 /**
  * Opaque, request-local proof that the canonical access resolver authorized the
@@ -208,7 +260,7 @@ async function accessGrantAuthorization(
   permission?: Permission,
 ): Promise<AccessGrantAuthorization> {
   const principalKind = hostedHumanSessionPrincipalKind(context);
-  const grant =
+  let grant =
     context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId) ??
     (await getWorkspaceGrant(
       deps.db,
@@ -221,7 +273,25 @@ async function accessGrantAuthorization(
     if (!workspace) {
       throw new HTTPException(404, { message: "workspace not found" });
     }
-    throw new HTTPException(403, { message: "workspace access denied" });
+    const authority = accountScopedApiKeyWorkspaceAuthority(context);
+    const requiredWorkspacePermission = permission ?? "workspace:read";
+    if (
+      authority &&
+      workspace.accountId === authority.accountId &&
+      workspace.kind === "shared" &&
+      hasPermission(authority.permissions, requiredWorkspacePermission)
+    ) {
+      grant = {
+        workspaceId: workspace.id,
+        accountId: workspace.accountId,
+        subjectId: context.subjectId,
+        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+        permissions: authority.permissions,
+        principalKind: "api_key",
+      };
+    } else {
+      throw new HTTPException(403, { message: "workspace access denied" });
+    }
   }
   if (permission) {
     requirePermission(grant, permission);
@@ -441,8 +511,10 @@ async function apiKeyAccessContext(
     ? apiKey.permissions.filter(
         (permission) => permission === "billing:read" || permission === "billing:manage",
       )
-    : apiKey.permissions;
-  return {
+    : apiKey.permissions.filter((permission) =>
+        accountScopedApiKeyAccountPermissions.has(permission),
+      );
+  const context = {
     mode,
     subjectId,
     subjectLabel: apiKey.name,
@@ -469,6 +541,20 @@ async function apiKeyAccessContext(
     defaultAccountId: apiKey.accountId,
     defaultWorkspaceId: apiKey.workspaceId,
   } satisfies AccessContext;
+  if (apiKey.workspaceId === null && apiKey.credentialKind === "organization") {
+    accountScopedApiKeyContexts.set(
+      context,
+      Object.freeze({
+        accountId: apiKey.accountId,
+        permissions: Object.freeze(
+          apiKey.permissions.filter(
+            (permission) => !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission),
+          ),
+        ),
+      }),
+    );
+  }
+  return context;
 }
 
 async function delegatedAccessContext(

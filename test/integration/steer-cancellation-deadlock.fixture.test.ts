@@ -394,7 +394,7 @@ describe("cancellation-settlement lane Agent Steer cancellation deadlock product
         try {
           await handle.terminate("cancellation-settlement lane fixture final cleanup");
         } catch {
-          // The workflow already completed naturally after exact-activity cleanup.
+          // The workflow already closed after its bounded cancellation wait.
         }
         worker.shutdown();
         await workerRun;

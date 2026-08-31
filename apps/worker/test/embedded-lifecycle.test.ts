@@ -413,6 +413,7 @@ describe("embedded worker lifecycle contract", () => {
       [
         ...[
           "company_profile_activation_events",
+          "company_profile_agent_automatic_activation_receipts",
           "company_profile_agent_confirmation_receipts",
           "company_profile_agent_proposal_receipts",
           "company_profile_heads",
@@ -428,6 +429,8 @@ describe("embedded worker lifecycle contract", () => {
           "knowledge_source_sync_states",
           "knowledge_sources",
           "managed_accounts",
+          "organization_company_profile_agent_policies",
+          "organization_company_profile_agent_policy_events",
           "organization_invitation_binding_events",
           "organization_membership_invitations",
           "organization_membership_lifecycle_events",
@@ -757,7 +760,10 @@ describe("embedded worker lifecycle contract", () => {
 
     const startingHealth = await fetch(new Request("http://worker.test/healthz"));
     expect(startingHealth.status).toBe(200);
-    expect(await startingHealth.json()).toMatchObject({
+    expect(await startingHealth.json()).toEqual({
+      service: "opengeni",
+      environment: "test",
+      deploymentRevision: "dev",
       ok: true,
       role: "control",
       state: "starting",
@@ -783,6 +789,30 @@ describe("embedded worker lifecycle contract", () => {
     const metrics = await fetch(new Request("http://worker.test/metrics"));
     expect(metrics.status).toBe(200);
     expect(metrics.headers.get("content-type")).toContain("text/plain");
+  });
+
+  test("health exposes incomplete GitHub App bot identity without failing liveness", async () => {
+    const settings = {
+      ...testSettings(),
+      gitAuthorName: undefined,
+      gitAuthorEmail: undefined,
+      githubAppId: undefined,
+      githubAppSlug: undefined,
+      githubClientId: "configured-client",
+    };
+    const fetch = createWorkerHttpHandler({
+      settings,
+      observability: createObservability(settings, { component: "worker-test" }),
+      checks: { db: () => undefined, nats: () => undefined, temporal: () => undefined },
+      lifecycle: { role: "turn", state: () => "ready" },
+    });
+
+    const response = await fetch(new Request("http://worker.test/healthz"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      warnings: ["github_app_bot_identity_unavailable"],
+    });
   });
 
   test("a failed dependency keeps a ready-state worker out of service", async () => {

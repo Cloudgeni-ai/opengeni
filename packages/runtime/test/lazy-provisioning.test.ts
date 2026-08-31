@@ -184,6 +184,46 @@ describe("lazy provisioning synthetic manifest", () => {
     ).toBe(true);
   });
 
+  test("durable rig coordinator can reuse immutable setup before turn-private hooks", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([]),
+      sandboxEnvironment: environment,
+      rigSetup: {
+        rigId: "rig-1",
+        rigName: "dev-machine",
+        versionId: "ver-shared",
+        script: "echo immutable setup",
+        timeoutMs: 60_000,
+      },
+    });
+    const commands: string[] = [];
+    const events: string[] = [];
+    const backend = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async (args: { cmd: string }) => {
+        commands.push(args.cmd);
+        return { exitCode: 0, output: "" };
+      },
+    };
+    let coordinatedSpecHash = "";
+
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+      onRuntimeEvent: (event) => events.push(event.type),
+      coordinateSharedRigSetup: async ({ specHash }) => {
+        coordinatedSpecHash = specHash;
+        return "reused";
+      },
+    });
+
+    expect(coordinatedSpecHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(commands).toEqual([]);
+    expect(events).toEqual(["rig.setup.started", "rig.setup.skipped"]);
+  });
+
   test("connected-machine setup delivers verified attachments without running platform hooks", async () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
     const environment = { HOME: "/workspace" };

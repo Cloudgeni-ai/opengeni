@@ -74,8 +74,8 @@ The product has several deliberately separate surfaces:
   Memory, preferences, instructions, organization identity, and learning policy
   as distinct authorities.
 - **Artifacts and interaction** support retained files, generated media,
-  editable documents/spreadsheets/presentations, browser control, computer use,
-  terminals, and published outputs.
+  editable documents/spreadsheets/presentations, browser control, managed
+  ComputerSession interaction, terminals, and published outputs.
 - **Embedding and clients** expose a framework-neutral SDK, React surfaces, a
   stock web console, and advanced in-process host seams.
 - **Operations** include usage metering, entitlement admission, billing,
@@ -103,10 +103,25 @@ published. NATS carries session-event fanout, invalidations, request/reply, and
 Connected Machine streams, but it is not the event store and is never evidence
 that a mutation committed.
 
-Session events have a monotonic per-session sequence. SSE clients begin with
-durable replay, subscribe to live fanout, and backfill from Postgres whenever a
-sequence gap appears. A NATS restart may interrupt live delivery or machine
-reachability, but it must not erase session history or queued obligations.
+Session events have a monotonic per-session sequence. The narrow
+`session_event_cursors` row transactionally verifies every append and is the
+sequence authority. Semantic writers retain the session row because state and
+event truth commit together. Accepted raw exact-attempt batches hold only the
+session identity with `FOR KEY SHARE`, serialize on the compact cursor, retain
+the exact turn/attempt fence, and do not update the wide session row. Public
+`lastSequence`, unread, child acknowledgment, and viewer-specific tree
+attention projections (including unacknowledged failed descendants) read the
+cursor; `sessions.last_sequence` remains only a semantic/legacy compatibility
+projection. Legacy SQL writers are rebased at the database boundary, and late
+raw events roll back and retry through the semantic gate before becoming
+rejected audit evidence. SSE clients begin with durable replay, subscribe to
+live fanout, and backfill from Postgres whenever a sequence gap appears. A NATS
+restart may interrupt live delivery or machine reachability, but it must not
+erase session history or queued obligations.
+
+The raw isolation route has an operational rollback switch:
+`OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
+validation active while restoring wide-session locking and compatibility writes.
 
 Interactive commands acknowledge their durable transaction. NATS publication
 and immediate Temporal signalling are replayable follow-up work. Never make a
@@ -197,6 +212,21 @@ The similar-looking stores are not interchangeable:
 | `session_goals` | The standing objective and continuation obligation | Workflow-local state |
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
+
+Workspace Memory is the autonomous agent-retention lane: when the workspace
+Memory toggle is enabled, exact live agent attempts save and correct active
+facts, decisions, incidents, fixes, and outcomes without consulting Learning
+mode. It remains retrieval-only model context through `memory_search`; it is
+not a Skill, mandatory instruction, organization profile, or reviewed Knowledge
+claim.
+
+Organization identity has a separate organization-owner autonomy policy. Off
+rejects agent-authored identity changes before proposal creation, Review first
+keeps the bound human-confirmation path, and Autonomous activates eligible
+proposals without another prompt. All three modes still require an exact live
+turn initiated by the active organization owner and use the existing
+company-profile compare-and-swap lifecycle; workspace Learning mode and
+workspace-admin authority cannot widen this organization scope.
 
 Accepted conversation and tool content is preserved at its canonical boundary;
 OpenGeni does not centrally rewrite arbitrary text because it resembles a
@@ -292,6 +322,18 @@ outcome; text-only reasoning can still begin without contacting it. OpenGeni
 never interprets an offline machine as permission to cold-create a rival box,
 snapshot it, or provider-terminate the user's computer.
 
+Generated-session schedules follow the same explicit route: they persist an
+exact workspace- or organization-scoped machine target and seed the session's
+active pointer before its first turn. A targetless generated schedule cannot
+resolve to `selfhosted`; ingress rejects that configuration, and dispatch
+revalidates the frozen target rather than falling back to managed compute.
+
+Child workers keep the ordinary low-friction rule: omitting placement shares
+the creator's box. Because a Connected Machine pointer is session-local, that
+default copies the trusted parent's exact active machine and working directory
+before the child's first turn. A selfhosted-only child with no inherited or
+explicit machine fails at create rather than reaching an unbound runtime.
+
 A machine-home session does not pre-provision a hidden managed box. When the
 deployment has a managed sandbox backend, its fleet nevertheless exposes the
 session's synthetic managed group as a separate explicit target. Selecting
@@ -301,8 +343,21 @@ or turn use it. This is an intentional user route change, not an
 offline-machine fallback; deployments configured with only `none` or
 `selfhosted` expose no managed group.
 
+Connected Machine event ingestion cannot make every runner wait behind one
+global database queue. The API drains the NATS event subscription immediately
+into exact-process queues: different connection subjects progress concurrently
+within a fixed database-concurrency bound, each subject preserves event order,
+and only consecutive pending heartbeats collapse latest-wins. GoingOffline and
+update-progress events remain ordering barriers. A database slowdown can
+therefore delay current telemetry, but a backlog of old heartbeats from a killed
+runner cannot renew its short ownership lease once per stale sample for minutes.
+Canonical:
+`apps/api/src/sandbox/metrics-ingestion.ts`.
+
 Canonical: `packages/runtime/src/sandbox/selfhosted/`,
 `apps/worker/src/activities/agent-turn/sandbox-establish.ts`,
+`packages/core/src/domain/scheduled-tasks.ts`,
+`apps/worker/src/activities/scheduled-tasks.ts`,
 `agent/proto/opengeni_agent.proto`, [`connected-machines.md`](connected-machines.md),
 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
@@ -535,9 +590,13 @@ Steer-equivalent replacement only when the active, unpaused branch is waiting in
 `requires_action`; checked-out queue edits, paused sessions, and other active
 lifecycle states keep ordinary Send ordering. Human prompts are the reorderable
 queue surface; machine-origin inputs remain typed records and join a turn only
-through the claim transaction. Pause blocks admission without pretending that
-physical execution has already stopped. Cancel fences a session subtree and is
-terminal for the affected sessions.
+through the claim transaction. A `requires_action` resume preserves that rule
+without violating provider protocol: it first writes the interrupted
+call/result pair, then re-enters the exact attempt claim to attach only machine
+input whose durable pending-event sequence was inside the resume attempt's
+frozen start boundary. Pause blocks
+admission without pretending that physical execution has already stopped.
+Cancel fences a session subtree and is terminal for the affected sessions.
 
 Steer ordinarily inserts at the head and immediately supersedes the live
 direction. Active compaction is the exact exception: while a claimed standalone
@@ -677,6 +736,12 @@ grant capacity.
 Managed billing is an API concern over the shared usage and entitlement
 boundaries. Provider subscription pools such as Codex or SuperGrok add their
 own credential and capacity authority without changing the logical-turn model.
+Codex may resolve to a workspace pool or an organization pool inherited by a
+shared workspace; the resolved pool remains one complete allocator boundary.
+Provider-refusal cooldowns carry separate provenance and revision authority so
+fresh usage repairs only an older quota refusal, never generic backpressure or
+a concurrently newer refusal. All-capped admission and durable capacity waits
+run that reconciliation through bounded control-plane refreshes.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),
@@ -809,6 +874,13 @@ dependencies. `@opengeni/runtime` owns provider-neutral agent construction,
 model input/output handling, tool execution, progressive disclosure, and the
 sandbox interface.
 
+The embedding process—not the Agents SDK—owns process-global rejection and
+termination policy. SDK background lifecycle work must settle an owned promise;
+it may not detach a rejecting task or install an `unhandledRejection` handler
+that exits the shared worker. The worker's global rejection listener is a
+last-resort observational boundary, while deliberate restart remains an
+OpenGeni drain-and-checkpoint decision.
+
 The worker supplies frozen authority and durable sinks. Runtime must not invent
 tenancy or persistence authority from its in-memory agent context.
 
@@ -839,12 +911,24 @@ Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
 
-### 7.5 Artifacts, browser control, and computer use
+### 7.5 Artifacts, browser control, and managed computer sessions
 
 Editable artifacts use `@opengeni/artifact-tool` plus durable collaboration
-services. Browser/computer control uses `@opengeni/interaction` and
-`@opengeni/browserd`, with the selected sandbox or machine providing placement.
-The browser extension is an attachment client, not an authorization service.
+services. Browser and computer control use attempt-scoped managed
+`ComputerSession` tools from `@opengeni/interaction` and `@opengeni/browserd`,
+with the selected sandbox or machine providing placement. Agents do not receive
+the retired model-bound shared-desktop capability; human viewer control remains
+a separate consented surface. Computer screenshot bytes and their bounded frame
+metadata remain one evidence unit: the placement runtime verifies their digest
+and controller/session/target binding, the API repeats that validation against
+its durable `ComputerSession` binding before forwarding the exact bytes, and the
+SDK retains its independent verification. The browser extension is an attachment
+client, not an authorization service.
+
+New capability negotiation advertises only `manual` and `on-verify` recording.
+Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
+remain parseable for old events, SDK clients, and retained evidence, but they do
+not register a runnable legacy computer tool.
 
 Static published HTML, retained evidence, Documents/RAG, and editable artifacts
 are different products and must not share mutable truth accidentally.
@@ -899,6 +983,14 @@ can exist before a box does. The lease tracks provider identity, epoch,
 holders, workspace mutation generation, archive/recovery state, and teardown
 authority. The active session pointer selects an effective target without
 rewriting the session's durable home policy.
+
+Immutable rig setup is single-flight at the lease boundary. The exact lease
+epoch, provider instance, and non-secret setup specification hash own one
+durable claim/revision/settlement receipt. Sibling turns join or reuse that
+receipt with backed-off durable reads; after an owner disappears, a deadline
+successor safely re-enters the box-local marker guard. This shared receipt never
+contains or covers per-turn credentials, repository authorization, Codemode
+tokens, cloud login, attached files, or generated media.
 
 Rigs layer versioned setup and checks on the deployment-owned platform sandbox
 base; they cannot replace that base image. A verified provider-native Rig image

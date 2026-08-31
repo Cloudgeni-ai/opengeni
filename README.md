@@ -19,7 +19,7 @@ Most agent products give you some of these; OpenGeni's premise is that organizat
 - **Self-host everything, Apache-2.0 all the way down.** The control plane, sessions API, web app, and deployment artifacts (Helm chart, reference Terraform for Azure/AWS/GCP) are open source. The durable record is a Postgres database you operate.
 - **Durable, replayable sessions as an API.** Every event lands in a Postgres event log; live streams over SSE backfill from it, so a browser reload, a new client, or an audit replays the same history.
 - **Your hardware as a first-class target.** Connected Machines run sessions on computers you enroll, with dial-out-only networking, no platform-minted credentials on your machines, loud consent-based enrollment, and one-click revocation. Off by default until an operator enables it.
-- **Governance built in, not bolted on.** Human approvals gate tool use, agents can pause durably for structured answers, credentials are brokered per session, and agent memory is a reviewed resource — agents *propose* memories, and a human or your API approves them before they become retrieval context.
+- **Governance built in, not bolted on.** Human approvals gate tool use, agents can pause durably for structured answers, and credentials are brokered per session. When Workspace Memory is enabled, exact live agents autonomously save and correct durable facts, decisions, incidents, fixes, and outcomes for later retrieval; the separate curated Knowledge lane remains proposal-and-review based.
 
 ## What It Does
 
@@ -54,9 +54,9 @@ There are three product access modes:
 
 - `local`: local development bootstrap account/workspace, subject `dev`, broad permissions.
 - `configured`: self-hosted or embedded deployments using configured deployment keys or delegated bearer tokens from a parent product.
-- `managed`: OpenGeni owns email/password sign-up through Better Auth, workspaces, OpenGeni API keys, prepaid Stripe credits, usage, and limits.
+- `managed`: OpenGeni owns email/password sign-up through Better Auth, workspaces, organization and workspace API keys, prepaid Stripe credits, usage, and limits.
 
-The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. Ordinary clients send it as `x-opengeni-access-key`; product API keys and delegated tokens use `Authorization: Bearer ...`. Valid first-party delegated bearers can enter the `/v1` API without copying the static deployment key, then remain constrained by normal route authorization.
+The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. Ordinary clients send it as `x-opengeni-access-key`; organization API keys and delegated tokens use `Authorization: Bearer ...`. Valid first-party delegated bearers can enter the `/v1` API without copying the static deployment key, then remain constrained by normal route authorization.
 
 Do not expose a production deployment without a deliberate access mode, RLS-tested database role posture, rate limits, real model/sandbox credentials, and reviewed sandbox preparation policy. Sandbox preparation profiles and env allowlists can make host credentials available to agent sandboxes, so review `.env` before running live sessions.
 
@@ -128,7 +128,11 @@ Pair this README with the [CloudGeni Infrastructure Agents Guide](https://github
 The capability catalog lets operators see and enable packs, MCP tools, APIs, skills, and plugins for the same runtime. See [docs/capabilities.md](docs/capabilities.md) for the unified catalog and [docs/packs.md](docs/packs.md) for the marketing social daily analysis pack.
 
 For product integration, keep OpenGeni as a standalone service by default. Start
-with the [TypeScript SDK](packages/sdk/README.md), add the
+with the canonical [product integration guide](docs/product-integration.md): an
+external backend holds one organization API key, maps each product tenant to an
+organization workspace (wire `kind: "shared"`), excludes Personal workspaces,
+and passes its own selected Skills inline per session. Continue with the
+[TypeScript SDK](packages/sdk/README.md), add the
 [React surfaces](packages/react/README.md) the product needs, and use the
 [workbench guide](docs/embedding-workbench.md) only when exposing agent compute.
 The [`opengeni-client` skill](.agents/skills/opengeni-client/SKILL.md) gives
@@ -255,7 +259,10 @@ AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORA
 For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
 registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
 `OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot and remains the logical base
-for every Rig. A verified Rig provider image may accelerate physical cold create,
+image identity for every Rig. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
+`OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
+memory for every new box and remain stable through resume and replacement.
+A verified Rig provider image may accelerate physical cold create,
 but never replaces that logical lease identity. V2 capability Packs select a Rig
 for setup/check composition and cannot require an explicit sandbox image while
 Rig image overrides are disabled. Rig-less pre-v2 Pack rows retain their
@@ -399,7 +406,7 @@ The generated GitHub URL is only the manifest form target. Opening or copying th
 
 The Documents workspace supports document bases, file upload, indexing status, failed-document retry, and hybrid/vector/keyword search. Typical knowledge uploads include PDF, Word, PowerPoint, Excel, OpenDocument, plain-text/structured-text, email, and common image formats. The stock API and worker images include headless LibreOffice for Office conversion and local English OCR data; native source runs use the parser's built-in image conversion but require LibreOffice on the host to index Office formats. Indexed documents can carry source metadata such as source kind, URI, title, author, version, timestamps, and ACL tags for retrieval filtering.
 
-The workspace knowledge layer also includes reviewed memory records. Agents can search approved memories and propose new memories through the built-in docs MCP server. Human/API review happens through workspace knowledge memory endpoints before proposed memories become approved retrieval context.
+The workspace knowledge layer includes two retrieval-only memory paths. Workspace Memory lets exact live agents autonomously save and correct active durable facts when the workspace toggle is enabled. The curated Knowledge lane remains reviewed: agents can search approved records and propose new ones through the built-in docs MCP server, while human/API review happens through workspace knowledge memory endpoints before proposals become approved retrieval context.
 
 Document indexing depends on:
 

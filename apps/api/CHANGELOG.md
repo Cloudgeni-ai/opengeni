@@ -1,5 +1,114 @@
 # @opengeni/api-router
 
+## 2.6.2
+
+### Patch Changes
+
+- 26006f3: Bound Connected Machine event backlogs per exact runner. Separate connections now ingest with bounded concurrency, while consecutive queued heartbeats collapse to the newest sample without reordering lifecycle events.
+- 7e67729: Prevent parent agents from duplicating delegated work. Child creation now requires an independent integration plan, and `session_wait` can ignore messages, goal/progress events, maintenance turns, and continuation segments until a child produces a result-bearing final turn or blocks.
+- 478f572: Harden organization API keys with explicit credential provenance, fail-closed revocation of ambiguous legacy account keys, bounded delegation, atomic organization-key and workspace limits, and safer rotation and one-time-secret UI behavior.
+- Updated dependencies [59b286a]
+- Updated dependencies [3a7fe2f]
+- Updated dependencies [7e67729]
+- Updated dependencies [9b844c8]
+- Updated dependencies [4fb337b]
+- Updated dependencies [478f572]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/runtime@2.0.1
+  - @opengeni/db@3.7.2
+  - @opengeni/core@2.6.2
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+  - @opengeni/documents@0.8.12
+  - @opengeni/github@0.6.7
+  - @opengeni/storage@0.2.115
+  - @opengeni/events@0.4.10
+  - @opengeni/artifact-tool@0.3.14
+  - @opengeni/codemode@0.4.22
+  - @opengeni/observability@0.8.14
+
+## 2.6.1
+
+### Patch Changes
+
+- b471a90: Add an organization-owner Off, Review first, or Autonomous policy for agent-managed organization identity, including owner-only API and SDK controls, exact-attempt automatic activation, immutable receipts, and the organization settings control.
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. The legacy runtime desktop API remains exported only as a deprecated, fail-closed migration shell; because direct sandbox desktop control and model-bound tools are no longer functional, release `@opengeni/runtime` as the next major. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+- 4bacdd3: Add fixed-scope organization API keys, idempotent external tenant workspace provisioning, Personal-workspace exclusion, and the matching SDK and integration guidance.
+- 72de39c: Retain low-cardinality workspace deletion phase, inventory, and total transaction metrics with exact workspace identifiers confined to structured logs.
+- Updated dependencies [c3b43a5]
+- Updated dependencies [fab355b]
+- Updated dependencies [b471a90]
+- Updated dependencies [973b1dd]
+- Updated dependencies [e41285f]
+- Updated dependencies [1f289a0]
+- Updated dependencies [c9ac869]
+- Updated dependencies [96624a7]
+- Updated dependencies [fab355b]
+- Updated dependencies [fab355b]
+- Updated dependencies [4bacdd3]
+- Updated dependencies [72de39c]
+  - @opengeni/db@3.7.1
+  - @opengeni/contracts@2.9.1
+  - @opengeni/runtime@2.0.0
+  - @opengeni/events@0.4.9
+  - @opengeni/config@0.22.4
+  - @opengeni/core@2.6.1
+  - @opengeni/documents@0.8.11
+  - @opengeni/artifact-tool@0.3.13
+  - @opengeni/codemode@0.4.21
+  - @opengeni/github@0.6.6
+  - @opengeni/observability@0.8.13
+  - @opengeni/storage@0.2.114
+
+## 2.6.0
+
+### Minor Changes
+
+- 699477a: Restore autonomous agent Workspace Memory writes whenever workspace Memory is enabled. Agents can save and correct active facts, decisions, incidents, fixes, and outcomes independently of Learning mode while all existing Memory kinds remain retrieval-only through search. Autonomous learning may activate eligible concise Workspace instructions and focused Skills through their governed, auditable, undoable lifecycles; Review first keeps proposals inactive and Off creates no derived change.
+- ddce5cc: Allow scheduled generated sessions and nested workers to target an exact Connected Machine, and fail closed without leaving an unstarted generated session behind when that route cannot be established.
+- 132c8d3: Require self-hosted-only session defaults to resolve to a reachable Connected Machine. Keep the composer blocked when no eligible machine exists instead of submitting an unroutable session.
+
+### Patch Changes
+
+- Updated dependencies [699477a]
+- Updated dependencies [ec1aebc]
+- Updated dependencies [3ef2488]
+- Updated dependencies [ddce5cc]
+- Updated dependencies [132c8d3]
+- Updated dependencies [88b6b48]
+  - @opengeni/contracts@2.9.0
+  - @opengeni/core@2.6.0
+  - @opengeni/db@3.7.0
+  - @opengeni/runtime@1.5.0
+  - @opengeni/artifact-tool@0.3.12
+  - @opengeni/codemode@0.4.20
+  - @opengeni/config@0.22.3
+  - @opengeni/documents@0.8.10
+  - @opengeni/events@0.4.8
+  - @opengeni/github@0.6.5
+  - @opengeni/observability@0.8.12
+  - @opengeni/storage@0.2.113
+
+## 2.5.4
+
+### Patch Changes
+
+- 06fda28: Return bounded stable-key conflict outcomes for governed preference proposals instead of exposing persistence query details.
+- Updated dependencies [3c75347]
+- Updated dependencies [551cead]
+- Updated dependencies [06460ae]
+- Updated dependencies [227c54c]
+- Updated dependencies [06fda28]
+- Updated dependencies [499cc48]
+- Updated dependencies [37faec3]
+  - @opengeni/runtime@1.4.6
+  - @opengeni/db@3.6.3
+  - @opengeni/core@2.5.7
+  - @opengeni/github@0.6.4
+  - @opengeni/documents@0.8.9
+  - @opengeni/events@0.4.7
+
 ## 2.5.3
 
 ### Patch Changes

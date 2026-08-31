@@ -29,6 +29,7 @@ function account(
     secondaryResetAt: null,
     usageCheckedAt: null,
     exhaustedUntil: null,
+    exhaustedKind: null,
     activeLeaseCount: 0,
     selectionCount: 0,
     lastSelectedAt: null,
@@ -70,6 +71,49 @@ describe("Codex capacity availability diagnostics", () => {
       kind: "available",
       credentialId: "healthy",
       diagnostic: { connectedCount: 3, eligibleCount: 1 },
+    });
+  });
+
+  test("typed quota cooldowns use bounded live reconciliation", () => {
+    const resetAt = new Date("2100-01-01T00:00:00.000Z");
+    const base: CodexCapacitySelectionContext = {
+      accounts: [
+        account("cooling", {
+          exhaustedUntil: resetAt,
+          exhaustedKind: "quota",
+        }),
+      ],
+      activeCredentialId: "cooling",
+      rotationEnabled: true,
+      leaseRotationEnabled: true,
+      rotationStrategy: "most_remaining",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "session-quota-reconcile",
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: null,
+      policyHash: null,
+    };
+
+    expect(codexCapacityDecision(base, testSettings())).toMatchObject({
+      kind: "unavailable",
+      earliestResetAt: resetAt,
+      resetKind: "bounded_refresh",
+    });
+    expect(
+      codexCapacityDecision(
+        {
+          ...base,
+          accounts: [account("cooling", { exhaustedUntil: resetAt, exhaustedKind: "rate_limit" })],
+        },
+        testSettings(),
+      ),
+    ).toMatchObject({
+      kind: "unavailable",
+      earliestResetAt: resetAt,
+      resetKind: "authoritative",
     });
   });
 

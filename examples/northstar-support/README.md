@@ -9,7 +9,7 @@ integration as a clear before/after:
 2. Turn on the frontend-only **OpenGeni** switch to embed the agent workspace in
    the same product.
 3. The product backend creates OpenGeni sessions and proxies workspace-scoped
-   API/SSE traffic, keeping the OpenGeni API key server-side.
+   API/SSE traffic, keeping the organization API key server-side.
 4. OpenGeni calls the product's authenticated Streamable HTTP MCP server.
 5. MCP tools read and mutate the same ticket data used by the human workflow.
 6. Product SSE updates the ticket immediately while OpenGeni SSE updates the
@@ -37,13 +37,14 @@ component source rather than a stale published copy.
 
 ## Run against managed OpenGeni
 
-Requirements: Bun, an OpenGeni workspace API key, and a public HTTPS tunnel for
-the MCP endpoint.
+Requirements: Bun, an organization API key authorized for the configured
+organization workspace, and a public HTTPS tunnel for the MCP endpoint.
 
-The product API key needs `workspace:read`, `sessions:create`, `sessions:read`,
-`sessions:control`, `mcp_servers:attach`, `files:upload`, and `files:read`.
-These are workspace capabilities, not browser-origin registrations; file bytes
-still travel through short-lived signed storage URLs.
+The built-in organization API-key scope includes `workspace:admin`, which
+implies the ordinary workspace capabilities this example uses, including
+sessions, files, and MCP attachment. It still does not imply the literal
+`secrets:read` permission. These are workspace capabilities, not browser-origin
+registrations; file bytes still travel through short-lived signed storage URLs.
 
 ```bash
 cd examples/northstar-support
@@ -81,6 +82,6 @@ This is a local integration example, not a production auth template. A real
 SaaS should authenticate its users, authorize each product resource and
 OpenGeni workspace mapping, deploy MCP on its backend, store secrets in a secret
 manager, and rate-limit both its session and tool endpoints. See
-[`docs/embedding.md`](../../docs/embedding.md),
+[`docs/product-integration.md`](../../docs/product-integration.md),
 [`docs/session-mcp-servers.md`](../../docs/session-mcp-servers.md), and
 [`packages/sdk/README.md`](../../packages/sdk/README.md).

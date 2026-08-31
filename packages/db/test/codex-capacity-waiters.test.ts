@@ -21,6 +21,7 @@ import {
   reconcileCodexCapacityWait,
   recordCodexAccountUsageWithWakeTargets,
   registerPendingSessionToolCall,
+  setCodexCredentialExhausted,
   setSessionCodexPinInTransaction,
   submitHumanPromptInTransaction,
   updateCodexRotationSettings,
@@ -745,6 +746,64 @@ describe("durable Codex capacity waits", () => {
     expect(claimed[0]?.activeAttemptId).not.toBe(scenario.attemptId);
   });
 
+  test("an organization-pool capacity mutation wakes sibling workspace waiters atomically", async () => {
+    if (!available) return;
+    const [account] = await admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('organization capacity account') returning id`;
+    const workspaces: Workspace[] = [];
+    for (const name of ["organization capacity A", "organization capacity B"]) {
+      const [workspace] = await admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${account!.id}, ${name}) returning id`;
+      await admin`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${workspace!.id}, ${account!.id})`;
+      workspaces.push({ accountId: account!.id, workspaceId: workspace!.id });
+    }
+    const [credential] = await admin<{ id: string }[]>`
+      insert into codex_subscription_credentials (
+        account_id, workspace_id, organization_id, authority_scope,
+        credential_encrypted, chatgpt_account_id, status
+      ) values (
+        ${account!.id}, null, ${account!.id}, 'organization',
+        'ciphertext', ${crypto.randomUUID()}, 'error'
+      ) returning id`;
+    await admin`
+      insert into organization_codex_rotation_settings (
+        account_id, active_credential_id, rotation_enabled, lease_rotation_enabled
+      ) values (${account!.id}, ${credential!.id}, true, true)`;
+    const firstScenario = await seedScenario(workspaces[0]!);
+    const secondScenario = await seedScenario(workspaces[1]!);
+    const firstWait = await arm(firstScenario);
+    const secondWait = await arm(secondScenario);
+    if (firstWait.action !== "waiting" || secondWait.action !== "waiting") {
+      throw new Error("expected organization waiters");
+    }
+
+    const mutation = await withCodexCapacityMutation(
+      dbA,
+      { workspaceId: workspaces[0]!.workspaceId, reason: "organization_capacity_restored" },
+      async (tx) => {
+        const updated = await tx
+          .update(schema.codexSubscriptionCredentials)
+          .set({ status: "active", lastError: null })
+          .where(eq(schema.codexSubscriptionCredentials.id, credential!.id))
+          .returning({ id: schema.codexSubscriptionCredentials.id });
+        return { result: true, changed: updated.length === 1 };
+      },
+    );
+
+    expect(new Set(mutation.wakeTargets.map((target) => target.workspaceId))).toEqual(
+      new Set(workspaces.map((workspace) => workspace.workspaceId)),
+    );
+    expect(await listPendingCodexCapacityWakeTargets(dbA, workspaces[0]!.workspaceId)).toHaveLength(
+      1,
+    );
+    expect(await listPendingCodexCapacityWakeTargets(dbB, workspaces[1]!.workspaceId)).toHaveLength(
+      1,
+    );
+  });
+
   test("an identical usage refresh updates freshness without advancing waiter revisions", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -785,6 +844,51 @@ describe("durable Codex capacity waits", () => {
     expect(
       (await getCodexCapacityWaitForSession(dbA, ws.workspaceId, scenario.sessionId))?.wakeRevision,
     ).toBe(first.wakeTargets[0]!.wakeRevision);
+  });
+
+  test("clearing a future quota cooldown advances waiter revisions atomically", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const credentialId = await connectCredential(ws, false);
+    await setCodexCredentialExhausted(
+      dbA,
+      ws.workspaceId,
+      credentialId,
+      new Date(Date.now() + 5 * 60 * 60_000),
+      "quota",
+    );
+    const [credential] = await admin<{ exhausted_revision: number | string }[]>`
+      select exhausted_revision from codex_subscription_credentials
+      where id = ${credentialId}`;
+    const scenario = await seedScenario(ws);
+    const armed = await arm(scenario);
+    if (armed.action !== "waiting") throw new Error("expected waiter");
+
+    const mutation = await recordCodexAccountUsageWithWakeTargets(
+      dbA,
+      ws.workspaceId,
+      credentialId,
+      {
+        primaryUsedPercent: 0,
+        primaryResetAt: null,
+        secondaryUsedPercent: 0,
+        secondaryResetAt: null,
+        checkedAt: new Date(),
+        clearQuotaCooldownRevision: Number(credential!.exhausted_revision),
+      },
+    );
+
+    expect(mutation.result).toBe(true);
+    expect(mutation.wakeTargets).toEqual([
+      expect.objectContaining({
+        waiterId: armed.waiter.id,
+        wakeRevision: armed.waiter.wakeRevision + 1,
+      }),
+    ]);
+    const [after] = await admin<{ exhausted_until: Date | null }[]>`
+      select exhausted_until from codex_subscription_credentials
+      where id = ${credentialId}`;
+    expect(after?.exhausted_until).toBeNull();
   });
 
   test("a policy-pin CAS advances the waiter outbox in the same allocator transaction", async () => {

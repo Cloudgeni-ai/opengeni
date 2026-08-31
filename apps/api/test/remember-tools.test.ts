@@ -5,7 +5,7 @@ import {
   agentAuthoredDurableTextTooLongMessage,
 } from "@opengeni/contracts";
 import { RememberError } from "@opengeni/core";
-import type { Database } from "@opengeni/db";
+import { PreferenceRegistryStableKeyConflictError, type Database } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerRememberTools } from "../src/mcp/remember";
 
@@ -26,7 +26,7 @@ type Handler = (input: Record<string, unknown>) => Promise<{
   content: { type: "text"; text: string }[];
 }>;
 
-function harness() {
+function harness(options: { rememberError?: Error } = {}) {
   const handlers = new Map<string, Handler>();
   const configs = new Map<string, { description?: string }>();
   const remembers: unknown[] = [];
@@ -49,6 +49,7 @@ function harness() {
     router: {
       async remember(input) {
         remembers.push(input);
+        if (options.rememberError) throw options.rememberError;
         return {
           status: "blocked",
           operationId: OPERATION_ID,
@@ -149,9 +150,13 @@ describe("remember MCP tools", () => {
     expect(h.remembers[2]).toMatchObject({ request: { lane: "knowledge", subject: "Acme" } });
   });
 
-  test("the tool description states the prompt cost and the shape of a durable rule", () => {
+  test("the tool description separates autonomous Memory from governed durable changes", () => {
     const description = harness().configs.get("remember")?.description ?? "";
-    expect(description).toContain("lane=knowledge for a fact, decision, incident, bug fix");
+    expect(description).toContain("use it instead for ordinary durable facts");
+    expect(description).toContain("independent of Learning mode");
+    expect(description).toContain(
+      "lane=knowledge only when memory_save is unavailable and the user explicitly requests reviewed workspace knowledge",
+    );
     expect(description).toContain("lane=preference creates a Skill");
     expect(description).toContain("lane=instruction_policy is only for a universal");
     expect(description).toContain(
@@ -163,6 +168,11 @@ describe("remember MCP tools", () => {
       `Keep a Skill under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters`,
     );
     expect(description).toContain("one-sentence descriptor");
+    expect(description).toContain(
+      "eligible Skill or workspace instruction may activate immediately",
+    );
+    expect(description).toContain("Under Review first, it remains inactive");
+    expect(description).toContain("Off creates no governed change");
     expect(description).toContain("materializes its exact approved text into Memory");
     expect(description).toContain("`memory_search` retrieval");
   });
@@ -208,6 +218,28 @@ describe("remember MCP tools", () => {
       subject: "Acme",
     });
     expect(h.remembers).toHaveLength(1);
+  });
+
+  test("remember returns a bounded stable-key conflict instead of throwing persistence details", async () => {
+    const h = harness({
+      rememberError: new PreferenceRegistryStableKeyConflictError(
+        "A preference with this stable key already exists for the workspace",
+      ),
+    });
+    const result = await h.handlers.get("remember")!({
+      lane: "preference",
+      operationId: OPERATION_ID,
+      content: "Use a concise, direct tone for support replies.",
+      stableKey: "support.tone",
+      title: "Support tone",
+      description: "Suggested tone for support replies.",
+      reason: "The user asked to remember it.",
+    });
+    expect(JSON.parse(result.content[0]!.text)).toEqual({
+      status: "not_remembered",
+      code: "preference_stable_key_conflict",
+      message: "A preference with this stable key already exists for the workspace",
+    });
   });
 
   test("remember_confirm returns a bounded not_confirmed result instead of throwing on remember errors", async () => {

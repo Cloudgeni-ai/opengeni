@@ -942,15 +942,8 @@ const FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
  * trustworthy logical-delivery identity. Server-owned Slack delivery paths
  * call the internal client directly with their own durable operation IDs.
  */
-// Names kept so previously written data still parses - immutable scheduled-task
-// execution snapshots recorded the tool set that was default at the time, and
-// they are strictly re-parsed on replay. Retiring a tool must not strand an
-// accepted occurrence. These are never registered, never default, and never
-// authorized; they exist so history stays readable.
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
-  "memory_save",
-  "memory_correct",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
@@ -983,10 +976,6 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
-    // Memory V1 writes are retired entirely; `remember` and task-note
-    // promotion own durable agent writes.
-    name !== "memory_save" &&
-    name !== "memory_correct" &&
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
@@ -2960,6 +2949,28 @@ export const CreateWorkspaceRequest = z.object({
 });
 export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequest>;
 
+export const EnsureWorkspaceRequest = z
+  .object({
+    accountId: z.string().uuid(),
+    externalSource: z.string().trim().min(1).max(200),
+    externalId: z.string().trim().min(1).max(1024),
+    name: z.string().trim().min(1).max(200),
+    slug: z.string().trim().min(1).max(200).optional(),
+    // White-label persona override for this workspace's agent. null/omitted uses
+    // the deployment default template.
+    agentInstructions: z.string().min(1).nullable().optional(),
+  })
+  .strict();
+export type EnsureWorkspaceRequest = z.infer<typeof EnsureWorkspaceRequest>;
+
+export const EnsureWorkspaceResponse = z
+  .object({
+    workspace: Workspace,
+    created: z.boolean(),
+  })
+  .strict();
+export type EnsureWorkspaceResponse = z.infer<typeof EnsureWorkspaceResponse>;
+
 export const UpdateWorkspaceRequest = z
   .object({
     name: z.string().min(1).optional(),
@@ -3001,6 +3012,15 @@ export const CreateApiKeyResponse = z.object({
   token: z.string().min(1),
 });
 export type CreateApiKeyResponse = z.infer<typeof CreateApiKeyResponse>;
+
+export const CreateOrganizationApiKeyRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    description: z.string().trim().min(1).max(500).optional(),
+    expiresAt: z.string().datetime({ offset: true }).optional(),
+  })
+  .strict();
+export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
 // row. `subjectId` is `user:<betterAuthUserId>` or `api_key:<id>`; the People
@@ -7662,6 +7682,48 @@ export const VariableSetVariableName = z
   .max(128);
 export type VariableSetVariableName = z.infer<typeof VariableSetVariableName>;
 
+export const VARIABLE_SET_RESERVED_EXACT_NAMES = [
+  "HOME",
+  "PATH",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "IFS",
+  "ENV",
+  "BASH_ENV",
+  "NODE_OPTIONS",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PERL5OPT",
+  "PERL5LIB",
+  "GH_TOKEN",
+  "GITHUB_TOKEN",
+  "GITLAB_TOKEN",
+  "AZURE_DEVOPS_EXT_PAT",
+  "GIT_ASKPASS",
+  "GIT_TERMINAL_PROMPT",
+] as const;
+
+export const VARIABLE_SET_RESERVED_PREFIXES = [
+  "OPENGENI_",
+  "GIT_CONFIG_",
+  "GIT_AUTHOR_",
+  "GIT_COMMITTER_",
+  "LD_",
+  "DYLD_",
+] as const;
+
+export function variableSetVariableNameReservation(
+  name: string,
+): { kind: "exact" | "prefix"; value: string } | null {
+  if ((VARIABLE_SET_RESERVED_EXACT_NAMES as readonly string[]).includes(name)) {
+    return { kind: "exact", value: name };
+  }
+  const prefix = VARIABLE_SET_RESERVED_PREFIXES.find((candidate) => name.startsWith(candidate));
+  return prefix ? { kind: "prefix", value: prefix } : null;
+}
+
 function withVariableSetIdAlias<T extends z.ZodRawShape>(
   shape: T,
   options: { rejectKeys?: readonly string[] } = {},
@@ -8509,6 +8571,14 @@ export const ScheduledTaskMetadataInput =
   );
 
 function scheduledTaskAgentConfigShape(bounded: boolean) {
+  const machineTarget = z
+    .object({
+      targetSandboxId: z.string().uuid(),
+      workingDir: bounded
+        ? z.string().trim().min(1).max(4096).optional()
+        : z.string().min(1).optional(),
+    })
+    .strict();
   return {
     prompt: bounded
       ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
@@ -8534,6 +8604,10 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
       : z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
     sandboxBackend: SandboxBackend.optional(),
+    // Connected Machines are a concrete execution target, not a generic
+    // sandbox backend. Persist the exact machine + optional cwd so every
+    // generated session can seed its active route before its first turn.
+    machineTarget: machineTarget.optional(),
     goal: GoalSpec.optional(),
     // Incident telemetry is the only special execution class. Omission keeps
     // every existing task on the byte-compatible ordinary dispatch path.
@@ -8575,6 +8649,20 @@ export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
   .object(scheduledTaskAgentConfigShape(true))
   .superRefine((value, context) => {
+    if (value.machineTarget && value.sandboxBackend !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["machineTarget"],
+        message: "machineTarget cannot be combined with sandboxBackend",
+      });
+    }
+    if (value.sandboxBackend === "selfhosted") {
+      context.addIssue({
+        code: "custom",
+        path: ["sandboxBackend"],
+        message: "selfhosted scheduled tasks require machineTarget",
+      });
+    }
     if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
       context.addIssue({
         code: "custom",
@@ -8899,6 +8987,13 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
       message: "agentConfig.goal cannot be used with an existing-session target",
     });
   }
+  if (value.runMode === "existing_session" && value.agentConfig.machineTarget) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "machineTarget"],
+      message: "machineTarget cannot be used with an existing-session target",
+    });
+  }
 });
 
 const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
@@ -8973,6 +9068,16 @@ export const UpdateScheduledTaskRequest =
         code: "custom",
         path: ["agentConfig", "goal"],
         message: "agentConfig.goal cannot be used with an existing-session target",
+      });
+    }
+    if (
+      value.agentConfig?.machineTarget &&
+      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfig", "machineTarget"],
+        message: "machineTarget cannot be used with an existing-session target",
       });
     }
   });
@@ -11680,8 +11785,11 @@ export const Session = z.object({
       queuedDescendants: z.number().int().nonnegative(),
       attentionDescendants: z.number().int().nonnegative(),
       pausedDescendants: z.number().int().nonnegative(),
+      /** Historical failed lifecycle states, including already-reviewed failures. */
       failedDescendants: z.number().int().nonnegative(),
       unreadDescendants: z.number().int().nonnegative().optional(),
+      /** Failed descendants whose latest durable event this viewer has not acknowledged. */
+      unreadFailedDescendants: z.number().int().nonnegative().optional(),
       activelyWorkingDescendants: z.number().int().nonnegative().optional(),
       /**
        * Earliest moment one of the counted `attentionDescendants` entered
@@ -14616,10 +14724,10 @@ export const SessionCapabilities = z.object({
     codecs: z.array(z.enum(["h264-mp4", "vp9-webm"])),
     reason: CapabilityUnavailableReason.nullable(),
   }),
-  // The AGENT drives the SAME :0 (xdotool/XTEST + scrot) the human watches; the
-  // human viewer plane is read-only by default (§6). `available` == desktop-
-  // capable backend && computerUseEnabled; `readOnly` reports whether the agent
-  // driver itself is gated to no-op input (v1 default false — the agent clicks).
+  // Deprecated compatibility cell for clients that predate managed
+  // ComputerSession interaction tools. Newly negotiated documents report this
+  // unavailable/read-only with `disabled_by_policy`; the shape remains so older
+  // clients and persisted payloads still parse.
   ComputerUse: z.object({
     available: z.boolean(),
     readOnly: z.boolean(),
@@ -15736,6 +15844,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     models: z.array(ClientModel).default([]),
     defaultReasoningEffort: ReasoningEffort,
     allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
+    // Client-safe execution default. The schedule editor uses this to avoid
+    // presenting a targetless "managed" choice on self-hosted deployments.
+    defaultSandboxBackend: SandboxBackend.default("modal"),
     mcpServers: z
       .array(
         z.object({

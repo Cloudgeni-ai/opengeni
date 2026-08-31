@@ -834,6 +834,13 @@ const SettingsSchema = z.object({
   // larger timeout—is what lets a session outlive one finite provider box.
   // Knob: OPENGENI_MODAL_TIMEOUT_SECONDS.
   modalTimeoutSeconds: z.coerce.number().int().positive().max(86_400).default(86_400),
+  // Optional provider reservations for every new Modal sandbox. CPU is measured
+  // in physical cores and may be fractional; memory is measured in MiB. Leave
+  // both unset to preserve Modal's provider defaults. The Agents adapter stores
+  // the resolved values in its session state so snapshot replacement and exact
+  // resume cannot silently change the reservation.
+  modalSandboxCpu: z.coerce.number().positive().optional(),
+  modalSandboxMemoryMiB: z.coerce.number().int().positive().optional(),
   modalTokenId: z.string().optional(),
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
@@ -873,8 +880,8 @@ const SettingsSchema = z.object({
   // cell advertises mode "interactive" — the noVNC viewer can drive mouse+keyboard
   // into :0 (x11vnc runs without -viewonly). Turn it OFF for a genuinely read-only
   // deployment: the cell reports mode "read-only" and the client disables the
-  // "Take control" affordance. Independent of computerUseReadOnly (the AGENT
-  // driver); this gates the HUMAN viewer plane.
+  // "Take control" affordance. This gates the HUMAN viewer plane; agent
+  // interaction is authorized through managed ComputerSession tools.
   sandboxDesktopInteractive: EnvBoolean.default(true),
   // REAL PTY terminal toggle (P5.t): gates the ttyd pty-ws plane (7681) the API
   // mints over the SAME tunnel as the desktop. Defaults ON — the interactive
@@ -888,13 +895,7 @@ const SettingsSchema = z.object({
   // down→up restart. Defaults match the proven spike geometry (1280x800).
   streamResolutionWidth: z.coerce.number().int().positive().default(1280),
   streamResolutionHeight: z.coerce.number().int().positive().default(800),
-  // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
-  // scrot). Gated by sandboxDesktopEnabled + a desktop-capable backend in
-  // buildAgentCapabilities; computerUseReadOnly:false is the agent-driver default
-  // (it must click/type — the human viewer plane is the read-only one).
-  computerUseEnabled: EnvBoolean.default(true),
-  computerUseReadOnly: EnvBoolean.default(false),
-  // P4.3 recording loop: ffmpeg x11grab of :0 → mp4/webm → @opengeni/storage.
+  // Recording loop: ffmpeg x11grab of :0 → mp4/webm → @opengeni/storage.
   // recordingMaxBytes caps the in-memory finalize buffer (≤ storage single-PUT);
   // recordingMaxSeconds is the ffmpeg -t hard ceiling (bounds a multi-day turn).
   recordingEnabled: EnvBoolean.default(true),
@@ -2501,6 +2502,8 @@ export function getSettings(): Settings {
     modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
+    modalSandboxCpu: optional("OPENGENI_MODAL_SANDBOX_CPU"),
+    modalSandboxMemoryMiB: optional("OPENGENI_MODAL_SANDBOX_MEMORY_MIB"),
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
     modalTokenSecret: optional("OPENGENI_MODAL_TOKEN_SECRET"),
     modalEnvironment: optional("OPENGENI_MODAL_ENVIRONMENT"),
@@ -2511,8 +2514,6 @@ export function getSettings(): Settings {
     sandboxTerminalEnabled: optional("OPENGENI_SANDBOX_TERMINAL_ENABLED"),
     streamResolutionWidth: optional("OPENGENI_STREAM_RESOLUTION_WIDTH"),
     streamResolutionHeight: optional("OPENGENI_STREAM_RESOLUTION_HEIGHT"),
-    computerUseEnabled: optional("OPENGENI_COMPUTER_USE_ENABLED"),
-    computerUseReadOnly: optional("OPENGENI_COMPUTER_USE_READONLY"),
     recordingEnabled: optional("OPENGENI_RECORDING_ENABLED"),
     workspaceCaptureEnabled: optional("OPENGENI_WORKSPACE_CAPTURE"),
     recordingDefaultCodec: optional("OPENGENI_RECORDING_DEFAULT_CODEC"),
@@ -3556,8 +3557,10 @@ function canonicalJson(value: unknown): string {
 function definitionVersionFor(
   model: Omit<ConfiguredModel, "definitionVersion">,
   provider: ResolvedModelProvider,
+  options: { includeWireProfile?: boolean } = {},
 ): string {
   const requestMetadata = staticRequestMetadataForDigest(provider);
+  const includeWireProfile = options.includeWireProfile ?? true;
   const digestInput = canonicalJson({
     schemaVersion: model.schemaVersion,
     id: model.id,
@@ -3566,7 +3569,7 @@ function definitionVersionFor(
     provider: {
       adapterKind: provider.kind,
       wireApi: provider.api,
-      wireProfile: provider.wireProfile,
+      ...(includeWireProfile ? { wireProfile: provider.wireProfile } : {}),
       baseUrl: provider.baseUrl ?? null,
       defaultHeaders: requestMetadata.headers,
       defaultQuery: requestMetadata.query,
@@ -3582,6 +3585,15 @@ function definitionVersionFor(
     .update("opengeni:model-definition:v1\n", "utf8")
     .update(digestInput, "utf8")
     .digest("hex")}`;
+}
+
+function legacyImplicitOpenAiDefinitionVersionFor(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): string | null {
+  if (provider.wireProfile !== "openai") return null;
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  return definitionVersionFor(modelWithoutVersion, provider, { includeWireProfile: false });
 }
 
 /**
@@ -4165,11 +4177,22 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   if (!resolved) {
     throw new Error("Turn execution policy model is no longer configured");
   }
+  // wireProfile was added to the definition digest after policies already
+  // existed in durable in-flight turns. An omitted profile meant exactly
+  // "openai", so accept that one legacy digest only; Azure and every other
+  // executable-definition change remain fail-closed.
+  const legacyImplicitOpenAiDefinitionVersion = legacyImplicitOpenAiDefinitionVersionFor(
+    resolved.model,
+    resolved.provider,
+  );
+  const definitionVersionMatches =
+    parsed.definitionVersion === resolved.model.definitionVersion ||
+    parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion;
   const mismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
     parsed.wireApi !== resolved.model.api ||
-    parsed.definitionVersion !== resolved.model.definitionVersion ||
+    !definitionVersionMatches ||
     canonicalJson(parsed.credentialSource) !== canonicalJson(resolved.model.credentialSource) ||
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
   if (mismatched) {

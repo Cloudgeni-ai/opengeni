@@ -134,6 +134,21 @@ async function claimConnection(workspaceId: string, enrollmentId: string): Promi
   expect(claimed.claimed).toBe(true);
 }
 
+async function waitForValue<T>(
+  read: () => Promise<T>,
+  matches: (value: T) => boolean,
+  description: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const value = await read();
+    if (matches(value)) return value;
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 class SlowProbeBus extends MemoryEventBus {
   startedSubjects: string[] = [];
   completed = 0;
@@ -210,6 +225,18 @@ async function emitHeartbeat(
     `agent.${workspaceId}.${agentId}.connection.${CONNECTION_INSTANCE_ID}.events`,
     event,
   );
+  await waitForValue(
+    async () => {
+      const [sample] = await admin<Array<{ cpuPercent: string | number | null }>>`
+        select cpu_percent as "cpuPercent"
+        from machine_metrics_latest
+        where enrollment_id = ${agentId}
+      `;
+      return sample?.cpuPercent ?? null;
+    },
+    (value) => Number(value) === cpuPct,
+    `heartbeat metrics for enrollment ${agentId}`,
+  );
 }
 
 async function emitHeartbeatWithoutMetrics(
@@ -233,6 +260,11 @@ async function emitHeartbeatWithoutMetrics(
     `agent.${workspaceId}.${agentId}.connection.${CONNECTION_INSTANCE_ID}.events`,
     event,
   );
+  await waitForValue(
+    () => getEnrollment(db, workspaceId, agentId),
+    (enrollment) => enrollment?.lastSeenAt != null,
+    `heartbeat liveness for enrollment ${agentId}`,
+  );
 }
 
 /** Emit a clean GoingOffline AgentEvent, driving the ingestion consumer to stamp
@@ -250,6 +282,11 @@ async function emitGoingOffline(
   await bus.emitAgentEvent(
     `agent.${workspaceId}.${agentId}.connection.${CONNECTION_INSTANCE_ID}.events`,
     event,
+  );
+  await waitForValue(
+    () => getEnrollment(db, workspaceId, agentId),
+    (enrollment) => enrollment?.wentOfflineAt != null,
+    `going-offline marker for enrollment ${agentId}`,
   );
 }
 
@@ -1049,10 +1086,14 @@ describe("Connected Machine signed self-update orchestration", () => {
           },
         }).finish(),
       );
-      expect(
-        (await getEnrollment(db, machine.originWorkspaceId, machine.enrollmentId))?.agentUpdate
-          ?.status,
-      ).toBe("restarting");
+      const restarting = await waitForValue(
+        async () =>
+          (await getEnrollment(db, machine.originWorkspaceId, machine.enrollmentId))?.agentUpdate
+            ?.status,
+        (status) => status === "restarting",
+        `restarting update ${operationId}`,
+      );
+      expect(restarting).toBe("restarting");
       await handleHelloPayload(
         db,
         undefined,
@@ -1155,9 +1196,12 @@ describe("Connected Machine signed self-update orchestration", () => {
         },
       }).finish(),
     );
-    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status).toBe(
-      "restarting",
+    const restarting = await waitForValue(
+      async () => (await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate?.status,
+      (status) => status === "restarting",
+      `restarting update ${body.operationId}`,
     );
+    expect(restarting).toBe("restarting");
 
     // A reconnect alone is insufficient: the exact signed artifact digest is
     // part of the success proof.
@@ -1362,7 +1406,11 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
       GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE,
     );
 
-    const events = await machineLinkEvents(session.id);
+    const events = await waitForValue(
+      () => machineLinkEvents(session.id),
+      (current) => current.length === 2,
+      `machine link-loss events for session ${session.id}`,
+    );
     expect(events.map((e) => e.type)).toEqual(["machine.link.lost", "machine.runner.restarted"]);
     // Both are stamped on the session's OWN running turn.
     expect(events.every((e) => e.turn_id === turnId)).toBe(true);
@@ -1382,7 +1430,12 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
       GoingOfflineReason.GOING_OFFLINE_REASON_HOST_SHUTDOWN,
     );
 
-    expect((await machineLinkEvents(session.id)).map((e) => e.type)).toEqual(["machine.link.lost"]);
+    const events = await waitForValue(
+      () => machineLinkEvents(session.id),
+      (current) => current.length === 1,
+      `machine link-loss event for session ${session.id}`,
+    );
+    expect(events.map((e) => e.type)).toEqual(["machine.link.lost"]);
   }, 90_000);
 
   test("a reconnect Hello after a lost fans out link.restored; a second Hello (marker already cleared) emits nothing more", async () => {
@@ -1398,6 +1451,11 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
       workspaceId,
       enrollment.id,
       GoingOfflineReason.GOING_OFFLINE_REASON_USER_STOP,
+    );
+    await waitForValue(
+      () => machineLinkEvents(session.id),
+      (events) => events.some((event) => event.type === "machine.link.lost"),
+      `machine link-loss event for session ${session.id}`,
     );
 
     // Reconnect: the Hello clears the marker → emits link.restored on the turn.
@@ -1432,13 +1490,18 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
     // seed() creates a session but does NOT point it at the machine / give it a
     // running turn, so the fan-out query matches nothing.
     const { workspaceId, session, enrollment, bus } = await seed();
-    appFor(bus);
-
-    await emitGoingOffline(
+    await handleAgentEventPayload(
+      db,
+      undefined,
+      AgentEvent.encode({
+        agentId: enrollment.id,
+        event: {
+          $case: "goingOffline",
+          goingOffline: { reason: GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE },
+        },
+      }).finish(),
+      `agent.${workspaceId}.${enrollment.id}.connection.${CONNECTION_INSTANCE_ID}.events`,
       bus,
-      workspaceId,
-      enrollment.id,
-      GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE,
     );
 
     expect(await machineLinkEvents(session.id)).toEqual([]);
@@ -1485,15 +1548,14 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
       "eeeeeeee-0000-4000-8000-000000000002",
     );
 
-    // Rig sessionA's NEXT append to REJECT: pre-occupy its next sequence slot so the
-    // unique (workspace, session, sequence) index throws on sessionA's fan-out
-    // append — a faithful stand-in for the session-specific / racing-writer failure
-    // the isolation must survive. sessionB is untouched.
-    const [{ last_sequence: lastSeqA }] = await admin<{ last_sequence: number }[]>`
-      select last_sequence from sessions where id = ${sessionA.id}`;
+    // Rig sessionA's NEXT append to REJECT by removing its durable cursor.
+    // Cursor-authoritative writers fail closed when the cursor row is missing.
+    // sessionB is untouched, so the fan-out must continue after sessionA's
+    // isolated error.
     await admin`
-      insert into session_events (account_id, workspace_id, session_id, sequence, type)
-      values (${accountId}, ${workspaceId}, ${sessionA.id}, ${lastSeqA + 1}, 'user.message')`;
+      delete from session_event_cursors
+      where workspace_id = ${workspaceId}
+        and session_id = ${sessionA.id}`;
 
     // Capture warns; call the handler directly so the per-session log is observable.
     const warns: Array<{ message: string; meta?: Record<string, unknown> }> = [];

@@ -2,7 +2,7 @@
 // sandbox surface for the `selfhosted` backend (bring-your-own-compute).
 //
 // The insight: every existing seam (Channel-A exec/fs/git, the
-// viewer's `resolveExposedPort`, computer-use) consumes a provider session
+// viewer's `resolveExposedPort`) consumes a provider session
 // STRUCTURALLY — `session.exec ?? session.execCommand`, `session.readFile`,
 // `session.resolveExposedPort`, `session.serializeSessionState`. If the
 // selfhosted client's `create()`/`resume()` return a session presenting that
@@ -21,7 +21,6 @@ import {
   ErrorCode,
   FsEntryKind,
   StreamKind,
-  type DesktopInputRequest,
   type BrowserControlEnsureRequest,
   type BrowserControlEnsureResponse,
   type BrowserFramesOpenRequest,
@@ -430,7 +429,7 @@ export interface SelfhostedSessionState {
 
 /**
  * A live selfhosted session — the structural `SandboxSessionLike` surface over a
- * `ControlRpc`. Mirrors Modal's session shape so Channel-A/viewer/computer-use
+ * `ControlRpc`. Mirrors Modal's session shape so Channel-A and viewer surfaces
  * consume it unchanged.
  */
 export class SelfhostedSession {
@@ -1395,63 +1394,6 @@ export class SelfhostedSession {
       throw new Error(`selfhosted statFile: unexpected result ${result.$case}`);
     }
     return { exists: result.fsStat.exists };
-  }
-
-  // ── Computer-use control plane (the agent drives its OWN screen) ──────────────
-  // The CONTROL-PLANE twin of the relay DesktopInput/desktop stream: instead of a
-  // human viewer channel, the agent injects synthetic input into — and captures —
-  // its own display for the model's computer-use loop. Both route over the SAME
-  // `call()` primitive, so a consent/epoch rejection surfaces as the mapped
-  // `SelfhostedControlError` exactly like every other op. `NativeDesktopComputer`
-  // (sandbox-computer.ts) is the sole consumer.
-
-  /** Computer-use WRITE op: inject one synthetic desktop input event (pointer/key/
-   *  scroll) on the machine's OWN display. The agent injects via CGEvent (macOS) /
-   *  XTEST (Linux) and CONSENT-GATES it — an unconsented call never touches the OS
-   *  and surfaces the mapped control error (ERROR_CODE_CONSENT_REQUIRED) via `call()`. */
-  async desktopInput(event: DesktopInputRequest["event"]): Promise<void> {
-    const result = await this.call({
-      $case: "desktopInput",
-      desktopInput: { event },
-    });
-    if (result.$case !== "desktopInput") {
-      throw new Error(`selfhosted desktopInput: unexpected result ${result.$case}`);
-    }
-  }
-
-  /** Computer-use VIEW op: capture a single PNG screenshot of the machine's desktop
-   *  plus its geometry (via ScreenCaptureKit / x11). NOT consent-gated (a view op —
-   *  the view/control decoupling), so it works with a display but no screen-control
-   *  consent. Returns the raw encoded bytes + the ENCODED width/height, plus the
-   *  NATIVE (pre-downscale) geometry: when the agent had to downscale the PNG to fit
-   *  the transport's max payload, `nativeWidth`/`nativeHeight` carry the original
-   *  capture size so the computer-use layer can scale model clicks (in encoded-pixel
-   *  space) back to native pixels. An older agent leaves them 0 → read as "same as
-   *  width/height" (no downscale). */
-  async screenshot(): Promise<{
-    png: Uint8Array;
-    width: number;
-    height: number;
-    nativeWidth: number;
-    nativeHeight: number;
-  }> {
-    const result = await this.call({
-      $case: "desktopScreenshot",
-      desktopScreenshot: {},
-    });
-    if (result.$case !== "desktopScreenshot") {
-      throw new Error(`selfhosted screenshot: unexpected result ${result.$case}`);
-    }
-    const s = result.desktopScreenshot;
-    // Back-compat: an agent predating the native-geometry fields sends 0 → treat the
-    // encoded geometry AS the native geometry (scale factor 1.0, no coordinate shift).
-    return {
-      png: s.png,
-      width: s.width,
-      height: s.height,
-      nativeWidth: s.nativeWidth || s.width,
-      nativeHeight: s.nativeHeight || s.height,
-    };
   }
 
   /** Ensure the loopback browser controller sidecar owned by this connected

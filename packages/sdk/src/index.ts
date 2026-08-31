@@ -194,6 +194,8 @@ export {
 } from "./company-profile";
 export type {
   ActivateCompanyProfileRevisionRequest,
+  CompanyProfileAgentPolicy,
+  CompanyProfileAgentPolicyMode,
   CompanyProfileActivationEvent,
   CompanyProfileContent,
   CompanyProfileDiffRequest,
@@ -207,6 +209,7 @@ export type {
   CompanyProfileRevisionIdentity,
   RollbackCompanyProfileRequest,
   UpdateCompanyProfileRequest,
+  UpdateCompanyProfileAgentPolicyRequest,
 } from "./company-profile";
 export type {
   ActivateWorkspaceInstructionPolicyRequest,
@@ -496,6 +499,7 @@ export type {
   CodexAccount,
   CodexAccountOverview,
   CodexAccountsResponse,
+  OrganizationCodexAccountsResponse,
   CodexAllocatorUpdate,
   CodexAccountSwitchedPayload,
   CodexConnectionStatus,
@@ -520,6 +524,8 @@ export type {
   CodexRotationSettings,
   CodexUsage,
   CodexUsageMap,
+  WorkspaceCodexSubscriptionMode,
+  WorkspaceCodexSubscriptionSource,
   CodexUsagePayload,
   CodexUsageWindow,
   CompactSessionContextResult,
@@ -556,6 +562,7 @@ export type {
   AddDocumentRequest,
   CreateApiKeyRequest,
   CreateApiKeyResponse,
+  CreateOrganizationApiKeyRequest,
   CreateCapabilityCatalogItemRequest,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
@@ -584,6 +591,8 @@ export type {
   CreateVariableSetRequest,
   CreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest,
+  EnsureWorkspaceRequest,
+  EnsureWorkspaceResponse,
   DiscoverMcpCapabilitiesResponse,
   InstallSkillRequest,
   InstallLibrarySkillRequest,

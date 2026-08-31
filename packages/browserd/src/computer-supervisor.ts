@@ -53,7 +53,7 @@ export type ComputerSupervisorDriver = ComputerInteractionDriver & {
   readonly adapterId: string;
   readonly capabilities: ComputerSessionCapabilities;
   listTargets(): Promise<ComputerTarget[]>;
-  capture(targetId: string): Promise<ComputerImageFrame>;
+  capture(targetId: string, options?: ComputerFrameStreamOptions): Promise<ComputerImageFrame>;
   clipboard(): Promise<ComputerClipboard>;
   subscribeFrames(
     targetId: string,
@@ -241,8 +241,9 @@ export class ComputerSupervisor {
   async capture(
     reference: ComputerSessionReference,
     targetId: string,
+    options?: ComputerFrameStreamOptions,
   ): Promise<ComputerImageFrame> {
-    return await this.requireActive(reference).driver.capture(targetId);
+    return await this.requireActive(reference).driver.capture(targetId, options);
   }
 
   async clipboard(reference: ComputerSessionReference): Promise<ComputerClipboard> {

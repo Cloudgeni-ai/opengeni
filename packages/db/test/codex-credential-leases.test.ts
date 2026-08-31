@@ -274,6 +274,55 @@ describe("credential allocator atomic Codex credential allocation", () => {
     expect(allocationB.accounts[0]?.activeLeaseCount).toBe(0);
   }, 60_000);
 
+  test("organization pool load counts include live leases from sibling workspaces", async () => {
+    if (!available) return;
+    const [wsA, wsB] = await freshAccount(2);
+    const [credential] = await admin<{ id: string }[]>`
+      insert into codex_subscription_credentials (
+        account_id, workspace_id, organization_id, authority_scope,
+        credential_encrypted, chatgpt_account_id, status, allocator_enabled
+      ) values (
+        ${wsA!.accountId}, null, ${wsA!.accountId}, 'organization',
+        'ciphertext', ${crypto.randomUUID()}, 'active', true
+      ) returning id`;
+    await admin`
+      insert into organization_codex_rotation_settings (
+        account_id, active_credential_id, rotation_enabled, lease_rotation_enabled
+      ) values (${wsA!.accountId}, ${credential!.id}, true, true)`;
+    const turnA = await seedTurn(wsA!, 1);
+    const turnB = await seedTurn(wsB!, 1);
+
+    await acquireCodexCredentialLease(
+      dbA,
+      {
+        accountId: wsA!.accountId,
+        workspaceId: wsA!.workspaceId,
+        turnId: turnA,
+        holderId: "organization-sibling-a",
+        advanceActivePointer: false,
+      },
+      ({ accounts }) => ({
+        credentialId: accounts[0]!.id,
+        decision: { activeLeaseCount: accounts[0]!.activeLeaseCount },
+      }),
+    );
+    const second = await acquireCodexCredentialLease(
+      dbB,
+      {
+        accountId: wsB!.accountId,
+        workspaceId: wsB!.workspaceId,
+        turnId: turnB,
+        holderId: "organization-sibling-b",
+        advanceActivePointer: false,
+      },
+      ({ accounts }) => ({
+        credentialId: accounts[0]!.id,
+        decision: { activeLeaseCount: accounts[0]!.activeLeaseCount },
+      }),
+    );
+    expect(second.decision.activeLeaseCount).toBe(1);
+  });
+
   test("usage and cooldown never propagate across workspace boundaries", async () => {
     if (!available) return;
     const [wsA, wsB] = await freshAccount(2);
@@ -289,7 +338,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     });
     const statusesAfterUsage = await listCodexAccountStatuses(dbB, wsB!.workspaceId);
     expect(statusesAfterUsage[0]?.primaryUsedPercent).toBeNull();
-    await setCodexCredentialExhausted(dbA, wsA!.workspaceId, credentialA, reset);
+    await setCodexCredentialExhausted(dbA, wsA!.workspaceId, credentialA, reset, "quota");
     const statusesAfterCooldown = await listCodexAccountStatuses(dbB, wsB!.workspaceId);
     expect(statusesAfterCooldown[0]?.exhaustedUntil).toBeNull();
   });
@@ -891,7 +940,11 @@ describe("credential allocator atomic Codex credential allocation", () => {
       credentialId: first.credentialId!,
       holderId: first.holderId!,
       generation: first.generation!,
-      quarantine: { kind: "cooldown", until: new Date(Date.now() + 60_000) },
+      quarantine: {
+        kind: "cooldown",
+        until: new Date(Date.now() + 60_000),
+        cooldownKind: "quota",
+      },
     });
     expect(staleQuarantine).toBe(false);
     const [credentialAfterStaleAttempt] = await admin<
@@ -1090,7 +1143,11 @@ describe("credential allocator atomic Codex credential allocation", () => {
         credentialId: first.credentialId!,
         holderId: first.holderId!,
         generation: first.generation!,
-        quarantine: { kind: "cooldown", until: new Date(Date.now() + 60_000) },
+        quarantine: {
+          kind: "cooldown",
+          until: new Date(Date.now() + 60_000),
+          cooldownKind: "quota",
+        },
       }),
     ).toBe(true);
     // Force the narrow race: the holder was live for quarantine, then crossed
@@ -1281,7 +1338,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     }
     const databaseError = (triggerError as { cause?: unknown })?.cause ?? triggerError;
     expect(String(databaseError)).toContain(
-      "Codex credential reference must remain in the row workspace",
+      "Codex session credential is outside the workspace effective pool",
     );
 
     let turnFkError: unknown;
@@ -1332,6 +1389,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       ws!.workspaceId,
       first.credentialId!,
       new Date(Date.now() + 5 * 60 * 60_000),
+      "quota",
     );
 
     const sessionRows = await admin<{ session_id: string }[]>`

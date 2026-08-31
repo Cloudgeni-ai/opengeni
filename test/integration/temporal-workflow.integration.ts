@@ -1069,7 +1069,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "Temporal activity failure never manufactures quiescence or pins workflow completion",
+    "Temporal activity failure closes boundedly and a later wake retries exact quiescence",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -1080,6 +1080,7 @@ describe("Temporal workflow integration", () => {
       const queuedTurns = [first];
       const controls: unknown[] = [];
       let runs = 0;
+      let reconciliationAttempts = 0;
       let cancellationWaitAttemptId: string | null = null;
       let terminateFirst = false;
       const admission = createTurnAdmission(queuedTurns, async () => {
@@ -1108,7 +1109,10 @@ describe("Temporal workflow integration", () => {
           terminateFirst = true;
           return { action: "continue" as const };
         },
-        reconcileSessionAttemptQuiescence: async () => ({ action: "pending" as const }),
+        reconcileSessionAttemptQuiescence: async () => {
+          reconciliationAttempts += 1;
+          return { action: "pending" as const };
+        },
       });
       const run = worker.run();
       try {
@@ -1123,8 +1127,29 @@ describe("Temporal workflow integration", () => {
         await handle.signal("userMessage", second.triggerEventId);
         await handle.signal("sessionControl", "control-event");
         await handle.result();
+        const attemptsAfterFirstClose = reconciliationAttempts;
+        expect(attemptsAfterFirstClose).toBeGreaterThanOrEqual(1);
+
+        // Model the still-undelivered wake-outbox revision after the bounded
+        // close. signalWithStart must create a fresh run under the same durable
+        // workflow identity and retry exact receipt reconciliation without
+        // manufacturing quiescence or admitting the fenced replacement.
+        const restarted = await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ ...scope, sessionId }],
+          signal: "queueChanged",
+          signalArgs: [],
+        });
+        await waitFor(() => reconciliationAttempts > attemptsAfterFirstClose, {
+          timeoutMs: temporalWorkflowTestTimeoutMs,
+          describe: () => "outbox restart did not retry exact quiescence reconciliation",
+        });
+        await restarted.result();
 
         expect(runs).toBe(1);
+        expect(restarted.firstExecutionRunId).not.toBe(handle.firstExecutionRunId);
         expect(controls).toEqual([
           { ...scope, sessionId, attemptId: expect.any(String), workflowId },
         ]);

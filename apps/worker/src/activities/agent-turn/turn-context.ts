@@ -18,7 +18,6 @@ import type { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import type { CodemodeTokenRenewalController } from "../codemode-token-renewal";
 import type { GitCredentialRenewalController } from "../git-credential-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
-import type { ActiveRecording } from "../recording";
 import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming";
 import type { RunAgentTurnResult } from "../types";
 import type { TurnOutcome } from "../../observability-metrics";
@@ -117,12 +116,6 @@ export type RenewalState = {
   publishedRunCredentialNotices: Set<string>;
 };
 
-export type RecordingState = {
-  activeRecording: ActiveRecording | null;
-  computerUseRecordingStart: Promise<void> | null;
-  didComputerUse: boolean;
-};
-
 export type EventingState = {
   heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
   batcher: ReturnType<typeof createRuntimeBatcher> | null;
@@ -181,7 +174,6 @@ export type TurnContext = {
   billingState: BillingState;
   sandboxState: SandboxRuntimeState;
   renewals: RenewalState;
-  recordingState: RecordingState;
   eventing: EventingState;
   workspaceRefs: WorkspaceRefState;
   providerTurn: ProviderTurnState;
@@ -244,11 +236,6 @@ export function createTurnContext(input: {
       codemodeTokenRenewal: null,
       codemodeTokenRenewalClosed: false,
       publishedRunCredentialNotices: new Set(),
-    },
-    recordingState: {
-      activeRecording: null,
-      computerUseRecordingStart: null,
-      didComputerUse: false,
     },
     eventing: {
       heartbeatTimer: undefined,

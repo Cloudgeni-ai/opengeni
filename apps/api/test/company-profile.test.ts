@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
+import { createDb, ensureManagedAccessForUser, type DbClient } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   acquireSharedTestDatabase,
@@ -14,22 +14,21 @@ const SECRET = "company-profile-test-secret-at-least-32-bytes";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
-let grant: Awaited<ReturnType<typeof bootstrapWorkspace>>["workspaceGrants"][number];
+let grant: Awaited<ReturnType<typeof ensureManagedAccessForUser>>["workspaceGrants"][number];
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-company-profile");
   if (!shared) return;
   client = createDb(shared.appUrl);
-  const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "test",
-    accountExternalId: `api-company-profile-${crypto.randomUUID()}`,
-    accountName: "API company profile",
-    workspaceExternalSource: "test",
-    workspaceExternalId: `api-company-profile-workspace-${crypto.randomUUID()}`,
-    workspaceName: "API company profile workspace",
-    subjectId: "human:profile-admin",
+  const userId = `api-company-profile-${crypto.randomUUID()}`;
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "API company profile owner",
   });
-  grant = access.workspaceGrants[0]!;
+  grant = access.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+  )!;
   app = new Hono();
   registerCompanyProfileRoutes(app, {
     settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
@@ -56,6 +55,43 @@ async function bearer(permissions: Permission[]): Promise<string> {
 describe("company-profile API authority", () => {
   test("requires direct account admin for writes while exposing current history to readers", async () => {
     if (!app) return;
+    const policyEndpoint = `http://x/v1/workspaces/${grant.workspaceId}/company-profile/agent-policy`;
+    expect(
+      (
+        await app.request(policyEndpoint, {
+          headers: { authorization: await bearer(["workspace:read", "workspace:admin"]) },
+        })
+      ).status,
+    ).toBe(403);
+    const initialPolicy = await app.request(policyEndpoint, {
+      headers: { authorization: await bearer(["account:admin", "workspace:read"]) },
+    });
+    expect(initialPolicy.status).toBe(200);
+    expect(await initialPolicy.json()).toMatchObject({
+      organizationId: grant.accountId,
+      mode: "suggest",
+      version: 0,
+    });
+    const automaticPolicy = await app.request(policyEndpoint, {
+      method: "PATCH",
+      headers: {
+        authorization: await bearer(["account:admin", "workspace:read"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        mode: "automatic",
+        expectedVersion: 0,
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(automaticPolicy.status).toBe(200);
+    expect(await automaticPolicy.json()).toMatchObject({
+      organizationId: grant.accountId,
+      mode: "automatic",
+      version: 1,
+      changed: true,
+    });
+
     const body = {
       operationId: crypto.randomUUID(),
       profile: {

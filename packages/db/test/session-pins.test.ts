@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
+  appendSessionEvents,
   createDb,
   createSession,
   decodeSessionListCursor,
@@ -257,6 +258,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: waitingSince.toISOString(),
@@ -279,6 +281,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: waitingSince.toISOString(),
@@ -293,6 +296,67 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
     expect(grandchildren.sessions[0]?.requiresActionSince).toBe(waitingSince.toISOString());
     expect(children.sessions[0]?.requiresActionSince).toBeNull();
+  });
+
+  test("counts only unacknowledged failed descendants as failure attention per viewer", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const viewer = "user:failure-viewer";
+    const otherViewer = "user:other-failure-viewer";
+    await grantMember(workspace, viewer);
+    await grantMember(workspace, otherViewer);
+    const root = await session({ ...workspace, message: "failure root" });
+    const child = await session({
+      ...workspace,
+      message: "failed child",
+      parentSessionId: root.id,
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set status = 'failed', updated_at = now() where id = ${child.id}`,
+    );
+    await appendSessionEvents(db, workspace.workspaceId, child.id, [
+      { type: "session.title_set", payload: { title: "Failed child" } },
+    ]);
+
+    const before = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: viewer,
+      parentSessionId: null,
+    });
+    expect(before.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+      unreadDescendants: 1,
+    });
+
+    const childForViewer = await getSessionForSubject(db, workspace.workspaceId, child.id, viewer);
+    await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: viewer,
+      sessionId: child.id,
+      unread: false,
+      acknowledgedThroughSequence: childForViewer!.lastSequence,
+      expectedVersion: childForViewer!.attentionVersion,
+    });
+
+    const after = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: viewer,
+      parentSessionId: null,
+    });
+    expect(after.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 0,
+      unreadDescendants: 0,
+    });
+    const other = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: otherViewer,
+      parentSessionId: null,
+    });
+    expect(other.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
+      failedDescendants: 1,
+      unreadFailedDescendants: 1,
+      unreadDescendants: 1,
+    });
   });
 
   test("counts effective pauses and excludes paused descendants from active totals", async () => {
@@ -473,6 +537,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: null,
@@ -486,6 +551,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: null,
@@ -499,6 +565,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: null,
@@ -596,6 +663,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
+      unreadFailedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
       attentionSince: null,
@@ -1146,6 +1214,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         attentionDescendants: 0,
         pausedDescendants: 0,
         failedDescendants: 0,
+        unreadFailedDescendants: 0,
         unreadDescendants: 0,
         activelyWorkingDescendants: 0,
         truncated: false,
@@ -1607,9 +1676,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
     expect(cleared).toMatchObject({ unread: false, attentionVersion: 2 });
 
-    await executeSessionActivity(
+    await appendSessionEvents(
+      db,
       workspace.workspaceId,
-      sql`update sessions set last_sequence = 5 where id = ${target.id}`,
+      target.id,
+      Array.from({ length: 5 }, (_, index) => ({
+        type: "session.title_set" as const,
+        payload: { title: `Attention event ${index + 1}` },
+      })),
     );
 
     expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
@@ -1652,10 +1726,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
     expect(active).toMatchObject({ unread: false, activelyWorking: true, attentionVersion: 5 });
 
-    await executeSessionActivity(
-      workspace.workspaceId,
-      sql`update sessions set last_sequence = 6 where id = ${target.id}`,
-    );
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      { type: "session.title_set", payload: { title: "Attention event 6" } },
+    ]);
     expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
       { unread: true, activelyWorking: true, attentionVersion: 5 },
     );

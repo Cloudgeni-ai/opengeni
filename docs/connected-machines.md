@@ -161,11 +161,21 @@ Rules to keep in mind:
 - `sandboxBackend` selects the backend for a **managed** sandbox; for a machine
   target the backend is the machine itself, so leave it off and point at the
   machine with `targetSandboxId`.
+- When the deployment default itself is `selfhosted`, the web composer starts on
+  Connected Machine and selects the first online machine. It does not offer a
+  fictional managed default, and submission stays blocked until a machine is
+  available. The API also rejects a targetless selfhosted create before writing
+  a session.
 - **A child spawn with `targetSandboxId` / `machineTarget` is an own-box
   machine-primary home**, even when the parent is `backend: none`. Omitted
   `sandbox` still shares the creator's box only when no machine is named.
   Explicit `sandbox: "shared"` or `{ groupId }` plus a machine target is a
   **422**.
+- When a child omits both `sandbox` and `machineTarget`, sharing a parent that is
+  currently routed to a Connected Machine automatically copies that exact
+  machine and working directory to the child before its first turn. The model
+  does not choose the machine again. A selfhosted-only create with neither an
+  inherited nor explicit machine is rejected before an unusable session starts.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required
@@ -180,6 +190,20 @@ machine target, and the last working directory for every project+machine pair.
 Switching projects or machines restores the matching nested choice. Absolute
 host paths remain tied to the exact machine id and are never reused on another
 machine.
+
+Scheduled agent tasks use the same explicit targeting rule. A generated-session
+schedule persists a `machineTarget` containing the exact `targetSandboxId` and
+optional `workingDir`; the worker proves that machine is still available and
+seeds the generated session's active pointer before its first turn. A deployment
+whose default backend is `selfhosted` rejects a generated-session schedule that
+does not select a machine instead of creating a session that cannot execute.
+Manual runs also preflight current liveness and the reported workspace root
+before consuming run capacity.
+
+Unattended schedules currently accept workspace- and organization-scoped
+machines only. User-scoped machines require an owning human's explicit personal
+resource attachment, which a future scheduled-execution authority flow must
+freeze durably before those machines can be offered safely.
 
 ## Discover machines + metrics
 

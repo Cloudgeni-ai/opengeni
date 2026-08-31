@@ -18,7 +18,6 @@ import {
   settleCodexCredentialFailover,
   readLease,
   SandboxLeaseSupersededError,
-  SandboxLeaseTransitionError,
   isSessionEventPersistenceError,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -61,6 +60,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
   isWorkerShutdownCancellation,
+  sandboxLifecycleTransitionDiagnostic,
   sandboxRouteTransitionCode,
   safeErrorDiagnostic,
   classifyXaiCredentialFailure,
@@ -159,20 +159,20 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // recoverable control-plane states, never session failures. The latter is
   // paced briefly; the next acquire waits on the durable claim and resumes
   // immediately when it clears.
-  if (
-    (error instanceof SandboxLeaseSupersededError ||
-      error instanceof SandboxLeaseTransitionError) &&
-    recoveryTurnId
-  ) {
+  const lifecycleTransition = sandboxLifecycleTransitionDiagnostic(error);
+  const leaseControlError =
+    error instanceof SandboxLeaseSupersededError ? error : lifecycleTransition;
+  if (leaseControlError && recoveryTurnId) {
     try {
-      const fencedLease = await readLease(db, input.workspaceId, error.sandboxGroupId).catch(
-        () => null,
-      );
-      const lifecycleTransition = error instanceof SandboxLeaseTransitionError;
+      const fencedLease = await readLease(
+        db,
+        input.workspaceId,
+        leaseControlError.sandboxGroupId,
+      ).catch(() => null);
       const rotationPending =
         fencedLease?.rotationRequestedAt != null ||
-        (lifecycleTransition && error.reason === "rotation_in_progress");
-      const transitionPending = lifecycleTransition || rotationPending;
+        lifecycleTransition?.reason === "rotation_in_progress";
+      const transitionPending = lifecycleTransition !== null || rotationPending;
       const deadlineRotationPending =
         rotationPending && fencedLease?.rotationReason === "provider_deadline";
       const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
@@ -182,20 +182,20 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         attemptId: input.attemptId,
         reason: deadlineRotationPending
           ? "sandbox_deadline_rotation"
-          : lifecycleTransition
+          : lifecycleTransition !== null
             ? "sandbox_lifecycle_transition"
             : "sandbox_lease_superseded",
         ...(transitionPending
           ? {
               detail: {
-                sandboxGroupId: error.sandboxGroupId,
-                leaseEpoch: error.leaseEpoch,
+                sandboxGroupId: leaseControlError.sandboxGroupId,
+                leaseEpoch: leaseControlError.leaseEpoch,
                 ...(rotationPending
                   ? {
                       rotationReason: fencedLease?.rotationReason ?? "operator",
                     }
                   : {}),
-                ...(lifecycleTransition ? { transitionReason: error.reason } : {}),
+                ...(lifecycleTransition ? { transitionReason: lifecycleTransition.reason } : {}),
               },
             }
           : {}),
@@ -647,7 +647,11 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
                         status: "error",
                         lastError: "model request was forbidden for this credential",
                       }
-                    : { kind: "cooldown", until: cooldownUntil! },
+                    : {
+                        kind: "cooldown",
+                        until: cooldownUntil!,
+                        cooldownKind: codexCredentialFailure.kind,
+                      },
             })
           : false;
       if (!statePersisted && leases.codex.holderId && leases.codex.generation !== null) {
@@ -903,6 +907,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     let rotationResumeIdleUntilReset = false; // circuit-breaker fall (Finding 1b) ⇒ MANDATORY hold
     let allCappedResetAt: Date | null = null; // set ⇒ every account capped; idle until this
     let capacityAuthoritativeResetAt: Date | null = null;
+    let capacityNeedsBoundedRefresh = false;
     if (providerTurn.effectiveCodexCredentialId) {
       const [rotation, sessionCodex] = await Promise.all([
         getCodexRotationSettings(db, input.workspaceId).catch(() => null),
@@ -941,6 +946,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           input.workspaceId,
           providerTurn.effectiveCodexCredentialId,
           until,
+          "quota",
         ).catch(() => null);
         const cooldownPersisted = cooldownMutation?.result ?? false;
         if (cooldownMutation) {
@@ -953,7 +959,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         // write, so stamp the just-cooled account so the engine excludes it now. The
         // serving account is thus walked AT MOST ONCE per turn (invariant 4: bounded).
         const fresh = accounts.map((a) =>
-          a.id === providerTurn.effectiveCodexCredentialId ? { ...a, exhaustedUntil: until } : a,
+          a.id === providerTurn.effectiveCodexCredentialId
+            ? { ...a, exhaustedUntil: until, exhaustedKind: "quota" as const }
+            : a,
         );
         if (reactiveSharded) {
           // AM-5: RE-SHARD over the healthy survivors (the just-capped serving account is
@@ -1017,6 +1025,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             rotated = true;
             allCappedResetAt = earliestCodexReset(fresh, new Date());
             capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(fresh, new Date());
+            capacityNeedsBoundedRefresh = true;
           }
         } else {
           const decision = chooseRotationActive({
@@ -1048,6 +1057,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             rotated = true;
             allCappedResetAt = decision.earliestResetAt;
             capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(fresh, new Date());
+            capacityNeedsBoundedRefresh = true;
           }
           // kind:"none" → fall through to today's single-account idle.
         }
@@ -1088,7 +1098,8 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         goalId: goalActive && goal ? goal.id : null,
         goalVersion: goalActive && goal ? goal.version : null,
         earliestResetAt: providerResetAt,
-        resetKind: providerResetAt ? "authoritative" : "bounded_refresh",
+        resetKind:
+          providerResetAt && !capacityNeedsBoundedRefresh ? "authoritative" : "bounded_refresh",
         failurePayload,
         ...(leases.codex.holderId && leases.codex.generation !== null
           ? {

@@ -35,6 +35,7 @@ import { createHash } from "node:crypto";
 import {
   createCompanyBrainLearningPolicyRouter,
   derivedGovernedLearningOperationId,
+  dispatchBestEffortGovernedLearningNotification,
 } from "./company-brain-governed-writes";
 import { publishGovernedLearningEventToSlack } from "./governed-learning-slack-publication";
 
@@ -548,16 +549,14 @@ export function createRememberRouter(options: RememberRouterOptions): {
         }
       }
       if (!activation) throw asRememberFailure(lastFailure);
-      try {
-        await notifyActivation({
+      dispatchBestEffortGovernedLearningNotification(() =>
+        notifyActivation({
           db: options.db,
           receipt: activation,
           sessionId: attempt.sessionId,
           attemptId: attempt.attemptId,
-        });
-      } catch {
-        // Notification is best-effort; the durable receipts already exist.
-      }
+        }),
+      );
       return RememberConfirmReceipt.parse({
         status: "activated",
         operationId: request.operationId,

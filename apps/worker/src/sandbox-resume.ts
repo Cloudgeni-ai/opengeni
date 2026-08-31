@@ -11,7 +11,7 @@
 //      re-enters admission instead of creating a rival.
 //   3. (spawner) commitWarmingToWarm (the lease_epoch++ fence + folds the resume
 //      envelope onto the lease). Optional desktop work is deliberately absent:
-//      the viewer and the first actual computer-use action initialize :0 lazily.
+//      viewers and managed ComputerSession operations initialize it lazily.
 //   4. the caller injects {client, session, sessionState} NON-OWNED into the run
 //      (the SDK never reaps it — the keystone), runs, then in `finally` calls the
 //      returned `release()` and drops the in-memory handle. NEVER provider-delete

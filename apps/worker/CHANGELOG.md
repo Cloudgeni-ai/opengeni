@@ -1,5 +1,112 @@
 # @opengeni/worker-bundle
 
+## 0.23.2
+
+### Patch Changes
+
+- 59b286a: Add optional Modal CPU and memory reservations and preserve them through sandbox creation, exact resume, and snapshot replacement.
+- 9b844c8: Recover Modal command starts that fail on task-router DNS before connecting, while leaving generic unavailable, HTTP-status-bearing, mixed-tool, and sandbox-shutdown failures non-retryable.
+- 4fb337b: Reconcile stale Codex quota cooldowns from authoritative live usage without clearing generic rate limits or concurrently newer refusals.
+- Updated dependencies [59b286a]
+- Updated dependencies [3a7fe2f]
+- Updated dependencies [7e67729]
+- Updated dependencies [9b844c8]
+- Updated dependencies [4fb337b]
+- Updated dependencies [478f572]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/runtime@2.0.1
+  - @opengeni/db@3.7.2
+  - @opengeni/core@2.6.2
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+  - @opengeni/documents@0.8.12
+  - @opengeni/github@0.6.7
+  - @opengeni/storage@0.2.115
+  - @opengeni/events@0.4.10
+  - @opengeni/codemode@0.4.22
+  - @opengeni/observability@0.8.14
+
+## 0.23.1
+
+### Patch Changes
+
+- c3b43a5: Expose bounded durable recovery-backlog metrics from every control worker and alert when closed recoverable attempts remain without active ownership or a settled session projection.
+- e41285f: Overlap optional MCP preparation with first inference even when artifact tooling is enabled, keep optional eager integrations off the first-token critical path, reuse immutable large-history projections incrementally, and expose fenced event-append phase latency without changing durable ordering.
+- 1f289a0: Attach machine input that arrived during a structured human-input wait to the resumed logical turn after its open tool-call result, while leaving post-resume arrivals for the next turn.
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. The legacy runtime desktop API remains exported only as a deprecated, fail-closed migration shell; because direct sandbox desktop control and model-bound tools are no longer functional, release `@opengeni/runtime` as the next major. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+- Updated dependencies [c3b43a5]
+- Updated dependencies [fab355b]
+- Updated dependencies [b471a90]
+- Updated dependencies [973b1dd]
+- Updated dependencies [e41285f]
+- Updated dependencies [1f289a0]
+- Updated dependencies [c9ac869]
+- Updated dependencies [96624a7]
+- Updated dependencies [fab355b]
+- Updated dependencies [fab355b]
+- Updated dependencies [4bacdd3]
+- Updated dependencies [72de39c]
+  - @opengeni/db@3.7.1
+  - @opengeni/contracts@2.9.1
+  - @opengeni/runtime@2.0.0
+  - @opengeni/events@0.4.9
+  - @opengeni/config@0.22.4
+  - @opengeni/core@2.6.1
+  - @opengeni/documents@0.8.11
+  - @opengeni/codemode@0.4.21
+  - @opengeni/github@0.6.6
+  - @opengeni/observability@0.8.13
+  - @opengeni/storage@0.2.114
+
+## 0.23.0
+
+### Minor Changes
+
+- ddce5cc: Allow scheduled generated sessions and nested workers to target an exact Connected Machine, and fail closed without leaving an unstarted generated session behind when that route cannot be established.
+
+### Patch Changes
+
+- 3ef2488: Coordinate immutable Rig setup once per exact sandbox lease epoch and provider instance while keeping credentials, repositories, and files turn-private.
+- Updated dependencies [699477a]
+- Updated dependencies [ec1aebc]
+- Updated dependencies [3ef2488]
+- Updated dependencies [ddce5cc]
+- Updated dependencies [132c8d3]
+- Updated dependencies [88b6b48]
+  - @opengeni/contracts@2.9.0
+  - @opengeni/core@2.6.0
+  - @opengeni/db@3.7.0
+  - @opengeni/runtime@1.5.0
+  - @opengeni/codemode@0.4.20
+  - @opengeni/config@0.22.3
+  - @opengeni/documents@0.8.10
+  - @opengeni/events@0.4.8
+  - @opengeni/github@0.6.5
+  - @opengeni/observability@0.8.12
+  - @opengeni/storage@0.2.113
+
+## 0.22.12
+
+### Patch Changes
+
+- 3c75347: Keep Agents SDK MCP lifecycle failures inside owned promises and reserve shared-worker process termination policy for OpenGeni.
+- 237ef39: Keep detached SDK and transport promise rejections from restarting shared worker pods and causing cross-session lease loss.
+- da6708a: Keep detached duplicates of already-handled MCP lifecycle failures from restarting turn workers.
+- Updated dependencies [3c75347]
+- Updated dependencies [551cead]
+- Updated dependencies [06460ae]
+- Updated dependencies [227c54c]
+- Updated dependencies [06fda28]
+- Updated dependencies [499cc48]
+- Updated dependencies [37faec3]
+  - @opengeni/runtime@1.4.6
+  - @opengeni/db@3.6.3
+  - @opengeni/core@2.5.7
+  - @opengeni/github@0.6.4
+  - @opengeni/documents@0.8.9
+  - @opengeni/events@0.4.7
+
 ## 0.22.11
 
 ### Patch Changes

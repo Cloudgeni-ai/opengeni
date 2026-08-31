@@ -4,7 +4,7 @@ import {
   type CodexAccountStatus,
 } from "@opengeni/db";
 import { type RegistryProviderKind, type Settings } from "@opengeni/config";
-import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
+import { codexAccountNeedsLiveCapacityRefresh } from "../codex-rotation";
 import {
   refreshCodexUsageAndRepairCapacityWaiters,
   signalPendingCodexCapacityWakeTargets,
@@ -37,9 +37,10 @@ export function acceptsPromptCacheKeyForTurn(
  * would idle-loop forever. Before idling, refresh LIVE usage for every connected account
  * the cache marks exhausted (bounded to the account count), which re-writes the
  * cache columns, then return the re-read rows so the ranker can pick up a genuinely-reset
- * window THIS turn. A refresh/read failure is swallowed (fall back to the pre-refresh rows
- * + the bounded idle). Cooling (429'd) accounts are NOT refreshed: their exhaustedUntil
- * cooldown is authoritative, and refreshing them would burn a provider call for nothing.
+ * window THIS turn. Typed quota cooldowns are also refreshed because the provider may
+ * replace an allowance cycle before its original reset; revision fencing makes that
+ * repair safe. Generic backpressure and legacy-unknown cooldowns are never reconciled.
+ * A refresh/read failure is swallowed (fall back to the pre-refresh rows + bounded idle).
  */
 export async function refreshCappedCodexUsageRows(
   db: ActivityServices["db"],
@@ -48,7 +49,12 @@ export async function refreshCappedCodexUsageRows(
   accounts: Array<
     Pick<
       CodexAccountStatus,
-      "id" | "status" | "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil"
+      | "id"
+      | "status"
+      | "primaryUsedPercent"
+      | "secondaryUsedPercent"
+      | "exhaustedUntil"
+      | "exhaustedKind"
     >
   >,
   capacitySignals: {
@@ -59,15 +65,18 @@ export async function refreshCappedCodexUsageRows(
   Array<
     Pick<
       CodexAccountStatus,
-      "id" | "status" | "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil"
+      | "id"
+      | "status"
+      | "primaryUsedPercent"
+      | "secondaryUsedPercent"
+      | "exhaustedUntil"
+      | "exhaustedKind"
     >
   >
 > {
+  const now = new Date();
   const stale = accounts.filter(
-    (a) =>
-      a.status === "active" &&
-      ((a.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
-        (a.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT),
+    (account) => account.status === "active" && codexAccountNeedsLiveCapacityRefresh(account, now),
   );
   if (stale.length === 0) {
     return accounts;

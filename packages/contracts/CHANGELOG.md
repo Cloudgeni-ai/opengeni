@@ -1,5 +1,28 @@
 # @opengeni/contracts
 
+## 2.9.2
+
+### Patch Changes
+
+- 5b9acd1: Make session attention monotonic across rapid navigation and nested trees. Failed sessions now remain red only until the viewer or their parent agent acknowledges the latest event, while historical failure lifecycle state remains intact.
+
+## 2.9.1
+
+### Patch Changes
+
+- b471a90: Add an organization-owner Off, Review first, or Autonomous policy for agent-managed organization identity, including owner-only API and SDK controls, exact-attempt automatic activation, immutable receipts, and the organization settings control.
+- 96624a7: Move agent computer interaction to managed ComputerSession tools. The legacy runtime desktop API remains exported only as a deprecated, fail-closed migration shell; because direct sandbox desktop control and model-bound tools are no longer functional, release `@opengeni/runtime` as the next major. Managed observations now carry bounded native image content for visual model input while preserving viewer control, explicit manual/on-verify recording, and historical contract parsing.
+- 4bacdd3: Add fixed-scope organization API keys, idempotent external tenant workspace provisioning, Personal-workspace exclusion, and the matching SDK and integration guidance.
+
+## 2.9.0
+
+### Minor Changes
+
+- 699477a: Restore autonomous agent Workspace Memory writes whenever workspace Memory is enabled. Agents can save and correct active facts, decisions, incidents, fixes, and outcomes independently of Learning mode while all existing Memory kinds remain retrieval-only through search. Autonomous learning may activate eligible concise Workspace instructions and focused Skills through their governed, auditable, undoable lifecycles; Review first keeps proposals inactive and Off creates no derived change.
+- ddce5cc: Allow scheduled generated sessions and nested workers to target an exact Connected Machine, and fail closed without leaving an unstarted generated session behind when that route cannot be established.
+- 132c8d3: Require self-hosted-only session defaults to resolve to a reachable Connected Machine. Keep the composer blocked when no eligible machine exists instead of submitting an unroutable session.
+- 88b6b48: Share Variable Set reserved-name validation between the API and web UI, and make Variable Set editing and variable management clearer and more actionable.
+
 ## 2.8.0
 
 ### Minor Changes

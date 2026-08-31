@@ -24,6 +24,7 @@ import {
   CODEX_REFRESH_FALLBACK_MS,
   CODEX_REFRESH_WINDOW_MS,
   CodexReloginRequired,
+  codexUsageConfirmsQuotaAvailable,
   type CodexTokenSnapshot,
   type CodexUsagePayload,
   type CodexFetch,
@@ -43,6 +44,8 @@ export type CodexCredentialTokens = {
   idToken: string;
 };
 
+export type CodexCredentialCooldownKind = "quota" | "rate_limit";
+
 export type CodexCredentialForRun = {
   id: string;
   version: number;
@@ -56,6 +59,9 @@ export type CodexCredentialForRun = {
   lastRefreshAt: Date | null;
   status: string;
   lastError: string | null;
+  exhaustedUntil: Date | null;
+  exhaustedKind: CodexCredentialCooldownKind | null;
+  exhaustedRevision: number;
 };
 
 export type CodexAccountUsageSnapshot = {
@@ -66,6 +72,12 @@ export type CodexAccountUsageSnapshot = {
   checkedAt?: Date;
   resetCreditAvailableCount?: number | null;
   resetCreditsCheckedAt?: Date | null;
+  /**
+   * Clear only a quota cooldown with this exact revision. Set solely after a
+   * live provider response proves allowance is open; a concurrent refusal
+   * advances the revision and makes this observation stale.
+   */
+  clearQuotaCooldownRevision?: number;
 };
 
 type CodexCredentialRefreshInput = {
@@ -375,7 +387,8 @@ function errorUsagePayload(reason?: "needs_relogin"): CodexUsagePayload {
  *      account's expired JWT from 401-ing the usage read.
  *   2. fetch GET /wham/usage with that bearer.
  *   3. normalize (§3) into the P2/P3 contract.
- *   4. on any windows present, write the five usage-cache columns (the TTL clock).
+ *   4. on any windows present, write the usage cache and conditionally reconcile
+ *      the exact older typed quota cooldown observed before provider I/O.
  *
  * A refresh that stamps needs_relogin returns { status:"error", reason } and never
  * hits the provider; a transient refresh error returns a plain error payload.
@@ -395,6 +408,13 @@ export async function fetchCodexUsageForAccount(
   } catch (error) {
     return errorUsagePayload(error instanceof CodexReloginRequired ? "needs_relogin" : undefined);
   }
+
+  // Snapshot cooldown authority immediately before provider I/O. The usage
+  // write may clear only this exact revision; any concurrent refusal advances
+  // it and wins. A metadata-read failure must not sink the usage response.
+  const observedCredential = await deps
+    .loadCredential(db, settings, workspaceId, credentialId)
+    .catch(() => null);
 
   let normalized: CodexUsagePayload;
   try {
@@ -437,6 +457,11 @@ export async function fetchCodexUsageForAccount(
                 : null,
               checkedAt,
             }
+          : {}),
+        ...(observedCredential?.exhaustedUntil &&
+        observedCredential.exhaustedKind === "quota" &&
+        codexUsageConfirmsQuotaAvailable(normalized)
+          ? { clearQuotaCooldownRevision: observedCredential.exhaustedRevision }
           : {}),
         ...(normalized.rateLimitResetCredits
           ? {

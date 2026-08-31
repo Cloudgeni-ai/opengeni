@@ -206,11 +206,14 @@ function companyBrainPreferenceAuthorityTables(): RuntimeTablePosture[] {
 function companyProfileAgentAdminAuthorityTables(): RuntimeTablePosture[] {
   return [
     "company_profile_activation_events",
+    "company_profile_agent_automatic_activation_receipts",
     "company_profile_agent_confirmation_receipts",
     "company_profile_agent_proposal_receipts",
     "company_profile_heads",
     "company_profile_revisions",
     "managed_accounts",
+    "organization_company_profile_agent_policies",
+    "organization_company_profile_agent_policy_events",
     "session_human_input_requests",
   ].map((name) => ({
     name,
@@ -554,26 +557,26 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 303],
+            [FORCE_RLS_TABLES, 309],
             [NON_RLS_RUNTIME_TABLES, 13],
-            [RUNTIME_FULL_DML_TABLES, 150],
+            [RUNTIME_FULL_DML_TABLES, 153],
             [RUNTIME_READ_ONLY_TABLES, 21],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 46],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 66],
-            [RUNTIME_DML_TABLES, 250],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 69],
+            [RUNTIME_DML_TABLES, 253],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 204],
+            [FORCE_RLS_TABLES, 205],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 118],
+            [RUNTIME_FULL_DML_TABLES, 119],
             [RUNTIME_READ_ONLY_TABLES, 17],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 30],
-            [RUNTIME_DML_TABLES, 185],
+            [RUNTIME_DML_TABLES, 186],
           ] as const);
       for (const [tables, length] of contracts) {
         const expectedLength =
@@ -589,7 +592,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 316 : 215;
+      const tableCount = hasCurrentMainActivityLedger ? 322 : 216;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
@@ -1339,6 +1342,9 @@ describe("runtime database posture evaluator", () => {
     for (const table of [
       "company_profile_agent_proposal_receipts",
       "company_profile_agent_confirmation_receipts",
+      "company_profile_agent_automatic_activation_receipts",
+      "organization_company_profile_agent_policies",
+      "organization_company_profile_agent_policy_events",
     ] as const) {
       expect(FORCE_RLS_TABLES).toContain(table);
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
@@ -1346,7 +1352,10 @@ describe("runtime database posture evaluator", () => {
     }
     for (const routine of [
       "propose_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, text)",
+      "propose_company_profile_for_attempt_v2(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, text, text, text)",
       "confirm_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid)",
+      "get_company_profile_agent_policy(uuid, uuid, text)",
+      "update_company_profile_agent_policy(uuid, uuid, text, text, bigint, uuid)",
     ] as const) {
       expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(routine);
     }

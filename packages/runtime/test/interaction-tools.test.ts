@@ -613,6 +613,45 @@ describe("interaction attempt tools", () => {
     expect(request).toMatchObject({ expectedFrameId: "frame-user-saw" });
   });
 
+  test("returns managed computer pixels as native image content", async () => {
+    const target = computerTarget();
+    const observation = computerObservation(target);
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => observation,
+        captureComputerTarget: async () => ({
+          frameId: "captured-frame",
+          computerSessionId,
+          controllerGeneration: target.controllerGeneration,
+          targetId: target.id,
+          targetGeneration: target.targetGeneration,
+          sequence: 0,
+          mediaType: "image/jpeg",
+          width: 1,
+          height: 1,
+          capturedAt: now,
+          sha256: "0".repeat(64),
+          data: image,
+        }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId, targetId: target.id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    expect(result.structuredContent).toMatchObject({ frameId: "captured-frame" });
+    expect(result.content).toEqual([
+      { type: "text", text: JSON.stringify({ ...observation, frameId: "captured-frame" }) },
+      { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
+    ]);
+  });
+
   test("publishes every declared atomic name only once", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       transport: unusedTransport(),

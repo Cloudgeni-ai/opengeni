@@ -4,13 +4,11 @@ import {
   heartbeatLeaseHolder,
   readLease,
   accrueWarmSeconds,
-  abandonRecordingForTurnAttempt,
   SandboxWorkspaceMutationFencedError,
 } from "@opengeni/db";
 import {
   RoutingMutationOutcomeUnknownError,
   type EstablishedSandboxSession,
-  stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
 import {
   sandboxLifecycleTransitionWaitMs,
@@ -26,10 +24,7 @@ import {
   type ResumedTurnSandbox,
 } from "../../sandbox-resume";
 import { recordCreditMicros } from "../../observability-metrics";
-import { beginRecording, discardUnpublishedRecording, type ActiveRecording } from "../recording";
 import { ChannelAPartialMutationError } from "@opengeni/runtime/sandbox";
-import { sandboxRunAs } from "@opengeni/runtime";
-import { randomUUID } from "node:crypto";
 
 import { safeErrorDiagnostic } from "./errors";
 import {
@@ -38,13 +33,7 @@ import {
   finalizeDurableTurnOpStreams,
 } from "./quiescence";
 import { SandboxDeadlineRotationError } from "./sandbox-provision";
-import { shouldStartOnTurnRecording } from "./tool-policy";
-import type {
-  AttemptIdentityState,
-  EventingState,
-  RecordingState,
-  SandboxRuntimeState,
-} from "./turn-context";
+import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from "./turn-context";
 
 export type SandboxTurnRuntimeDeps = {
   input: RunAgentTurnInput;
@@ -56,7 +45,6 @@ export type SandboxTurnRuntimeDeps = {
   activityContext: ReturnType<typeof currentActivityContext>;
   sandboxRotationController: AbortController;
   sandboxState: SandboxRuntimeState;
-  recordingState: RecordingState;
   eventing: EventingState;
   attempt: AttemptIdentityState;
 };
@@ -74,7 +62,6 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     activityContext,
     sandboxRotationController,
     sandboxState,
-    recordingState,
     eventing,
     attempt,
   } = deps;
@@ -354,39 +341,6 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
   // Turn-end capture needs the lease heartbeat to keep its holder alive, but
   // must prevent that same timer from starting another periodic snapshot
   // while it reads. This gate separates those two responsibilities.
-  // Computer-use-only recording. Ordinary shell/filesystem turns leave this
-  // null; the first actual computer action starts it after :0 is ready.
-  // P4.3 recording gate: flips true in `onComputerUseReady`, the runtime's
-  // execution-time callback for the first real computer action. It must flip
-  // BEFORE awaiting recording startup: the SDK tool-call stream item can arrive
-  // before ffmpeg has finished starting. A plain text turn ("hey"/"continue")
-  // never invokes the callback, so settlement performs no storage PUT.
-  const abandonActiveRecording = async (
-    reason: string,
-    disposition: "failed" | "discard" = "failed",
-  ): Promise<void> => {
-    const recording = recordingState.activeRecording as ActiveRecording | null;
-    if (!recording) return;
-    recordingState.activeRecording = null;
-    if (sandboxState.resolvedSandbox) {
-      await stopRecordingOnBox(
-        sandboxState.resolvedSandbox.established.session,
-        recording.proc,
-      ).catch(() => undefined);
-    }
-    if (!attempt.turnId || attempt.executionGeneration <= 0) return;
-    await abandonRecordingForTurnAttempt(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: attempt.turnId,
-      executionGeneration: attempt.executionGeneration,
-      attemptId: input.attemptId,
-      recordingId: recording.recordingId,
-      disposition,
-      reason,
-    }).catch(() => undefined);
-  };
   const flushRuntimeBatcher = async () => {
     const current = eventing.batcher as ReturnType<typeof createRuntimeBatcher> | null;
     await current?.flush().catch(() => undefined);
@@ -647,73 +601,6 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
       sandboxState.leaseHeartbeatTimer.unref();
     }
   };
-  const maybeStartOnTurnRecording = async (
-    sandbox: ResumedTurnSandbox,
-    effectiveBackend: Settings["sandboxBackend"] | undefined,
-  ): Promise<void> => {
-    if (recordingState.activeRecording) {
-      return;
-    }
-    if (recordingState.computerUseRecordingStart) {
-      await recordingState.computerUseRecordingStart;
-      return;
-    }
-    // Called only by the runtime's first-computer-action hook. Plain sandbox
-    // operations never start ffmpeg and never boot a display merely to record
-    // an unused desktop. Recording failure never fails the computer action.
-    if (
-      shouldStartOnTurnRecording({
-        recordingEnabled: settings.recordingEnabled,
-        desktopEnabled: settings.sandboxDesktopEnabled,
-        establishedBackendId: sandbox.established.backendId,
-        // EFFECTIVE (active) backend, not the session home: a machine-primary turn
-        // resolves to "selfhosted" and skips; a swap back to the cloud group box
-        // resolves to undefined and records as before.
-        effectiveBackend,
-      })
-    ) {
-      recordingState.computerUseRecordingStart = (async () => {
-        let begun: Awaited<ReturnType<typeof beginRecording>> | null = null;
-        try {
-          begun = await beginRecording({
-            settings,
-            db,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: attempt.turnId!,
-            recordingId: randomUUID(),
-            mode: "on-turn",
-            session: sandbox.established.session,
-            runAs: sandboxRunAs(settings),
-            reason: null,
-          });
-          if (!eventing.publish) {
-            throw new Error("recording started before the turn event publisher was ready");
-          }
-          await eventing.publish([{ type: "recording.started", payload: begun.started }]);
-          recordingState.activeRecording = begun.active;
-        } catch (recordingError) {
-          recordingState.activeRecording = null;
-          if (begun) {
-            await discardUnpublishedRecording({
-              db,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              active: begun.active,
-              session: sandbox.established.session,
-            });
-          }
-          console.error(
-            "computer-use recording start failed (action outcome unaffected)",
-            safeErrorDiagnostic(recordingError),
-          );
-        }
-      })();
-      await recordingState.computerUseRecordingStart;
-    }
-  };
-
   return {
     releaseLateSandbox,
     requireResolvedSandboxForMutation,
@@ -721,11 +608,9 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     onHomeSandboxRebound,
     runWorkspaceMutationForSandbox,
     stopLeaseHeartbeat,
-    abandonActiveRecording,
     flushRuntimeBatcher,
     publishSandboxLifecycleEvents,
     publishSandboxLost,
     startLeaseHeartbeat,
-    maybeStartOnTurnRecording,
   };
 }

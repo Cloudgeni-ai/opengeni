@@ -54,7 +54,6 @@ import { sandboxRunAs } from "@opengeni/runtime";
 import { VideoGenerationRejectedResult } from "@opengeni/contracts";
 
 import {
-  computerToolModeForTurn,
   structuredToolTransportForTurn,
   hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
@@ -62,7 +61,6 @@ import {
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
 import type { CompactionPrepOk } from "./compaction-prep";
-import type { SandboxTurnRuntime } from "./sandbox-runtime";
 import type { runtimeResourcesForTurn } from "./file-resources";
 import type { sandboxArtifactRuntimeAdmission } from "./sandbox-route";
 import type {
@@ -73,7 +71,6 @@ import type {
   AttemptIdentityState,
   EventingState,
   ProviderTurnState,
-  RecordingState,
   SandboxRuntimeState,
 } from "./turn-context";
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
@@ -91,8 +88,6 @@ export type BuildTurnAgentDeps = {
   eventing: EventingState;
   attempt: AttemptIdentityState;
   sandboxState: SandboxRuntimeState;
-  recordingState: RecordingState;
-  maybeStartOnTurnRecording: SandboxTurnRuntime["maybeStartOnTurnRecording"];
   providerTurn: ProviderTurnState;
   media: ReturnType<typeof createTurnMediaArtifacts>;
   leases: ReturnType<typeof createTurnCredentialLeases>;
@@ -161,8 +156,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     runtimeCancellationSignal,
     eventing,
     sandboxState,
-    recordingState,
-    maybeStartOnTurnRecording,
     providerTurn,
     media,
     leases,
@@ -718,31 +711,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               // typed input_image content. Chat wires have no proven typed image
               // result transport and therefore receive no view_image tool.
               structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
-              // EXPLICIT computer-use tool transport. See {@link computerToolModeForTurn}.
-              computerToolMode: computerToolModeForTurn(resolvedModel),
               ...(promptCacheKey ? { promptCacheKey } : {}),
             }
           : // LEGACY global-client fallback (resolveTurnModel returned null → the model
             // is not in the registry, served by the built-in OpenAI/Azure Responses
-            // client). Pin computerToolMode to function-image EXPLICITLY rather than
-            // leaving the runtime to sniff the instance.
+            // client).
             {
-              computerToolMode: computerToolModeForTurn(null),
               promptCacheKey: input.sessionId,
             }),
-        // Lazy computer-use seam: runtime first brings up :0 only after the model
-        // selects a computer tool, then this hook begins the optional proof
-        // recording. Shell/filesystem turns never invoke either operation.
-        onComputerUseReady: async () => {
-          if (!sandboxState.resolvedSandbox) {
-            throw new Error("Computer-use display became ready without a resolved sandbox");
-          }
-          // This callback is the authoritative execution boundary. Record the
-          // action before async ffmpeg startup so transport-event ordering cannot
-          // make settlement misclassify a real computer turn as unused.
-          recordingState.didComputerUse = true;
-          await maybeStartOnTurnRecording(sandboxState.resolvedSandbox, activeSandboxBackend);
-        },
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         ...(runtimeSkillActivations.length > 0
           ? { skillActivations: runtimeSkillActivations }
