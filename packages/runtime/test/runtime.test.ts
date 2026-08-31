@@ -51,6 +51,7 @@ import {
   buildManifest,
   compactMcpResultCustomDataRunState,
   composeAgentInstructions,
+  ConnectorActionBindingRejectedError,
   configureRuntimeMetricsHooks,
   connectMcpServersInBatches,
   coreInstructions,
@@ -2415,7 +2416,9 @@ describe("runtime event normalization", () => {
           {
             modelName: "github_app__repository_get",
             call: () => {
-              throw new Error("repository is outside accepted resources");
+              throw new ConnectorActionBindingRejectedError(
+                "repository is outside accepted resources",
+              );
             },
           },
         ],
@@ -2450,6 +2453,39 @@ describe("runtime event normalization", () => {
         });
         expect(executions).toEqual([]);
         expect(policyCalls).toEqual([]);
+
+        const bugAgent = buildOpenGeniAgent(testSettings(), [], {
+          mcpServers: prepared.mcpServers,
+          connectorActionPolicy: hooks,
+          attemptConnectorActionBindings: [
+            {
+              modelName: "github_app__repository_get",
+              call: () => {
+                throw new Error("unexpected binding bug");
+              },
+            },
+          ],
+        });
+        const [bugTool] = (await bugAgent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "github_app__repository_get",
+        );
+        if (!bugTool || bugTool.type !== "function")
+          throw new Error("attempt connector tool missing");
+        await expect(
+          bugTool.needsApproval(
+            new RunContext(),
+            { repository: "Cloudgeni-ai/not-accepted" },
+            "call-bug",
+          ),
+        ).rejects.toThrow("unexpected binding bug");
+        await expect(
+          bugTool.invoke(
+            new RunContext(),
+            JSON.stringify({ repository: "Cloudgeni-ai/not-accepted" }),
+            { toolCall: { callId: "call-bug" } } as any,
+          ),
+        ).rejects.toThrow("unexpected binding bug");
       } finally {
         await prepared.close();
       }
