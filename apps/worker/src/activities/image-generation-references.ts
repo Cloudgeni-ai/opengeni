@@ -1,8 +1,4 @@
-import {
-  RETAINED_OUTPUT_MAX_PAGE_BYTES,
-  type ImageGenerationReference,
-  type FileAsset,
-} from "@opengeni/contracts";
+import { type ImageGenerationReference, type FileAsset } from "@opengeni/contracts";
 import { getGeneratedImageArtifact, requireFileForSubject, type Database } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import {
@@ -210,26 +206,15 @@ async function referenceBytes(
 }
 
 export async function readStoredImageReferenceFile(
-  objectStorage: Pick<ObjectStorage, "getFileRange">,
+  objectStorage: Pick<ObjectStorage, "getFileBytes">,
   file: FileAsset,
 ): Promise<Uint8Array> {
-  const bytes = new Uint8Array(file.sizeBytes);
-  for (let start = 0; start < file.sizeBytes; start += RETAINED_OUTPUT_MAX_PAGE_BYTES) {
-    const end = Math.min(file.sizeBytes - 1, start + RETAINED_OUTPUT_MAX_PAGE_BYTES - 1);
-    const page = await objectStorage.getFileRange(file, { start, end });
-    if (!page) {
-      throw new ImageGenerationReferenceError(
-        "reference_unavailable",
-        "The durable image reference bytes are unavailable.",
-      );
-    }
-    if (page.byteLength !== end - start + 1) {
-      throw new ImageGenerationReferenceError(
-        "reference_integrity_mismatch",
-        "The durable image reference bytes do not match their file metadata.",
-      );
-    }
-    bytes.set(page, start);
+  const bytes = await objectStorage.getFileBytes(file);
+  if (bytes.byteLength !== file.sizeBytes) {
+    throw new ImageGenerationReferenceError(
+      "reference_integrity_mismatch",
+      "The durable image reference bytes do not match their file metadata.",
+    );
   }
   return bytes;
 }
