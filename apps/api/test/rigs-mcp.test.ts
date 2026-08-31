@@ -318,6 +318,49 @@ describe("rig MCP tools", () => {
     expect(workflow.rigVerifications[1]).toEqual(workflow.rigVerifications[0]);
   });
 
+  test("rig_verify reports an outcome-unknown retry as unchanged after dispatch succeeds", async () => {
+    if (!available) return;
+    const workflow = new FakeWorkflowClient();
+    workflow.failRigVerification = true;
+    const rig = await createRig(client.db, {
+      accountId,
+      workspaceId,
+      name: `mcp-active-dispatch-recovery-${crypto.randomUUID()}`,
+      createdBy: "user:mcp",
+      initialVersion: { setupScript: "true" },
+    });
+    const activeVersion = rig.activeVersion!;
+    const server = buildOpenGeniMcpServer(deps(workflow), grant(["rigs:use"]));
+
+    const first = await callMcpTool<{
+      outcome: string;
+      changed: boolean;
+      idempotency: { status: string };
+      facts: { verificationAttempt: string };
+    }>(server, "rig_verify", { rigId: rig.id });
+    expect(first).toMatchObject({
+      outcome: "partial_failure",
+      changed: true,
+      idempotency: { status: "unknown" },
+    });
+    const stateAfterFirst = await rigVersionState(activeVersion.id);
+
+    workflow.failRigVerification = false;
+    // The production workflow client also normalizes Temporal AlreadyStarted
+    // into this successful return path for the same deterministic workflow id.
+    const recovered = await callMcpTool<typeof first>(server, "rig_verify", { rigId: rig.id });
+    expect(recovered).toMatchObject({
+      outcome: "accepted",
+      changed: false,
+      resource: { id: activeVersion.id, state: "verification_started" },
+      idempotency: { status: "not_supported" },
+      facts: { verificationAttempt: first.facts.verificationAttempt },
+    });
+    expect(await rigVersionState(activeVersion.id)).toEqual(stateAfterFirst);
+    expect(workflow.rigVerifications).toHaveLength(2);
+    expect(workflow.rigVerifications[1]).toEqual(workflow.rigVerifications[0]);
+  });
+
   test("rig_verify recovers only the unique inactive pending attempt without superseding it", async () => {
     if (!available) return;
     const workflow = new FakeWorkflowClient();

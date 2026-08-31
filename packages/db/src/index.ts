@@ -577,6 +577,7 @@ import {
   fetchCodexUsageForAccount as fetchCodexUsageForAccountCore,
   type CodexAccountUsageSnapshot,
   type CodexAuthDeps,
+  type CodexCredentialCooldownKind,
   type CodexCredentialForRun,
   type CodexCredentialTokens,
 } from "./codex-token-resolver";
@@ -22131,6 +22132,7 @@ export async function listOrganizationCodexAccountStatuses(
         secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
         usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
         exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
+        exhaustedKind: schema.codexSubscriptionCredentials.exhaustedKind,
       })
       .from(schema.codexSubscriptionCredentials)
       .where(
@@ -22156,6 +22158,10 @@ export async function listOrganizationCodexAccountStatuses(
       secondaryResetAt: codexMetadataDate(row.secondaryResetAt),
       usageCheckedAt: codexMetadataDate(row.usageCheckedAt),
       exhaustedUntil: codexMetadataDate(row.exhaustedUntil),
+      exhaustedKind:
+        row.exhaustedKind === "quota" || row.exhaustedKind === "rate_limit"
+          ? row.exhaustedKind
+          : null,
     }));
   });
 }
@@ -22767,6 +22773,12 @@ export async function loadCodexCredentialForRun(
       lastRefreshAt: row.lastRefreshAt,
       status: row.status,
       lastError: row.lastError,
+      exhaustedUntil: row.exhaustedUntil,
+      exhaustedKind:
+        row.exhaustedKind === "quota" || row.exhaustedKind === "rate_limit"
+          ? row.exhaustedKind
+          : null,
+      exhaustedRevision: row.exhaustedRevision,
     };
   });
 }
@@ -23214,6 +23226,8 @@ export type CodexAccountStatus = {
   // P3 rotation cooldown: when set and in the future, this account is cooling-down
   // (rotated-off after a usage cap) and the engine skips it. null ⇒ not cooling.
   exhaustedUntil: Date | null;
+  /** Typed provider-refusal provenance; null for legacy/cleared cooldowns. */
+  exhaustedKind: CodexCredentialCooldownKind | null;
 };
 
 /**
@@ -23333,6 +23347,7 @@ type CodexLeaseCandidateRow = {
   secondary_reset_at: Date | string | null;
   usage_checked_at: Date | string | null;
   exhausted_until: Date | string | null;
+  exhausted_kind: string | null;
   selection_count: number;
   last_selected_at: Date | string | null;
   active_lease_count: number;
@@ -23365,6 +23380,10 @@ function mapCodexLeaseCandidate(
     secondaryResetAt: codexMetadataDate(row.secondary_reset_at),
     usageCheckedAt: codexMetadataDate(row.usage_checked_at),
     exhaustedUntil: codexMetadataDate(row.exhausted_until),
+    exhaustedKind:
+      row.exhausted_kind === "quota" || row.exhausted_kind === "rate_limit"
+        ? row.exhausted_kind
+        : null,
     selectionCount: Number(row.selection_count),
     lastSelectedAt: codexMetadataDate(row.last_selected_at),
     activeLeaseCount: Number(row.active_lease_count),
@@ -23428,6 +23447,7 @@ async function listCodexLeaseCandidatesInTransaction(
       c.secondary_reset_at,
       c.usage_checked_at,
       c.exhausted_until,
+      c.exhausted_kind,
       c.selection_count,
       c.last_selected_at,
       ${
@@ -26335,7 +26355,7 @@ export type CodexCredentialLeaseQuarantine =
       status: "needs_relogin" | "error";
       lastError: string;
     }
-  | { kind: "cooldown"; until: Date };
+  | { kind: "cooldown"; until: Date; cooldownKind: CodexCredentialCooldownKind };
 
 /**
  * Quarantine the credential served by one exact live holder. The lease row is
@@ -26384,7 +26404,11 @@ export async function quarantineCodexCredentialForLease(
                   lastError: input.quarantine.lastError,
                   updatedAt: new Date(),
                 }
-              : { exhaustedUntil: input.quarantine.until },
+              : {
+                  exhaustedUntil: input.quarantine.until,
+                  exhaustedKind: input.quarantine.cooldownKind,
+                  exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
+                },
           )
           .where(
             and(
@@ -26455,6 +26479,7 @@ export async function listCodexAccountStatuses(
         secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
         usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
         exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
+        exhaustedKind: schema.codexSubscriptionCredentials.exhaustedKind,
       })
       .from(schema.codexSubscriptionCredentials)
       .where(pool.condition)
@@ -26473,6 +26498,10 @@ export async function listCodexAccountStatuses(
       secondaryResetAt: codexMetadataDate(row.secondaryResetAt),
       usageCheckedAt: codexMetadataDate(row.usageCheckedAt),
       exhaustedUntil: codexMetadataDate(row.exhaustedUntil),
+      exhaustedKind:
+        row.exhaustedKind === "quota" || row.exhaustedKind === "rate_limit"
+          ? row.exhaustedKind
+          : null,
       isActive: row.id === activeId,
     }));
   });
@@ -27350,7 +27379,11 @@ export async function completeCodexResetRedemption(
       if (restoresCapacity) {
         await tx
           .update(schema.codexSubscriptionCredentials)
-          .set({ exhaustedUntil: null })
+          .set({
+            exhaustedUntil: null,
+            exhaustedKind: null,
+            exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
+          })
           .where(
             and(
               eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
@@ -27387,7 +27420,7 @@ export async function completeCodexResetRedemption(
 /** The P2 usage-cache snapshot written by the refreshing usage wrapper. */
 
 /**
- * Cache-write for P2 quota bars: persist the five plaintext usage columns on a
+ * Cache-write for P2 quota bars and revision-fenced quota cooldown repair on a
  * SPECIFIC credential row. NEVER touches credential_encrypted. RLS-scoped, guarded
  * by (id, workspace_id) so it can only write a row the workspace owns. Returns true
  * iff a row was updated (false ⇒ the credential was disconnected under us — the
@@ -27423,6 +27456,9 @@ export async function recordCodexAccountUsageWithWakeTargets(
           primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
           secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
           secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
+          exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
+          exhaustedKind: schema.codexSubscriptionCredentials.exhaustedKind,
+          exhaustedRevision: schema.codexSubscriptionCredentials.exhaustedRevision,
         })
         .from(schema.codexSubscriptionCredentials)
         .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
@@ -27430,6 +27466,12 @@ export async function recordCodexAccountUsageWithWakeTargets(
       if (!previous) {
         return { result: false, changed: false };
       }
+      const clearQuotaCooldown =
+        snapshot.checkedAt !== undefined &&
+        Number.isSafeInteger(snapshot.clearQuotaCooldownRevision) &&
+        snapshot.clearQuotaCooldownRevision === previous.exhaustedRevision &&
+        previous.exhaustedKind === "quota" &&
+        previous.exhaustedUntil !== null;
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
         .set({
@@ -27448,6 +27490,13 @@ export async function recordCodexAccountUsageWithWakeTargets(
                 resetCreditsCheckedAt: snapshot.resetCreditsCheckedAt ?? null,
               }
             : {}),
+          ...(clearQuotaCooldown
+            ? {
+                exhaustedUntil: null,
+                exhaustedKind: null,
+                exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
+              }
+            : {}),
           // NB: no `version` bump and no `updatedAt` touch — usage is non-credential
           // metadata and must NOT race the (id, version) refresh CAS in
           // recordCodexTokenRefresh / setCodexCredentialStatus.
@@ -27463,7 +27512,8 @@ export async function recordCodexAccountUsageWithWakeTargets(
         (previous.primaryUsedPercent !== (snapshot.primaryUsedPercent ?? null) ||
           timestampChanged(previous.primaryResetAt, snapshot.primaryResetAt ?? null) ||
           previous.secondaryUsedPercent !== (snapshot.secondaryUsedPercent ?? null) ||
-          timestampChanged(previous.secondaryResetAt, snapshot.secondaryResetAt ?? null));
+          timestampChanged(previous.secondaryResetAt, snapshot.secondaryResetAt ?? null) ||
+          (clearQuotaCooldown && previous.exhaustedUntil! > snapshot.checkedAt));
       return { result: rowUpdated, changed: capacityChanged };
     },
   );
@@ -27695,9 +27745,17 @@ export async function setCodexCredentialExhausted(
   workspaceId: string,
   credentialId: string,
   until: Date | null,
+  cooldownKind: CodexCredentialCooldownKind | null,
 ): Promise<boolean> {
-  return (await setCodexCredentialExhaustedWithWakeTargets(db, workspaceId, credentialId, until))
-    .result;
+  return (
+    await setCodexCredentialExhaustedWithWakeTargets(
+      db,
+      workspaceId,
+      credentialId,
+      until,
+      cooldownKind,
+    )
+  ).result;
 }
 
 /** Cooldown mutation plus its committed durable capacity-wake outbox. */
@@ -27706,7 +27764,11 @@ export async function setCodexCredentialExhaustedWithWakeTargets(
   workspaceId: string,
   credentialId: string,
   until: Date | null,
+  cooldownKind: CodexCredentialCooldownKind | null,
 ): Promise<CodexCapacityMutationResult<boolean>> {
+  if ((until === null) !== (cooldownKind === null)) {
+    throw new Error("Codex cooldown timestamp and kind must be set or cleared together");
+  }
   return await withCodexCapacityMutation(
     db,
     {
@@ -27718,7 +27780,11 @@ export async function setCodexCredentialExhaustedWithWakeTargets(
       if (!pool.condition) return { result: false, changed: false };
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
-        .set({ exhaustedUntil: until })
+        .set({
+          exhaustedUntil: until,
+          exhaustedKind: cooldownKind,
+          exhaustedRevision: sql`${schema.codexSubscriptionCredentials.exhaustedRevision} + 1`,
+        })
         .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
         .returning({ id: schema.codexSubscriptionCredentials.id });
       const changed = updated.length > 0;
@@ -72126,6 +72192,7 @@ export {
   withCodexTokenDeadline,
   type CodexAccountUsageSnapshot,
   type CodexAuthDeps,
+  type CodexCredentialCooldownKind,
   type CodexCredentialForRun,
   type CodexCredentialTokens,
   type CodexRateLimitResetCreditsAccountResult,

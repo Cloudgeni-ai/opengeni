@@ -11,8 +11,8 @@ import {
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
 import {
-  CODEX_USAGE_EXHAUSTED_PCT,
   authoritativeCodexCapacityResetAt,
+  codexAccountNeedsLiveCapacityRefresh,
   isCodexCredentialEligible,
   isCodexCredentialHealthy,
   selectCodexCredentialLeaseForTurn,
@@ -119,10 +119,19 @@ export function codexCapacityDecision(
     };
   }
   const authoritativeReset = authoritativeCodexCapacityResetAt(context.accounts, now);
+  const hasReconcilableQuotaCooldown = context.accounts.some(
+    (account) =>
+      account.status === "active" &&
+      account.allocatorEnabled &&
+      account.exhaustedKind === "quota" &&
+      account.exhaustedUntil !== null &&
+      account.exhaustedUntil > now,
+  );
   return {
     kind: "unavailable",
     earliestResetAt: authoritativeReset,
-    resetKind: authoritativeReset ? "authoritative" : "bounded_refresh",
+    resetKind:
+      authoritativeReset && !hasReconcilableQuotaCooldown ? "authoritative" : "bounded_refresh",
     diagnostic: {
       connectedCount: context.accounts.length,
       allocatorEnabledCount: context.accounts.filter((account) => account.allocatorEnabled).length,
@@ -136,13 +145,12 @@ async function refreshCapacityMetadata(
   workspaceId: string,
 ): Promise<void> {
   const accounts = await listCodexAccountStatuses(services.db, workspaceId).catch(() => []);
+  const now = new Date();
   const stale = accounts.filter(
     (account) =>
       account.allocatorEnabled &&
       account.status === "active" &&
-      ((account.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
-        (account.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
-        account.usageCheckedAt === null),
+      (codexAccountNeedsLiveCapacityRefresh(account, now) || account.usageCheckedAt === null),
   );
   await refreshCodexUsageAndRepairCapacityWaiters(
     stale.map(

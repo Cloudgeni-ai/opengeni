@@ -4413,7 +4413,7 @@ function registerRigTools(
             operation: "rig_verify",
             committed: true,
             outcome: "accepted",
-            changed: true,
+            changed: !versionAttempt.reused,
             resource: {
               type: "rig_version",
               id: rig.activeVersion.id,

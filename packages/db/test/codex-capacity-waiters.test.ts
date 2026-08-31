@@ -21,6 +21,7 @@ import {
   reconcileCodexCapacityWait,
   recordCodexAccountUsageWithWakeTargets,
   registerPendingSessionToolCall,
+  setCodexCredentialExhausted,
   setSessionCodexPinInTransaction,
   submitHumanPromptInTransaction,
   updateCodexRotationSettings,
@@ -843,6 +844,51 @@ describe("durable Codex capacity waits", () => {
     expect(
       (await getCodexCapacityWaitForSession(dbA, ws.workspaceId, scenario.sessionId))?.wakeRevision,
     ).toBe(first.wakeTargets[0]!.wakeRevision);
+  });
+
+  test("clearing a future quota cooldown advances waiter revisions atomically", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const credentialId = await connectCredential(ws, false);
+    await setCodexCredentialExhausted(
+      dbA,
+      ws.workspaceId,
+      credentialId,
+      new Date(Date.now() + 5 * 60 * 60_000),
+      "quota",
+    );
+    const [credential] = await admin<{ exhausted_revision: number | string }[]>`
+      select exhausted_revision from codex_subscription_credentials
+      where id = ${credentialId}`;
+    const scenario = await seedScenario(ws);
+    const armed = await arm(scenario);
+    if (armed.action !== "waiting") throw new Error("expected waiter");
+
+    const mutation = await recordCodexAccountUsageWithWakeTargets(
+      dbA,
+      ws.workspaceId,
+      credentialId,
+      {
+        primaryUsedPercent: 0,
+        primaryResetAt: null,
+        secondaryUsedPercent: 0,
+        secondaryResetAt: null,
+        checkedAt: new Date(),
+        clearQuotaCooldownRevision: Number(credential!.exhausted_revision),
+      },
+    );
+
+    expect(mutation.result).toBe(true);
+    expect(mutation.wakeTargets).toEqual([
+      expect.objectContaining({
+        waiterId: armed.waiter.id,
+        wakeRevision: armed.waiter.wakeRevision + 1,
+      }),
+    ]);
+    const [after] = await admin<{ exhausted_until: Date | null }[]>`
+      select exhausted_until from codex_subscription_credentials
+      where id = ${credentialId}`;
+    expect(after?.exhausted_until).toBeNull();
   });
 
   test("a policy-pin CAS advances the waiter outbox in the same allocator transaction", async () => {

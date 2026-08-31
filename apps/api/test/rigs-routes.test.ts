@@ -801,12 +801,14 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "ambiguous-deferred-version" }),
     });
     const rig = await created.json();
-    const authored = await http.request(`${base}/${rig.id}/versions`, {
-      method: "POST",
-      headers: manager,
-      body: JSON.stringify({ setupScript: "echo second" }),
+    const secondPending = await createRigVersion(client.db, ws.workspaceId, rig.id, {
+      setupScript: "echo second",
     });
-    expect(authored.status).toBe(201);
+    await beginRigVersionVerificationAttempt(client.db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: secondPending.id,
+    });
     const pendingBefore = await listPendingInactiveRigVersionVerificationAttempts(
       client.db,
       ws.workspaceId,

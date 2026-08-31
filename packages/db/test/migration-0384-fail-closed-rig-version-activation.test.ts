@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 const migrationUrl = new URL(
-  "../drizzle/0383_fail_closed_rig_version_activation.sql",
+  "../drizzle/0384_fail_closed_rig_version_activation.sql",
   import.meta.url,
 );
 const source = await Bun.file(migrationUrl).text();
 
-describe("migration 0383 fail-closed Rig activation", () => {
+describe("migration 0384 fail-closed Rig activation", () => {
   test("adds operational verification state without backfilling false success", () => {
     expect(source).toMatch(
       /ADD COLUMN verification jsonb NOT NULL DEFAULT '\{"status":"unverified"\}'::jsonb/iu,

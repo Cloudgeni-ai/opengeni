@@ -73,7 +73,11 @@ burst sees earlier reservations and spreads before delayed usage headers move.
 Usage percentages never create a configurable "near exhaustion" cliff. Accounts
 remain eligible through 99% in either provider window; 90% is presentation-only
 warning state. Cached usage excludes an account only at 100%, while an explicit
-provider refusal installs the authoritative cooldown. Sharded policy pins remain
+provider refusal installs the authoritative cooldown. A later live usage read
+may reconcile an older quota cooldown only when the provider reports an open
+base allowance, every surfaced feature-specific window is below exhaustion,
+and the cooldown revision proves no newer refusal raced the read. Generic
+provider backpressure is never cleared by quota telemetry. Sharded policy pins remain
 sticky throughout 90–99% and are rewritten only after actual exhaustion or another
 definitive health failure.
 
@@ -126,6 +130,12 @@ Codex quota adds three deliberately separate product seams:
   view-only. Valid quota windows advance `usage_checked_at` independently from
   valid reset-summary data advancing `reset_credits_checked_at`; a malformed or
   timed-out reset inventory cannot erase fresh five-hour/weekly provider truth.
+  An authoritative open response also clears the exact older typed quota
+  cooldown observed before provider I/O. The revision makes a concurrent newer
+  refusal win; legacy-unknown and generic rate-limit cooldowns remain intact.
+  All-capped turn admission refreshes those typed quota cooldowns immediately;
+  a durable wait then retries the control-plane read with bounded backoff so an
+  already-waiting turn also notices an allowance cycle replaced before reset.
 - **Allocator control** writes only `allocator_enabled` plus its independent
   `allocator_version`/actor/timestamp. Same desired state is idempotent even with
   a stale expected version; a conflicting stale transition returns the current
@@ -178,8 +188,10 @@ for that provider credit. `nothingToReset`/`noCredit` remain visible as history
 but do not suppress a later newly confirmed attempt when the provider again
 reports exact actionable detail; that later action receives a fresh logical and
 upstream idempotency key.
-Only `reset`/`alreadyRedeemed` clear provider-exhaustion cooldown, and no outcome
-changes allocator eligibility. The one-credit fence remains permanent only for
+`reset`/`alreadyRedeemed` clear provider-exhaustion cooldown without usage
+readback; an independently fresh open usage response may also reconcile an
+older typed quota cooldown through the revision fence above. No redemption
+outcome changes allocator eligibility. The one-credit fence remains permanent only for
 those successful outcomes; `nothingToReset`/`noCredit` permit a later, newly
 confirmed logical attempt. Provider bodies, bearer tokens, opaque credit ids and
 upstream keys never enter logs/events/audit metadata.
@@ -248,7 +260,8 @@ eligibility or future pool membership/default write: it locks the effective
 workspace or organization rotation row first, applies the mutation, increments matching waiter wake
 revisions only when truth changed, and returns secret-safe signal targets.
 Refreshing only `usage_checked_at` or reset-credit display metadata is not a
-capacity-truth change; an identical quota snapshot must not advance waiter or
+capacity-truth change; clearing a future typed quota cooldown is. An identical
+quota snapshot that leaves cooldown state unchanged must not advance waiter or
 workflow wake revisions. With rotation disabled, an unpinned turn considers only
 the workspace active pointer: a capped pointer enters the same durable wait and
 never becomes “available” merely because it remains connected, while healthy
@@ -346,6 +359,12 @@ rotation-off settings write clears both generations). Do that before rolling the
 deployment flag back to `false`; every replica immediately returns to the legacy
 path without a schema rollback. The additive table/columns remain inert. An older
 binary is also compatible with the additive schema.
+
+Migration `0383_codex_cooldown_reconciliation.sql` is rolling. It adds typed
+cooldown provenance and an independent revision. During mixed-version rollout,
+its trigger preserves a legacy writer's `exhausted_until` change, advances the
+revision, and clears only typed provenance so a new usage reader cannot
+misclassify an unknown old-writer cooldown as quota.
 
 ## Secret-safe observability
 

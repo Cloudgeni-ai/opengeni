@@ -1319,10 +1319,13 @@ export const codexSubscriptionCredentials = pgTable(
     secondaryUsedPercent: integer("secondary_used_percent"),
     secondaryResetAt: timestamp("secondary_reset_at", { withTimezone: true }),
     usageCheckedAt: timestamp("usage_checked_at", { withTimezone: true }), // snapshot freshness → cache TTL clock
-    // P3 rotation cooldown (plaintext metadata; NEVER a token). Set when this account hit its
-    // usage cap on a rotation turn; the rotation engine treats `exhausted_until > now()` as
-    // capped/skip so it isn't immediately re-picked. Self-clears via the now() comparison.
+    // P3 rotation cooldown (plaintext metadata; NEVER a token). The kind keeps
+    // quota refusals distinct from generic provider backpressure. The independent
+    // revision fences a live usage response against a concurrently newer refusal;
+    // neither field participates in token-refresh OCC.
     exhaustedUntil: timestamp("exhausted_until", { withTimezone: true }),
+    exhaustedKind: text("exhausted_kind"), // quota | rate_limit | null (legacy/cleared)
+    exhaustedRevision: bigint("exhausted_revision", { mode: "number" }).notNull().default(0),
     // Workspace-local, server-held fairness cursor. Provider usage headers are
     // capacity hints, never the sole allocator: live lease count is ranked first
     // and this cursor deterministically breaks equal-load/equal-capacity ties.
