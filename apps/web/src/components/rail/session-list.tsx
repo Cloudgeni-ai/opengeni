@@ -166,6 +166,10 @@ import { formatWaitingSince } from "@/lib/format";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
 import {
+  notifySessionListChanged,
+  subscribeToWorkspaceSessionListChanges,
+} from "@/lib/session-list-invalidation";
+import {
   authoritativeSessionBranchChannels,
   beginSessionBranchRequest,
   commitSessionBranchPage,
@@ -533,6 +537,17 @@ export function SessionList() {
     return subscribeToLocalSessionDeliveryAttention(refreshLocalDeliveryAttention);
   }, [rail.workspaceId]);
   const archiving = useRef(new Set<string>());
+  useEffect(
+    () =>
+      subscribeToWorkspaceSessionListChanges(rail.workspaceId, (invalidation) => {
+        // The archive callback below already awaits this refresh while holding
+        // its optimistic transition. Other mounted producers, including For
+        // You Dismiss/Stop, need the same prompt re-read immediately.
+        if (archiving.current.has(invalidation.sessionId)) return;
+        void refreshSessionPages();
+      }),
+    [rail.workspaceId, refreshSessionPages],
+  );
   const moveRequestOwner = useRef({});
   const pinOperation = useRef(0);
   const focusRestoreOperation = useRef(0);
@@ -1382,6 +1397,11 @@ export function SessionList() {
               }
             : current,
         );
+        notifySessionListChanged({
+          workspaceId: rail.workspaceId,
+          sessionId: session.id,
+          archived: updated.archived,
+        });
         toast.success(archived ? "Chat archived" : "Chat restored");
         await refreshSessionPages();
       } catch (archiveError) {
