@@ -505,8 +505,13 @@ The managed-human API surface is:
   below that member route for the shared-workspace control plane; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
-These routes require a direct managed-human cookie session; API keys and
-delegated bearer requests are rejected.
+The organization overview, organization/shared-workspace metadata, member
+inventory, retention, and organization Codex routes require either a direct
+managed-human cookie session or the exact provenance-stamped single-user local
+administrator for `opengeni:local/default`. Invitation and member lifecycle,
+private-session, and recovery operations remain managed-human-only. API keys,
+configured access, delegated bearers, services, and agents are rejected from
+the local exception.
 
 ### Pre-registration invitations and signup convergence (0314)
 
@@ -774,9 +779,10 @@ path to `pg_catalog`, the selected data schema, then `pg_temp`.
 
 Migration `0332_organization_shared_workspace_control_plane.sql` makes the
 organization control plane authoritative rather than depending on an
-administrator also holding an operational workspace grant. The managed-cookie-
-only organization routes can create or update shared-workspace metadata/settings
-and add, update, or remove an active organization member's direct workspace access. Each
+administrator also holding an operational workspace grant. The direct
+organization routes can create or update shared-workspace metadata/settings
+and, in managed mode, add, update, or remove an active organization member's
+direct workspace access. Each
 mutation runs under an exact active owner/administrator organization membership
 and an organization-scoped transaction advisory fence. Missing,
 cross-organization, and Personal workspace ids are rejected through one

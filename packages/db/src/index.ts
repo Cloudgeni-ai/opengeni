@@ -44605,6 +44605,28 @@ export async function releaseLeaseHolder(
         const row = rows[0];
         if (!row) return null; // already cold-and-reaped; release is an idempotent no-op
 
+        // Cancellation can delete the holder before the shared rig coordinator
+        // catches its abort. That coordinator must then fail closed because its
+        // ordinary settlement requires the holder to remain present. Once the
+        // later proof-bearing release confirms every attempt-owned sandbox
+        // writer is physically quiesced, close the abandoned single-flight too.
+        // Matching the canonical holder to the durable owner attempt keeps this
+        // idempotent and prevents an eager, proof-free release from admitting a
+        // replacement while the old rig command may still be running.
+        if (input.kind === "turn" && input.workspaceWritersQuiesced === true) {
+          await tx.execute(sql`
+            update sandbox_leases
+            set shared_preparation_status = 'failed',
+                shared_preparation_revision = shared_preparation_revision + 1,
+                shared_preparation_settled_at = now(),
+                updated_at = now()
+            where id = ${row.id}
+              and shared_preparation_status = 'running'
+              and lower(${input.holderId}) =
+                'turn-attempt:' || shared_preparation_owner_attempt_id::text
+          `);
+        }
+
         // Idempotent: deleting an already-gone holder affects 0 rows, fine.
         await tx.execute(sql`
         delete from sandbox_lease_holders
@@ -59173,6 +59195,9 @@ export type InitializeSessionStartInput = {
   /** Trusted create-session policy. Omitted only by legacy low-level callers. */
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   createdEventPayload: Record<string, unknown>;
+  /** Sensitive-safe semantic title supplied by the trusted agent-child create
+   * path. It is committed with the initial timeline, never as a bare row edit. */
+  initialAutomaticTitle?: string | null;
   goal?: {
     text: string;
     successCriteria?: string | null;
@@ -59269,6 +59294,39 @@ export async function initializeSessionStartAtomically(
           };
         }
 
+        const normalizedInitialAutomaticTitle =
+          typeof input.initialAutomaticTitle === "string"
+            ? normalizeAutomaticSessionTitle(input.initialAutomaticTitle)
+            : null;
+        let appliedInitialAutomaticTitle: string | null = null;
+        if (
+          normalizedInitialAutomaticTitle &&
+          normalizedInitialAutomaticTitle !== AUTOMATIC_SESSION_TITLE_FALLBACK &&
+          session.title === AUTOMATIC_SESSION_TITLE_FALLBACK &&
+          session.titleSource === "agent"
+        ) {
+          await tx.execute(
+            sql`select pg_catalog.set_config('opengeni.automatic_session_title_v1_candidate', ${normalizedInitialAutomaticTitle}, true)`,
+          );
+          const [updatedTitle] = await tx
+            .update(schema.sessions)
+            .set({
+              title: normalizedInitialAutomaticTitle,
+              titleSource: "agent",
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, session.id),
+                eq(schema.sessions.title, AUTOMATIC_SESSION_TITLE_FALLBACK),
+                eq(schema.sessions.titleSource, "agent"),
+              ),
+            )
+            .returning({ title: schema.sessions.title });
+          appliedInitialAutomaticTitle = updatedTitle?.title ?? null;
+        }
+
         let insertedGoal = false;
         let [goal] = await tx
           .select()
@@ -59337,6 +59395,21 @@ export async function initializeSessionStartAtomically(
                         createdBy: creator.initiator,
                       },
                     },
+                    ...(appliedInitialAutomaticTitle
+                      ? [
+                          {
+                            accountId: session.accountId,
+                            workspaceId: input.workspaceId,
+                            sessionId: session.id,
+                            sequence: ++sequence,
+                            type: "session.title_set" as const,
+                            payload: {
+                              title: appliedInitialAutomaticTitle,
+                              source: "agent",
+                            },
+                          },
+                        ]
+                      : []),
                     ...(goal
                       ? [
                           {
@@ -59368,6 +59441,29 @@ export async function initializeSessionStartAtomically(
               )
               .returning();
             initializedNow = true;
+          } else if (appliedInitialAutomaticTitle) {
+            const [titleEvent] = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    sequence: ++sequence,
+                    type: "session.title_set",
+                    payload: {
+                      title: appliedInitialAutomaticTitle,
+                      source: "agent",
+                    },
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning();
+            if (!titleEvent) throw new Error("Failed to append initial session title event");
+            insertedEvents.push(titleEvent);
           }
           const deferredStatusNeedsRepair = initializedNow && session.status !== deferredStatus;
           const sessionNeedsRepair =
@@ -59472,6 +59568,21 @@ export async function initializeSessionStartAtomically(
                       createdBy: creator.initiator,
                     },
                   },
+                  ...(appliedInitialAutomaticTitle
+                    ? [
+                        {
+                          accountId: session.accountId,
+                          workspaceId: input.workspaceId,
+                          sessionId: session.id,
+                          sequence: ++sequence,
+                          type: "session.title_set" as const,
+                          payload: {
+                            title: appliedInitialAutomaticTitle,
+                            source: "agent",
+                          },
+                        },
+                      ]
+                    : []),
                   ...(goal
                     ? [
                         {
@@ -59530,6 +59641,29 @@ export async function initializeSessionStartAtomically(
           userEvent = rows.find((event) => event.type === "user.message");
           if (!userEvent) throw new Error("Failed to create initial user event");
           initializedNow = true;
+        } else if (appliedInitialAutomaticTitle) {
+          const [titleEvent] = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  sequence: ++sequence,
+                  type: "session.title_set",
+                  payload: {
+                    title: appliedInitialAutomaticTitle,
+                    source: "agent",
+                  },
+                },
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .returning();
+          if (!titleEvent) throw new Error("Failed to append initial session title event");
+          insertedEvents.push(titleEvent);
         }
 
         let [turn] = await tx
@@ -62438,12 +62572,22 @@ export async function claimSessionWorkForAttempt(
               frozenGoalSnapshot,
             );
           }
+          const scheduledOccurrenceHistoryItem =
+            !routingGoalUpdate &&
+            delivered.updates.length > 0 &&
+            delivered.updates.every((update) => update.kind === "scheduled_occurrence")
+              ? sessionSystemUpdateBatchHistoryItem(
+                  delivered.updates.map((update) => mapSessionSystemUpdate(update)),
+                  frozenGoalSnapshot,
+                  { promoteScheduledOccurrenceToUser: true },
+                )
+              : undefined;
           await persistDeliveredUpdateBatch(
             delivered,
             session.accountId,
             internalTurn.id,
             frozenGoalSnapshot,
-            goalContinuationHistoryItem,
+            goalContinuationHistoryItem ?? scheduledOccurrenceHistoryItem,
           );
           // The batch is now durable model memory. Every child it reports on has
           // been carried to this turn's initiating human, so their read fence on
@@ -68977,21 +69121,24 @@ export async function claimPendingSessionWorkflowWakes(
  * accepted direction or an interrupted attempt awaiting writer-set proof.
  * Temporal accepting a signal is transport evidence, not proof that a closing
  * workflow observed Postgres. While active control still has an actionable
- * Agent Steer or pending quiescence, retain the revision so the bounded outbox
- * dispatcher retries signalWithStart. The attempt-fenced claim consumes an
- * Agent Steer once; a real Pause is the typed blocker and may acknowledge this
+ * Agent Steer, a current wake still owns an accepted queued human/API turn, or
+ * an attempt awaits quiescence, retain the revision so the bounded outbox
+ * dispatcher retries signalWithStart. The attempt-fenced claim consumes each
+ * direction once; a real Pause is the typed blocker and may acknowledge this
  * revision because Resume commits a new one.
  *
  * An older sender may advance only its own revision; it cannot clear a claim or
- * failure state belonging to a newer revision. The control -> workspace ->
- * session lock prefix serializes this decision with Steer, Pause/Resume, and
- * claim without weakening physical-quiescence admission.
+ * failure state belonging to a newer revision. Therefore queued prompt work
+ * blocks acknowledgement only for the current coalesced revision: a stale
+ * acknowledgement still leaves the newer revision outstanding. The control ->
+ * workspace -> session lock prefix serializes this decision with Send, Steer,
+ * Pause/Resume, and claim without weakening physical-quiescence admission.
  */
 export type SessionWorkflowWakeDeliveryResult =
   | { action: "acknowledged" }
   | {
       action: "pending_admission";
-      blocker: "pending_agent_steer" | "pending_quiescence";
+      blocker: "pending_agent_steer" | "pending_prompt_turn" | "pending_quiescence";
     };
 
 export async function markSessionWorkflowWakeDelivered(
@@ -69045,6 +69192,36 @@ export async function markSessionWorkflowWakeDelivered(
               action: "pending_admission",
               blocker: "pending_quiescence",
             } as const;
+          }
+          const [currentWake] = await tx
+            .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+            .from(schema.sessionWorkflowWakeOutbox)
+            .where(
+              and(
+                eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+                eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if (currentWake?.wakeRevision === input.wakeRevision) {
+            const [pendingPromptTurn] = await tx
+              .select({ id: schema.sessionTurns.id })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                  eq(schema.sessionTurns.status, "queued"),
+                  inArray(schema.sessionTurns.source, ["user", "api"]),
+                ),
+              )
+              .limit(1);
+            if (pendingPromptTurn) {
+              return {
+                action: "pending_admission",
+                blocker: "pending_prompt_turn",
+              } as const;
+            }
           }
         }
         const [row] = await tx

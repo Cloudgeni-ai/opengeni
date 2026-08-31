@@ -2,7 +2,7 @@
 -- Newly authored initial/direct Rig versions stay inactive until the worker
 -- publishes an exact native platform-surface validation receipt.
 -- This is a one-way writer-protocol cutover: stop every API, control worker,
--- and turn worker before applying it, and never restart a pre-0386 image. Old
+-- and turn worker before applying it, and never restart a pre-0387 image. Old
 -- writers create/activate versions without the mandatory receipt state.
 
 SET LOCAL lock_timeout = '5s';
@@ -17,14 +17,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0386 Rig verification activation requires an explicit application database role list'
+      '0387 Rig verification activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0386 Rig verification activation received a malformed application database role list'
+      '0387 Rig verification activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -43,7 +43,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0386 Rig verification activation received an invalid application database role list'
+      '0387 Rig verification activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -55,7 +55,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0386 Rig verification activation requires all configured OpenGeni application database sessions to be stopped'
+      '0387 Rig verification activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -80,7 +80,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0386 Rig verification activation requires all configured OpenGeni application database sessions to be stopped'
+      '0387 Rig verification activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END

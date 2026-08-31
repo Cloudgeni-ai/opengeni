@@ -33,6 +33,7 @@ import {
 import {
   getManagedSession,
   organizationMembershipHttpStatus,
+  requireCanonicalLocalAccountAdministrator,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -98,6 +99,25 @@ async function requireManagedHuman(context: Context, deps: ApiRouteDeps) {
     throw new HTTPException(401, { message: "managed human session required" });
   }
   return { session, subjectId: `user:${session.user.id}` };
+}
+
+async function requireOrganizationAdministrator(
+  context: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+): Promise<{ subjectId: string }> {
+  if (deps.settings.productAccessMode === "managed") {
+    return await requireManagedHuman(context, deps);
+  }
+  if (deps.settings.productAccessMode === "local") {
+    const { subjectId } = await requireCanonicalLocalAccountAdministrator(
+      context,
+      deps,
+      organizationId,
+    );
+    return { subjectId };
+  }
+  throw new HTTPException(401, { message: "organization administrator session required" });
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
@@ -213,12 +233,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.get("/v1/organizations/:organizationId/overview", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
       "organization id",
     );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     try {
       return context.json(
         OrganizationAdministrationOverview.parse(
@@ -234,12 +254,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.patch("/v1/organizations/:organizationId", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
       "organization id",
     );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     const payload = await parseBody(context, UpdateOrganizationNameRequest);
     try {
       return context.json(
@@ -257,12 +277,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.patch("/v1/organizations/:organizationId/workspaces/:workspaceId", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
       "organization id",
     );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
     const payload = await parseBody(context, UpdateOrganizationWorkspaceRequest);
     try {
@@ -284,12 +304,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.post("/v1/organizations/:organizationId/workspaces", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
       "organization id",
     );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     const payload = await parseBody(context, CreateOrganizationWorkspaceRequest);
     try {
       return context.json(
@@ -311,12 +331,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   app.patch(
     "/v1/organizations/:organizationId/workspaces/:workspaceId/settings",
     async (context) => {
-      const { subjectId } = await requireManagedHuman(context, deps);
       const organizationId = parseId(
         OrganizationId,
         context.req.param("organizationId"),
         "organization id",
       );
+      const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
       const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
       const payload = await parseBody(context, UpdateWorkspaceSettingsRequest);
       try {
@@ -642,12 +662,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   );
 
   app.get("/v1/organizations/:organizationId/members", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
       "organization id",
     );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     try {
       return context.json(
         ListOrganizationAdministrationMembersResponse.parse({
@@ -689,12 +709,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.get("/v1/organizations/:organizationId/retention-policy", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
       "organization id",
     );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     try {
       return context.json(
         OrganizationRetentionPolicy.parse(
@@ -710,12 +730,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.patch("/v1/organizations/:organizationId/retention-policy", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
       "organization id",
     );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     const payload = await parseBody(context, UpdateOrganizationRetentionPolicyRequest);
     try {
       return context.json(

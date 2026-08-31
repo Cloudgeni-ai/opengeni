@@ -8769,9 +8769,21 @@ describe("API component integration", () => {
       "session_create",
       {
         initialMessage: "wait for manager control",
+        title: "Manager-controlled child",
         model: "scripted-model",
       },
     );
+    expect(
+      await requireSession(dbClient.db, grant.workspaceId, controlledChild.resource.id),
+    ).toMatchObject({
+      title: "Manager-controlled child",
+      titleSource: "agent",
+    });
+    expect(
+      (await listSessionEvents(dbClient.db, grant.workspaceId, controlledChild.resource.id, 0, 10))
+        .slice(0, 2)
+        .map((event) => event.type),
+    ).toEqual(["session.created", "session.title_set"]);
     const childAttemptId = crypto.randomUUID();
     const childClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
       sessionId: controlledChild.resource.id,

@@ -259,6 +259,12 @@ initiating principal and the authority snapshots needed by later execution and
 recovery.
 
 Organization settings owns the cross-workspace roster and organization roles.
+A managed browser administrator is the ordinary authority. Single-user local
+deployments additionally admit only the access resolver's canonical
+`opengeni:local/default` + `dev` browser context to organization metadata,
+shared-workspace, retention, company-identity, and organization Codex controls.
+This is provenance-stamped authority, not a subject-name check; configured,
+delegated, API-key, service, and agent principals remain excluded.
 A shared workspace's Members page is deliberately narrower: a caller with
 `members:manage` may add an already-active human from the same organization and
 change or revoke access only in that workspace. Personal workspaces,
@@ -491,7 +497,10 @@ flowchart LR
    events, queue/control state, audit facts, and workflow-wake intent in
    Postgres.
 4. The API returns the committed projection. NATS fanout and immediate Temporal
-   wake delivery happen as replayable follow-up work.
+   wake delivery happen as replayable follow-up work. Temporal transport
+   acceptance does not acknowledge the current durable wake while an accepted
+   human/API turn is still queued or an Agent Steer is still pending; only the
+   attempt-fenced Postgres claim proves admission.
 5. The session workflow observes the durable obligation and dispatches a turn
    activity.
 6. The worker claims the logical turn, registers an exact attempt, freezes its
@@ -648,6 +657,15 @@ These producers all converge on the ordinary session/turn runtime:
 For an existing session, a scheduled turn that omits its turn-level `tools`
 field inherits the durable session tool policy; explicit `tools: []` remains an
 empty override.
+
+A pure scheduled-occurrence batch that creates a standalone scheduler-owned
+turn is persisted in model-facing history as a direct `user`-role task boundary
+carrying the immutable scheduled task, run, and update ids. That role is
+conversation structure only: the logical turn still freezes the scheduler
+service as initiator, retains its causal-human and personal-connection authority
+snapshots, and remains a scheduled run in audit and settlement. Scheduled
+occurrences attached to an existing human/API turn, and all other machine-input
+batches, keep the internal `system`-role envelope.
 
 None of them creates a parallel agent engine. They differ in admission and
 provenance, then use the same logical turn, attempt, event, recovery, and usage
@@ -1166,7 +1184,7 @@ This index intentionally routes at subsystem granularity. Use
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
 | Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
-| Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
+| Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Realtime browser conversation | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime/`, `apps/api/src/session-realtime-context.ts` | [`run-lifecycle.md`](run-lifecycle.md), package READMEs |
 
 ### Contracts, access, and persistence

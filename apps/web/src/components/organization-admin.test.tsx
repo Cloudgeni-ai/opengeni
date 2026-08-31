@@ -490,6 +490,46 @@ describe("organization administration component fences", () => {
     container.remove();
   });
 
+  test("keeps local single-user workspace management free of managed member controls", async () => {
+    const listOrganizationAdministrationMembers = mock(async () => ({
+      members: [member(identityA, "overview")],
+    }));
+    const client = {
+      getOrganizationAdministrationOverview: mock(async () => overview(identityA)),
+      listOrganizationAdministrationMembers,
+    } as unknown as OpenGeniBrowserClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationOverviewSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          singleUser
+          accessibleWorkspaceIds={new Set(["workspace-company"])}
+          onOrganizationChanged={() => undefined}
+          onCreateWorkspace={async () => undefined}
+        />,
+      );
+    });
+    await flush();
+
+    expect(listOrganizationAdministrationMembers).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      "Access is managed automatically for the local administrator.",
+    );
+    expect(container.textContent).not.toContain("Add organization member");
+    expect(container.textContent).not.toContain("Fine-tune");
+    expect(button(container, "Create new workspace")).toBeInstanceOf(HTMLButtonElement);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("uses the organization control plane for shared-workspace settings and access", async () => {
     const updateOrganizationWorkspace = mock(async () => ({
       id: "workspace-company",

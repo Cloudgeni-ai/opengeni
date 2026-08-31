@@ -7667,17 +7667,74 @@ export function renderSessionSystemUpdateBatch(
   ].join("\n");
 }
 
+export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[OpenGeni scheduled task occurrence]" as const;
+
+/**
+ * A pure scheduled-occurrence batch is a new task boundary for the model, not
+ * merely background context. The user role here is conversational only: the
+ * owning turn retains its immutable scheduler/service initiator and frozen
+ * execution authority in the database.
+ *
+ * Malformed or mixed legacy batches fall back to the generic system envelope
+ * so this renderer never invents task identity from inconsistent payloads.
+ */
+function renderScheduledOccurrenceTaskBatch(
+  updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
+): string | null {
+  if (updates.length === 0 || updates.some((update) => update.kind !== "scheduled_occurrence")) {
+    return null;
+  }
+  const occurrences = updates.map((update) => {
+    const parsed = SessionSystemUpdatePayload.safeParse(update.payload);
+    if (
+      !parsed.success ||
+      parsed.data.type !== "scheduled_occurrence" ||
+      parsed.data.scheduledTaskRunId !== update.sourceId
+    ) {
+      return null;
+    }
+    return { update, payload: parsed.data };
+  });
+  if (occurrences.some((occurrence) => occurrence === null)) return null;
+
+  const introduction =
+    occurrences.length === 1
+      ? "A new scheduled occurrence has started. Execute the instructions below for this occurrence now."
+      : `${occurrences.length} new scheduled occurrences have started. Execute every instruction set below for this turn now.`;
+  return [
+    SCHEDULED_OCCURRENCE_TASK_LABEL,
+    introduction,
+    "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
+    ...occurrences.flatMap((occurrence, index) => {
+      if (!occurrence) return [];
+      return [
+        "",
+        ...(occurrences.length > 1 ? [`Occurrence ${index + 1}:`] : []),
+        `Scheduled task ID: ${occurrence.payload.scheduledTaskId}`,
+        `Scheduled task run ID: ${occurrence.payload.scheduledTaskRunId}`,
+        `Update ID: ${occurrence.update.id}`,
+        "Instructions:",
+        occurrence.payload.text,
+      ];
+    }),
+  ].join("\n");
+}
+
 export function sessionSystemUpdateBatchHistoryItem(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
   goalSnapshot?: SessionGoalSnapshot,
-): { type: "message"; role: "system"; content: string } {
+  options: { promoteScheduledOccurrenceToUser?: boolean } = {},
+): { type: "message"; role: "system" | "user"; content: string } {
   const goalContext = renderSessionGoalContext(goalSnapshot);
+  const scheduledTask = options.promoteScheduledOccurrenceToUser
+    ? renderScheduledOccurrenceTaskBatch(updates)
+    : null;
   return {
     type: "message",
-    role: "system",
+    role: scheduledTask ? "user" : "system",
     content: [
       ...(goalContext ? [`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`] : []),
-      renderSessionSystemUpdateBatch(updates),
+      scheduledTask ?? renderSessionSystemUpdateBatch(updates),
     ].join("\n\n"),
   };
 }

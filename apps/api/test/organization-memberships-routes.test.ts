@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ApiRouteDeps, ManagedEmailDeliveryResult, ManagedEmailMessage } from "@opengeni/core";
 import {
+  bootstrapWorkspace,
   claimOrganizationUserSetupDelivery,
   createDb,
   createOrganizationInvitation,
@@ -16,6 +17,7 @@ import {
 } from "@opengeni/testing";
 import { Hono } from "hono";
 import { registerManagedOnboardingRoutes } from "../src/routes/managed-onboarding";
+import { registerCodexRoutes } from "../src/routes/codex";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 
 let shared: SharedTestDatabase | null = null;
@@ -113,6 +115,101 @@ afterAll(async () => {
 }, 60_000);
 
 describe("organization membership routes", () => {
+  test("lets only the canonical single-user local browser administer its organization", async () => {
+    if (!client) return;
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "opengeni:local",
+      accountExternalId: "default",
+      accountName: "Local",
+      workspaceExternalSource: "opengeni:local",
+      workspaceExternalId: "default",
+      workspaceName: "Local",
+      subjectId: "dev",
+      subjectLabel: "Local dev",
+    });
+    if (!access.defaultAccountId) throw new Error("local account was not returned");
+    const local = new Hono();
+    registerOrganizationMembershipRoutes(local, {
+      db: client.db,
+      settings: testSettings({ productAccessMode: "local" }),
+      managedAuth: null,
+    } as ApiRouteDeps);
+    registerCodexRoutes(local, {
+      db: client.db,
+      settings: testSettings({ productAccessMode: "local" }),
+      managedAuth: null,
+      githubStateSecret: "local-organization-codex-test-secret",
+    } as ApiRouteDeps);
+
+    const response = await local.request(
+      `http://x/v1/organizations/${access.defaultAccountId}/overview`,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      organization: { id: access.defaultAccountId },
+    });
+    const codex = await local.request(
+      `http://x/v1/organizations/${access.defaultAccountId}/codex/accounts`,
+    );
+    expect(codex.status).toBe(200);
+    expect(await codex.json()).toMatchObject({ accounts: [] });
+
+    const realFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            device_auth_id: "local-device-auth",
+            user_code: "LOCAL-1234",
+            interval: "5",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )) as typeof fetch;
+      const start = await local.request(
+        `http://opengeni-api:8000/v1/organizations/${access.defaultAccountId}/codex/connect/start`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            host: "homeserver",
+            origin: "http://homeserver:30079",
+            "sec-fetch-site": "same-origin",
+            "x-forwarded-host": "homeserver",
+            "x-forwarded-proto": "http",
+          },
+          body: "{}",
+        },
+      );
+      expect(start.status).toBe(200);
+      expect(await start.json()).toMatchObject({ userCode: "LOCAL-1234" });
+
+      const crossOrigin = await local.request(
+        `http://opengeni-api:8000/v1/organizations/${access.defaultAccountId}/codex/connect/start`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            host: "homeserver",
+            origin: "http://attacker.example:30079",
+            "sec-fetch-site": "same-origin",
+            "x-forwarded-host": "homeserver",
+            "x-forwarded-proto": "http",
+          },
+          body: "{}",
+        },
+      );
+      expect(crossOrigin.status).toBe(403);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    const delegated = await local.request(
+      `http://x/v1/organizations/${access.defaultAccountId}/overview`,
+      { headers: { authorization: "Bearer not-a-valid-local-token" } },
+    );
+    expect(delegated.status).toBe(401);
+  });
+
   test("denies non-managed and delegated principals before database access", async () => {
     const configured = new Hono();
     registerOrganizationMembershipRoutes(configured, {
