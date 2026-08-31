@@ -973,14 +973,18 @@ interruption, or a settled interruption whose exact attempt still lacks its
 quiescence receipt as control work. A fully quiesced historical interruption is
 audit evidence and cannot upgrade a later ordinary queue wake to
 `sessionControl`.
-For Agent Steer, accepting that signal is not an admission acknowledgement: if
-effective control is active while the newest `agent_steer_instruction` remains
-pending, the delivery path leaves its coalesced workflow-wake revision
-unacknowledged. The bounded outbox dispatcher can therefore redeliver across a
-workflow close or `continueAsNew`; the attempt-fenced Postgres claim consumes
-the newest instruction once, so duplicate signals cannot duplicate inference.
-A real Pause is the truthful blocker and may acknowledge the old revision;
-Resume commits a fresh revision for the preserved pending instruction.
+For every accepted human/API prompt and Agent Steer, accepting a Temporal signal
+is not an admission acknowledgement. While effective control is active, the
+delivery path leaves the current coalesced workflow-wake revision
+unacknowledged if any human/API turn remains physically queued, and leaves the
+wake unacknowledged while the newest `agent_steer_instruction` remains pending.
+An older prompt sender may still advance only its own stale revision because the
+newer coalesced revision remains outstanding. The bounded outbox dispatcher can
+therefore redeliver across a workflow close or `continueAsNew`; the
+attempt-fenced Postgres claim consumes each prompt turn or newest instruction
+once, so duplicate signals cannot duplicate inference. A real Pause is the
+truthful blocker and may acknowledge the old revision; Resume commits a fresh
+revision for preserved pending direction.
 
 Control settlement and physical cancellation are deliberately separate
 boundaries. A receipt-gated v2 workflow first atomically settles the exact
