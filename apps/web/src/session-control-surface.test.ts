@@ -154,6 +154,12 @@ describe("session control surface architecture", () => {
       ),
     ).toHaveLength(2);
     expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(2);
+    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(2);
+    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(2);
+    expect(establishedPicker).toContain(
+      "const busy = props.busy || props.goalActive || props.voiceActive",
+    );
+    expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
     expect(establishedControl).not.toContain('value: "once"');
     expect(establishedControl).not.toContain('value: "session"');
     expect(establishedControl).not.toContain('value: "always"');

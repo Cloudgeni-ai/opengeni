@@ -30,6 +30,7 @@ export function SessionVariableSetPicker(props: {
   disabled?: boolean;
   busy?: boolean;
   goalActive?: boolean;
+  voiceActive?: boolean;
   compact?: boolean;
   triggerClassName?: string;
   onReloadSession: () => Promise<void>;
@@ -81,7 +82,7 @@ export function SessionVariableSetPicker(props: {
   );
   const canEdit = props.canControl && props.canAttach && !refreshRequired;
   const canAdd = canEdit && props.canUse && props.canList;
-  const busy = props.busy || props.goalActive;
+  const busy = props.busy || props.goalActive || props.voiceActive;
   const visible = refreshRequired || currentIds.length > 0 || canAdd;
   if (!visible) return null;
 
@@ -286,6 +287,8 @@ export function SessionVariableSetPicker(props: {
           <p className="text-2xs text-fg-subtle">
             Pause or complete the active goal before changing Variable Sets.
           </p>
+        ) : props.voiceActive ? (
+          <p className="text-2xs text-fg-subtle">End voice mode before changing Variable Sets.</p>
         ) : props.busy ? (
           <p className="text-2xs text-fg-subtle">
             Variable Sets can be changed after the current and queued work finishes.

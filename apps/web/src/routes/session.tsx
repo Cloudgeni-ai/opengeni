@@ -2041,11 +2041,13 @@ function SessionChatPane(props: {
                   }
                   disabled={terminal}
                   busy={
+                    voiceActive ||
                     composer.sending ||
                     props.session.activeTurnId !== null ||
                     props.queue.queue.length > 0
                   }
                   goalActive={props.goal.isActive}
+                  voiceActive={voiceActive}
                   compact
                   triggerClassName="sm:hidden"
                   onReloadSession={props.onReloadSession}
@@ -2129,11 +2131,13 @@ function SessionChatPane(props: {
                   }
                   disabled={terminal}
                   busy={
+                    voiceActive ||
                     composer.sending ||
                     props.session.activeTurnId !== null ||
                     props.queue.queue.length > 0
                   }
                   goalActive={props.goal.isActive}
+                  voiceActive={voiceActive}
                   triggerClassName="max-sm:hidden"
                   onReloadSession={props.onReloadSession}
                 />
