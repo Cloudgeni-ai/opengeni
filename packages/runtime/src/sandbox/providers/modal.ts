@@ -703,6 +703,12 @@ export const modalProvider: ProviderRegistration = {
     // and the reaper — not Modal's idle-reap — governs teardown (and snapshots
     // /workspace first).
     options.idleTimeoutMs = effectiveModalIdleTimeoutSeconds(settings) * 1000;
+    if (settings.modalSandboxCpu !== undefined) {
+      options.cpu = settings.modalSandboxCpu;
+    }
+    if (settings.modalSandboxMemoryMiB !== undefined) {
+      options.memoryMiB = settings.modalSandboxMemoryMiB;
+    }
     if (settings.modalWorkspacePersistence) {
       options.workspacePersistence = settings.modalWorkspacePersistence;
     }
