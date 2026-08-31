@@ -3548,8 +3548,10 @@ function canonicalJson(value: unknown): string {
 function definitionVersionFor(
   model: Omit<ConfiguredModel, "definitionVersion">,
   provider: ResolvedModelProvider,
+  options: { includeWireProfile?: boolean } = {},
 ): string {
   const requestMetadata = staticRequestMetadataForDigest(provider);
+  const includeWireProfile = options.includeWireProfile ?? true;
   const digestInput = canonicalJson({
     schemaVersion: model.schemaVersion,
     id: model.id,
@@ -3558,7 +3560,7 @@ function definitionVersionFor(
     provider: {
       adapterKind: provider.kind,
       wireApi: provider.api,
-      wireProfile: provider.wireProfile,
+      ...(includeWireProfile ? { wireProfile: provider.wireProfile } : {}),
       baseUrl: provider.baseUrl ?? null,
       defaultHeaders: requestMetadata.headers,
       defaultQuery: requestMetadata.query,
@@ -3574,6 +3576,15 @@ function definitionVersionFor(
     .update("opengeni:model-definition:v1\n", "utf8")
     .update(digestInput, "utf8")
     .digest("hex")}`;
+}
+
+function legacyImplicitOpenAiDefinitionVersionFor(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): string | null {
+  if (provider.wireProfile !== "openai") return null;
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  return definitionVersionFor(modelWithoutVersion, provider, { includeWireProfile: false });
 }
 
 /**
@@ -4157,11 +4168,22 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   if (!resolved) {
     throw new Error("Turn execution policy model is no longer configured");
   }
+  // wireProfile was added to the definition digest after policies already
+  // existed in durable in-flight turns. An omitted profile meant exactly
+  // "openai", so accept that one legacy digest only; Azure and every other
+  // executable-definition change remain fail-closed.
+  const legacyImplicitOpenAiDefinitionVersion = legacyImplicitOpenAiDefinitionVersionFor(
+    resolved.model,
+    resolved.provider,
+  );
+  const definitionVersionMatches =
+    parsed.definitionVersion === resolved.model.definitionVersion ||
+    parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion;
   const mismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
     parsed.wireApi !== resolved.model.api ||
-    parsed.definitionVersion !== resolved.model.definitionVersion ||
+    !definitionVersionMatches ||
     canonicalJson(parsed.credentialSource) !== canonicalJson(resolved.model.credentialSource) ||
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
   if (mismatched) {
