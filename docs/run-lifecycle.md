@@ -37,6 +37,16 @@ metadata, and obvious credential-, URL-, or identifier-shaped prefixes retain
 the generic marker. When the durable title changes, the client naturally yields
 to it.
 
+The first-party `session_create` tool is the bounded exception for an
+agent-created child: the manager may provide a concise semantic title, and an
+omission derives one from the delegated goal or initial message through the same
+sensitive-safe automatic-title normalizer. The title row mutation and
+`session.title_set` event commit in the child's atomic initial-state transaction,
+before its first turn can wake. Public REST/SDK creation does not gain a title
+field, and a human title still wins over every automatic write. If every child
+candidate is rejected as sensitive or unsuitable, the ordinary pending marker
+and first-turn self-heal path remain.
+
 While a session still has the pending marker, and its exact selected first-party
 tool and permission policy permits `set_session_title`, the worker projects only
 that exact operation through the attempt-local tool server and removes it from

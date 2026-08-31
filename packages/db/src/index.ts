@@ -58339,6 +58339,9 @@ export type InitializeSessionStartInput = {
   /** Trusted create-session policy. Omitted only by legacy low-level callers. */
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   createdEventPayload: Record<string, unknown>;
+  /** Sensitive-safe semantic title supplied by the trusted agent-child create
+   * path. It is committed with the initial timeline, never as a bare row edit. */
+  initialAutomaticTitle?: string | null;
   goal?: {
     text: string;
     successCriteria?: string | null;
@@ -58435,6 +58438,39 @@ export async function initializeSessionStartAtomically(
           };
         }
 
+        const normalizedInitialAutomaticTitle =
+          typeof input.initialAutomaticTitle === "string"
+            ? normalizeAutomaticSessionTitle(input.initialAutomaticTitle)
+            : null;
+        let appliedInitialAutomaticTitle: string | null = null;
+        if (
+          normalizedInitialAutomaticTitle &&
+          normalizedInitialAutomaticTitle !== AUTOMATIC_SESSION_TITLE_FALLBACK &&
+          session.title === AUTOMATIC_SESSION_TITLE_FALLBACK &&
+          session.titleSource === "agent"
+        ) {
+          await tx.execute(
+            sql`select pg_catalog.set_config('opengeni.automatic_session_title_v1_candidate', ${normalizedInitialAutomaticTitle}, true)`,
+          );
+          const [updatedTitle] = await tx
+            .update(schema.sessions)
+            .set({
+              title: normalizedInitialAutomaticTitle,
+              titleSource: "agent",
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, session.id),
+                eq(schema.sessions.title, AUTOMATIC_SESSION_TITLE_FALLBACK),
+                eq(schema.sessions.titleSource, "agent"),
+              ),
+            )
+            .returning({ title: schema.sessions.title });
+          appliedInitialAutomaticTitle = updatedTitle?.title ?? null;
+        }
+
         let insertedGoal = false;
         let [goal] = await tx
           .select()
@@ -58503,6 +58539,21 @@ export async function initializeSessionStartAtomically(
                         createdBy: creator.initiator,
                       },
                     },
+                    ...(appliedInitialAutomaticTitle
+                      ? [
+                          {
+                            accountId: session.accountId,
+                            workspaceId: input.workspaceId,
+                            sessionId: session.id,
+                            sequence: ++sequence,
+                            type: "session.title_set" as const,
+                            payload: {
+                              title: appliedInitialAutomaticTitle,
+                              source: "agent",
+                            },
+                          },
+                        ]
+                      : []),
                     ...(goal
                       ? [
                           {
@@ -58534,6 +58585,29 @@ export async function initializeSessionStartAtomically(
               )
               .returning();
             initializedNow = true;
+          } else if (appliedInitialAutomaticTitle) {
+            const [titleEvent] = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    sequence: ++sequence,
+                    type: "session.title_set",
+                    payload: {
+                      title: appliedInitialAutomaticTitle,
+                      source: "agent",
+                    },
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning();
+            if (!titleEvent) throw new Error("Failed to append initial session title event");
+            insertedEvents.push(titleEvent);
           }
           const deferredStatusNeedsRepair = initializedNow && session.status !== deferredStatus;
           const sessionNeedsRepair =
@@ -58638,6 +58712,21 @@ export async function initializeSessionStartAtomically(
                       createdBy: creator.initiator,
                     },
                   },
+                  ...(appliedInitialAutomaticTitle
+                    ? [
+                        {
+                          accountId: session.accountId,
+                          workspaceId: input.workspaceId,
+                          sessionId: session.id,
+                          sequence: ++sequence,
+                          type: "session.title_set" as const,
+                          payload: {
+                            title: appliedInitialAutomaticTitle,
+                            source: "agent",
+                          },
+                        },
+                      ]
+                    : []),
                   ...(goal
                     ? [
                         {
@@ -58696,6 +58785,29 @@ export async function initializeSessionStartAtomically(
           userEvent = rows.find((event) => event.type === "user.message");
           if (!userEvent) throw new Error("Failed to create initial user event");
           initializedNow = true;
+        } else if (appliedInitialAutomaticTitle) {
+          const [titleEvent] = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  sequence: ++sequence,
+                  type: "session.title_set",
+                  payload: {
+                    title: appliedInitialAutomaticTitle,
+                    source: "agent",
+                  },
+                },
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .returning();
+          if (!titleEvent) throw new Error("Failed to append initial session title event");
+          insertedEvents.push(titleEvent);
         }
 
         let [turn] = await tx

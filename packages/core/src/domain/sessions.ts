@@ -10,6 +10,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
   CreateSessionRequest,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -20,6 +21,7 @@ import {
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
+  normalizeAutomaticSessionTitle,
   resolveWorkspaceSessionToolDefaults,
   stableJson,
   type AccessGrant,
@@ -608,6 +610,25 @@ export type CreateSessionRequestOutcome = CreateSessionOutcome & {
   usageRecording: "recorded" | "failed";
 };
 
+type AgentChildSessionCreatePresentation = {
+  /** Model-authored title candidate from the first-party `session_create` tool.
+   * This is deliberately separate from the public REST request contract. */
+  automaticTitleCandidate?: string | null;
+};
+
+function automaticTitleForAgentChildCreate(
+  presentation: AgentChildSessionCreatePresentation,
+  goal: GoalSpec | null | undefined,
+  initialMessage: string | null | undefined,
+): string | null {
+  for (const candidate of [presentation.automaticTitleCandidate, goal?.text, initialMessage]) {
+    if (typeof candidate !== "string") continue;
+    const normalized = normalizeAutomaticSessionTitle(candidate);
+    if (normalized && normalized !== AUTOMATIC_SESSION_TITLE_FALLBACK) return normalized;
+  }
+  return null;
+}
+
 export async function createAndStartSessionWithOutcome(input: {
   requestedSessionId?: string;
   db: Database;
@@ -653,6 +674,9 @@ export async function createAndStartSessionWithOutcome(input: {
   // resolved workspace-scoped by the caller). Null/omitted ⇒ unfiled (inbox).
   channelId?: string | null;
   goal?: GoalSpec | null;
+  /** Trusted sensitive-safe automatic title for an agent-created child. The
+   * atomic initializer commits the row mutation and `session.title_set`. */
+  initialAutomaticTitle?: string | null;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Persisted on the session row and composed system-level AFTER the
   // workspace agentInstructions at turn time; never emitted as a timeline event.
@@ -906,6 +930,7 @@ async function finishStartSession(
     sandboxBackend: Settings["sandboxBackend"];
     variableSets?: Array<{ id: string; name: string; scope: VariableSet["scope"] }>;
     goal?: GoalSpec | null;
+    initialAutomaticTitle?: string | null;
     sessionMcpServers?: SessionMcpServerMetadata[];
     seedTargetSandbox?: {
       sandboxId: string;
@@ -1010,6 +1035,7 @@ async function finishStartSession(
             : {}),
         }
       : null,
+    initialAutomaticTitle: input.initialAutomaticTitle ?? null,
     consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
     rememberNewSessionSelection: input.rememberNewSessionSelection ?? null,
     deferInitialTurn: input.deferInitialTurn === true,
@@ -1486,6 +1512,7 @@ export async function createSessionForRequestWithOutcome(
   workspaceId: string,
   rawPayload: unknown,
   authorization?: AccessGrantAuthorization,
+  agentChildPresentation?: AgentChildSessionCreatePresentation,
 ): Promise<CreateSessionRequestOutcome> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
@@ -1613,6 +1640,14 @@ export async function createSessionForRequestWithOutcome(
       });
     }
   }
+  const initialAutomaticTitle =
+    parentSession && agentChildPresentation
+      ? automaticTitleForAgentChildCreate(
+          agentChildPresentation,
+          effectiveGoal,
+          payload.initialMessage,
+        )
+      : null;
   const personalResourceSubjectId = creationInitiator.actor
     ? (await requireLiveAgentAttemptAuthorization(db, grant, creationInitiator.actor.sessionId))
         .initiatingHumanSubjectId
@@ -2332,6 +2367,7 @@ export async function createSessionForRequestWithOutcome(
       rigVersionId: frozenRigVersionId,
       channelId,
       goal: effectiveGoal ?? null,
+      initialAutomaticTitle,
       // Per-session persona instructions (already trimmed/validated by the
       // contracts schema). Persisted on the row; composed system-level at turn
       // time. Not surfaced as an event.
