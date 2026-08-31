@@ -1,16 +1,20 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ReactNode } from "react";
+import { act, useEffect, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
+import { subscribeToWorkspaceSessionListChanges } from "@/lib/session-list-invalidation";
 import type { Session } from "@/types";
 
 const WORKSPACE_ID = "00000000-0000-4000-8000-000000000001";
 const SESSION_ID = "00000000-0000-4000-8000-000000000002";
+const OTHER_WORKSPACE_ID = "00000000-0000-4000-8000-000000000004";
 
 let sessions: Session[] = [];
 let permissions = ["sessions:read", "sessions:control"];
 const refresh = mock(async () => undefined);
+const railRefresh = mock(async () => undefined);
+const otherWorkspaceRailRefresh = mock(async () => undefined);
 const updateSessionArchive = mock(async (_workspaceId: string, _sessionId: string) => ({
   ...sessions[0]!,
   archived: true,
@@ -55,33 +59,6 @@ mock.module("@/context", () => ({
   }),
 }));
 
-mock.module("@/components/ui/confirm-dialog", () => ({
-  ConfirmDialog: (props: {
-    open: boolean;
-    title: ReactNode;
-    description?: ReactNode;
-    confirmLabel: string;
-    onOpenChange: (open: boolean) => void;
-    onConfirm: () => void | boolean | Promise<void | boolean>;
-  }) =>
-    props.open ? (
-      <div role="dialog">
-        <div>{props.title}</div>
-        <div>{props.description}</div>
-        <button
-          type="button"
-          onClick={() => {
-            void Promise.resolve(props.onConfirm()).then((result) => {
-              if (result !== false) props.onOpenChange(false);
-            });
-          }}
-        >
-          {props.confirmLabel}
-        </button>
-      </div>
-    ) : null,
-}));
-
 mock.module("sonner", () => ({
   toast: {
     success: mock(() => undefined),
@@ -89,14 +66,13 @@ mock.module("sonner", () => ({
   },
 }));
 
+GlobalRegistrator.register();
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
 const { PriorityRoute } = await import("./priority");
 
-beforeAll(() => {
-  GlobalRegistrator.register();
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-});
-
 afterAll(() => {
+  mock.restore();
   GlobalRegistrator.unregister();
 });
 
@@ -104,6 +80,8 @@ beforeEach(() => {
   sessions = [brokenSession()];
   permissions = ["sessions:read", "sessions:control"];
   refresh.mockClear();
+  railRefresh.mockClear();
+  otherWorkspaceRailRefresh.mockClear();
   updateSessionArchive.mockClear();
   cancelSession.mockClear();
 });
@@ -167,8 +145,46 @@ async function renderPriorityRoute() {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
-  await act(async () => root.render(<PriorityRoute workspaceId={WORKSPACE_ID} />));
+  await act(async () =>
+    root.render(
+      <>
+        <PriorityRoute workspaceId={WORKSPACE_ID} />
+        <SessionListRefreshProbe workspaceId={WORKSPACE_ID} refresh={railRefresh} />
+        <SessionListRefreshProbe
+          workspaceId={OTHER_WORKSPACE_ID}
+          refresh={otherWorkspaceRailRefresh}
+        />
+      </>,
+    ),
+  );
   return { container, root };
+}
+
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+  }
+}
+
+function SessionListRefreshProbe({
+  workspaceId,
+  refresh: refreshProbe,
+}: {
+  workspaceId: string;
+  refresh: () => Promise<void>;
+}) {
+  useEffect(
+    () =>
+      subscribeToWorkspaceSessionListChanges(workspaceId, () => {
+        void refreshProbe();
+      }),
+    [refreshProbe, workspaceId],
+  );
+  return null;
 }
 
 describe("For you broken-session actions", () => {
@@ -187,21 +203,26 @@ describe("For you broken-session actions", () => {
       });
       expect(container.textContent).not.toContain("Broken deployment");
       expect(refresh).toHaveBeenCalled();
+      expect(railRefresh).toHaveBeenCalledTimes(1);
+      expect(otherWorkspaceRailRefresh).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();
     }
   });
 
-  test("confirms a terminal stop with one stable command id", async () => {
+  test("confirms a terminal stop, refreshes the rail, and restores stable focus", async () => {
     const { container, root } = await renderPriorityRoute();
     try {
-      await act(async () => buttonWithText(container, "Stop workstream")!.click());
-      const dialog = container.querySelector<HTMLElement>('[role="dialog"]');
+      const trigger = buttonWithText(container, "Stop workstream")!;
+      trigger.focus();
+      await act(async () => trigger.click());
+      const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
       expect(dialog?.textContent).toContain("1 spawned session");
 
       await act(async () => {
         buttonWithText(dialog!, "Stop workstream")!.click();
+        await Promise.resolve();
         await Promise.resolve();
       });
 
@@ -215,6 +236,43 @@ describe("For you broken-session actions", () => {
       expect(cancelSession.mock.calls[0]?.[2]?.clientEventId).toBeString();
       expect(container.textContent).not.toContain("Broken deployment");
       expect(updateSessionArchive).not.toHaveBeenCalled();
+      expect(railRefresh).toHaveBeenCalledTimes(1);
+      expect(otherWorkspaceRailRefresh).not.toHaveBeenCalled();
+      expect(trigger.isConnected).toBe(false);
+      const heading = container.querySelector("h1");
+      await waitFor(
+        () =>
+          document.body.querySelector('[role="dialog"]') === null &&
+          document.activeElement === heading,
+        `Expected focus on the For you heading after dialog close; active element was ${
+          document.activeElement?.tagName ?? "none"
+        }`,
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("describes a truncated descendant count as a lower bound", async () => {
+    const session = brokenSession();
+    sessions = [
+      {
+        ...session,
+        treeStats: {
+          ...session.treeStats!,
+          totalDescendants: 1_000,
+          truncated: true,
+        },
+      },
+    ];
+    const { container, root } = await renderPriorityRoute();
+    try {
+      await act(async () => buttonWithText(container, "Stop workstream")!.click());
+      const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+
+      expect(dialog?.textContent).toContain("at least 1,000 spawned sessions");
+      expect(dialog?.textContent).not.toContain("its 1,000 spawned sessions");
     } finally {
       await act(async () => root.unmount());
       container.remove();

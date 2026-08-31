@@ -21,3 +21,12 @@ export function subscribeToSessionListChanges(
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
+
+export function subscribeToWorkspaceSessionListChanges(
+  workspaceId: string,
+  listener: (invalidation: SessionListInvalidation) => void,
+): () => void {
+  return subscribeToSessionListChanges((invalidation) => {
+    if (invalidation.workspaceId === workspaceId) listener(invalidation);
+  });
+}

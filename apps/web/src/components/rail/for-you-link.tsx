@@ -10,7 +10,7 @@ import { useEffect, useMemo } from "react";
 import { useRail } from "@/components/rail/rail-context";
 import { rootNeedsYou } from "@/lib/needs-you";
 import { workspacePriorityPath } from "@/lib/routes";
-import { subscribeToSessionListChanges } from "@/lib/session-list-invalidation";
+import { subscribeToWorkspaceSessionListChanges } from "@/lib/session-list-invalidation";
 import { cn } from "@/lib/utils";
 
 export function ForYouLink(props: { embedded?: boolean }) {
@@ -22,8 +22,8 @@ export function ForYouLink(props: { embedded?: boolean }) {
   });
   useEffect(
     () =>
-      subscribeToSessionListChanges((invalidation) => {
-        if (invalidation.workspaceId === rail.workspaceId) void refresh();
+      subscribeToWorkspaceSessionListChanges(rail.workspaceId, () => {
+        void refresh();
       }),
     [rail.workspaceId, refresh],
   );
