@@ -21,6 +21,9 @@ function makeCred(overrides: Partial<CodexCredentialForRun> = {}): CodexCredenti
     lastRefreshAt: new Date(),
     status: "active",
     lastError: null,
+    exhaustedUntil: null,
+    exhaustedKind: null,
+    exhaustedRevision: 0,
     ...overrides,
   };
 }

@@ -5,6 +5,7 @@ import {
   chooseRotationActive,
   chooseShardedHome,
   classifyCodexPin,
+  codexAccountNeedsLiveCapacityRefresh,
   computeIdleDelayMs,
   computeReactiveRotationResume,
   DEFAULT_RESET_COOLDOWN_MS,
@@ -26,6 +27,25 @@ import {
 const NOW = new Date("2026-06-30T12:00:00.000Z");
 const HOUR = 3_600_000;
 
+test("live refresh targets quota cooldowns but not generic or legacy cooldowns", () => {
+  const until = new Date(NOW.getTime() + HOUR);
+  expect(
+    codexAccountNeedsLiveCapacityRefresh(
+      acct("quota", { exhaustedUntil: until, exhaustedKind: "quota" }),
+      NOW,
+    ),
+  ).toBe(true);
+  expect(
+    codexAccountNeedsLiveCapacityRefresh(
+      acct("rate", { exhaustedUntil: until, exhaustedKind: "rate_limit" }),
+      NOW,
+    ),
+  ).toBe(false);
+  expect(codexAccountNeedsLiveCapacityRefresh(acct("legacy", { exhaustedUntil: until }), NOW)).toBe(
+    false,
+  );
+});
+
 function acct(id: string, over: Partial<CodexAccountStatus> = {}): CodexAccountStatus {
   return {
     id,
@@ -45,6 +65,7 @@ function acct(id: string, over: Partial<CodexAccountStatus> = {}): CodexAccountS
     secondaryResetAt: null,
     usageCheckedAt: null,
     exhaustedUntil: null,
+    exhaustedKind: null,
     ...over,
   };
 }

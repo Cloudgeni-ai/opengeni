@@ -338,7 +338,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     });
     const statusesAfterUsage = await listCodexAccountStatuses(dbB, wsB!.workspaceId);
     expect(statusesAfterUsage[0]?.primaryUsedPercent).toBeNull();
-    await setCodexCredentialExhausted(dbA, wsA!.workspaceId, credentialA, reset);
+    await setCodexCredentialExhausted(dbA, wsA!.workspaceId, credentialA, reset, "quota");
     const statusesAfterCooldown = await listCodexAccountStatuses(dbB, wsB!.workspaceId);
     expect(statusesAfterCooldown[0]?.exhaustedUntil).toBeNull();
   });
@@ -940,7 +940,11 @@ describe("credential allocator atomic Codex credential allocation", () => {
       credentialId: first.credentialId!,
       holderId: first.holderId!,
       generation: first.generation!,
-      quarantine: { kind: "cooldown", until: new Date(Date.now() + 60_000) },
+      quarantine: {
+        kind: "cooldown",
+        until: new Date(Date.now() + 60_000),
+        cooldownKind: "quota",
+      },
     });
     expect(staleQuarantine).toBe(false);
     const [credentialAfterStaleAttempt] = await admin<
@@ -1139,7 +1143,11 @@ describe("credential allocator atomic Codex credential allocation", () => {
         credentialId: first.credentialId!,
         holderId: first.holderId!,
         generation: first.generation!,
-        quarantine: { kind: "cooldown", until: new Date(Date.now() + 60_000) },
+        quarantine: {
+          kind: "cooldown",
+          until: new Date(Date.now() + 60_000),
+          cooldownKind: "quota",
+        },
       }),
     ).toBe(true);
     // Force the narrow race: the holder was live for quarantine, then crossed
@@ -1381,6 +1389,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       ws!.workspaceId,
       first.credentialId!,
       new Date(Date.now() + 5 * 60 * 60_000),
+      "quota",
     );
 
     const sessionRows = await admin<{ session_id: string }[]>`
