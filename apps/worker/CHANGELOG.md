@@ -1,5 +1,16 @@
 # @opengeni/worker-bundle
 
+## 0.23.3
+
+### Patch Changes
+
+- 463c709: Reset provider recovery backoff after a fenced successful model request so intermittent outages cannot exhaust a long-running turn's consecutive retry budget.
+- Updated dependencies [463c709]
+  - @opengeni/db@3.7.3
+  - @opengeni/core@2.6.3
+  - @opengeni/documents@0.8.13
+  - @opengeni/events@0.4.11
+
 ## 0.23.2
 
 ### Patch Changes
