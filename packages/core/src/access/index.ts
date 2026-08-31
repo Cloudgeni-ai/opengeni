@@ -243,6 +243,37 @@ export function requireAccountAdminAuthorizationStamp(
   });
 }
 
+/**
+ * Resolve the exact built-in single-user local administrator for an account.
+ *
+ * This is intentionally narrower than checking `context.mode === "local"` or
+ * the `dev` subject name. Only the in-process local bootstrap branch can place
+ * the resolved context in `canonicalLocalHumanContexts`, so delegated bearer
+ * tokens and caller-constructed contexts cannot borrow this authority.
+ */
+export async function requireCanonicalLocalAccountAdministrator(
+  c: Context,
+  deps: AccessDeps,
+  accountId: string,
+): Promise<{ subjectId: string; authorization: AccessGrantAuthorization }> {
+  if (c.req.header("authorization")) {
+    throw new HTTPException(401, { message: "organization administrator session required" });
+  }
+  const context = await requireAccessContext(c, deps);
+  const grant = context.workspaceGrants.find((candidate) => candidate.accountId === accountId);
+  if (!grant) {
+    throw new HTTPException(403, {
+      message: "local organization administration is not authorized",
+    });
+  }
+  const authorization = accessGrantAuthorizationFromContext(context, grant);
+  if (!authorization.canonicalLocalHumanSession) {
+    throw new HTTPException(401, { message: "organization administrator session required" });
+  }
+  requireAccountAdminAuthorizationStamp(authorization);
+  return { subjectId: context.subjectId, authorization };
+}
+
 export async function requireAccessGrantAuthorization(
   c: Context,
   deps: AccessDeps,

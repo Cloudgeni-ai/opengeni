@@ -14,6 +14,9 @@ const recoverySource = await Bun.file(
 const organizationCodexSource = await Bun.file(
   `${import.meta.dir}/components/organization-codex-subscriptions.tsx`,
 ).text();
+const workspaceCodexSource = await Bun.file(
+  `${import.meta.dir}/components/codex-connection.tsx`,
+).text();
 const normalizedRecoverySource = recoverySource.replace(/\s+/gu, " ");
 const workspaceSettingsSource = await Bun.file(
   `${import.meta.dir}/routes/workspace-settings.tsx`,
@@ -47,12 +50,18 @@ describe("organization administration surface", () => {
     expect(routeSource).toContain("OrganizationKnowledgePrompt");
     expect(routeSource).toContain("OrganizationCompanyProfileAgentPolicy");
     expect(routeSource).toContain("canManageOrganizationCodex");
+    expect(routeSource).toContain('context.clientConfig.productAccessMode === "local"');
+    expect(routeSource).toContain("organizationAdministratorSession");
+    expect(routeSource).toContain("singleUser={singleUser}");
     expect(routeSource).toContain('actorRole === "owner" || actorRole === "admin"');
     expect(routeSource).toContain("showModels={canManageOrganizationCodex}");
     expect(shellSource).toContain('item.id !== "models" || showModels');
     expect(organizationCodexSource).toContain("setLoadError(message)");
     expect(organizationCodexSource).toContain('role="alert"');
     expect(organizationCodexSource).toContain("Retry");
+    expect(workspaceCodexSource).toContain("Where this workspace gets Codex");
+    expect(workspaceCodexSource).toContain("Automatic: prefer organization");
+    expect(workspaceCodexSource).toContain("Connect an organization subscription");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
     expect(routeSource).toContain('accountGrant?.role === "owner"');
     expect(routeSource).toContain('"account:admin"');

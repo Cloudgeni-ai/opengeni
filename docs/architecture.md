@@ -259,6 +259,12 @@ initiating principal and the authority snapshots needed by later execution and
 recovery.
 
 Organization settings owns the cross-workspace roster and organization roles.
+A managed browser administrator is the ordinary authority. Single-user local
+deployments additionally admit only the access resolver's canonical
+`opengeni:local/default` + `dev` browser context to organization metadata,
+shared-workspace, retention, company-identity, and organization Codex controls.
+This is provenance-stamped authority, not a subject-name check; configured,
+delegated, API-key, service, and agent principals remain excluded.
 A shared workspace's Members page is deliberately narrower: a caller with
 `members:manage` may add an already-active human from the same organization and
 change or revoke access only in that workspace. Personal workspaces,
