@@ -658,7 +658,7 @@ describe("rail session grouping", () => {
     ]);
   });
 
-  test("fresh active branches skip hydration and background requests stay visually silent", () => {
+  test("fresh active branches skip hydration and background failures expose retry", () => {
     const managerId = "manager-silent-hydration";
     const active = railSession({ id: "active-worker", parentSessionId: managerId });
     let pages = commitSessionBranchPage(new Map(), managerId, {
@@ -681,7 +681,7 @@ describe("rail session grouping", () => {
     pages = failSessionBranchRequest(pages, managerId, 12);
     expect(pages.get(managerId)).toMatchObject({
       loading: false,
-      feedbackVisible: false,
+      feedbackVisible: true,
       failed: true,
     });
   });

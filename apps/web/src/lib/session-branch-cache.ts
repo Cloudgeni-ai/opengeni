@@ -173,7 +173,7 @@ export function authoritativeSessionBranchChannels(
   return evidence;
 }
 
-/** Fail only the still-current request and retain its exact retry cursor. */
+/** Fail only the still-current request and expose its exact retry cursor. */
 export function failSessionBranchRequest(
   pages: ReadonlyMap<string, SessionBranchPage>,
   parentSessionId: string,
@@ -184,6 +184,10 @@ export function failSessionBranchRequest(
   return new Map(pages).set(parentSessionId, {
     ...previous,
     loading: false,
+    // Background hydration may suppress transient loading feedback, but a
+    // failure must become actionable instead of leaving the branch silently
+    // incomplete for the rest of the active route.
+    feedbackVisible: true,
     failed: true,
     stale: false,
     requestId: null,
