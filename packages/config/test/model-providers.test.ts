@@ -1382,6 +1382,34 @@ describe("turn execution policy V1", () => {
     ).toThrow("current provider definition");
   });
 
+  test("accepts the pre-wire-profile digest for an unchanged OpenAI wire profile", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true",
+      },
+      () => getSettings(),
+    );
+    const policy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: "codex/gpt-5.6-sol",
+      requestedModelId: null,
+      modelSource: "continuation",
+      reasoningEffort: "xhigh",
+      reasoningSource: "continuation",
+    });
+    const preWireProfilePolicy = {
+      ...policy,
+      definitionVersion: "sha256:45a93d5876fdb2a3b3d485c83ea6ac758fddb64e7fe493384a05a198bc582c00",
+    };
+
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(settings, preWireProfilePolicy, {
+        modelId: policy.productModelId,
+        reasoningEffort: policy.reasoningEffort,
+      }),
+    ).not.toThrow();
+  });
+
   test("attributes connected Codex subscription turns explicitly as externally billed", () => {
     const settings = withEnv(
       {
