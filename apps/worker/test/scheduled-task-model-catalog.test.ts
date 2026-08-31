@@ -4,6 +4,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createScheduledTask,
+  createScheduledTaskRun,
   createSession,
   createWorkspaceGatewayCustomModel,
   deleteWorkspaceGatewayCustomModel,
@@ -11,6 +12,7 @@ import {
   listSessions,
   listScheduledTaskRuns,
   lockActiveWorkspaceGatewayCustomModelForAdmission,
+  type Database,
   type DbClient,
   updateScheduledTask,
 } from "@opengeni/db";
@@ -28,6 +30,7 @@ import type { ActivityServices } from "../src/activities/types";
 let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
   const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
@@ -52,6 +55,9 @@ async function acquireDatabase(): Promise<SharedTestDatabase | null> {
 beforeAll(async () => {
   shared = await acquireDatabase();
   if (!shared) {
+    if (requireRealDatabase) {
+      throw new Error("scheduled-task model catalog tests require real PostgreSQL");
+    }
     available = false;
     console.warn("[worker-scheduled-model-catalog] PostgreSQL unavailable, skipping");
     return;
@@ -399,6 +405,168 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
     } finally {
       releaseUpdate();
       await updatePromise.catch(() => undefined);
+    }
+  }, 60_000);
+
+  test("replays an overlapping producer accepted before retirement wins", async () => {
+    if (!available) return;
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `scheduled-model-overlap-account-${crypto.randomUUID()}`,
+      accountName: "Scheduled model overlap account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `scheduled-model-overlap-workspace-${crypto.randomUUID()}`,
+      workspaceName: "Scheduled model overlap workspace",
+      subjectId: "user:scheduled-model-overlap-owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    const upstreamModelId = `race/scheduled-overlap-${crypto.randomUUID()}`;
+    const productModelId = `workspace-gateway/${upstreamModelId}`;
+    const customModel = await createWorkspaceGatewayCustomModel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      upstreamModelId,
+      operationId: crypto.randomUUID(),
+      requestHash: "8".repeat(64),
+      createdBySubjectId: grant.subjectId,
+    });
+    if (!customModel) throw new Error("custom model create unexpectedly conflicted");
+    const task = await createScheduledTask(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+      name: "Overlapping producer replay",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-model-overlap-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Replay the winner when retirement overtakes an overlapping retry",
+        model: productModelId,
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const seedProducerKey = `scheduled-model-overlap-seed-${crypto.randomUUID()}`;
+    const seed = await activities().dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: seedProducerKey,
+    });
+    expect(seed.action).toBe("start");
+    const runs = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
+    const seedRun = runs.find((run) => run.producerKey === seedProducerKey);
+    if (!seedRun) throw new Error("seed scheduled occurrence was not persisted");
+    const seedAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: grant.workspaceId,
+      runId: seedRun.id,
+    });
+    if (!seedAccepted) throw new Error("seed scheduled occurrence has no accepted execution");
+
+    const producerKey = `scheduled-model-overlap-race-${crypto.randomUUID()}`;
+    const acceptedExecution = {
+      ...seedAccepted,
+      generatedSessionBinding: seedAccepted.generatedSessionBinding
+        ? {
+            ...seedAccepted.generatedSessionBinding,
+            createIdempotencyKey: `scheduled-task-run:${producerKey}`,
+          }
+        : null,
+    };
+    const beforeFreshAgentRunCommit = async (tx: Database): Promise<void> => {
+      const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        upstreamModelId,
+      });
+      if (!active) throw new Error("custom model retired before overlapping producer admission");
+    };
+    let releaseWinner!: () => void;
+    const winnerRelease = new Promise<void>((resolve) => {
+      releaseWinner = resolve;
+    });
+    let markWinnerReady!: () => void;
+    const winnerReady = new Promise<void>((resolve) => {
+      markWinnerReady = resolve;
+    });
+    let winnerBackendPid: number | null = null;
+    const winnerRunId = crypto.randomUUID();
+    const winnerPromise = client.db.transaction(async (transaction) => {
+      const tx = transaction as unknown as Database;
+      const backendRows = await tx.execute(
+        sql<{ pid: number }>`select pg_backend_pid()::int as pid`,
+      );
+      winnerBackendPid = backendRows[0]?.pid ?? null;
+      if (!winnerBackendPid) throw new Error("producer winner has no backend pid");
+      const run = await createScheduledTaskRun(tx, {
+        runId: winnerRunId,
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: task.authorityRevision,
+        taskExecutionDigest: task.executionDigest,
+        triggerType: "scheduled",
+        producerKey,
+        acceptedExecutionSnapshot: acceptedExecution,
+        beforeFreshAgentRunCommit,
+      });
+      markWinnerReady();
+      await winnerRelease;
+      return run;
+    });
+
+    try {
+      await winnerReady;
+      const blockerPid = winnerBackendPid;
+      if (!blockerPid) throw new Error("producer winner did not expose its backend pid");
+      const retirementPromise = deleteWorkspaceGatewayCustomModel(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        customModelId: customModel.id,
+        expectedVersion: customModel.version,
+        operationId: crypto.randomUUID(),
+        requestHash: "9".repeat(64),
+      });
+      const retirementBackendPid = await waitForBackendBlockedBy(
+        blockerPid,
+        "queued custom-model retirement behind producer winner",
+      );
+      const retryPromise = createScheduledTaskRun(client.db, {
+        runId: crypto.randomUUID(),
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: task.authorityRevision,
+        taskExecutionDigest: task.executionDigest,
+        triggerType: "scheduled",
+        producerKey,
+        acceptedExecutionSnapshot: acceptedExecution,
+        beforeFreshAgentRunCommit,
+      });
+      await waitForBackendBlockedBy(
+        retirementBackendPid,
+        "overlapping producer retry behind queued retirement",
+      );
+
+      releaseWinner();
+      const [winner, retired, replay] = await Promise.all([
+        winnerPromise,
+        retirementPromise,
+        retryPromise,
+      ]);
+      expect(retired).toMatchObject({ outcome: "success" });
+      expect(replay.id).toBe(winner.id);
+      expect(replay.id).toBe(winnerRunId);
+      expect(
+        (await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).filter(
+          (run) => run.producerKey === producerKey,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      releaseWinner();
+      await winnerPromise.catch(() => undefined);
     }
   }, 60_000);
 

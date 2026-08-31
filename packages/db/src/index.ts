@@ -16642,16 +16642,20 @@ export async function createScheduledTaskRun(
       guardedAcceptedExecution = ScheduledTaskRunAcceptedExecution.parse(
         input.acceptedExecutionSnapshot,
       );
-      [replayedProducerRow] = await scopedDb
-        .select()
-        .from(schema.scheduledTaskRuns)
-        .where(
-          and(
-            eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
-            eq(schema.scheduledTaskRuns.producerKey, input.producerKey),
-          ),
-        )
-        .limit(1);
+      const readProducerReplay = async () => {
+        const [row] = await scopedDb
+          .select()
+          .from(schema.scheduledTaskRuns)
+          .where(
+            and(
+              eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+              eq(schema.scheduledTaskRuns.producerKey, input.producerKey!),
+            ),
+          )
+          .limit(1);
+        return row;
+      };
+      replayedProducerRow = await readProducerReplay();
       // Fresh custom-model admission must precede the task row lock. Material
       // task updates take the same advisory lock before updating that row, and
       // acquiring them in the opposite order can deadlock behind a queued
@@ -16659,7 +16663,16 @@ export async function createScheduledTaskRun(
       // still skips the live-model check so retirement cannot invalidate work
       // that was already accepted.
       if (!replayedProducerRow) {
-        await input.beforeFreshAgentRunCommit(scopedDb);
+        try {
+          await input.beforeFreshAgentRunCommit(scopedDb);
+        } catch (error) {
+          // An overlapping producer can commit after the unlocked pre-read
+          // while this retry waits behind a queued retirement. Re-read before
+          // surfacing the mutable-model denial so the committed winner remains
+          // replayable instead of becoming a false terminal rejection.
+          replayedProducerRow = await readProducerReplay();
+          if (!replayedProducerRow) throw error;
+        }
       }
     }
     const taskFilter = and(
