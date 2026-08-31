@@ -141,8 +141,10 @@ import {
   projectRailSessions,
   groupSessionsForRail,
   mergeSessionForRail,
+  normalizeSessionBrowseCreator,
   relativeTimeLabel,
   scheduledTaskIdOf,
+  sessionBrowseResultCount,
   selectedDescendantNode,
   sessionCreatorLabelMap,
   visibleForestRows,
@@ -298,6 +300,7 @@ export function SessionList() {
   const [browseDateField, setBrowseDateField] = useState<SessionBrowseDateField>("activity");
   const [browseDateRange, setBrowseDateRange] = useState<SessionBrowseDateRange>("any");
   const [browseCreator, setBrowseCreator] = useState<string | null>(null);
+  const browseCreatorOrigin = useRef<"search" | "hierarchy" | null>(null);
   useEffect(() => {
     if (previousBrowsePreferenceStorageId.current === browsePreferenceStorageId) return;
     previousBrowsePreferenceStorageId.current = browsePreferenceStorageId;
@@ -314,8 +317,6 @@ export function SessionList() {
     const timer = window.setTimeout(() => setSearch(searchDraft.trim()), 200);
     return () => window.clearTimeout(timer);
   }, [searchDraft]);
-  const browseControlsActive =
-    browseGroupBy !== "activity" || browseDateRange !== "any" || browseCreator !== null;
   // Search is the one intentionally flat projection: it can surface a match
   // from anywhere in a workstream. Sorting and filtering still operate on
   // root workstreams and preserve their expandable descendant hierarchy.
@@ -324,8 +325,22 @@ export function SessionList() {
     setBrowseGroupBy("activity");
     setBrowseDateField("activity");
     setBrowseDateRange("any");
+    browseCreatorOrigin.current = null;
     setBrowseCreator(null);
   }, [setBrowseGroupBy]);
+  const updateSearchDraft = useCallback((value: string) => {
+    setSearchDraft(value);
+    if (value.trim().length > 0 || browseCreatorOrigin.current !== "search") return;
+    browseCreatorOrigin.current = null;
+    setBrowseCreator(null);
+  }, []);
+  const updateBrowseCreator = useCallback(
+    (creator: string | null) => {
+      browseCreatorOrigin.current = creator ? (hierarchyMode ? "hierarchy" : "search") : null;
+      setBrowseCreator(creator);
+    },
+    [hierarchyMode],
+  );
 
   const rootPage = useWorkspaceSessions({
     limit: 50,
@@ -910,6 +925,13 @@ export function SessionList() {
   const creatorOptions = useMemo(() => {
     return [...creatorLabels].map(([value, label]) => ({ value, label }));
   }, [creatorLabels]);
+  const activeBrowseCreator = normalizeSessionBrowseCreator(
+    browseCreator,
+    creatorLabels,
+    hierarchyMode,
+  );
+  const browseControlsActive =
+    browseGroupBy !== "activity" || browseDateRange !== "any" || activeBrowseCreator !== null;
   const browseSessions = useMemo(
     () =>
       filterSessionsForBrowse(
@@ -920,7 +942,7 @@ export function SessionList() {
           return session.parentSessionId !== null || !session.archived;
         }),
         {
-          creator: browseCreator,
+          creator: activeBrowseCreator,
           dateField: browseDateField,
           dateRange: browseDateRange,
           hierarchical: hierarchyMode,
@@ -929,7 +951,7 @@ export function SessionList() {
     [
       allSessions,
       archiveTransitions,
-      browseCreator,
+      activeBrowseCreator,
       browseDateField,
       browseDateRange,
       hierarchyMode,
@@ -2021,9 +2043,9 @@ export function SessionList() {
 
   useEffect(() => {
     if (loading || (!search && !browseControlsActive)) return;
-    const count = browseSessions.length;
+    const count = sessionBrowseResultCount(browseSessions, hierarchyMode);
     setAnnouncement(`${count} matching session${count === 1 ? "" : "s"}.`);
-  }, [browseControlsActive, browseSessions.length, loading, search]);
+  }, [browseControlsActive, browseSessions, hierarchyMode, loading, search]);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -2043,11 +2065,11 @@ export function SessionList() {
           <input
             type="search"
             value={searchDraft}
-            onChange={(event) => setSearchDraft(event.target.value)}
+            onChange={(event) => updateSearchDraft(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Escape" && searchDraft) {
                 event.preventDefault();
-                setSearchDraft("");
+                updateSearchDraft("");
               }
             }}
             maxLength={200}
@@ -2148,16 +2170,15 @@ export function SessionList() {
               <DropdownMenuSubTrigger>
                 Creator
                 <span className="ml-auto mr-1 max-w-20 truncate text-2xs text-fg-subtle">
-                  {browseCreator
-                    ? (creatorOptions.find((option) => option.value === browseCreator)?.label ??
-                      "Selected")
+                  {activeBrowseCreator
+                    ? creatorOptions.find((option) => option.value === activeBrowseCreator)?.label
                     : "Anyone"}
                 </span>
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent className="max-h-(--radix-dropdown-menu-content-available-height) w-52 overflow-x-hidden overflow-y-auto">
                 <DropdownMenuRadioGroup
-                  value={browseCreator ?? "all"}
-                  onValueChange={(value) => setBrowseCreator(value === "all" ? null : value)}
+                  value={activeBrowseCreator ?? "all"}
+                  onValueChange={(value) => updateBrowseCreator(value === "all" ? null : value)}
                 >
                   <DropdownMenuRadioItem value="all">Anyone</DropdownMenuRadioItem>
                   {creatorOptions.map((option) => (
@@ -2239,7 +2260,7 @@ export function SessionList() {
               type="button"
               className="mt-2 min-h-8 rounded px-2 underline hover:text-fg pointer-coarse:min-h-11"
               onClick={() => {
-                setSearchDraft("");
+                updateSearchDraft("");
                 clearBrowseControls();
               }}
             >

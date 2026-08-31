@@ -171,7 +171,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 60_000);
 
-  test("keeps created-date browse results nested under their parent workstream", async () => {
+  test("normalizes search-only creators and counts hierarchical browse roots", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -180,6 +180,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
+      await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Created grouping unrelated root",
+      );
       const manager = await createSessionThroughApi(
         page,
         apiBaseUrl,
@@ -197,6 +203,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         latencyMode: "standard",
         sandboxBackend: "none",
         parentSessionId: manager.id,
+        createdBy: {
+          kind: "subject",
+          subjectId: "sessionpin-child-only-creator",
+          label: "Child-only creator",
+        },
       });
 
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
@@ -204,9 +215,31 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const managerRow = rail.locator(`a[data-session-row="${manager.id}"]`);
       await managerRow.waitFor();
 
+      const search = page.getByRole("searchbox", { name: "Search sessions" });
+      await search.fill("Created grouping child");
+      await page.getByText("1 matching session.").waitFor();
       await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("menuitem", { name: /^Creator/ }).hover();
+      await page.getByRole("menuitemradio", { name: "Child-only creator" }).click();
+
+      // A creator offered only by flat child search is not a valid root filter.
+      // Leaving search clears that scoped choice instead of painting an empty
+      // hierarchy or leaving the submenu with a generic "Selected" value.
+      await search.fill("");
+      await managerRow.waitFor();
+      await page.getByRole("button", { name: "Session filters" }).click();
+      expect(await page.getByText("Selected", { exact: true }).count()).toBe(0);
       await page.getByRole("menuitemradio", { name: "Created date" }).click();
       await page.getByRole("button", { name: "Session filters, active" }).waitFor();
+      const liveRegion = rail.locator('[aria-live="polite"]');
+      await page.waitForFunction(() => {
+        const message = document.querySelector(
+          '[data-sessionpin-session-list] [aria-live="polite"]',
+        )?.textContent;
+        return Boolean(message && message !== "1 matching session.");
+      });
+      const rootCountAnnouncement = await liveRegion.textContent();
+      expect(rootCountAnnouncement).toMatch(/^\d+ matching sessions?\.$/);
 
       // Browse grouping keeps root-only pagination and lazy child loading. The
       // child must not appear beside its manager as another top-level result.
@@ -215,6 +248,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await managerItem.getByRole("button", { name: "Expand spawned sessions" }).click();
       const childRow = rail.locator(`a[data-session-row="${child.id}"]`);
       await childRow.waitFor();
+      await page.waitForTimeout(250);
+      expect(await liveRegion.textContent()).toBe(rootCountAnnouncement);
       expect(
         await childRow.evaluate((element) =>
           element.closest('[role="list"]')?.getAttribute("aria-label"),

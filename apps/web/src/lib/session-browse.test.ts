@@ -6,7 +6,9 @@ import {
   buildPinnedRailSections,
   filterSessionsForBrowse,
   groupSessionsForBrowse,
+  normalizeSessionBrowseCreator,
   projectRailSessions,
+  sessionBrowseResultCount,
   sessionCreatorLabelMap,
   sessionCreatorLabel,
   sessionCreatorOptions,
@@ -138,15 +140,16 @@ describe("session browse projections", () => {
       createdBy: { kind: "subject", subjectId: "user:grace", label: "Grace Hopper" },
     });
 
-    expect(
-      filterSessionsForBrowse([manager, worker], {
-        creator: "subject:user:ada",
-        dateField: "activity",
-        dateRange: "any",
-        hierarchical: true,
-        now: NOW,
-      }).map((item) => item.id),
-    ).toEqual(["manager", "worker"]);
+    const matchingWorkstream = filterSessionsForBrowse([manager, worker], {
+      creator: "subject:user:ada",
+      dateField: "activity",
+      dateRange: "any",
+      hierarchical: true,
+      now: NOW,
+    });
+    expect(matchingWorkstream.map((item) => item.id)).toEqual(["manager", "worker"]);
+    expect(sessionBrowseResultCount(matchingWorkstream, true)).toBe(1);
+    expect(sessionBrowseResultCount(matchingWorkstream, false)).toBe(2);
     expect(
       filterSessionsForBrowse([manager, worker], {
         creator: "subject:user:grace",
@@ -156,6 +159,24 @@ describe("session browse projections", () => {
         now: NOW,
       }),
     ).toEqual([]);
+  });
+
+  test("normalizes child-only creator selections when returning to hierarchical browse", () => {
+    const manager = session({ id: "manager" });
+    const worker = session({
+      id: "worker",
+      parentSessionId: manager.id,
+      createdBy: { kind: "subject", subjectId: "user:grace", label: "Grace Hopper" },
+    });
+    const childCreator = "subject:user:grace";
+    const searchLabels = sessionCreatorLabelMap([manager, worker]);
+    const hierarchyLabels = sessionCreatorLabelMap([manager]);
+
+    expect(normalizeSessionBrowseCreator(childCreator, searchLabels, false)).toBe(childCreator);
+    expect(normalizeSessionBrowseCreator(childCreator, hierarchyLabels, true)).toBeNull();
+    expect(normalizeSessionBrowseCreator("subject:user:ada", hierarchyLabels, true)).toBe(
+      "subject:user:ada",
+    );
   });
 
   test("disambiguates duplicate frozen creator labels with opaque identities", () => {

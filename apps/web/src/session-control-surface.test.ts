@@ -262,10 +262,16 @@ describe("session control surface architecture", () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain("const creatorSessions = useMemo");
     expect(list).toContain("sessionCreatorLabelMap(creatorSessions)");
+    expect(list).toContain("const activeBrowseCreator = normalizeSessionBrowseCreator(");
+    expect(list).toContain("creator: activeBrowseCreator");
+    expect(list).toContain('browseCreatorOrigin.current !== "search"');
+    expect(list).toContain("updateSearchDraft(event.target.value)");
+    expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
     expect(list).toContain(
       'className="max-h-(--radix-dropdown-menu-content-available-height) w-52 overflow-x-hidden overflow-y-auto"',
     );
+    expect(list).toContain("sessionBrowseResultCount(browseSessions, hierarchyMode)");
   });
 
   test("the retired client-side queue model is gone", async () => {

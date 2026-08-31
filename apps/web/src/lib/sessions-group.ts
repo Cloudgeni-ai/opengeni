@@ -470,6 +470,28 @@ export function sessionCreatorOptions(sessions: Session[]): SessionCreatorOption
   return [...sessionCreatorLabelMap(sessions)].map(([value, label]) => ({ value, label }));
 }
 
+/** Drop a flat-search creator selection that is not valid for hierarchical browse roots. */
+export function normalizeSessionBrowseCreator(
+  creator: string | null,
+  creatorLabels: ReadonlyMap<string, string>,
+  hierarchical: boolean,
+): string | null {
+  if (!hierarchical || !creator || creatorLabels.has(creator)) return creator;
+  return null;
+}
+
+/** Count matching rows in flat search, or matching workstream roots in hierarchical browse. */
+export function sessionBrowseResultCount(
+  sessions: readonly Session[],
+  hierarchical: boolean,
+): number {
+  if (!hierarchical) return sessions.length;
+  const loadedIds = new Set(sessions.map((session) => session.id));
+  return sessions.filter(
+    (session) => !session.parentSessionId || !loadedIds.has(session.parentSessionId),
+  ).length;
+}
+
 function browseTimestamp(session: Session, field: SessionBrowseDateField): number {
   if (field === "activity") return sessionActivityTime(session);
   const created = Date.parse(session.createdAt);
