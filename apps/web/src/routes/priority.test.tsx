@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useEffect, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
+import { ApiError } from "@/api";
 import { subscribeToWorkspaceSessionListChanges } from "@/lib/session-list-invalidation";
 import type { Session } from "@/types";
 
@@ -248,6 +249,62 @@ describe("For you broken-session actions", () => {
           document.activeElement?.tagName ?? "none"
         }`,
       );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("reopens a conflicted stop with the refreshed control ETag", async () => {
+    cancelSession.mockImplementationOnce(async () => {
+      throw new ApiError(409, "control changed");
+    });
+    refresh.mockImplementationOnce(async () => {
+      const refreshed = brokenSession();
+      sessions = [
+        {
+          ...refreshed,
+          effectiveControl: {
+            ...refreshed.effectiveControl,
+            controlVersion: 5,
+            controlEtag: "paused-5",
+            state: "paused",
+            directState: "paused",
+          },
+        },
+      ];
+    });
+    const { container, root } = await renderPriorityRoute();
+    try {
+      await act(async () => buttonWithText(container, "Stop workstream")!.click());
+      const firstDialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+      await act(async () => {
+        buttonWithText(firstDialog, "Stop workstream")!.click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      await waitFor(
+        () => document.body.querySelector('[role="dialog"]') === null,
+        "Expected the stale confirmation to close after the control conflict",
+      );
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(cancelSession.mock.calls[0]?.[2]?.expectedControlEtag).toBe("active-4");
+      const firstClientEventId = cancelSession.mock.calls[0]?.[2]?.clientEventId;
+
+      await act(async () => buttonWithText(container, "Stop workstream")!.click());
+      const secondDialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+      await act(async () => {
+        buttonWithText(secondDialog, "Stop workstream")!.click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(cancelSession).toHaveBeenCalledTimes(2);
+      expect(cancelSession.mock.calls[1]?.[2]).toMatchObject({
+        expectedControlEtag: "paused-5",
+      });
+      expect(cancelSession.mock.calls[1]?.[2]?.clientEventId).not.toBe(firstClientEventId);
     } finally {
       await act(async () => root.unmount());
       container.remove();

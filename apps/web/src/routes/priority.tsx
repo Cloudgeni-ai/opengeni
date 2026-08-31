@@ -8,6 +8,7 @@ import { ChevronRightIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { toast } from "sonner";
 
+import { isApiErrorStatus } from "@/api";
 import { CreatorMonogram } from "@/components/creator-monogram";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useAppContext } from "@/context";
@@ -135,7 +136,12 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
       toast.error("Couldn't stop the workstream.", {
         description: stopError instanceof Error ? stopError.message : String(stopError),
       });
-      void refresh();
+      if (isApiErrorStatus(stopError, 409)) {
+        await refresh();
+        setPendingStop(null);
+      } else {
+        void refresh();
+      }
       return false;
     }
   }, [context.client, pendingStop, refresh, workspaceId]);
