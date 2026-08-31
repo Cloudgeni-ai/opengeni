@@ -64373,6 +64373,37 @@ function metadataWithoutTurnDispatchAttempt(
   return next;
 }
 
+function providerRecoveryCountFromTurnMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): number {
+  const value = metadata?.providerRecoveryCount;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function metadataWithoutProviderRecoveryCount(
+  metadata: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const next = { ...(metadata ?? {}) };
+  delete next.providerRecoveryCount;
+  return next;
+}
+
+function hasCompletedCurrentModelRequest(
+  events: ReadonlyArray<
+    Pick<
+      typeof schema.sessionEvents.$inferSelect,
+      "type" | "payload" | "payloadCodecVersion" | "turnAssociation"
+    >
+  >,
+): boolean {
+  return events.some(
+    (event) =>
+      event.turnAssociation === "current" &&
+      event.type === "agent.model.request" &&
+      sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).phase === "completed",
+  );
+}
+
 type WorkerDeathRedispatchMetadata =
   | { kind: "valid"; count: number }
   | { kind: "malformed"; reason: string };
@@ -69972,6 +70003,34 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                         now,
                       },
                     );
+                    if (
+                      providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0 &&
+                      hasCompletedCurrentModelRequest(inserted)
+                    ) {
+                      const [resetTurn] = await tx
+                        .update(schema.sessionTurns)
+                        .set({
+                          metadata: metadataWithoutProviderRecoveryCount(fence.turn!.metadata),
+                          version: fence.turn!.version + 1,
+                          updatedAt: now,
+                        })
+                        .where(
+                          and(
+                            eq(schema.sessionTurns.workspaceId, workspaceId),
+                            eq(schema.sessionTurns.sessionId, sessionId),
+                            eq(schema.sessionTurns.id, turnId),
+                            eq(schema.sessionTurns.status, "running"),
+                            eq(schema.sessionTurns.executionGeneration, executionGeneration),
+                            eq(schema.sessionTurns.activeAttemptId, attemptId),
+                          ),
+                        )
+                        .returning({ id: schema.sessionTurns.id });
+                      if (!resetTurn) {
+                        throw new Error(
+                          `Completed provider request lost its active turn fence: ${turnId}`,
+                        );
+                      }
+                    }
                   }
                   return milestones;
                 },
