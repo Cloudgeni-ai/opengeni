@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 2.9.2
+
+### Patch Changes
+
+- 5b9acd1: Make session attention monotonic across rapid navigation and nested trees. Failed sessions now remain red only until the viewer or their parent agent acknowledges the latest event, while historical failure lifecycle state remains intact.
+
 ## 2.9.1
 
 ### Patch Changes
