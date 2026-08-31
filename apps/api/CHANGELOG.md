@@ -1,5 +1,33 @@
 # @opengeni/api-router
 
+## 2.6.2
+
+### Patch Changes
+
+- 26006f3: Bound Connected Machine event backlogs per exact runner. Separate connections now ingest with bounded concurrency, while consecutive queued heartbeats collapse to the newest sample without reordering lifecycle events.
+- 7e67729: Prevent parent agents from duplicating delegated work. Child creation now requires an independent integration plan, and `session_wait` can ignore messages, goal/progress events, maintenance turns, and continuation segments until a child produces a result-bearing final turn or blocks.
+- 478f572: Harden organization API keys with explicit credential provenance, fail-closed revocation of ambiguous legacy account keys, bounded delegation, atomic organization-key and workspace limits, and safer rotation and one-time-secret UI behavior.
+- Updated dependencies [59b286a]
+- Updated dependencies [3a7fe2f]
+- Updated dependencies [7e67729]
+- Updated dependencies [9b844c8]
+- Updated dependencies [4fb337b]
+- Updated dependencies [478f572]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/runtime@2.0.1
+  - @opengeni/db@3.7.2
+  - @opengeni/core@2.6.2
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+  - @opengeni/documents@0.8.12
+  - @opengeni/github@0.6.7
+  - @opengeni/storage@0.2.115
+  - @opengeni/events@0.4.10
+  - @opengeni/artifact-tool@0.3.14
+  - @opengeni/codemode@0.4.22
+  - @opengeni/observability@0.8.14
+
 ## 2.6.1
 
 ### Patch Changes

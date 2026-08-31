@@ -1,5 +1,15 @@
 # @opengeni/config
 
+## 0.22.5
+
+### Patch Changes
+
+- 59b286a: Add optional Modal CPU and memory reservations and preserve them through sandbox creation, exact resume, and snapshot replacement.
+- Updated dependencies [4fb337b]
+- Updated dependencies [5b9acd1]
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+
 ## 0.22.4
 
 ### Patch Changes
