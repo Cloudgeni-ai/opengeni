@@ -168,6 +168,7 @@ import {
   beginSessionBranchRequest,
   commitSessionBranchPage,
   failSessionBranchRequest,
+  sessionBranchNeedsHydration,
   sessionBranchSummaryKey,
   sessionBranchSummaryDecision,
   upsertSessionBranchChild,
@@ -448,6 +449,8 @@ export function SessionList() {
   const [childPages, setChildPages] = useState<ReadonlyMap<string, ChildPageState>>(
     () => new Map(),
   );
+  const childPagesRef = useRef(childPages);
+  childPagesRef.current = childPages;
   const childLoadEpoch = useRef(0);
   const childRequestSequence = useRef(0);
   const branchSummaryKeys = useRef(new Map<string, string>());
@@ -1438,7 +1441,10 @@ export function SessionList() {
     async (
       parentSessionId: string,
       cursor?: string,
-      preserve: readonly Session[] = [],
+      options: {
+        preserve?: readonly Session[] | undefined;
+        feedbackVisible?: boolean | undefined;
+      } = {},
     ): Promise<void> => {
       const epoch = childLoadEpoch.current;
       if (!branchSummaryKeys.current.has(parentSessionId)) {
@@ -1450,7 +1456,9 @@ export function SessionList() {
       childRequestSequence.current += 1;
       const requestId = childRequestSequence.current;
       setChildPages((current) =>
-        beginSessionBranchRequest(current, parentSessionId, requestId, cursor),
+        beginSessionBranchRequest(current, parentSessionId, requestId, cursor, {
+          feedbackVisible: options.feedbackVisible,
+        }),
       );
       try {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
@@ -1471,7 +1479,7 @@ export function SessionList() {
             },
             {
               append: cursor !== undefined,
-              preserve,
+              preserve: options.preserve,
               requestId,
               readGeneration,
             },
@@ -1494,11 +1502,16 @@ export function SessionList() {
       activeBranchHydration.current = null;
       return;
     }
+    const cachedPage = childPagesRef.current.get(active.parentSessionId);
     setChildPages((current) => upsertSessionBranchChild(current, active));
     const hydrationKey = `${active.parentSessionId}:${active.id}`;
     if (activeBranchHydration.current === hydrationKey) return;
     activeBranchHydration.current = hydrationKey;
-    void loadChildPage(active.parentSessionId, undefined, [active]);
+    if (!sessionBranchNeedsHydration(cachedPage)) return;
+    void loadChildPage(active.parentSessionId, undefined, {
+      preserve: [active],
+      feedbackVisible: false,
+    });
   }, [context.session, hierarchyMode, loadChildPage]);
 
   // Deep active routes auto-expand their ancestor path. Load every missing
@@ -1515,7 +1528,9 @@ export function SessionList() {
       const node = nodesById.get(parentId);
       const knownDirectChildren =
         node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
-      if (knownDirectChildren > 0) void loadChildPage(parentId);
+      if (knownDirectChildren > 0) {
+        void loadChildPage(parentId, undefined, { feedbackVisible: false });
+      }
     }
   }, [
     autoExpanded,
@@ -1551,8 +1566,9 @@ export function SessionList() {
         stale: page.stale,
       });
       if (decision.acknowledge) branchSummaryKeys.current.set(parentId, nextKey);
-      if (decision.refresh) void loadChildPage(parentId);
-      else if (decision.markStale) newlyStale.add(parentId);
+      if (decision.refresh) {
+        void loadChildPage(parentId, undefined, { feedbackVisible: false });
+      } else if (decision.markStale) newlyStale.add(parentId);
     }
     if (newlyStale.size > 0) {
       setChildPages((current) => {
@@ -2777,10 +2793,10 @@ function SessionTreeRow(props: {
                 />
               ))
             : null}
-          {isExpanded && childPage?.loading ? (
+          {isExpanded && childPage?.loading && childPage.feedbackVisible ? (
             <TreeLoadRow depth={props.depth + 1} text="Loading sessions…" />
           ) : null}
-          {isExpanded && childPage?.failed ? (
+          {isExpanded && childPage?.failed && childPage.feedbackVisible ? (
             <TreeLoadRow
               depth={props.depth + 1}
               text="Retry loading sessions"

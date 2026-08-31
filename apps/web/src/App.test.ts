@@ -35,6 +35,7 @@ import {
   beginSessionBranchRequest,
   commitSessionBranchPage,
   failSessionBranchRequest,
+  sessionBranchNeedsHydration,
   sessionBranchSummaryKey,
   sessionBranchSummaryDecision,
   upsertSessionBranchChild,
@@ -451,6 +452,7 @@ describe("rail session grouping", () => {
           channelGenerations: new Map(),
           nextCursor: null,
           loading: false,
+          feedbackVisible: false,
           failed: false,
           stale: false,
           requestId: null,
@@ -654,6 +656,34 @@ describe("rail session grouping", () => {
       "newer-worker",
       "active-worker",
     ]);
+  });
+
+  test("fresh active branches skip hydration and background requests stay visually silent", () => {
+    const managerId = "manager-silent-hydration";
+    const active = railSession({ id: "active-worker", parentSessionId: managerId });
+    let pages = commitSessionBranchPage(new Map(), managerId, {
+      sessions: [active],
+      nextCursor: null,
+    });
+
+    expect(sessionBranchNeedsHydration(pages.get(managerId))).toBe(false);
+    expect(sessionBranchNeedsHydration(undefined)).toBe(true);
+    expect(sessionBranchNeedsHydration({ ...pages.get(managerId)!, stale: true })).toBe(true);
+    expect(sessionBranchNeedsHydration({ ...pages.get(managerId)!, failed: true })).toBe(true);
+
+    pages = beginSessionBranchRequest(pages, managerId, 12, undefined, {
+      feedbackVisible: false,
+    });
+    expect(pages.get(managerId)).toMatchObject({
+      loading: true,
+      feedbackVisible: false,
+    });
+    pages = failSessionBranchRequest(pages, managerId, 12);
+    expect(pages.get(managerId)).toMatchObject({
+      loading: false,
+      feedbackVisible: false,
+      failed: true,
+    });
   });
 
   test("visibleForestRows expands only where the set says so", () => {

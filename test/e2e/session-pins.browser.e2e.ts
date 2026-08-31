@@ -27,6 +27,7 @@ import {
   type BrowserContextOptions,
   type Page,
   type Response as PlaywrightResponse,
+  type Route,
 } from "playwright";
 import postgres from "postgres";
 
@@ -919,6 +920,60 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         descendant,
         true,
       );
+
+      // A direct child route hydrates its parent branch in the background.
+      // Hold that request open so any transient tree feedback remains visible
+      // long enough to catch: route reconciliation must not append a loading
+      // row beneath the workstream.
+      const childPagePattern = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions?**`;
+      let releaseChildPage!: () => void;
+      let markChildPageStarted!: () => void;
+      let markChildPageFinished!: () => void;
+      let childPageRequestStarted = false;
+      const childPageGate = new Promise<void>((resolve) => {
+        releaseChildPage = resolve;
+      });
+      const childPageStarted = new Promise<void>((resolve) => {
+        markChildPageStarted = resolve;
+      });
+      const childPageFinished = new Promise<void>((resolve) => {
+        markChildPageFinished = resolve;
+      });
+      const holdChildPage = async (route: Route): Promise<void> => {
+        const url = new URL(route.request().url());
+        if (
+          url.searchParams.get("parentSessionId") !== manager.id ||
+          url.searchParams.has("cursor")
+        ) {
+          await route.continue();
+          return;
+        }
+        childPageRequestStarted = true;
+        markChildPageStarted();
+        await childPageGate;
+        await route.continue();
+        markChildPageFinished();
+      };
+      await page.route(childPagePattern, holdChildPage);
+      try {
+        await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${ordinaryChild.id}`);
+        await page
+          .getByTestId("session-timeline")
+          .getByText("Ordinary manager child", { exact: true })
+          .waitFor();
+        await childPageStarted;
+        expect(
+          await page
+            .locator("[data-sessionpin-session-list]")
+            .getByText("Loading sessions…", { exact: true })
+            .count(),
+        ).toBe(0);
+      } finally {
+        releaseChildPage();
+        if (childPageRequestStarted) await childPageFinished;
+        await page.unroute(childPagePattern, holdChildPage);
+      }
+
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`);
 
       const pinnedList = page.getByRole("list", { name: "Pinned sessions" });
