@@ -1,17 +1,17 @@
-import { OpenGeniProvider } from "@opengeni/react";
-import { OpenGeniClient } from "@opengeni/sdk";
 import { CheckIcon, LifeBuoyIcon, RotateCcwIcon, SparklesIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { SupportAgentPanel } from "./support-agent-panel";
 import { SupportInbox } from "./support-inbox";
 import { SupportTicketView } from "./support-ticket";
 import type { SupportCase } from "./types";
 import { useSupportDemo } from "./use-support-demo";
 import "./styles.css";
 
-const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
+const SupportAgentPanel = lazy(async () => {
+  const mod = await import("./support-agent-panel");
+  return { default: mod.SupportAgentPanel };
+});
 
 declare global {
   interface Window {
@@ -44,65 +44,65 @@ function NorthstarApp() {
   const selectedState = { revision: demo.state.revision, ...selectedCase };
 
   return (
-    <OpenGeniProvider client={client} workspaceId={demo.health?.workspaceId ?? "unconfigured"}>
-      <div
-        className={
-          agentEnabled
-            ? agentPanelExpanded
-              ? "northstar grid h-dvh min-w-[1120px] grid-cols-[240px_minmax(360px,1fr)_620px] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
-              : "northstar grid h-dvh min-w-[1120px] grid-cols-[260px_minmax(460px,1fr)_420px] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
-            : "northstar grid h-dvh min-w-[980px] grid-cols-[320px_minmax(0,1fr)] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
-        }
-        data-agent-enabled={agentEnabled}
-        data-og-density="compact"
-        data-og-theme="light"
-      >
-        <SupportInbox
-          state={demo.state}
-          selectedTicketId={selectedCase.ticket.id}
+    <div
+      className={
+        agentEnabled
+          ? agentPanelExpanded
+            ? "northstar grid h-dvh min-w-[1120px] grid-cols-[240px_minmax(360px,1fr)_620px] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
+            : "northstar grid h-dvh min-w-[1120px] grid-cols-[260px_minmax(460px,1fr)_420px] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
+          : "northstar grid h-dvh min-w-[980px] grid-cols-[320px_minmax(0,1fr)] overflow-hidden bg-[#f7f7f5] transition-[grid-template-columns] duration-300 ease-out"
+      }
+      data-agent-enabled={agentEnabled}
+      data-og-density="compact"
+      data-og-theme="light"
+    >
+      <SupportInbox
+        state={demo.state}
+        selectedTicketId={selectedCase.ticket.id}
+        agentEnabled={agentEnabled}
+        onSelectTicket={(ticketId) => {
+          setSelectedTicketId(ticketId);
+          setSessionId(null);
+        }}
+      />
+
+      <main className="flex min-h-0 min-w-0 flex-col bg-[#f7f7f5]">
+        <ProductHeader
+          supportCase={selectedCase}
           agentEnabled={agentEnabled}
-          onSelectTicket={(ticketId) => {
-            setSelectedTicketId(ticketId);
+          onAgentEnabledChange={(enabled) => {
+            setAgentEnabled(enabled);
+            if (!enabled) setAgentPanelExpanded(false);
             setSessionId(null);
           }}
+          onReset={() => {
+            setSessionId(null);
+            setSelectedTicketId("TKT-2847");
+            void demo.reset();
+          }}
         />
+        <SupportTicketView
+          key={selectedCase.ticket.id}
+          state={selectedState}
+          lastEvent={demo.lastEvent?.ticketId === selectedCase.ticket.id ? demo.lastEvent : null}
+          agentEnabled={agentEnabled}
+          onUpdateTicket={(changes) => demo.updateTicket(selectedCase.ticket.id, changes)}
+          onAddNote={(body) => demo.addNote(selectedCase.ticket.id, body)}
+          onSendReply={(body) => demo.sendReply(selectedCase.ticket.id, body)}
+        />
+      </main>
 
-        <main className="flex min-h-0 min-w-0 flex-col bg-[#f7f7f5]">
-          <ProductHeader
-            supportCase={selectedCase}
-            agentEnabled={agentEnabled}
-            onAgentEnabledChange={(enabled) => {
-              setAgentEnabled(enabled);
-              if (!enabled) setAgentPanelExpanded(false);
-              setSessionId(null);
-            }}
-            onReset={() => {
-              setSessionId(null);
-              setSelectedTicketId("TKT-2847");
-              void demo.reset();
-            }}
-          />
-          <SupportTicketView
-            key={selectedCase.ticket.id}
-            state={selectedState}
-            lastEvent={demo.lastEvent?.ticketId === selectedCase.ticket.id ? demo.lastEvent : null}
-            agentEnabled={agentEnabled}
-            onUpdateTicket={(changes) => demo.updateTicket(selectedCase.ticket.id, changes)}
-            onAddNote={(body) => demo.addNote(selectedCase.ticket.id, body)}
-            onSendReply={(body) => demo.sendReply(selectedCase.ticket.id, body)}
-          />
-        </main>
-
-        <AnimatePresence initial={false}>
-          {agentEnabled ? (
-            <motion.div
-              key="opengeni-panel"
-              initial={{ opacity: 0, x: 56 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 56 }}
-              transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
-              className="min-h-0 min-w-0 overflow-hidden"
-            >
+      <AnimatePresence initial={false}>
+        {agentEnabled ? (
+          <motion.div
+            key="opengeni-panel"
+            initial={{ opacity: 0, x: 56 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 56 }}
+            transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
+            className="min-h-0 min-w-0 overflow-hidden"
+          >
+            <Suspense fallback={<AgentPanelSkeleton />}>
               <SupportAgentPanel
                 health={demo.health}
                 supportCase={selectedCase}
@@ -112,11 +112,11 @@ function NorthstarApp() {
                 onSessionCreated={setSessionId}
                 onClearSession={() => setSessionId(null)}
               />
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-      </div>
-    </OpenGeniProvider>
+            </Suspense>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
   );
 }
 
@@ -219,6 +219,17 @@ function LoadingScreen() {
         <p className="mt-4 text-sm text-[#7c848b]">Opening Northstar…</p>
       </div>
     </div>
+  );
+}
+
+function AgentPanelSkeleton() {
+  return (
+    <aside className="flex h-full min-h-0 flex-col border-l border-[#302a40] bg-white">
+      <div className="flex h-[72px] items-center gap-3 border-b border-[#302a40] bg-[#252131] px-5">
+        <div className="size-8 animate-pulse rounded-lg bg-white/15" />
+        <div className="h-3 w-24 animate-pulse rounded bg-white/20" />
+      </div>
+    </aside>
   );
 }
 
