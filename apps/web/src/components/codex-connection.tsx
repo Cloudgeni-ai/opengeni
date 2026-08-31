@@ -15,6 +15,7 @@ import type {
   CodexUsageWindow,
   WorkspaceCodexSubscriptionMode,
 } from "@opengeni/sdk";
+import { Link } from "@tanstack/react-router";
 import {
   CheckIcon,
   ChevronDownIcon,
@@ -1257,22 +1258,46 @@ export function CodexSubscriptionsCard({
       </div>
 
       {canManage && source?.workspaceKind === "shared" ? (
-        <label className="grid gap-1 rounded-md border border-border/70 px-3 py-2">
-          <span className="text-xs font-medium">Subscription source</span>
-          <select
-            className="h-8 rounded-md border border-border bg-surface px-2 text-xs"
-            value={source.mode}
-            disabled={busy}
-            onChange={(event) =>
-              void setSourceMode(event.target.value as WorkspaceCodexSubscriptionMode)
-            }
-          >
-            <option value="automatic">Automatic</option>
-            <option value="organization">Organization</option>
-            <option value="workspace">Workspace</option>
-            <option value="disabled">Disabled</option>
-          </select>
-        </label>
+        <div className="grid gap-2 rounded-md border border-border/70 px-3 py-2">
+          <label className="grid gap-1">
+            <span className="text-xs font-medium">Where this workspace gets Codex</span>
+            <select
+              className="h-8 rounded-md border border-border bg-surface px-2 text-xs"
+              value={source.mode}
+              disabled={busy}
+              onChange={(event) =>
+                void setSourceMode(event.target.value as WorkspaceCodexSubscriptionMode)
+              }
+            >
+              <option value="automatic">Automatic: prefer organization</option>
+              <option value="organization">
+                Organization subscription only
+                {source.organizationAvailable ? "" : " (not connected)"}
+              </option>
+              <option value="workspace">This workspace only</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </label>
+          <p className="text-2xs leading-4 text-fg-subtle">
+            {source.mode === "automatic"
+              ? "Automatic uses the organization subscription when one is connected, otherwise this workspace's subscription."
+              : source.mode === "organization"
+                ? "Sessions use the subscription managed once for the whole organization."
+                : source.mode === "workspace"
+                  ? "Sessions use subscriptions connected only in this workspace."
+                  : "Codex models are unavailable in this workspace."}
+          </p>
+          {source.effectiveSource === "organization" && !source.organizationAvailable ? (
+            <Link
+              to="/workspaces/$workspaceId/organization"
+              params={{ workspaceId }}
+              search={{ section: "models" }}
+              className="w-fit text-xs font-medium text-brand hover:underline"
+            >
+              Connect an organization subscription
+            </Link>
+          ) : null}
+        </div>
       ) : null}
 
       {accounts.length > 1 && canManage && workspaceManaged ? (

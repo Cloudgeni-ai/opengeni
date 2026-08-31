@@ -90,6 +90,11 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   personal-workspace pointer converge through the lifecycle SECURITY DEFINER
   seam. Bearer/delegated principals, API keys, and account or organization
   administrators receive no personal-workspace access through that exception.
+  The exact built-in `opengeni:local/default` + `dev` browser context is also
+  the sole organization administrator in single-user local mode. It may manage
+  organization metadata, shared workspaces, retention, company identity, and
+  the organization Codex pool; subject names alone, configured access, bearer
+  tokens, API keys, services, and agents never inherit that exception.
   Because that workspace has no `workspace_memberships` row, a seam that fences
   on one denies its owner: `subjectHasLiveWorkspaceAuthorityInScope`
   (`packages/db/src/workspace-authority.ts`) is the single implementation of the
