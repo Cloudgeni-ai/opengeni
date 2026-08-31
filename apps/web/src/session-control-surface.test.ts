@@ -156,6 +156,11 @@ describe("session control surface architecture", () => {
     expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(2);
     expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(2);
     expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(2);
+    expect(establishedRoute).toContain(
+      "const [variableSetPickerState, setVariableSetPickerState] =",
+    );
+    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(2);
+    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(2);
     expect(establishedPicker).toContain(
       "const busy = props.busy || props.goalActive || props.voiceActive",
     );

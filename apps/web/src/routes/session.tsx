@@ -66,7 +66,10 @@ import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
-import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker";
+import {
+  SessionVariableSetPicker,
+  type SessionVariableSetPickerSharedState,
+} from "@/components/session/session-variable-set-picker";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
@@ -1294,6 +1297,11 @@ function SessionChatPane(props: {
   const onVoiceActiveChange = useCallback((active: boolean) => {
     setVoiceActive(active);
   }, []);
+  const [variableSetPickerState, setVariableSetPickerState] =
+    useState<SessionVariableSetPickerSharedState>({
+      saving: false,
+      committedSelection: null,
+    });
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -2048,6 +2056,8 @@ function SessionChatPane(props: {
                   }
                   goalActive={props.goal.isActive}
                   voiceActive={voiceActive}
+                  sharedState={variableSetPickerState}
+                  setSharedState={setVariableSetPickerState}
                   compact
                   triggerClassName="sm:hidden"
                   onReloadSession={props.onReloadSession}
@@ -2138,6 +2148,8 @@ function SessionChatPane(props: {
                   }
                   goalActive={props.goal.isActive}
                   voiceActive={voiceActive}
+                  sharedState={variableSetPickerState}
+                  setSharedState={setVariableSetPickerState}
                   triggerClassName="max-sm:hidden"
                   onReloadSession={props.onReloadSession}
                 />

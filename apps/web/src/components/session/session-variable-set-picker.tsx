@@ -1,7 +1,7 @@
 import { useVariableSets } from "@opengeni/react";
 import type { Session } from "@opengeni/sdk";
 import { BoxIcon, ChevronDownIcon, Loader2Icon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { type Dispatch, type SetStateAction, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { SelectedVariableSetList } from "@/components/session/selected-variable-set-list";
@@ -21,6 +21,14 @@ function selectedVariableSetIds(
   return session.variableSetIds ?? (session.variableSetId ? [session.variableSetId] : []);
 }
 
+export type SessionVariableSetPickerSharedState = {
+  saving: boolean;
+  committedSelection: {
+    sessionId: string;
+    key: string;
+  } | null;
+};
+
 export function SessionVariableSetPicker(props: {
   session: Pick<Session, "id" | "workspaceId" | "variableSetIds" | "variableSetId" | "tenancy">;
   canControl: boolean;
@@ -33,9 +41,12 @@ export function SessionVariableSetPicker(props: {
   voiceActive?: boolean;
   compact?: boolean;
   triggerClassName?: string;
+  sharedState: SessionVariableSetPickerSharedState;
+  setSharedState: Dispatch<SetStateAction<SessionVariableSetPickerSharedState>>;
   onReloadSession: () => Promise<void>;
 }) {
   const context = useAppContext();
+  const setSharedState = props.setSharedState;
   const variableSets = useVariableSets({
     workspaceId: props.session.workspaceId,
     enabled: props.canList,
@@ -53,12 +64,8 @@ export function SessionVariableSetPicker(props: {
   const currentKey = currentIds.join("\u0000");
   const [open, setOpen] = useState(false);
   const [draftIds, setDraftIds] = useState(currentIds);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [committedSelection, setCommittedSelection] = useState<{
-    sessionId: string;
-    key: string;
-  } | null>(null);
+  const { committedSelection, saving } = props.sharedState;
   const refreshRequired = committedSelection?.sessionId === props.session.id;
 
   useEffect(() => {
@@ -69,9 +76,16 @@ export function SessionVariableSetPicker(props: {
       return;
     }
     setDraftIds(currentIds);
-    setCommittedSelection(null);
+    if (committedSelection !== null) {
+      setSharedState((current) =>
+        current.committedSelection?.sessionId === committedSelection.sessionId &&
+        current.committedSelection.key === committedSelection.key
+          ? { ...current, committedSelection: null }
+          : current,
+      );
+    }
     setError(null);
-  }, [committedSelection, currentIds, currentKey, props.session.id]);
+  }, [committedSelection, currentIds, currentKey, props.session.id, setSharedState]);
 
   const selectedChanged = draftIds.join("\u0000") !== currentKey;
   const availableVariableSets = variableSets.variableSets.filter(
@@ -87,14 +101,17 @@ export function SessionVariableSetPicker(props: {
   if (!visible) return null;
 
   const save = async () => {
-    setSaving(true);
+    setSharedState((current) => ({ ...current, saving: true }));
     setError(null);
     try {
       await context.client.updateSessionVariableSets(props.session.workspaceId, props.session.id, {
         variableSetIds: draftIds,
       });
       const nextCommittedKey = draftIds.join("\u0000");
-      setCommittedSelection({ sessionId: props.session.id, key: nextCommittedKey });
+      setSharedState((current) => ({
+        ...current,
+        committedSelection: { sessionId: props.session.id, key: nextCommittedKey },
+      }));
       try {
         await props.onReloadSession();
       } catch (cause) {
@@ -114,12 +131,12 @@ export function SessionVariableSetPicker(props: {
       setError(message);
       toast.error("Variable Sets were not updated", { description: message });
     } finally {
-      setSaving(false);
+      setSharedState((current) => ({ ...current, saving: false }));
     }
   };
 
   const refreshCommittedSession = async () => {
-    setSaving(true);
+    setSharedState((current) => ({ ...current, saving: true }));
     try {
       await props.onReloadSession();
       setOpen(false);
@@ -131,7 +148,7 @@ export function SessionVariableSetPicker(props: {
       );
       toast.warning("Session refresh failed", { description: message });
     } finally {
-      setSaving(false);
+      setSharedState((current) => ({ ...current, saving: false }));
     }
   };
 
