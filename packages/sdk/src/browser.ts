@@ -2,6 +2,7 @@
 export { OpenGeniClient as OpenGeniBrowserClient } from "./client";
 export type {
   FetchLike,
+  FetchResponse,
   GetSessionOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
