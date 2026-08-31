@@ -1458,6 +1458,11 @@ export type ConnectorActionPolicyHooks = {
   }) => Promise<void>;
 };
 
+/** Expected rejection when model arguments do not match an attempt's frozen connector authority. */
+export class ConnectorActionBindingRejectedError extends Error {
+  override readonly name = "ConnectorActionBindingRejectedError";
+}
+
 /** Exact private binding for one attempt-local model tool backed by a connector action. */
 export type AttemptConnectorActionBinding = {
   modelName: string;
@@ -2684,9 +2689,18 @@ function installAttemptConnectorActionPolicy(
           if (!callId) {
             throw new Error("Attempt connector action is missing its durable approval identity");
           }
-          const preparation = await connectorActionPolicy.prepare(
-            binding.call(callId, parsedInput),
-          );
+          let call: ConnectorActionToolCall;
+          try {
+            call = binding.call(callId, parsedInput);
+          } catch (error) {
+            if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
+            // Exact-resource and connection bindings are evaluated before the
+            // provider can run. A model can name a repository outside the
+            // accepted turn resources; that is an ordinary rejected tool call,
+            // not an Agents SDK lifecycle failure.
+            return false;
+          }
+          const preparation = await connectorActionPolicy.prepare(call);
           if (!preparation.managed || preparation.decision === "block") return false;
           return (
             preparation.decision === "ask" ||
@@ -2707,7 +2721,22 @@ function installAttemptConnectorActionPolicy(
           } catch {
             throw new Error("Attempt connector action was not executed: malformed tool input");
           }
-          const admission = await connectorActionPolicy.begin(binding.call(callId, parsedInput));
+          let call: ConnectorActionToolCall;
+          try {
+            call = binding.call(callId, parsedInput);
+          } catch (error) {
+            if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Connector action was not executed because its arguments are outside this turn's accepted authority.",
+                },
+              ],
+            };
+          }
+          const admission = await connectorActionPolicy.begin(call);
           if (!admission.allowed) {
             throw new Error(`Attempt connector action was not executed: ${admission.reason}`);
           }

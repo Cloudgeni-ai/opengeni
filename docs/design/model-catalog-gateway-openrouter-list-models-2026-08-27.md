@@ -9,16 +9,16 @@ workspace key, provider-qualified custom-model rows, workspace-paid external
 billing, and matching HTTP/UI/SDK lifecycle. Statements below that previously
 excluded workspace OpenRouter are superseded by this revision.
 
-Implementation correction on 2026-08-28: migration 0387 is maintenance-only.
+Implementation correction on 2026-08-28: migration 0388 is maintenance-only.
 Although its tables are additive, it changes OpenGeni's exact runtime-posture
-table/grant contract, so already-running pre-0387 processes become unready after
+table/grant contract, so already-running pre-0388 processes become unready after
 commit. The rolling-migration requirements in the original specification are
 superseded by the drained procedure in `docs/deployment.md`.
 
 Repository observation at capture time: this checkout already contained
 `0364_workspace_learning_policy_snapshot_lock_order.sql`. The migration was subsequently
 renumbered against the eventual PR base to
-`0387_model_catalog_and_gateway_custom_models.sql` with
+`0388_model_catalog_and_gateway_custom_models.sql` with
 `bun run migration:renumber --next`. The original next-free-ordinal guidance below is retained as
 part of the supplied specification.
 

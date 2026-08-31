@@ -1,10 +1,10 @@
 -- deployment-mode: maintenance
--- Migration 0387: deployment-owned model catalog authority, provider-scoped
+-- Migration 0388: deployment-owned model catalog authority, provider-scoped
 -- workspace Vercel AI Gateway/OpenRouter slugs, and indexed pre-catalog prompt
 -- receipt replay.
 -- This changes the exact runtime-posture table/grant contract. Stop every API,
 -- control worker, and turn worker before applying it, and never restart a
--- pre-0387 image after commit.
+-- pre-0388 image after commit.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';

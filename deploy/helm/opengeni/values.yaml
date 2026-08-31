@@ -99,7 +99,7 @@ config:
   OPENGENI_USAGE_LIMITS_MODE: none
   # Reviewed code/env catalog by default. Before changing this to "database",
   # apply the drained maintenance migration
-  # 0387_model_catalog_and_gateway_custom_models.sql and follow the
+  # 0388_model_catalog_and_gateway_custom_models.sql and follow the
   # compatibility-first catalog cutover in docs/deployment.md; do not expose
   # database-only membership during a mixed code/database rollout.
   OPENGENI_MODEL_CATALOG_SOURCE: code

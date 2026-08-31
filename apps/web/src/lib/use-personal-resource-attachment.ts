@@ -1,5 +1,4 @@
 import {
-  PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING,
   type PersonalResourceAttachmentIntent,
   type ResourceAuthorityScope,
   type SendMessageInput,
@@ -26,6 +25,14 @@ type PersonalResourceAttachmentAttempt = {
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
 };
 
+type SessionAuthorityRecovery = Readonly<{
+  identityKey: string;
+  expectedAuthorityEpoch: number | undefined;
+  selectedResourceCount: number;
+  status: "pending" | "reload_settled" | "failed";
+  error: Error | null;
+}>;
+
 export type PersonalResourceAttachmentController = Readonly<{
   eligible: boolean;
   loading: boolean;
@@ -37,13 +44,9 @@ export type PersonalResourceAttachmentController = Readonly<{
   catalog: PersonalResourceCatalog | null;
   selected: ReturnType<typeof personalSelection>;
   mode: PersonalAttachmentMode | null;
-  acknowledged: boolean;
   visibility: "private" | "workspace";
-  warning: string;
   requiresDecision: boolean;
   intent: PersonalResourceAttachmentIntent | undefined;
-  setMode: (mode: PersonalAttachmentMode | null) => void;
-  setAcknowledged: (acknowledged: boolean) => void;
   refresh: () => Promise<void>;
   onAccepted: (
     input: SendMessageInput | { personalResourceAttachment?: PersonalResourceAttachmentIntent },
@@ -146,7 +149,8 @@ export function usePersonalResourceAttachment(input: {
   const resolvedTargetWorkspaceId = resolvedScope?.targetWorkspaceId;
   const resolvedPersonalWorkspaceId = resolvedScope?.personalWorkspaceId;
   // Provider refreshes may replace equivalent projection objects. Preserve the
-  // catalog and the user's decision until one exact authority identity changes.
+  // catalog and current resource-selection identity until the exact authority
+  // identity changes.
   const scope = useMemo(
     () =>
       resolvedIdentityKey &&
@@ -171,15 +175,22 @@ export function usePersonalResourceAttachment(input: {
     ],
   );
   const scopeKey = scope?.identityKey ?? "ineligible";
+  const recoveryIdentityKey = [
+    resolvedSubjectId ?? "ineligible",
+    resolvedTargetWorkspaceId ?? "ineligible",
+    input.session?.id ?? "new",
+  ].join(":");
   const [catalog, setCatalog] = useState<PersonalResourceCatalog | null>(null);
+  const [settledCatalogScopeKey, setSettledCatalogScopeKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(scope !== null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [sourceLost, setSourceLost] = useState(false);
-  const [mode, setModeState] = useState<PersonalAttachmentMode | null>(null);
-  const [acknowledged, setAcknowledgedState] = useState(false);
+  const [sessionAuthorityRecovery, setSessionAuthorityRecovery] =
+    useState<SessionAuthorityRecovery | null>(null);
   const loadGeneration = useRef(0);
+  const recoveryGeneration = useRef(0);
   const acceptedScopeKey = useRef(scopeKey);
 
   const load = useCallback(
@@ -187,11 +198,13 @@ export function usePersonalResourceAttachment(input: {
       const generation = ++loadGeneration.current;
       if (!scope) {
         setCatalog(null);
+        setSettledCatalogScopeKey(null);
         setLoading(false);
         setRefreshing(false);
         setError(null);
         return;
       }
+      setSettledCatalogScopeKey(null);
       if (refresh) setRefreshing(true);
       else setLoading(true);
       try {
@@ -208,6 +221,7 @@ export function usePersonalResourceAttachment(input: {
         setError(cause instanceof Error ? cause : new Error(String(cause)));
       } finally {
         if (generation === loadGeneration.current && acceptedScopeKey.current === scopeKey) {
+          setSettledCatalogScopeKey(scopeKey);
           setLoading(false);
           setRefreshing(false);
         }
@@ -220,8 +234,7 @@ export function usePersonalResourceAttachment(input: {
     acceptedScopeKey.current = scopeKey;
     loadGeneration.current += 1;
     setCatalog(null);
-    setModeState(null);
-    setAcknowledgedState(false);
+    setSettledCatalogScopeKey(null);
     setNotice(null);
     setSourceLost(false);
     setError(null);
@@ -229,6 +242,11 @@ export function usePersonalResourceAttachment(input: {
     setRefreshing(false);
     void load(false);
   }, [load, scope, scopeKey]);
+
+  useEffect(() => {
+    recoveryGeneration.current += 1;
+    setSessionAuthorityRecovery(null);
+  }, [recoveryIdentityKey]);
 
   // Eligibility is a synchronous fence. Do not wait for the transition effect
   // to clear prior owner state before hiding it from a connected-machine send.
@@ -263,8 +281,6 @@ export function usePersonalResourceAttachment(input: {
     priorFixedIdentity.current = fixedIdentity;
     priorSelectionScopeKey.current = scopeKey;
     priorSelectedCount.current = selected.resourceCount;
-    setModeState(null);
-    setAcknowledgedState(false);
     setSourceLost(lost);
     setNotice(
       lost
@@ -281,6 +297,9 @@ export function usePersonalResourceAttachment(input: {
       ? "private"
       : (input.createVisibility ?? "workspace");
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
+  const mode: PersonalAttachmentMode | null =
+    selected.resourceCount > 0 ? (visibility === "private" ? "session" : "once") : null;
+  const acknowledged = visibility === "workspace" && selected.resourceCount > 0;
   const fixedResourceCount =
     (input.fixed.variableSetIds?.length ?? Number(input.fixed.variableSetId !== null)) +
     Number(input.fixed.rigId !== null) +
@@ -297,14 +316,28 @@ export function usePersonalResourceAttachment(input: {
         "The selected personal-resource authority closure could not be verified. Retry or choose a non-personal resource.",
       )
     : null;
-  const effectiveError = positivelyPersonal ? (error ?? closureError) : null;
+  const activeSessionAuthorityRecovery =
+    sessionAuthorityRecovery?.identityKey === recoveryIdentityKey ? sessionAuthorityRecovery : null;
+  const sessionAuthorityRecoveryError =
+    activeSessionAuthorityRecovery?.status === "failed"
+      ? activeSessionAuthorityRecovery.error
+      : null;
+  const effectiveError = positivelyPersonal
+    ? (sessionAuthorityRecoveryError ?? error ?? closureError)
+    : null;
   const intent = scope
     ? buildPersonalResourceAttachmentIntent({
         mode,
         visibility,
         acknowledged,
         expectedAuthorityEpoch,
-        resourceCount: selected.closureUnverified ? 0 : selected.resourceCount,
+        resourceCount:
+          selected.closureUnverified ||
+          sourceLost ||
+          activeSessionAuthorityRecovery !== null ||
+          effectiveError !== null
+            ? 0
+            : selected.resourceCount,
       })
     : undefined;
   const requiresDecision =
@@ -312,31 +345,122 @@ export function usePersonalResourceAttachment(input: {
     (sourceLost ||
       (positivelyPersonal &&
         fixedResourceCount > 0 &&
-        (loading || refreshing || effectiveError !== null)) ||
-      (selected.resourceCount > 0 &&
-        (mode === null || (visibility === "workspace" && !acknowledged))));
-
-  const setMode = useCallback((next: PersonalAttachmentMode | null) => {
-    setModeState(next);
-    setSourceLost(false);
-    setNotice(null);
-    if (next === null) setAcknowledgedState(false);
-  }, []);
-  const setAcknowledged = useCallback((next: boolean) => {
-    setAcknowledgedState(next);
-    setNotice(null);
-  }, []);
-  const refresh = useCallback(async () => await load(true), [load]);
+        (loading ||
+          refreshing ||
+          activeSessionAuthorityRecovery !== null ||
+          effectiveError !== null)));
+  const recoverSessionAuthority = useCallback(
+    async (
+      attemptedAuthorityEpoch: number | undefined,
+      selectedResourceCount: number,
+    ): Promise<void> => {
+      const generation = ++recoveryGeneration.current;
+      setSessionAuthorityRecovery({
+        identityKey: recoveryIdentityKey,
+        expectedAuthorityEpoch: attemptedAuthorityEpoch,
+        selectedResourceCount,
+        status: "pending",
+        error: null,
+      });
+      setNotice("Session authority changed. Reloading personal resources before retrying.");
+      const [, reloadResult] = await Promise.allSettled([
+        load(true),
+        onReloadSession
+          ? onReloadSession()
+          : Promise.reject(new Error("Session reload is unavailable.")),
+      ]);
+      if (generation !== recoveryGeneration.current) return;
+      if (reloadResult.status === "rejected") {
+        setSessionAuthorityRecovery({
+          identityKey: recoveryIdentityKey,
+          expectedAuthorityEpoch: attemptedAuthorityEpoch,
+          selectedResourceCount,
+          status: "failed",
+          error: new Error("The session authority could not be refreshed. Retry before sending."),
+        });
+        setNotice("Session authority could not be refreshed. Retry before sending again.");
+        return;
+      }
+      // Give the parent session read one render turn to publish its new
+      // authority epoch before deciding whether the reload actually advanced.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      if (generation !== recoveryGeneration.current) return;
+      setSessionAuthorityRecovery({
+        identityKey: recoveryIdentityKey,
+        expectedAuthorityEpoch: attemptedAuthorityEpoch,
+        selectedResourceCount,
+        status: "reload_settled",
+        error: null,
+      });
+    },
+    [load, onReloadSession, recoveryIdentityKey],
+  );
+  useEffect(() => {
+    if (
+      activeSessionAuthorityRecovery === null ||
+      activeSessionAuthorityRecovery.status === "pending"
+    ) {
+      return;
+    }
+    if (
+      expectedAuthorityEpoch === activeSessionAuthorityRecovery.expectedAuthorityEpoch ||
+      expectedAuthorityEpoch === undefined
+    ) {
+      if (activeSessionAuthorityRecovery.status === "reload_settled") {
+        setSessionAuthorityRecovery({
+          ...activeSessionAuthorityRecovery,
+          status: "failed",
+          error: new Error("The session authority could not be refreshed. Retry before sending."),
+        });
+        setNotice("Session authority could not be refreshed. Retry before sending again.");
+      }
+      return;
+    }
+    // The epoch transition changes the catalog scope. Wait for that new-scope
+    // load, not the superseded request launched against the stale epoch.
+    if (
+      acceptedScopeKey.current !== scopeKey ||
+      settledCatalogScopeKey !== scopeKey ||
+      loading ||
+      refreshing
+    ) {
+      return;
+    }
+    if (selected.resourceCount < activeSessionAuthorityRecovery.selectedResourceCount) {
+      setSessionAuthorityRecovery(null);
+      setSourceLost(true);
+      setNotice(
+        "Access to the selected personal resource changed. Choose an available resource before submitting.",
+      );
+      return;
+    }
+    setSessionAuthorityRecovery(null);
+    setNotice("Session authority changed. Personal resources were reloaded before retrying.");
+  }, [
+    activeSessionAuthorityRecovery,
+    expectedAuthorityEpoch,
+    loading,
+    refreshing,
+    scopeKey,
+    selected.resourceCount,
+    settledCatalogScopeKey,
+  ]);
+  const refresh = useCallback(
+    async () =>
+      activeSessionAuthorityRecovery
+        ? await recoverSessionAuthority(
+            activeSessionAuthorityRecovery.expectedAuthorityEpoch,
+            activeSessionAuthorityRecovery.selectedResourceCount,
+          )
+        : await load(true),
+    [activeSessionAuthorityRecovery, load, recoverSessionAuthority],
+  );
   const onAccepted = useCallback(
     (acceptedInput: {
       personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
     }) => {
       if (!acceptedInput.personalResourceAttachment) return;
       setNotice("Personal-resource use was accepted for this work.");
-      if (acceptedInput.personalResourceAttachment.mode === "once") {
-        setModeState(null);
-        setAcknowledgedState(false);
-      }
       void load(true);
     },
     [load],
@@ -344,14 +468,12 @@ export function usePersonalResourceAttachment(input: {
   const onDeliveryError = useCallback(
     (deliveryError: Error, attemptedInput: PersonalResourceAttachmentAttempt) => {
       if (!isPersonalAttachmentConflict(deliveryError, attemptedInput)) return;
-      setModeState(null);
-      setAcknowledgedState(false);
-      setNotice(
-        "Session authority changed. Personal resources were reloaded; review and confirm them again before retrying.",
+      void recoverSessionAuthority(
+        attemptedInput.personalResourceAttachment?.expectedAuthorityEpoch,
+        selected.resourceCount,
       );
-      void Promise.all([load(true), onReloadSession?.() ?? Promise.resolve()]);
     },
-    [load, onReloadSession],
+    [recoverSessionAuthority, selected.resourceCount],
   );
 
   return {
@@ -361,7 +483,12 @@ export function usePersonalResourceAttachment(input: {
     // personal resource; an unavailable optional catalog must not turn an
     // ordinary new-session composer into an error state.
     loading: positivelyPersonal && fixedResourceCount > 0 && loading,
-    refreshing: positivelyPersonal && fixedResourceCount > 0 && refreshing,
+    refreshing:
+      positivelyPersonal &&
+      fixedResourceCount > 0 &&
+      (refreshing ||
+        activeSessionAuthorityRecovery?.status === "pending" ||
+        activeSessionAuthorityRecovery?.status === "reload_settled"),
     error: positivelyPersonal && fixedResourceCount > 0 ? effectiveError : null,
     notice,
     sourceLost,
@@ -369,13 +496,9 @@ export function usePersonalResourceAttachment(input: {
     catalog,
     selected,
     mode,
-    acknowledged,
     visibility,
-    warning: PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING,
     requiresDecision,
     intent,
-    setMode,
-    setAcknowledged,
     refresh,
     onAccepted,
     onDeliveryError,

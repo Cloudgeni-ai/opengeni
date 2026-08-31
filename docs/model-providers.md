@@ -104,7 +104,7 @@ The strict document rejects keys, billing, pricing policy, enabled flags,
 bands, unknown note IDs, duplicate product IDs, and reserved provider IDs.
 Notes are at most 500 characters and cannot contain a newline or `|`.
 
-Migration 0387 is a drained maintenance cutover because it changes the exact
+Migration 0388 is a drained maintenance cutover because it changes the exact
 runtime-posture table/grant contract. Stop every API and worker, supply the
 complete application-login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply the migration with the

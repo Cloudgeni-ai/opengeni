@@ -51,43 +51,17 @@ describe("personal resource attachments in Chromium", () => {
     await Promise.allSettled([browserContext?.close(), browser?.close(), web?.stop()]);
   }, 30_000);
 
-  test("create and Send/Steer require keyboard-operable mode plus exact shared warning", async () => {
+  test("create and Send/Steer use automatic message-only authority plus exact shared warning", async () => {
     const control = page.locator("[data-personal-resource-attachment]");
     expect(await control.first().ariaSnapshot()).toContain("Private deploy keys");
     expect(await control.first().locator("fieldset").count()).toBe(0);
     expect(await control.first().getByText("Your resource access").count()).toBe(0);
-    expect(
-      await control
-        .first()
-        .getByRole("radiogroup", { name: /Choose how long OpenGeni may use/ })
-        .count(),
-    ).toBe(1);
-    expect(await page.getByRole("button", { name: "Create session" }).isDisabled()).toBe(true);
-    expect(await control.first().getByRole("radio").count()).toBe(3);
-    await control
-      .first()
-      .getByRole("radio", { name: /Remember here/ })
-      .check();
-    expect(
-      await control
-        .first()
-        .getByRole("radio", { name: /Remember here/ })
-        .isChecked(),
-    ).toBe(true);
-
-    const once = control.first().getByRole("radio", { name: /This message/ });
-    await once.focus();
-    await page.keyboard.press("Space");
-    expect(await once.isChecked()).toBe(true);
-    const confirmation = control.first().getByRole("checkbox");
-    expect(await confirmation.isChecked()).toBe(false);
-    expect(await control.first().textContent()).toContain(
-      "outputs visible to other workspace members",
-    );
-    expect(await control.first().textContent()).toContain(
-      "credentials and secret values are not shared",
-    );
-    await confirmation.check();
+    expect(await control.first().getByRole("radiogroup").count()).toBe(0);
+    expect(await control.first().getByRole("radio").count()).toBe(0);
+    expect(await control.first().getByRole("checkbox").count()).toBe(0);
+    expect(await page.getByRole("button", { name: "Create session" }).isDisabled()).toBe(false);
+    expect(await control.first().textContent()).toContain("used only for messages you send");
+    expect(await control.first().textContent()).toContain("cannot use your credential");
     await page.getByRole("button", { name: "Create session" }).click();
     expect(JSON.parse((await page.getByTestId("create-receipt").textContent()) ?? "{}")).toEqual({
       mode: "once",
@@ -120,24 +94,17 @@ describe("personal resource attachments in Chromium", () => {
     );
   }, 60_000);
 
-  test("stale epoch, source loss and principal transition clear and fence attachment state", async () => {
+  test("stale epoch reloads automatically while source loss and principal transition fence state", async () => {
     await page.getByRole("button", { name: "Simulate stale epoch" }).click();
-    expect(await page.getByRole("button", { name: "Send" }).isDisabled()).toBe(true);
+    expect(await page.getByRole("button", { name: "Send" }).isDisabled()).toBe(false);
     expect(
       await page.getByRole("status").filter({ hasText: "Session authority changed" }).count(),
     ).toBeGreaterThan(0);
-
-    const sessionMode = page
-      .locator("[data-personal-resource-attachment]")
-      .first()
-      .getByRole("radio", { name: /This session/ });
-    await sessionMode.check();
-    await page.locator("[data-personal-resource-attachment]").first().getByRole("checkbox").check();
     await page.getByRole("button", { name: "Send" }).click();
     expect(
       JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}"),
     ).toMatchObject({
-      mode: "session",
+      mode: "once",
       expectedAuthorityEpoch: 4,
     });
 

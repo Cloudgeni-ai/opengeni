@@ -1788,7 +1788,7 @@ const HELM_APPLICATION_DRAIN_ARGS = [
   "--set migrations.enabled=false",
 ].join(" ");
 
-export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0387_model_catalog_and_gateway_custom_models";
+export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0388_model_catalog_and_gateway_custom_models";
 
 const MAINTENANCE_IMAGE_DIGEST_ENV = {
   api: "OPENGENI_API_IMAGE_DIGEST",
@@ -2367,7 +2367,7 @@ function planNotes(
   }
   if (requestedMaintenanceCutover(env)) {
     notes.push(
-      `This plan includes the explicit ${MODEL_CATALOG_MAINTENANCE_CUTOVER} application drain; keep the application stopped until migration 0387 and the final exact-digest upgrade succeed.`,
+      `This plan includes the explicit ${MODEL_CATALOG_MAINTENANCE_CUTOVER} application drain; keep the application stopped until migration 0388 and the final exact-digest upgrade succeed.`,
     );
   }
   return notes;

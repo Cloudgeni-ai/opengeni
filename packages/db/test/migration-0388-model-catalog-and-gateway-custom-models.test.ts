@@ -26,7 +26,7 @@ import {
 } from "../src/runtime-posture";
 
 const migrationUrl = new URL(
-  "../drizzle/0387_model_catalog_and_gateway_custom_models.sql",
+  "../drizzle/0388_model_catalog_and_gateway_custom_models.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -37,7 +37,7 @@ let client: DbClient | null = null;
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0384-model-catalog");
   if (!shared && requireRealDatabase) {
-    throw new Error("migration 0387 requires real PostgreSQL");
+    throw new Error("migration 0388 requires real PostgreSQL");
   }
   if (shared) client = createDb(shared.appUrl, { max: 8 });
 }, 180_000);
@@ -47,7 +47,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0387 model catalog and Gateway custom models", () => {
+describe("migration 0388 model catalog and Gateway custom models", () => {
   test("pins maintenance posture, runtime drain, least privilege, and secret-free storage", async () => {
     const migration = await readFile(migrationUrl, "utf8");
     expect(migration).toContain("-- deployment-mode: maintenance");
@@ -116,7 +116,7 @@ describe("migration 0387 model catalog and Gateway custom models", () => {
   test("uses the rotation role list only for drain detection", async () => {
     const rotation = await acquireSharedTestDatabase("migration-0384-role-rotation");
     if (!rotation) {
-      if (requireRealDatabase) throw new Error("migration 0387 requires real PostgreSQL");
+      if (requireRealDatabase) throw new Error("migration 0388 requires real PostgreSQL");
       return;
     }
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
@@ -173,7 +173,7 @@ describe("migration 0387 model catalog and Gateway custom models", () => {
         DROP TABLE deployment_model_catalog;
         DROP INDEX session_command_receipts_prompt_actor_operation_idx;
         DELETE FROM schema_migrations
-        WHERE name = '0387_model_catalog_and_gateway_custom_models.sql';
+        WHERE name = '0388_model_catalog_and_gateway_custom_models.sql';
       `);
 
       await migrate(rotation.adminUrl, undefined, {
