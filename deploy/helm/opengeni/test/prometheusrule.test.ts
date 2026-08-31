@@ -355,6 +355,35 @@ describe("turn-capacity Prometheus alerts", () => {
   });
 });
 
+describe("Codex pool Prometheus alerts", () => {
+  test("deduplicates low-pool counters by deployment and workspace", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+
+    for (const alertName of [
+      "OpenGeniCodexCredentialPoolEmpty",
+      "OpenGeniCodexCredentialPoolSingle",
+    ]) {
+      const expression = alertExpression(template, alertName);
+      expect(expression).toContain(
+        "sum by (namespace, release, environment, component, workspace_key)",
+      );
+      expect(expression).not.toContain("pod");
+      expect(expression).not.toContain("instance");
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+    }
+
+    expect(template).toContain('Workspace pool {{ "{{ $labels.workspace_key }}" }} observed zero');
+    expect(template).toContain(
+      'Workspace pool {{ "{{ $labels.workspace_key }}" }} observed exactly one',
+    );
+  });
+});
+
 function alertExpression(template: string, alertName: string): string {
   const marker = `- alert: ${alertName}\n`;
   const start = template.indexOf(marker);
