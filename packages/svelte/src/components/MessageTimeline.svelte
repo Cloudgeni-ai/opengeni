@@ -1,6 +1,6 @@
 <script lang="ts">
   import { buildTimeline, groupTimeline, type SessionEventStore } from "@opengeni/sdk/session";
-  import type { TimelineRendererRegistry } from "../renderers";
+  import type { AuthReconnectHandler, TimelineRendererRegistry } from "../renderers";
   import { readableFromController } from "../store";
   import HistoryControls from "./HistoryControls.svelte";
   import TimelineGroup from "./TimelineGroup.svelte";
@@ -9,10 +9,12 @@
     controller,
     label = "Session timeline",
     renderers,
+    onReconnect,
   }: {
     controller: SessionEventStore;
     label?: string;
     renderers?: TimelineRendererRegistry | undefined;
+    onReconnect?: AuthReconnectHandler | undefined;
   } = $props();
   let snapshot = $derived(readableFromController(controller, { owned: false }));
   let groups = $derived(groupTimeline(buildTimeline([...$snapshot.events])));
@@ -38,7 +40,7 @@
       <div class="og-timeline__empty">No session activity yet.</div>
     {:else}
       {#each groups as group (group.kind === "item" ? group.item.id : group.id)}
-        <TimelineGroup {group} {renderers} />
+        <TimelineGroup {group} {renderers} {onReconnect} />
       {/each}
     {/if}
     {#if $snapshot.error}<div class="og-error" role="alert">{$snapshot.error.message}</div>{/if}

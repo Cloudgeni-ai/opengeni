@@ -404,7 +404,6 @@ function fixtureEvents(): SessionEvent[] {
         connectionId: "connection-1",
         reason: "refresh_failed",
         scopes: ["pull_requests:write"],
-        authorizationUrl: "https://github.com/login/oauth/authorize",
       },
       20,
     ),

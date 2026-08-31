@@ -118,6 +118,9 @@ describe("native Svelte Mission Control demo", () => {
       await page.getByText("No React runtime crossed the native Svelte boundary.").count(),
     ).toBe(1);
     expect(await page.getByText("Estimated history tokens:", { exact: false }).count()).toBe(1);
+    const authNeeded = page.locator('[data-og-kind="auth-needed"]');
+    await authNeeded.getByRole("button", { name: "Reconnect", exact: true }).click();
+    expect(await page.locator("[data-reconnect-request]").textContent()).toContain("github.com");
 
     await assertAxeClean(page);
     expect(diagnostics).toEqual([]);

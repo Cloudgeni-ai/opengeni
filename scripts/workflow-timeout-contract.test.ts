@@ -204,6 +204,8 @@ describe("workflow timeout contract", () => {
     expect(soakSource).toContain("FRAMEWORK_UI_SOAK_DEFAULT_DURATION_MILLISECONDS");
     expect(soakSource).toContain("FRAMEWORK_UI_SOAK_TEST_HEADROOM_MILLISECONDS");
     expect(FRAMEWORK_UI_SOAK_TEST_HEADROOM_MILLISECONDS).toBe(5 * 60_000);
+    const shardRunner = await readFile(resolve(root, "scripts/ci/run-test-shard.ts"), "utf8");
+    expect(shardRunner).toContain("e2eShardWeights(process.cwd(), files)");
   });
 
   test("Playwright retry, cache, and dirlock cleanup behavior stays intact", async () => {

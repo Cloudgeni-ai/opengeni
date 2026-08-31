@@ -23,6 +23,10 @@ browser hydration.
 
 Controller readables subscribe directly to `@opengeni/sdk/session` snapshots. Set `owned: false` when adapting a host-owned controller; an owned readable starts on its first browser subscriber and destroys on final teardown. Server rendering is import-safe and does not start browser transports.
 
+Pass `onReconnect` to `MessageTimeline` or `SessionSurface` when the host owns
+connection setup. The typed callback receives the projected auth-needed item;
+pre-minted authorization URLs remain a fallback for hosts without a callback.
+
 The deployed reference demo defaults to deterministic data. `?mode=live&workspace=<id>&session=<id>` uses the same controllers through the server-owned `/demo-api` proxy.
 
 ## Entry points

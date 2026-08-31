@@ -23,11 +23,13 @@ export const INTEGRATION_SHARD_PROFILE = "scripts/ci/integration-shard-profile.j
 const TEST_SOURCE_DIRECTORIES = ["apps", "examples", "packages", "scripts", "test"];
 
 export type ShardWeightResolution = {
-  mode: "profile" | "source-bytes";
+  mode: "profile" | "policy" | "source-bytes";
   weights: ReadonlyMap<string, number> | null;
   reason: string;
   profileSha256: string | null;
 };
+
+export const FRAMEWORK_UI_SOAK_E2E_TEST = "test/e2e/framework-ui-soak.browser.e2e.ts";
 
 export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
   "test/integration/workspace-capture.integration.ts":
@@ -265,6 +267,39 @@ export function deterministicShards(
     shard.weight += item.weight;
   }
   return shards.map((shard) => shard.files.sort());
+}
+
+export function e2eShardWeights(
+  root = process.cwd(),
+  files: readonly string[] = discoverTestFiles(root).e2e,
+): ShardWeightResolution {
+  const unique = [...new Set(files)];
+  if (!unique.includes(FRAMEWORK_UI_SOAK_E2E_TEST)) {
+    return {
+      mode: "source-bytes",
+      weights: null,
+      reason: "E2E tier uses deterministic source-byte weights",
+      profileSha256: null,
+    };
+  }
+  const weights = new Map<string, number>();
+  let nonSoakTotal = 0;
+  for (const path of unique) {
+    if (path === FRAMEWORK_UI_SOAK_E2E_TEST) continue;
+    const weight = existsSync(join(root, path)) ? Math.max(1, statSync(join(root, path)).size) : 1;
+    weights.set(path, weight);
+    nonSoakTotal += weight;
+  }
+  // The greedy deterministic sharder cannot place another file beside a test
+  // whose weight exceeds the sum of every remaining file. This keeps the
+  // required 30-minute soak isolated without making the plan order-sensitive.
+  weights.set(FRAMEWORK_UI_SOAK_E2E_TEST, nonSoakTotal + 1);
+  return {
+    mode: "policy",
+    weights,
+    reason: "framework UI soak is reserved as an isolated E2E shard",
+    profileSha256: null,
+  };
 }
 
 export function integrationShardWeights(

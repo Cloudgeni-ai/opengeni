@@ -15,7 +15,9 @@ import {
   deterministicFileBatches,
   deterministicShards,
   discoverTestFiles,
+  e2eShardWeights,
   fileUsesProcessGlobalTestState,
+  FRAMEWORK_UI_SOAK_E2E_TEST,
   integrationShardWeights,
   OPT_IN_TESTS,
   typecheckProjects,
@@ -461,6 +463,19 @@ describe("deterministic bounded execution", () => {
     expect(second).toEqual(first);
     expect(first.flat().sort()).toEqual([...files].sort());
     expect(new Set(first.flat()).size).toBe(files.length);
+  });
+
+  test("the required framework UI soak is isolated from ordinary E2E files", () => {
+    const files = createImpactPlan(["scripts/ci/workspace.ts"]).e2eTests;
+    const planning = e2eShardWeights(process.cwd(), files);
+    expect(planning.mode).toBe("policy");
+    expect(planning.reason).toContain("isolated E2E shard");
+    const shards = deterministicShards(process.cwd(), files, 4, planning.weights ?? undefined);
+    const soakShard = shards.find((shard) => shard.includes(FRAMEWORK_UI_SOAK_E2E_TEST));
+    expect(soakShard).toEqual([FRAMEWORK_UI_SOAK_E2E_TEST]);
+
+    const ordinary = e2eShardWeights(process.cwd(), ["test/e2e/code-editor.browser.e2e.ts"]);
+    expect(ordinary).toMatchObject({ mode: "source-bytes", weights: null });
   });
 
   test("batching rejects unsafe sizes and preserves order", () => {

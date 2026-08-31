@@ -130,6 +130,11 @@ their first browser subscriber and retire after the final subscriber. Pass
 Imports and deterministic rendering remain SSR-safe; browser transports begin
 only after subscription/mount.
 
+Actionable `auth-needed` rows accept a host-owned `onReconnect` callback on
+`MessageTimeline` and `SessionSurface`. The callback receives the projected
+auth item so the host can route to OAuth or credential setup. A pre-minted
+authorization URL is used only as a fallback when no callback is supplied.
+
 The fixed native session UI boundary includes session status/chrome, timeline
 and history controls, composer and attachments, queue/control, approvals,
 structured human input, goals, model/reasoning/latency controls, and tool policy

@@ -71,3 +71,25 @@ test("composed control and demo tool-policy failures remain visible and authorit
   expect(demo).toContain("expectedVersion: toolPolicyVersion");
   expect(demo).toContain("adoptSessionPolicy(await client.getSession(workspaceId, sessionId))");
 });
+
+test("native auth-needed recovery stays host-owned and works without a pre-minted URL", () => {
+  const packageRoot = resolve(import.meta.dir, "..");
+  const timeline = readFileSync(join(packageRoot, "src/components/MessageTimeline.svelte"), "utf8");
+  const row = readFileSync(join(packageRoot, "src/components/TimelineRow.svelte"), "utf8");
+  const sessionSurface = readFileSync(
+    join(packageRoot, "src/components/SessionSurface.svelte"),
+    "utf8",
+  );
+  const demo = readFileSync(join(packageRoot, "demo/src/App.svelte"), "utf8");
+  const fixture = readFileSync(join(packageRoot, "demo/src/mock-client.ts"), "utf8");
+
+  expect(timeline).toContain("onReconnect?: AuthReconnectHandler");
+  expect(timeline).toContain("<TimelineGroup {group} {renderers} {onReconnect} />");
+  expect(sessionSurface).toContain(
+    "<MessageTimeline controller={controllers.events.controller} {onReconnect} />",
+  );
+  expect(row).toContain("authActionable(item) && onReconnect");
+  expect(row).toContain("await onReconnect(value)");
+  expect(demo).toContain("onReconnect={requestReconnect}");
+  expect(fixture).not.toContain('authorizationUrl: "https://github.com/login/oauth/authorize"');
+});

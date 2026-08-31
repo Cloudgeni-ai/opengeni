@@ -1,5 +1,6 @@
 <script lang="ts">
   import { OpenGeniClient, type Session } from "@opengeni/sdk";
+  import type { AuthNeededItem } from "@opengeni/sdk/session";
   import { onDestroy, onMount } from "svelte";
   import {
     LatencyPicker,
@@ -114,6 +115,7 @@
   let toolPolicyVersion = $state<number | null>(null);
   let toolPolicySaving = $state(false);
   let toolPolicyError = $state<string | null>(null);
+  let reconnectRequest = $state<string | null>(null);
   let theme = $state<"dark" | "light">("dark");
   let density = $state<"comfortable" | "compact">("comfortable");
   let navigationOpen = $state(false);
@@ -159,6 +161,10 @@
     } finally {
       toolPolicySaving = false;
     }
+  }
+
+  function requestReconnect(item: AuthNeededItem) {
+    reconnectRequest = `Connection setup requested for ${item.providerDomain}.`;
   }
 
   function closeDrawers() {
@@ -255,12 +261,14 @@
 
     <main class="mission-main">
       {#if toolPolicyError}<div class="mission-policy-error og-error" role="alert">Could not save session tools. {toolPolicyError}</div>{/if}
+      {#if reconnectRequest}<div data-reconnect-request role="status">{reconnectRequest}</div>{/if}
       <SessionSurface
         {controllers}
         models={modelOptions}
         tools={composerTools}
         {selectedTools}
         onToolsChange={(ids) => void saveSelectedTools(ids)}
+        onReconnect={requestReconnect}
       />
     </main>
 
