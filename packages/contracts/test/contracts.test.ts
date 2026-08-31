@@ -43,6 +43,7 @@ import {
   mergeToolRefs,
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
+  SCHEDULED_OCCURRENCE_TASK_LABEL,
   ModelContextContributionSummaries,
   McpServerConnectionRef,
   ModelBillingAttributionV1,
@@ -1452,8 +1453,89 @@ describe("contracts", () => {
       lineage: {},
     };
     const internal = sessionSystemUpdateBatchHistoryItem([update], goalSnapshot);
+    expect(internal.role).toBe("system");
     expect(internal.content).toStartWith(`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`);
     expect(internal.content).toContain("[OpenGeni internal updates]");
+  });
+
+  test("renders scheduled occurrences as fresh user-role task boundaries", () => {
+    const scheduledTaskId = "33333333-3333-4333-8333-333333333333";
+    const scheduledTaskRunId = "44444444-4444-4444-8444-444444444444";
+    const updateId = "55555555-5555-4555-8555-555555555555";
+    const completedGoal = {
+      state: "completed" as const,
+      goalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      objectiveRevision: 1,
+      text: "Review an earlier pull-request snapshot",
+      successCriteria: null,
+      rootConstraints: [],
+      mutationPolicy: "preserve_intent" as const,
+      capturedAt: "2026-08-31T05:00:00.000Z",
+    };
+    const completedGoalContext = renderSessionGoalContext(completedGoal)!;
+    const scheduled = sessionSystemUpdateBatchHistoryItem(
+      [
+        {
+          id: updateId,
+          kind: "scheduled_occurrence",
+          classification: "info",
+          sourceId: scheduledTaskRunId,
+          summary: "Review and merge pull requests",
+          payload: {
+            type: "scheduled_occurrence",
+            text: "Review every currently open pull request and merge the approved ones.",
+            scheduledTaskId,
+            scheduledTaskRunId,
+          },
+          lineage: {
+            scheduledTaskId,
+            scheduledTaskRunId,
+            causalHumanSubjectId: "user:owner",
+          },
+        },
+      ],
+      completedGoal,
+    );
+
+    expect(scheduled.role).toBe("user");
+    expect(scheduled.content).toStartWith(`${SESSION_GOAL_CONTEXT_LABEL}\n${completedGoalContext}`);
+    expect(scheduled.content.indexOf(SCHEDULED_OCCURRENCE_TASK_LABEL)).toBeGreaterThan(
+      scheduled.content.indexOf(SESSION_GOAL_CONTEXT_LABEL),
+    );
+    expect(scheduled.content).toContain(SCHEDULED_OCCURRENCE_TASK_LABEL);
+    expect(scheduled.content).toContain("Execute the instructions below for this occurrence now.");
+    expect(scheduled.content).toContain(`Scheduled task ID: ${scheduledTaskId}`);
+    expect(scheduled.content).toContain(`Scheduled task run ID: ${scheduledTaskRunId}`);
+    expect(scheduled.content).toContain(`Update ID: ${updateId}`);
+    expect(scheduled.content).toContain(
+      "Review every currently open pull request and merge the approved ones.",
+    );
+    expect(scheduled.content).toContain("Earlier completed goals");
+    expect(scheduled.content).toContain("query that state during this occurrence");
+    expect(scheduled.content).not.toContain("[OpenGeni internal updates]");
+    expect(scheduled.content).not.toContain("They are not human prompts");
+  });
+
+  test("keeps inconsistent scheduled occurrence identity on the system update path", () => {
+    const scheduled = sessionSystemUpdateBatchHistoryItem([
+      {
+        id: "66666666-6666-4666-8666-666666666666",
+        kind: "scheduled_occurrence",
+        classification: "info",
+        sourceId: "77777777-7777-4777-8777-777777777777",
+        summary: "Malformed legacy occurrence",
+        payload: {
+          type: "scheduled_occurrence",
+          text: "Do not manufacture authority.",
+          scheduledTaskId: "88888888-8888-4888-8888-888888888888",
+          scheduledTaskRunId: "99999999-9999-4999-8999-999999999999",
+        },
+        lineage: {},
+      },
+    ]);
+
+    expect(scheduled.role).toBe("system");
+    expect(scheduled.content).toContain("[OpenGeni internal updates]");
   });
 
   test("accepts client config payloads", () => {

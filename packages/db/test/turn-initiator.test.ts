@@ -822,7 +822,7 @@ describe("immutable session turn initiators", () => {
       ...sessionInput(grant),
       createdBy: { kind: "service", subjectId: "scheduler" },
     });
-    const { runId: scheduledRunId } = await addAcceptedScheduledOccurrence(
+    const { taskId: scheduledTaskId, runId: scheduledRunId } = await addAcceptedScheduledOccurrence(
       grant,
       scheduledTarget.id,
     );
@@ -842,7 +842,23 @@ describe("immutable session turn initiators", () => {
       label: "OpenGeni scheduler",
     });
     expect(scheduledClaim.turn.initiatingHumanSubjectId).toBeNull();
+    expect(scheduledClaim.turn.scheduledTaskRunId).toBe(scheduledRunId);
     expect(scheduledClaim.turn.initiatorContext.scheduledRunIds).toEqual([scheduledRunId]);
+    const [scheduledHistory] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ item: schema.sessionHistoryItems.item })
+        .from(schema.sessionHistoryItems)
+        .where(eq(schema.sessionHistoryItems.turnId, scheduledClaim.turn.id)),
+    );
+    expect(scheduledHistory?.item).toMatchObject({ type: "message", role: "user" });
+    const scheduledHistoryContent = scheduledHistory?.item.content;
+    if (typeof scheduledHistoryContent !== "string") {
+      throw new Error("Scheduled occurrence history item has no text content");
+    }
+    expect(scheduledHistoryContent).toContain("[OpenGeni scheduled task occurrence]");
+    expect(scheduledHistoryContent).toContain(`Scheduled task ID: ${scheduledTaskId}`);
+    expect(scheduledHistoryContent).toContain(`Scheduled task run ID: ${scheduledRunId}`);
+    expect(scheduledHistoryContent).toContain("Instructions:\nScheduled work");
 
     const mixedTarget = await createSession(client.db, sessionInput(grant));
     const goal = await createSessionGoal(client.db, {

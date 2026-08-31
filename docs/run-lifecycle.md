@@ -15,12 +15,18 @@ internal-update batch is processed until the agent reaches a natural stopping
 point. Human/API prompts remain the only reorderable prompt rows. The same
 compact queue surface also projects canonical pending machine inputs, attached
 to the prompt they will join or grouped as standalone incoming updates. Goals,
-schedules, child results, and lifecycle notices never impersonate human
-messages. Codex capacity recovery preserves the current logical turn directly
-and is neither a queue row nor an internal update. One execution attempt runs as
-one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
-OpenAI Agents SDK loop makes as many model calls and tool calls as the work
-needs.
+child results, and lifecycle notices remain internal machine inputs. A claimed
+pure scheduled-occurrence batch is the deliberate model-facing exception: its
+durable history item uses the `user` role so the model receives a fresh task
+boundary, with exact task/run/update ids and an instruction to refresh mutable
+external state. That conversational role never impersonates a human in backend
+authority: the turn initiator remains the scheduler service and its frozen
+causal-human, personal-connection, provider-account, audit, and settlement
+facts remain unchanged. Codex capacity recovery preserves the current logical
+turn directly and is neither a queue row nor an internal update. One execution
+attempt runs as one non-retryable Temporal `runAgentTurn` activity. Inside the
+activity the OpenAI Agents SDK loop makes as many model calls and tool calls as
+the work needs.
 
 Session display titles are durable session metadata, not a truncation of model
 history. Creation and migration use `New conversation` as the durable marker
