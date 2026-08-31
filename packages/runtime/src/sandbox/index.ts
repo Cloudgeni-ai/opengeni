@@ -300,6 +300,11 @@ export {
   type ProvisionBrowserControlClientInput,
   type ProvisionBrowserControlClientResult,
   type RestorePlacementBrowserStateInput,
+  type TrustedRigPlatformSurface,
+  type TrustedRigPlatformSurfaceBinding,
+  type TrustedRigPlatformSurfaceController,
+  type TrustedRigPlatformSurfaceOperation,
+  type TrustedRigPlatformTerminalProbe,
 } from "./browser-control-client";
 
 // Host-owned rotating run credentials. Material lives outside the persisted

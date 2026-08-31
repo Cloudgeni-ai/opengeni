@@ -27,6 +27,9 @@ describe("migration 0387 fail-closed Rig activation", () => {
     expect(source).toContain("binding' ->> 'sandboxGroupId'");
     expect(source).toContain("binding' ->> 'rigVersionId'");
     expect(source).toContain("receipt' ->> 'version' IS DISTINCT FROM '2'");
+    expect(source).toContain("provenance' ->> 'authority'");
+    expect(source).toContain("deployment_control_plane");
+    expect(source).toContain("provenance' ->> 'providerImage'");
   });
 
   test("removes complete obsolete artifact references while preserving current proof", () => {

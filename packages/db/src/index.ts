@@ -173,7 +173,7 @@ import type {
   WorkDiscoveryProjection,
 } from "@opengeni/contracts";
 import {
-  RIG_PLATFORM_SURFACE_VALIDATION_VERSION,
+  hasTrustedRigPlatformSurfaceValidationProvenance,
   RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptSchema,
   type RigPlatformSurfaceValidationReceipt,
 } from "@opengeni/contracts/rig-platform-surface-validation";
@@ -19200,7 +19200,7 @@ export async function createRigVersionForChangePromotion(
         : null;
     if (
       !validationReceipt?.success ||
-      validationReceipt.data.version !== RIG_PLATFORM_SURFACE_VALIDATION_VERSION ||
+      !hasTrustedRigPlatformSurfaceValidationProvenance(validationReceipt.data) ||
       validationReceipt.data.binding.sandboxGroupId !== changeId ||
       validationReceipt.data.binding.rigVersionId !== changeId
     ) {
@@ -19830,7 +19830,7 @@ export async function activateRigVersion(
           : null;
       if (
         !receipt?.success ||
-        receipt.data.version !== RIG_PLATFORM_SURFACE_VALIDATION_VERSION ||
+        !hasTrustedRigPlatformSurfaceValidationProvenance(receipt.data) ||
         receipt.data.binding.sandboxGroupId !== versionId ||
         receipt.data.binding.rigVersionId !== versionId
       ) {
@@ -20326,7 +20326,7 @@ export async function completeRigVersionVerification(
 ): Promise<{ version: RigVersion; applied: boolean; activated: boolean; stale: boolean }> {
   const receipt = RigPlatformSurfaceValidationReceiptSchema.parse(input.receipt);
   if (
-    receipt.version !== RIG_PLATFORM_SURFACE_VALIDATION_VERSION ||
+    !hasTrustedRigPlatformSurfaceValidationProvenance(receipt) ||
     receipt.binding.sandboxGroupId !== input.versionId ||
     receipt.binding.rigVersionId !== input.versionId
   ) {

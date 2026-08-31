@@ -50,7 +50,11 @@ type FailureMode =
   | "computer_cleanup"
   | "controller_cleanup"
   | "lease_epoch_mismatch"
-  | "provider_instance_mismatch";
+  | "provider_instance_mismatch"
+  | "lease_image_mismatch"
+  | "trusted_authority_missing"
+  | "trusted_authority_mismatch"
+  | "trusted_image_mismatch";
 
 function lease(overrides: Partial<LeaseSnapshot> = {}): LeaseSnapshot {
   return {
@@ -386,24 +390,10 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       const current = lease({
         ...(mode === "lease_epoch_mismatch" ? { leaseEpoch: 9 } : {}),
         ...(mode === "provider_instance_mismatch" ? { instanceId: "sandbox-other" } : {}),
+        ...(mode === "lease_image_mismatch" ? { image: "example.invalid/opengeni:other" } : {}),
       });
       readBindings.push(current);
       return current;
-    },
-    provisionController: async (
-      session: unknown,
-      options: { timeoutMs?: number; signal?: AbortSignal },
-    ) => {
-      events.push("controller:provision");
-      operationOptions.push({ stage: "controller:provision", ...options });
-      expect(session).toBe(established.session);
-      return { client: controller };
-    },
-    tearDownController: async (session: unknown, options?: { timeoutMs?: number }) => {
-      events.push("controller:down");
-      operationOptions.push({ stage: "controller:down", ...options });
-      expect(session).toBe(established.session);
-      if (mode === "controller_cleanup") throw new Error("controller cleanup failed");
     },
     randomUUID: () => uuids[uuidIndex++]!,
     checkedAt: () => CHECKED_AT,
@@ -413,9 +403,68 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
         : { format: "png", width: 1, height: 1 },
   } as unknown as RigPlatformSurfaceValidationDependencies;
 
+  let mutableExecCalls = 0;
+  const trustedSurface = {
+    binding: {
+      authority: "deployment_control_plane" as const,
+      backendId: "modal",
+      instanceId: mode === "trusted_authority_mismatch" ? "sandbox-other" : "sandbox-exact",
+      providerImage:
+        mode === "trusted_image_mismatch"
+          ? "example.invalid/opengeni:other"
+          : "example.invalid/opengeni:test",
+    },
+    runTerminalProbe: async (options: { timeoutMs: number; signal?: AbortSignal }) => {
+      events.push("terminal:command");
+      operationOptions.push({ stage: "terminal:command", ...options });
+      if (mode === "terminal") {
+        return {
+          cwd: "/workspace",
+          uid: 0,
+          bunVersion: "0.0.0",
+          interactive: true,
+        } as never;
+      }
+      return {
+        cwd: "/workspace" as const,
+        uid: 0 as const,
+        bunVersion: "1.4.0" as const,
+        interactive: true as const,
+      };
+    },
+    provisionController: async (options: {
+      timeoutMs: number;
+      signal?: AbortSignal;
+      backendId: string;
+      instanceId: string;
+      providerImage: string;
+    }) => {
+      events.push("controller:provision");
+      operationOptions.push({ stage: "controller:provision", ...options });
+      expect(options).toMatchObject({
+        backendId: "modal",
+        instanceId: "sandbox-exact",
+        providerImage: "example.invalid/opengeni:test",
+      });
+      return { client: controller };
+    },
+    tearDownController: async (options: { timeoutMs: number }) => {
+      events.push("controller:down");
+      operationOptions.push({ stage: "controller:down", ...options });
+      if (mode === "controller_cleanup") throw new Error("controller cleanup failed");
+    },
+  };
   const established: EstablishedSandboxSession = {
     client: {},
-    session: { exec: async () => ({ exitCode: 0 }) },
+    session: {
+      exec: async () => {
+        mutableExecCalls += 1;
+        return { exitCode: 0, output: "forged success" };
+      },
+      ...(mode === "trusted_authority_missing"
+        ? {}
+        : { trustedRigPlatformSurface: trustedSurface }),
+    },
     sessionState: {},
     instanceId: "sandbox-exact",
     backendId: "modal",
@@ -430,17 +479,8 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
     workspaceId: WORKSPACE_ID,
     sandboxGroupId: GROUP_ID,
     rigVersionId: VERSION_ID,
+    providerImage: "example.invalid/opengeni:test",
     established,
-    commandRunner: async (session, command) => {
-      events.push("terminal:command");
-      expect(session).toBe(established.session);
-      expect(command).toMatchObject({ workdir: "/workspace", runAs: "root", tty: true });
-      if (mode === "terminal") return { exitCode: 1, output: "terminal failed" };
-      return {
-        exitCode: 0,
-        output: "cwd=/workspace\nuid=0\nbun=1.4.0\ninteractive=yes\n",
-      };
-    },
     ownership: {
       leaseId: LEASE_ID,
       sandboxGroupId: GROUP_ID,
@@ -458,7 +498,15 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
         }
       : {}),
   };
-  return { dependencies, input, events, readBindings, operationOptions, lifecycleAbort };
+  return {
+    dependencies,
+    input,
+    events,
+    readBindings,
+    operationOptions,
+    lifecycleAbort,
+    mutableExecCalls: () => mutableExecCalls,
+  };
 }
 
 describe("mandatory Rig platform surface validation", () => {
@@ -473,6 +521,10 @@ describe("mandatory Rig platform surface validation", () => {
       instanceId: "sandbox-exact",
       backendId: "modal",
       rigVersionId: VERSION_ID,
+    });
+    expect(receipt.provenance).toEqual({
+      authority: "deployment_control_plane",
+      providerImage: "example.invalid/opengeni:test",
     });
     expect(receipt.terminal.status).toBe("passed");
     expect(receipt.browser.status).toBe("passed");
@@ -535,6 +587,10 @@ describe("mandatory Rig platform surface validation", () => {
     ["controller_cleanup", "controller cleanup failed"],
     ["lease_epoch_mismatch", "binding changed"],
     ["provider_instance_mismatch", "binding changed"],
+    ["lease_image_mismatch", "binding changed"],
+    ["trusted_authority_missing", "no deployment-owned"],
+    ["trusted_authority_mismatch", "another provider binding"],
+    ["trusted_image_mismatch", "another provider binding"],
   ] as const) {
     test(`fails closed for ${mode}`, async () => {
       const state = harness(mode);
@@ -543,6 +599,16 @@ describe("mandatory Rig platform surface validation", () => {
       ).rejects.toThrow(message);
     });
   }
+
+  test("root-owned in-box command shims cannot manufacture a trusted receipt", async () => {
+    const state = harness("trusted_authority_missing");
+    await expect(runRigPlatformSurfaceValidation(state.input, state.dependencies)).rejects.toThrow(
+      "no deployment-owned",
+    );
+    expect(state.mutableExecCalls()).toBe(0);
+    expect(state.events).not.toContain("terminal:command");
+    expect(state.events).not.toContain("controller:provision");
+  });
 
   test("still ends browser and controller when computer creation is unsupported", async () => {
     const state = harness("computer_unsupported");

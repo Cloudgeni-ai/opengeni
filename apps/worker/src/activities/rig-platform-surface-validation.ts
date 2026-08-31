@@ -14,20 +14,16 @@ import {
 } from "@opengeni/contracts/rig-platform-surface-validation";
 import { readLease, type Database, type LeaseSnapshot } from "@opengeni/db";
 import {
-  provisionBrowserControlClient,
-  sandboxCommandExitCode,
-  sandboxCommandOutput,
-  tearDownBrowserControlServer,
   validateComputerControlFrameEvidence,
-  type BrowserControlClient,
   type BrowserControlRequestOptions,
   type BrowserControlPlacementSession,
   type ComputerControlFrame,
   type EstablishedSandboxSession,
   type PlacementBrowserSession,
   type PlacementComputerSession,
-  type TurnSandboxCommandArgs,
-  type TurnSandboxCommandSession,
+  type TrustedRigPlatformSurface,
+  type TrustedRigPlatformSurfaceController,
+  type TrustedRigPlatformSurfaceOperation,
 } from "@opengeni/runtime/sandbox";
 import sharp from "sharp";
 
@@ -35,31 +31,14 @@ const TERMINAL_EXPECTED_BUN_VERSION = "1.4.0";
 const SURFACE_TARGET_URL =
   "data:text/html,<title>OpenGeni Rig Surface Validation</title><main id=opengeni-rig-surface>ready</main>";
 
-type CommandRunner = (
-  session: TurnSandboxCommandSession,
-  args: TurnSandboxCommandArgs,
-) => Promise<unknown>;
-
-type BrowserSessionClient = ReturnType<BrowserControlClient["sessionClient"]>;
-type ComputerSessionClient = ReturnType<BrowserControlClient["computerSessionClient"]>;
-
-type SurfaceController = Pick<
-  BrowserControlClient,
-  | "createSession"
-  | "sessionClient"
-  | "endSession"
-  | "createComputerSession"
-  | "computerSessionClient"
-  | "endComputerSession"
+type BrowserSessionClient = ReturnType<TrustedRigPlatformSurfaceController["sessionClient"]>;
+type ComputerSessionClient = ReturnType<
+  TrustedRigPlatformSurfaceController["computerSessionClient"]
 >;
+type SurfaceController = TrustedRigPlatformSurfaceController;
 
 export type RigPlatformSurfaceValidationDependencies = {
   readLease: typeof readLease;
-  provisionController: (
-    session: BrowserControlPlacementSession,
-    input: Parameters<typeof provisionBrowserControlClient>[1],
-  ) => Promise<{ client: SurfaceController }>;
-  tearDownController: (session: unknown, options?: BrowserControlRequestOptions) => Promise<void>;
   randomUUID: () => string;
   checkedAt: () => string;
   inspectImage: (data: Uint8Array) => Promise<{
@@ -71,10 +50,6 @@ export type RigPlatformSurfaceValidationDependencies = {
 
 const defaultDependencies: RigPlatformSurfaceValidationDependencies = {
   readLease,
-  provisionController: async (session, input) =>
-    await provisionBrowserControlClient(session, input),
-  tearDownController: async (session, options) =>
-    await tearDownBrowserControlServer(session, options),
   randomUUID,
   checkedAt: () => new Date().toISOString(),
   inspectImage: async (data) => {
@@ -93,8 +68,8 @@ export type RigPlatformSurfaceValidationInput = {
   workspaceId: string;
   sandboxGroupId: string;
   rigVersionId: string;
+  providerImage: string;
   established: EstablishedSandboxSession;
-  commandRunner: CommandRunner;
   ownership: {
     leaseId: string;
     leaseEpoch: number;
@@ -146,11 +121,59 @@ function assertLeaseBinding(
     lease.instanceId !== expected.instanceId ||
     lease.instanceId !== input.established.instanceId ||
     lease.backend !== input.established.backendId ||
+    lease.image !== input.providerImage ||
     lease.rigVersionId !== input.rigVersionId ||
     lease.liveness !== "warm"
   ) {
     throw validationError("the verifier sandbox/provider/lease binding changed");
   }
+}
+
+function trustedSurface(input: RigPlatformSurfaceValidationInput): TrustedRigPlatformSurface {
+  const surface = (input.established.session as BrowserControlPlacementSession)
+    .trustedRigPlatformSurface;
+  if (!surface) {
+    throw validationError(
+      "the provider exposes no deployment-owned platform-surface validation authority",
+    );
+  }
+  if (
+    surface.binding.authority !== "deployment_control_plane" ||
+    surface.binding.backendId !== input.established.backendId ||
+    surface.binding.instanceId !== input.established.instanceId ||
+    surface.binding.providerImage !== input.providerImage
+  ) {
+    throw validationError("the deployment-owned validation authority has another provider binding");
+  }
+  return surface;
+}
+
+function trustedOperation(
+  input: RigPlatformSurfaceValidationInput,
+  cleanup = false,
+): TrustedRigPlatformSurfaceOperation {
+  const options = cleanup ? cleanupOptions(input) : workOptions(input);
+  return {
+    backendId: input.established.backendId,
+    instanceId: input.established.instanceId,
+    providerImage: input.providerImage,
+    leaseId: input.ownership.leaseId,
+    leaseEpoch: input.ownership.leaseEpoch,
+    workspaceGeneration: input.ownership.workspaceGeneration,
+    sandboxGroupId: input.sandboxGroupId,
+    rigVersionId: input.rigVersionId,
+    timeoutMs: options.timeoutMs!,
+    ...(cleanup
+      ? input.lifecycle?.cleanupDeadlineAtMs == null
+        ? {}
+        : { deadlineAtMs: input.lifecycle.cleanupDeadlineAtMs }
+      : {
+          ...(input.lifecycle?.workDeadlineAtMs == null
+            ? {}
+            : { deadlineAtMs: input.lifecycle.workDeadlineAtMs }),
+          ...(options.signal ? { signal: options.signal } : {}),
+        }),
+  };
 }
 
 async function assertExactBinding(
@@ -367,35 +390,19 @@ async function endComputerSession(
 async function validateTerminal(
   input: RigPlatformSurfaceValidationInput,
   dependencies: RigPlatformSurfaceValidationDependencies,
+  surface: TrustedRigPlatformSurface,
 ): Promise<RigPlatformSurfaceValidationReceiptValue["terminal"]> {
   if (!input.settings.sandboxTerminalEnabled) return { status: "disabled" };
   await assertExactBinding(input, dependencies);
-  const result = await input.commandRunner(input.established.session as TurnSandboxCommandSession, {
-    cmd: [
-      "set -eu",
-      'test "$(id -u)" = 0',
-      'test "$(pwd -P)" = /workspace',
-      "test -t 0",
-      `test "$(bun --version)" = ${TERMINAL_EXPECTED_BUN_VERSION}`,
-      `bun -e 'if (Bun.version !== "${TERMINAL_EXPECTED_BUN_VERSION}") process.exit(1)'`,
-      `printf 'cwd=%s\\nuid=%s\\nbun=%s\\ninteractive=yes\\n' "$(pwd -P)" "$(id -u)" "$(bun --version)"`,
-    ].join("\n"),
-    workdir: "/workspace",
-    runAs: "root",
-    tty: true,
-    yieldTimeMs: remainingWorkMs(input),
-    maxOutputTokens: 4_000,
-  });
+  const result = await surface.runTerminalProbe(trustedOperation(input));
   await assertExactBinding(input, dependencies);
-  const output = sandboxCommandOutput(result);
   if (
-    sandboxCommandExitCode(result) !== 0 ||
-    !output.includes("cwd=/workspace") ||
-    !output.includes("uid=0") ||
-    !output.includes(`bun=${TERMINAL_EXPECTED_BUN_VERSION}`) ||
-    !output.includes("interactive=yes")
+    result.cwd !== "/workspace" ||
+    result.uid !== 0 ||
+    result.bunVersion !== TERMINAL_EXPECTED_BUN_VERSION ||
+    result.interactive !== true
   ) {
-    throw validationError("the real interactive root terminal command path did not pass");
+    throw validationError("the deployment-owned interactive root terminal probe did not pass");
   }
   return {
     status: "passed",
@@ -641,7 +648,8 @@ export async function runRigPlatformSurfaceValidation(
   dependencies: RigPlatformSurfaceValidationDependencies = defaultDependencies,
 ): Promise<RigPlatformSurfaceValidationReceiptValue> {
   await assertExactBinding(input, dependencies);
-  const terminal = await validateTerminal(input, dependencies);
+  const surface = trustedSurface(input);
+  const terminal = await validateTerminal(input, dependencies, surface);
   const generation = controllerGeneration(input);
   const adminToken = token("admin", dependencies.randomUUID());
   let controller: SurfaceController | undefined;
@@ -653,14 +661,11 @@ export async function runRigPlatformSurfaceValidation(
     await assertExactBinding(input, dependencies);
     controllerProvisionAttempted = true;
     controller = (
-      await dependencies.provisionController(
-        input.established.session as BrowserControlPlacementSession,
-        {
-          adminToken,
-          allowedOrigins: [],
-          ...workOptions(input),
-        },
-      )
+      await surface.provisionController({
+        ...trustedOperation(input),
+        adminToken,
+        allowedOrigins: [],
+      })
     ).client;
     await assertExactBinding(input, dependencies);
     const browser = await validateBrowser(input, dependencies, controller, generation);
@@ -678,6 +683,10 @@ export async function runRigPlatformSurfaceValidation(
         backendId: input.established.backendId,
         rigVersionId: input.rigVersionId,
       },
+      provenance: {
+        authority: surface.binding.authority,
+        providerImage: input.providerImage,
+      },
       terminal,
       browser,
       computer,
@@ -691,7 +700,7 @@ export async function runRigPlatformSurfaceValidation(
   if (controllerProvisionAttempted) {
     try {
       await assertExactBinding(input, dependencies);
-      await dependencies.tearDownController(input.established.session, cleanupOptions(input));
+      await surface.tearDownController(trustedOperation(input, true));
       await assertExactBinding(input, dependencies);
     } catch (error) {
       cleanup = error;

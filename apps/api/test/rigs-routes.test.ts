@@ -144,6 +144,10 @@ function surfaceReceipt(versionId: string, sandboxGroupId = versionId) {
       backendId: "modal",
       rigVersionId: versionId,
     },
+    provenance: {
+      authority: "deployment_control_plane" as const,
+      providerImage: "example.invalid/opengeni:test",
+    },
     terminal: {
       status: "passed" as const,
       cwd: "/workspace" as const,
@@ -655,6 +659,25 @@ describe("rig route permission matrix", () => {
     expect(failedDispatches[0]?.workflowId).toBe(
       `rig-verification-version-${activeVersion.id}-attempt-${failedDispatches[0]?.attemptId}`,
     );
+    const audits = await shared!.admin<
+      Array<{ subject_id: string | null; metadata: Record<string, unknown> }>
+    >`
+      select subject_id, metadata from audit_events
+      where workspace_id = ${ws.workspaceId}
+        and action = 'rig.version.verification.requested'
+        and metadata ->> 'versionId' = ${activeVersion.id}
+      order by occurred_at asc
+    `;
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      subject_id: "user:u",
+      metadata: {
+        rigId: rig.id,
+        versionId: activeVersion.id,
+        attemptId: failedDispatches[0]!.attemptId,
+        expectedActiveVersionId: activeVersion.id,
+      },
+    });
   });
 
   test("exact version verification is manager-only and use-only denial has zero side effects", async () => {

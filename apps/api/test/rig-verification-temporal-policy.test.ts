@@ -21,7 +21,10 @@ describe("Rig verification Temporal dispatch policy", () => {
     expect(automation).not.toContain("ALLOW_DUPLICATE_FAILED_ONLY");
     expect(rigVerification).toContain('workflowIdReusePolicy: "REJECT_DUPLICATE"');
     expect(rigVerification).not.toContain("ALLOW_DUPLICATE_FAILED_ONLY");
-    expect(dispatchSource).toContain('status !== "FAILED"');
+    expect(dispatchSource).toContain("rigVerificationClosedStatusRequiresNewGeneration(status)");
+    for (const status of ["FAILED", "CANCELED", "CANCELLED", "TERMINATED", "TIMED_OUT"]) {
+      expect(dispatchSource).toContain(`normalized === "${status}"`);
+    }
     expect(dispatchSource).toContain("advanceExecutionGeneration");
   });
 });

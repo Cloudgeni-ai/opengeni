@@ -36,6 +36,32 @@ export function rigVerificationPhysicalWorkflowId(
   return `${logicalWorkflowId}-generation-${executionGeneration}`;
 }
 
+function normalizedWorkflowStatus(status: string): string {
+  return status
+    .trim()
+    .toUpperCase()
+    .replace(/^WORKFLOW_EXECUTION_STATUS_/u, "")
+    .replace(/[ -]+/gu, "_");
+}
+
+export function rigVerificationClosedStatusRequiresNewGeneration(status: string): boolean {
+  const normalized = normalizedWorkflowStatus(status);
+  if (
+    normalized === "FAILED" ||
+    normalized === "CANCELED" ||
+    normalized === "CANCELLED" ||
+    normalized === "TERMINATED" ||
+    normalized === "TIMED_OUT" ||
+    normalized === "TIMEDOUT"
+  ) {
+    return true;
+  }
+  if (normalized === "RUNNING" || normalized === "COMPLETED" || normalized === "CONTINUED_AS_NEW") {
+    return false;
+  }
+  throw new Error(`Unsupported Rig verification workflow status: ${status}`);
+}
+
 /**
  * Dispatch one logical verification attempt through immutable physical runs.
  * A failed run advances the database generation before another physical ID can
@@ -63,9 +89,9 @@ export async function dispatchRigVerification(
     }
 
     const status = await dependencies.describeStatus(physicalWorkflowId);
-    if (status !== "FAILED") {
-      // Running and every non-failed terminal state are idempotent dispatch
-      // acknowledgements for this physical generation.
+    if (!rigVerificationClosedStatusRequiresNewGeneration(status)) {
+      // Running and successful duplicates are idempotent acknowledgements for
+      // this physical generation. Every unsuccessful closed run advances.
       return;
     }
     executionGeneration = await dependencies.advanceExecutionGeneration({

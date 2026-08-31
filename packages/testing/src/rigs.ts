@@ -22,6 +22,10 @@ export function testRigSurfaceReceipt(versionId: string): RigPlatformSurfaceVali
       backendId: "docker",
       rigVersionId: versionId,
     },
+    provenance: {
+      authority: "deployment_control_plane",
+      providerImage: "example.invalid/opengeni:test",
+    },
     terminal: { status: "disabled" },
     browser: {
       status: "passed",

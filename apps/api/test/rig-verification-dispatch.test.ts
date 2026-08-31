@@ -16,22 +16,79 @@ const input = {
 class AlreadyStartedError extends Error {}
 
 describe("Rig verification physical dispatch", () => {
-  test("a running duplicate is an idempotent acknowledgement", async () => {
+  for (const status of ["RUNNING", "COMPLETED", "CONTINUED_AS_NEW"] as const) {
+    test(`${status} duplicate is an idempotent acknowledgement`, async () => {
+      const starts: string[] = [];
+      let advances = 0;
+      await dispatchRigVerification(input, {
+        getCurrentExecutionGeneration: async () => 1,
+        advanceExecutionGeneration: async () => {
+          advances += 1;
+          return 2;
+        },
+        start: async ({ physicalWorkflowId }) => {
+          starts.push(physicalWorkflowId);
+          throw new AlreadyStartedError();
+        },
+        describeStatus: async () => status,
+        isAlreadyStarted: (error) => error instanceof AlreadyStartedError,
+      });
+      expect(starts).toEqual([rigVerificationPhysicalWorkflowId(input.workflowId, 1)]);
+      expect(advances).toBe(0);
+    });
+  }
+
+  for (const status of [
+    "FAILED",
+    "CANCELED",
+    "CANCELLED",
+    "TERMINATED",
+    "TIMED_OUT",
+    "WORKFLOW_EXECUTION_STATUS_TIMED_OUT",
+  ] as const) {
+    test(`${status} duplicate advances to a fresh physical generation`, async () => {
+      const starts: string[] = [];
+      let generation = 1;
+      await dispatchRigVerification(input, {
+        getCurrentExecutionGeneration: async () => generation,
+        advanceExecutionGeneration: async ({ expectedExecutionGeneration }) => {
+          expect(expectedExecutionGeneration).toBe(1);
+          generation = 2;
+          return generation;
+        },
+        start: async ({ physicalWorkflowId }) => {
+          starts.push(physicalWorkflowId);
+          if (physicalWorkflowId.endsWith("generation-1")) throw new AlreadyStartedError();
+        },
+        describeStatus: async () => status,
+        isAlreadyStarted: (error) => error instanceof AlreadyStartedError,
+      });
+      expect(generation).toBe(2);
+      expect(starts).toEqual([
+        rigVerificationPhysicalWorkflowId(input.workflowId, 1),
+        rigVerificationPhysicalWorkflowId(input.workflowId, 2),
+      ]);
+    });
+  }
+
+  test("an unknown duplicate status fails closed", async () => {
     const starts: string[] = [];
     let advances = 0;
-    await dispatchRigVerification(input, {
-      getCurrentExecutionGeneration: async () => 1,
-      advanceExecutionGeneration: async () => {
-        advances += 1;
-        return 2;
-      },
-      start: async ({ physicalWorkflowId }) => {
-        starts.push(physicalWorkflowId);
-        throw new AlreadyStartedError();
-      },
-      describeStatus: async () => "RUNNING",
-      isAlreadyStarted: (error) => error instanceof AlreadyStartedError,
-    });
+    await expect(
+      dispatchRigVerification(input, {
+        getCurrentExecutionGeneration: async () => 1,
+        advanceExecutionGeneration: async () => {
+          advances += 1;
+          return 2;
+        },
+        start: async ({ physicalWorkflowId }) => {
+          starts.push(physicalWorkflowId);
+          throw new AlreadyStartedError();
+        },
+        describeStatus: async () => "UNSPECIFIED",
+        isAlreadyStarted: (error) => error instanceof AlreadyStartedError,
+      }),
+    ).rejects.toThrow("Unsupported Rig verification workflow status");
     expect(starts).toEqual([rigVerificationPhysicalWorkflowId(input.workflowId, 1)]);
     expect(advances).toBe(0);
   });

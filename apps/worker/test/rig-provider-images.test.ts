@@ -19,6 +19,8 @@ import {
   settingsWithRigProviderImage,
 } from "../src/activities/packs";
 import {
+  buildVerifiedRigProviderImage,
+  RigProviderImageBuildDeadlineError,
   rigProviderImageContentMarkerCommand,
   settingsForRigVerification,
   verifyRigProviderImageColdBoot,
@@ -110,6 +112,56 @@ async function execute(command: string): Promise<{ exitCode: number; output: str
 }
 
 describe("build-once rig provider image runtime", () => {
+  test("caps and aborts a hung immutable image build at the remaining work deadline", async () => {
+    let providerTimeoutMs = 0;
+    const startedAt = Date.now();
+    await expect(
+      buildVerifiedRigProviderImage(
+        {
+          settings: platformSettings({ sandboxSnapshotTimeoutMs: 10_000 }),
+          db: {} as never,
+          observability: {} as never,
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          definition: version(),
+          target: { kind: "version", id: VERSION_ID },
+          verificationAttemptId: "55555555-5555-4555-8555-555555555555",
+          verificationExecutionGeneration: 1,
+          established: {
+            backendId: "modal",
+            instanceId: "sandbox-build",
+            client: {},
+            session: {},
+            sessionState: {},
+          },
+          ownership: {
+            leaseId: "66666666-6666-4666-8666-666666666666",
+            leaseEpoch: 1,
+            workspaceGeneration: 0,
+            instanceId: "sandbox-build",
+          },
+          lifecycle: {
+            signal: new AbortController().signal,
+            workDeadlineAtMs: Date.now() + 40,
+            cleanupDeadlineAtMs: Date.now() + 1_000,
+            dispose: () => undefined,
+          },
+          signal: new AbortController().signal,
+        },
+        {
+          buildImmutableProviderImage: async (input) => {
+            providerTimeoutMs = input.timeoutMs;
+            return await new Promise(() => undefined);
+          },
+          deleteModalCheckpointSnapshot: async () => "not_found",
+        },
+      ),
+    ).rejects.toBeInstanceOf(RigProviderImageBuildDeadlineError);
+    expect(providerTimeoutMs).toBeGreaterThan(0);
+    expect(providerTimeoutMs).toBeLessThanOrEqual(40);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
   test("publishes cold-boot proof only after the exact image marker and checks pass", async () => {
     const commands: string[] = [];
     const surfaceBindings: Array<Record<string, unknown>> = [];

@@ -302,6 +302,25 @@ describe("rig MCP tools", () => {
         attemptId: first.facts.verificationAttempt,
       },
     });
+    const auditsAfterFirst = await shared!.admin<
+      Array<{ subject_id: string | null; metadata: Record<string, unknown> }>
+    >`
+      select subject_id, metadata from audit_events
+      where workspace_id = ${workspaceId}
+        and action = 'rig.version.verification.requested'
+        and metadata ->> 'versionId' = ${activeVersion.id}
+      order by occurred_at asc
+    `;
+    expect(auditsAfterFirst).toHaveLength(1);
+    expect(auditsAfterFirst[0]).toMatchObject({
+      subject_id: "user:mcp",
+      metadata: {
+        rigId: rig.id,
+        versionId: activeVersion.id,
+        attemptId: first.facts.verificationAttempt,
+        expectedActiveVersionId: activeVersion.id,
+      },
+    });
 
     const second = await callMcpTool<typeof first>(server, "rig_verify", { rigId: rig.id });
     expect(second).toMatchObject({
@@ -317,6 +336,13 @@ describe("rig MCP tools", () => {
     expect(await rigVersionState(activeVersion.id)).toEqual(stateAfterFirst);
     expect(workflow.rigVerifications).toHaveLength(2);
     expect(workflow.rigVerifications[1]).toEqual(workflow.rigVerifications[0]);
+    const [{ count } = { count: 0 }] = await shared!.admin<Array<{ count: number }>>`
+      select count(*)::int as count from audit_events
+      where workspace_id = ${workspaceId}
+        and action = 'rig.version.verification.requested'
+        and metadata ->> 'versionId' = ${activeVersion.id}
+    `;
+    expect(Number(count)).toBe(1);
   });
 
   test("rig_verify reports an outcome-unknown retry as unchanged after dispatch succeeds", async () => {

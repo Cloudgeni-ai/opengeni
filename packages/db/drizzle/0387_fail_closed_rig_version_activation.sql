@@ -157,6 +157,9 @@ BEGIN
     IF NEW.verification ->> 'status' IS DISTINCT FROM 'passed'
       OR NEW.verification ->> 'attemptId' IS NULL
       OR NEW.verification -> 'receipt' ->> 'version' IS DISTINCT FROM '2'
+      OR NEW.verification -> 'receipt' -> 'provenance' ->> 'authority'
+        IS DISTINCT FROM 'deployment_control_plane'
+      OR coalesce(NEW.verification -> 'receipt' -> 'provenance' ->> 'providerImage', '') = ''
       OR NEW.verification -> 'receipt' -> 'binding' ->> 'sandboxGroupId'
         IS DISTINCT FROM NEW.id::text
       OR NEW.verification -> 'receipt' -> 'binding' ->> 'rigVersionId'

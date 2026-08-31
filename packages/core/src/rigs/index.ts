@@ -6,7 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import {
-  RIG_PLATFORM_SURFACE_VALIDATION_VERSION,
+  hasTrustedRigPlatformSurfaceValidationProvenance,
   RigPlatformSurfaceValidationReceipt,
 } from "@opengeni/contracts/rig-platform-surface-validation";
 import type {
@@ -454,7 +454,7 @@ function requirePlatformSurfaceValidation(change: RigChange) {
     });
   }
   if (
-    parsed.data.version !== RIG_PLATFORM_SURFACE_VALIDATION_VERSION ||
+    !hasTrustedRigPlatformSurfaceValidationProvenance(parsed.data) ||
     parsed.data.binding.sandboxGroupId !== change.id ||
     parsed.data.binding.rigVersionId !== change.id
   ) {

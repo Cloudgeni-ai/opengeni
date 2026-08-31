@@ -205,6 +205,14 @@ export class RigVerificationActivityDeadlineError extends Error {
   }
 }
 
+export class RigProviderImageBuildDeadlineError extends Error {
+  readonly name = "RigProviderImageBuildDeadlineError";
+
+  constructor() {
+    super("Rig provider image build exceeded the remaining verification work deadline");
+  }
+}
+
 export type RigVerificationActivityLifecycle = {
   signal: AbortSignal;
   /** Absolute boundary for verifier work; cleanup begins when this is reached. */
@@ -943,6 +951,16 @@ export function rigProviderImageContentMarkerCommand(
   return `mkdir -p '${normalizedRoot}' && touch '${marker}'`;
 }
 
+function requiredRigVerificationProviderImage(
+  settings: ControlActivityServices["settings"],
+): string {
+  const image = rigProviderImageSourceImage(settings, settings.sandboxBackend);
+  if (!image) {
+    throw new Error("Rig verification requires one exact deployment provider image");
+  }
+  return image;
+}
+
 function rigProviderImageContentMarker(
   contentHash: string,
   markerRoot = "/var/opengeni",
@@ -1044,8 +1062,8 @@ export async function verifyRigProviderImageColdBoot(
         workspaceId: input.workspaceId,
         sandboxGroupId: input.buildRequestId,
         rigVersionId: input.rigVersionId,
+        providerImage: input.imageId,
         established,
-        commandRunner: runContext.commandRunner,
         ownership: runContext.ownership,
         lifecycle: input.lifecycle,
       });
@@ -1067,22 +1085,31 @@ export async function verifyRigProviderImageColdBoot(
   return dependencies.now().toISOString();
 }
 
-export async function buildVerifiedRigProviderImage(input: {
-  settings: ControlActivityServices["settings"];
-  db: Database;
-  observability: ControlActivityServices["observability"];
-  accountId: string;
-  workspaceId: string;
-  existingVersionId?: string;
-  definition: RigProviderImageDefinition;
-  target: { kind: "change" | "version"; id: string };
-  verificationAttemptId: string;
-  verificationExecutionGeneration: number;
-  established: EstablishedSandboxSession;
-  ownership: RigVerificationSandboxRunContext["ownership"];
-  lifecycle: RigVerificationActivityLifecycle;
-  signal: AbortSignal;
-}): Promise<RigProviderImage> {
+export async function buildVerifiedRigProviderImage(
+  input: {
+    settings: ControlActivityServices["settings"];
+    db: Database;
+    observability: ControlActivityServices["observability"];
+    accountId: string;
+    workspaceId: string;
+    existingVersionId?: string;
+    definition: RigProviderImageDefinition;
+    target: { kind: "change" | "version"; id: string };
+    verificationAttemptId: string;
+    verificationExecutionGeneration: number;
+    established: EstablishedSandboxSession;
+    ownership: RigVerificationSandboxRunContext["ownership"];
+    lifecycle: RigVerificationActivityLifecycle;
+    signal: AbortSignal;
+  },
+  dependencies: {
+    buildImmutableProviderImage: typeof buildImmutableProviderImage;
+    deleteModalCheckpointSnapshot: typeof deleteModalCheckpointSnapshot;
+  } = {
+    buildImmutableProviderImage,
+    deleteModalCheckpointSnapshot,
+  },
+): Promise<RigProviderImage> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
   const providerSupportsBuild = providerSupportsImmutableImageBuild(backend);
   const sourceImage = rigProviderImageSourceImage(input.settings, backend);
@@ -1205,13 +1232,56 @@ export async function buildVerifiedRigProviderImage(input: {
   let artifactId: string | null = null;
   let coldBootValidatedAt: string | null = null;
   try {
-    const built = await buildImmutableProviderImage({
+    throwIfAborted(input.signal);
+    const remainingWorkMs =
+      input.lifecycle.workDeadlineAtMs == null
+        ? input.settings.sandboxSnapshotTimeoutMs
+        : Math.floor(input.lifecycle.workDeadlineAtMs - Date.now());
+    if (remainingWorkMs <= 0) {
+      throw new RigProviderImageBuildDeadlineError();
+    }
+    const buildTimeoutMs = Math.max(
+      1,
+      Math.min(input.settings.sandboxSnapshotTimeoutMs, remainingWorkMs),
+    );
+    const buildPromise = dependencies.buildImmutableProviderImage({
       backend,
       settings: input.settings,
       session: input.established.session,
       requestId: building.buildRequestId,
-      timeoutMs: input.settings.sandboxSnapshotTimeoutMs,
+      timeoutMs: buildTimeoutMs,
     });
+    let buildAccepted = false;
+    const deadlineSignal =
+      input.lifecycle.workDeadlineAtMs == null
+        ? input.signal
+        : AbortSignal.any([input.signal, AbortSignal.timeout(buildTimeoutMs)]);
+    let built: Awaited<ReturnType<typeof buildImmutableProviderImage>>;
+    try {
+      built = await waitForAbortable(buildPromise, deadlineSignal);
+      buildAccepted = true;
+    } catch (error) {
+      if (!input.signal.aborted && deadlineSignal.aborted) {
+        throw new RigProviderImageBuildDeadlineError();
+      }
+      throw error;
+    } finally {
+      if (!buildAccepted && backend === "modal") {
+        void buildPromise
+          .then(async (late) => {
+            if (late?.imageId && late.providerBindingKey) {
+              await dependencies
+                .deleteModalCheckpointSnapshot(
+                  input.settings,
+                  late.providerBindingKey,
+                  late.imageId,
+                )
+                .catch(() => "not_found" as const);
+            }
+          })
+          .catch(() => undefined);
+      }
+    }
     if (!built || (!built.imageId && !built.imageDigest)) {
       throw new Error("provider image builder returned no immutable image identity");
     }
@@ -1301,6 +1371,7 @@ export async function buildVerifiedRigProviderImage(input: {
     });
   } catch (error) {
     if (input.signal.aborted) throw abortReason(input.signal);
+    if (error instanceof RigProviderImageBuildDeadlineError) throw error;
     if (artifactId) {
       await markSandboxCheckpointArtifactDeletePending(input.db, {
         accountId: input.accountId,
@@ -1313,11 +1384,13 @@ export async function buildVerifiedRigProviderImage(input: {
       builtIdentity &&
       !(error instanceof SandboxCheckpointArtifactRegistrationConflictError)
     ) {
-      await deleteModalCheckpointSnapshot(
-        input.settings,
-        builtIdentity.providerBindingKey,
-        builtIdentity.imageId,
-      ).catch(() => "not_found" as const);
+      await dependencies
+        .deleteModalCheckpointSnapshot(
+          input.settings,
+          builtIdentity.providerBindingKey,
+          builtIdentity.imageId,
+        )
+        .catch(() => "not_found" as const);
     }
     const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
     return await finalize({
@@ -1589,8 +1662,8 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 workspaceId: input.workspaceId,
                 sandboxGroupId: change.id,
                 rigVersionId: candidateVersion.id,
+                providerImage: requiredRigVerificationProviderImage(runSettings),
                 established,
-                commandRunner: runContext.commandRunner,
                 ownership: runContext.ownership,
                 lifecycle,
               });
@@ -1809,8 +1882,8 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 workspaceId: input.workspaceId,
                 sandboxGroupId: version.id,
                 rigVersionId: version.id,
+                providerImage: requiredRigVerificationProviderImage(runSettings),
                 established,
-                commandRunner: runContext.commandRunner,
                 ownership: runContext.ownership,
                 lifecycle,
               });

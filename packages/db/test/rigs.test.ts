@@ -174,6 +174,10 @@ function surfaceReceipt(versionId: string) {
       backendId: "modal",
       rigVersionId: versionId,
     },
+    provenance: {
+      authority: "deployment_control_plane" as const,
+      providerImage: "example.invalid/opengeni:test",
+    },
     terminal: {
       status: "passed" as const,
       cwd: "/workspace" as const,
@@ -493,30 +497,45 @@ describe("rig version invariants", () => {
     const [version] = await listRigVersions(db, ws.workspaceId, rig.id);
     expect(version).toBeDefined();
 
+    const boundedAdminWrite = async (
+      write: (tx: SharedTestDatabase["admin"]) => Promise<unknown>,
+    ) =>
+      await shared!.admin.begin(async (tx) => {
+        await tx`select set_config('lock_timeout', '5s', true), set_config('statement_timeout', '5s', true)`;
+        return await write(tx as unknown as SharedTestDatabase["admin"]);
+      });
     await expect(
-      shared!.admin`update rig_versions set active = true where id = ${version!.id}`,
+      boundedAdminWrite(
+        async (tx) => await tx`update rig_versions set active = true where id = ${version!.id}`,
+      ),
     ).rejects.toThrow(/exact passing platform-surface receipt/iu);
     await expect(
-      shared!.admin`insert into rig_versions (
-        account_id, workspace_id, rig_id, version, checks, credential_hooks,
-        default_variable_set_ids, provider_images, active
-      ) values (
-        ${ws.accountId}, ${ws.workspaceId}, ${rig.id}, 2, '[]'::jsonb, '[]'::jsonb,
-        '[]'::jsonb, '{}'::jsonb, true
-      )`,
+      boundedAdminWrite(
+        async (tx) =>
+          await tx`insert into rig_versions (
+          account_id, workspace_id, rig_id, version, checks, credential_hooks,
+          default_variable_set_ids, provider_images, active
+        ) values (
+          ${ws.accountId}, ${ws.workspaceId}, ${rig.id}, 2, '[]'::jsonb, '[]'::jsonb,
+          '[]'::jsonb, '{}'::jsonb, true
+        )`,
+      ),
     ).rejects.toThrow(/exact passing platform-surface receipt/iu);
     await expect(
-      shared!.admin`update rig_versions
-        set provider_images = ${shared!.admin.json({
-          modal: rigProviderImage({
-            status: "ready",
-            coldBootValidation: {
-              version: 1,
-              checkedAt: "2026-08-30T12:00:00.000Z",
-            },
-          }),
-        })}::jsonb
-        where id = ${version!.id}`,
+      boundedAdminWrite(
+        async (tx) =>
+          await tx`update rig_versions
+          set provider_images = ${tx.json({
+            modal: rigProviderImage({
+              status: "ready",
+              coldBootValidation: {
+                version: 1,
+                checkedAt: "2026-08-30T12:00:00.000Z",
+              },
+            }),
+          })}::jsonb
+          where id = ${version!.id}`,
+      ),
     ).rejects.toThrow(/proof version 1 is obsolete/iu);
     expect((await getRigVersionById(db, ws.workspaceId, version!.id))?.active).toBe(false);
   });
@@ -1186,6 +1205,7 @@ describe("rig provider image build ledger", () => {
     const versionId = rig.activeVersion!.id;
     const legacyBuild = rigProviderImage({
       buildRequestId: "77777777-7777-4777-8777-777777777777",
+      startedAt: "2026-08-30T00:00:00.000Z",
       provenance: {
         kind: "rig_verification",
         targetKind: "version",
@@ -1215,7 +1235,7 @@ describe("rig provider image build ledger", () => {
         versionId,
         image: legacyReady,
       }),
-    ).toBe(true);
+    ).toBe(false);
 
     const currentBuild = rigProviderImage({
       ...legacyBuild,

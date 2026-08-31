@@ -464,7 +464,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/verify", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { rig } = await requireRigMutation(c, workspaceId, "rigs:use");
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:use");
     if (!rig.activeVersion) {
       return c.json({ error: "rig has no active version" }, 422);
     }
@@ -472,6 +472,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       rig.workspaceId,
       rig.id,
       rig.activeVersion.id,
+      grant,
     );
     if (!verification.started) {
       throw rigVersionDispatchDeferredError(rig.activeVersion.id);

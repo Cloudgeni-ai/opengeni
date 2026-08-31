@@ -156,6 +156,12 @@ export type BrowserControlPlacementSession = {
     request: ComputerFramesOpenRequest,
   ) => Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }>;
   finalizeOpStreamOps?: () => Promise<void>;
+  /**
+   * Provider/deployment-owned validation authority. Rig setup executes as root
+   * inside the placement and therefore cannot be allowed to install, replace,
+   * or emulate this worker-memory capability.
+   */
+  trustedRigPlatformSurface?: TrustedRigPlatformSurface;
 };
 
 export type ComputerControlFrame = {
@@ -354,6 +360,8 @@ export type ProvisionBrowserControlClientInput = {
   allowedOrigins?: readonly string[];
   port?: number;
   timeoutMs?: number;
+  /** Absolute caller work boundary shared by every provisioning sub-operation. */
+  deadlineAtMs?: number;
   signal?: AbortSignal;
   /** Native connected-machine sidecar authority. Ignored by image-backed
    * placements, whose browserd is already supervised inside the sandbox image. */
@@ -361,6 +369,58 @@ export type ProvisionBrowserControlClientInput = {
     scopeId: string;
     scopeGeneration: string;
   };
+};
+
+export type TrustedRigPlatformSurfaceBinding = {
+  authority: "deployment_control_plane";
+  backendId: string;
+  instanceId: string;
+  providerImage: string;
+};
+
+export type TrustedRigPlatformSurfaceOperation = {
+  backendId: string;
+  instanceId: string;
+  providerImage: string;
+  leaseId: string;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  sandboxGroupId: string;
+  rigVersionId: string;
+  timeoutMs: number;
+  deadlineAtMs?: number;
+  signal?: AbortSignal;
+};
+
+export type TrustedRigPlatformTerminalProbe = {
+  cwd: "/workspace";
+  uid: 0;
+  bunVersion: "1.4.0";
+  interactive: true;
+};
+
+export type TrustedRigPlatformSurfaceController = Pick<
+  BrowserControlClient,
+  | "createSession"
+  | "sessionClient"
+  | "endSession"
+  | "createComputerSession"
+  | "computerSessionClient"
+  | "endComputerSession"
+>;
+
+export type TrustedRigPlatformSurface = {
+  binding: TrustedRigPlatformSurfaceBinding;
+  runTerminalProbe(
+    input: TrustedRigPlatformSurfaceOperation,
+  ): Promise<TrustedRigPlatformTerminalProbe>;
+  provisionController(
+    input: TrustedRigPlatformSurfaceOperation & {
+      adminToken: string;
+      allowedOrigins: readonly string[];
+    },
+  ): Promise<{ client: TrustedRigPlatformSurfaceController }>;
+  tearDownController(input: TrustedRigPlatformSurfaceOperation): Promise<void>;
 };
 
 export type ProvisionBrowserControlClientResult = {
@@ -406,6 +466,73 @@ export class BrowserControlUnsupportedError extends Error {
   readonly name = "BrowserControlUnsupportedError";
 }
 
+type ProvisionOperationBudget = {
+  deadlineAtMs: number;
+  signal?: AbortSignal;
+};
+
+function provisionOperationBudget(
+  input: ProvisionBrowserControlClientInput,
+): ProvisionOperationBudget {
+  const now = Date.now();
+  const relativeDeadline = now + boundedTimeout(input.timeoutMs ?? 60_000);
+  const requestedDeadline = input.deadlineAtMs;
+  if (requestedDeadline !== undefined && !Number.isFinite(requestedDeadline)) {
+    throw new BrowserControlProtocolError("browser controller provisioning deadline is invalid");
+  }
+  return {
+    deadlineAtMs:
+      requestedDeadline === undefined
+        ? relativeDeadline
+        : Math.min(relativeDeadline, Math.floor(requestedDeadline)),
+    ...(input.signal ? { signal: input.signal } : {}),
+  };
+}
+
+function remainingProvisionOperationMs(budget: ProvisionOperationBudget): number {
+  budget.signal?.throwIfAborted();
+  const remaining = Math.floor(budget.deadlineAtMs - Date.now());
+  if (remaining <= 0) {
+    throw new BrowserControlTransportError("browser controller provisioning deadline was reached");
+  }
+  return Math.max(1, Math.min(MAX_REQUEST_TIMEOUT_MS, remaining));
+}
+
+async function awaitProvisionOperation<T>(
+  budget: ProvisionOperationBudget,
+  operation: (timeoutMs: number) => Promise<T>,
+): Promise<T> {
+  const timeoutMs = remainingProvisionOperationMs(budget);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let removeAbortListener = (): void => undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new BrowserControlTransportError("browser controller provisioning deadline was reached"),
+        ),
+      timeoutMs,
+    );
+  });
+  const cancellation = budget.signal
+    ? new Promise<never>((_resolve, reject) => {
+        const onAbort = (): void => reject(budget.signal?.reason ?? new Error("operation aborted"));
+        removeAbortListener = () => budget.signal?.removeEventListener("abort", onAbort);
+        budget.signal?.addEventListener("abort", onAbort, { once: true });
+      })
+    : null;
+  try {
+    return await Promise.race([
+      operation(timeoutMs),
+      timeout,
+      ...(cancellation ? [cancellation] : []),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    removeAbortListener();
+  }
+}
+
 /** Install one placement-stable admin credential and start the pinned controller. */
 export async function provisionBrowserControlClient(
   session: BrowserControlPlacementSession,
@@ -414,18 +541,23 @@ export async function provisionBrowserControlClient(
   input.signal?.throwIfAborted();
   requirePlacementProvisioningSurface(session);
   const adminToken = requireToken(input.adminToken, "browser controller admin token");
+  const budget = provisionOperationBudget(input);
   if (session.ensureBrowserControl) {
     if (!input.nativeAuthority) {
       throw new BrowserControlProtocolError(
         "connected browser placement is missing its controller authority scope",
       );
     }
-    const ensured = await session.ensureBrowserControl({
-      scopeId: input.nativeAuthority.scopeId,
-      scopeGeneration: input.nativeAuthority.scopeGeneration,
-      adminToken,
-      allowedOrigins: [...(input.allowedOrigins ?? [])],
-    });
+    const ensured = await awaitProvisionOperation(
+      budget,
+      async () =>
+        await session.ensureBrowserControl!({
+          scopeId: input.nativeAuthority!.scopeId,
+          scopeGeneration: input.nativeAuthority!.scopeGeneration,
+          adminToken,
+          allowedOrigins: [...(input.allowedOrigins ?? [])],
+        }),
+    );
     const port = boundedPort(ensured.port);
     nativeControllerPorts.set(nativeControllerKey(input.nativeAuthority), port);
     return {
@@ -449,7 +581,8 @@ export async function provisionBrowserControlClient(
     await runChecked(
       session,
       `umask 077; install -d -m 0700 -- ${shellQuote(parent)}; printf '%s\\n' ${shellQuote(COMMAND_OK)}`,
-      input.timeoutMs,
+      remainingProvisionOperationMs(budget),
+      budget,
     );
     await writePrivateFile(
       session,
@@ -458,20 +591,26 @@ export async function provisionBrowserControlClient(
         content: `${adminToken}\n`,
         createParents: false,
       },
-      input.timeoutMs,
+      remainingProvisionOperationMs(budget),
+      budget,
     );
     await runChecked(
       session,
       `chmod 0600 -- ${shellQuote(temporaryTokenFile)}; mv -f -- ${shellQuote(temporaryTokenFile)} ${shellQuote(adminTokenFile)}; printf '%s\\n' ${shellQuote(COMMAND_OK)}`,
-      input.timeoutMs,
+      remainingProvisionOperationMs(budget),
+      budget,
     );
-    const server = await ensureBrowserControlServer(session, {
-      adminTokenFile,
-      ...(input.allowedOrigins ? { allowedOrigins: input.allowedOrigins } : {}),
-      ...(input.port === undefined ? {} : { port: input.port }),
-      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
+    const server = await awaitProvisionOperation(
+      budget,
+      async (timeoutMs) =>
+        await ensureBrowserControlServer(session, {
+          adminTokenFile,
+          ...(input.allowedOrigins ? { allowedOrigins: input.allowedOrigins } : {}),
+          ...(input.port === undefined ? {} : { port: input.port }),
+          timeoutMs,
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        }),
+    );
     const client = new BrowserControlClient(session, {
       adminToken,
       port: server.port,
@@ -480,12 +619,23 @@ export async function provisionBrowserControlClient(
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
     if (input.allowedOrigins && input.allowedOrigins.length > 0) {
-      await client.addAllowedOrigins(input.allowedOrigins);
+      await awaitProvisionOperation(
+        budget,
+        async (timeoutMs) =>
+          await client.addAllowedOrigins(input.allowedOrigins!, {
+            timeoutMs,
+            ...(input.signal ? { signal: input.signal } : {}),
+          }),
+      );
     }
     return { client, server };
   } finally {
-    await runBestEffort(session, `rm -f -- ${shellQuote(temporaryTokenFile)}`);
-    await session.finalizeOpStreamOps?.().catch(() => undefined);
+    await runBestEffort(session, `rm -f -- ${shellQuote(temporaryTokenFile)}`, budget);
+    if (session.finalizeOpStreamOps) {
+      await awaitProvisionOperation(budget, async () => await session.finalizeOpStreamOps!()).catch(
+        () => undefined,
+      );
+    }
   }
 }
 
@@ -516,7 +666,10 @@ export class BrowserControlClient {
     this.nativeAuthority = options.nativeAuthority;
   }
 
-  async addAllowedOrigins(origins: readonly string[]): Promise<readonly string[]> {
+  async addAllowedOrigins(
+    origins: readonly string[],
+    options: BrowserControlRequestOptions = {},
+  ): Promise<readonly string[]> {
     if (origins.length === 0 || origins.length > 64) {
       throw new RangeError("browser controller origin list size is invalid");
     }
@@ -526,6 +679,7 @@ export class BrowserControlClient {
       path: "/v1/origins",
       token: this.adminToken,
       body: { origins: normalized },
+      ...options,
     });
     if (!isRecord(data) || !Array.isArray(data.origins)) {
       throw new BrowserControlProtocolError("browser controller returned malformed origins");
@@ -2600,14 +2754,26 @@ async function writePrivateFile(
     createParents?: boolean;
   },
   timeoutMs = 60_000,
+  budget?: ProvisionOperationBudget,
 ): Promise<void> {
   if (session.writePlacementPrivate) {
-    await session.writePlacementPrivate(input);
+    if (budget) {
+      await awaitProvisionOperation(
+        budget,
+        async () => await session.writePlacementPrivate!(input),
+      );
+    } else {
+      await session.writePlacementPrivate(input);
+    }
     return;
   }
   if (session.writeFile) {
     try {
-      await session.writeFile(input);
+      if (budget) {
+        await awaitProvisionOperation(budget, async () => await session.writeFile!(input));
+      } else {
+        await session.writeFile(input);
+      }
       return;
     } catch (error) {
       if (
@@ -2633,6 +2799,7 @@ async function writePrivateFile(
       session,
       `umask 077; install -d -m 0700 -- ${shellQuote(parent)}; printf '%s\n' ${shellQuote(COMMAND_OK)}`,
       timeoutMs,
+      budget,
     );
   }
   if (bytes.byteLength === 0) {
@@ -2640,6 +2807,7 @@ async function writePrivateFile(
       session,
       `umask 077; : > ${shellQuote(path)}; chmod 0600 -- ${shellQuote(path)}; printf '%s\n' ${shellQuote(COMMAND_OK)}`,
       timeoutMs,
+      budget,
     );
     return;
   }
@@ -2659,19 +2827,21 @@ async function writePrivateFile(
     `chmod 0600 -- ${shellQuote(path)};`,
     `printf '%s\n' ${shellQuote(COMMAND_OK)}`,
   ].join(" ");
-  const started = session.exec
-    ? await session.exec({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: 250,
-        maxOutputTokens: 2_000,
-      })
-    : await session.execCommand!({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: 250,
-        maxOutputTokens: 2_000,
-      });
+  const start = async () =>
+    session.exec
+      ? await session.exec({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: Math.min(250, budget ? remainingProvisionOperationMs(budget) : 250),
+          maxOutputTokens: 2_000,
+        })
+      : await session.execCommand!({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: Math.min(250, budget ? remainingProvisionOperationMs(budget) : 250),
+          maxOutputTokens: 2_000,
+        });
+  const started = budget ? await awaitProvisionOperation(budget, start) : await start();
   const startedSessionId =
     typeof started === "string"
       ? (() => {
@@ -2686,12 +2856,16 @@ async function writePrivateFile(
       "browser private file transport did not yield an input session",
     );
   }
-  const output = await session.writeStdin({
-    sessionId: startedSessionId,
-    chars: payload,
-    yieldTimeMs: boundedTimeout(timeoutMs),
-    maxOutputTokens: 2_000,
-  });
+  const write = async (remainingMs = boundedTimeout(timeoutMs)) =>
+    await session.writeStdin!({
+      sessionId: startedSessionId,
+      chars: payload,
+      yieldTimeMs: remainingMs,
+      maxOutputTokens: 2_000,
+    });
+  const output = budget
+    ? await awaitProvisionOperation(budget, async (remainingMs) => await write(remainingMs))
+    : await write();
   const terminal = parseExecResponseBanner(output);
   if (
     terminal.kind === "invalid" ||
@@ -2707,21 +2881,25 @@ async function runChecked(
   session: BrowserControlPlacementSession,
   command: string,
   timeoutMs = 60_000,
+  budget?: ProvisionOperationBudget,
 ): Promise<void> {
-  const bounded = boundedTimeout(timeoutMs);
-  const result = session.exec
-    ? await session.exec({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: bounded,
-        maxOutputTokens: 2_000,
-      })
-    : await session.execCommand!({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: bounded,
-        maxOutputTokens: 2_000,
-      });
+  const run = async (remainingMs = boundedTimeout(timeoutMs)) =>
+    session.exec
+      ? await session.exec({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: remainingMs,
+          maxOutputTokens: 2_000,
+        })
+      : await session.execCommand!({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: remainingMs,
+          maxOutputTokens: 2_000,
+        });
+  const result = budget
+    ? await awaitProvisionOperation(budget, async (remainingMs) => await run(remainingMs))
+    : await run();
   const output = commandOutput(result);
   const exitCode = typeof result === "object" && result ? result.exitCode : undefined;
   if ((typeof exitCode === "number" && exitCode !== 0) || !output.includes(COMMAND_OK)) {
@@ -2732,22 +2910,33 @@ async function runChecked(
 async function runBestEffort(
   session: BrowserControlPlacementSession,
   command: string,
+  budget?: ProvisionOperationBudget,
 ): Promise<void> {
   try {
-    if (session.exec) {
-      await session.exec({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: 15_000,
-        maxOutputTokens: 100,
-      });
-    } else if (session.execCommand) {
-      await session.execCommand({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: 15_000,
-        maxOutputTokens: 100,
-      });
+    const run = async (timeoutMs = 15_000) => {
+      if (session.exec) {
+        await session.exec({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: timeoutMs,
+          maxOutputTokens: 100,
+        });
+      } else if (session.execCommand) {
+        await session.execCommand({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: timeoutMs,
+          maxOutputTokens: 100,
+        });
+      }
+    };
+    if (budget) {
+      await awaitProvisionOperation(
+        budget,
+        async (remainingMs) => await run(Math.min(15_000, remainingMs)),
+      );
+    } else {
+      await run();
     }
   } catch {
     // UUID-scoped request directories contain no durable state.

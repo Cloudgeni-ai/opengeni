@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, testRigSurfaceReceipt } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { createDb, createSession } from "../src";
+import {
+  beginRigVersionVerificationAttempt,
+  completeRigVersionVerification,
+  createDb,
+  createSession,
+} from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -137,7 +142,7 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
         await asActor(app!, ownerA, async (tx) => {
           const [row] = await tx<
             Array<{
-              value: { id: string; scope: string; activeVersion: { id: string } };
+              value: { id: string; scope: string; activeVersion: { id: string } | null };
             }>
           >`
             select create_scoped_rig(
@@ -168,6 +173,25 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
       expect(organizationRig.scope).toBe("organization");
       expect(personalRig.scope).toBe("user");
 
+      const [organizationVersion] = await admin<Array<{ id: string }>>`
+        select id from rig_versions where rig_id = ${organizationRig.id} order by version asc limit 1
+      `;
+      if (!organizationVersion) throw new Error("organization Rig initial version is missing");
+      const organizationAttempt = await beginRigVersionVerificationAttempt(db.db, {
+        workspaceId: ownerA.workspaceId,
+        rigId: organizationRig.id,
+        versionId: organizationVersion.id,
+      });
+      const organizationActivation = await completeRigVersionVerification(db.db, {
+        workspaceId: ownerA.workspaceId,
+        rigId: organizationRig.id,
+        versionId: organizationVersion.id,
+        attemptId: organizationAttempt.attemptId,
+        executionGeneration: organizationAttempt.executionGeneration,
+        receipt: testRigSurfaceReceipt(organizationVersion.id),
+      });
+      expect(organizationActivation.activated).toBe(true);
+
       const verificationOccurredAt = "2026-08-29T18:16:47.181Z";
       await admin`
         insert into audit_events (
@@ -178,7 +202,7 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
           'rig.verification.passed', 'rig', ${organizationRig.id},
           ${admin.json({
             rigId: organizationRig.id,
-            versionId: organizationRig.activeVersion.id,
+            versionId: organizationVersion.id,
             finishedAt: "malformed-untrusted-audit-metadata",
             passed: true,
           })}::jsonb,

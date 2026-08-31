@@ -12,6 +12,7 @@ import {
   UpdateRigRequest,
 } from "../src/index";
 import {
+  hasTrustedRigPlatformSurfaceValidationProvenance,
   RigChangePlatformSurfaceValidationTarget,
   RigPlatformSurfaceValidationReceipt,
 } from "../src/rig-platform-surface-validation";
@@ -115,6 +116,10 @@ describe("rig contracts", () => {
         backendId: "modal",
         rigVersionId: "22222222-3333-4444-8555-666666666666",
       },
+      provenance: {
+        authority: "deployment_control_plane",
+        providerImage: "example.invalid/opengeni:test",
+      },
       terminal: {
         status: "passed",
         cwd: "/workspace",
@@ -133,6 +138,11 @@ describe("rig contracts", () => {
     };
 
     expect(RigPlatformSurfaceValidationReceipt.safeParse(receipt).success).toBe(true);
+    expect(
+      hasTrustedRigPlatformSurfaceValidationProvenance(
+        RigPlatformSurfaceValidationReceipt.parse(receipt),
+      ),
+    ).toBe(true);
     expect(RigPlatformSurfaceValidationReceipt.safeParse({ ...receipt, version: 1 }).success).toBe(
       true,
     );
@@ -186,6 +196,10 @@ describe("rig contracts", () => {
         instanceId: "sandbox-test",
         backendId: "modal",
         rigVersionId: "22222222-3333-4444-8555-666666666666",
+      },
+      provenance: {
+        authority: "deployment_control_plane",
+        providerImage: "example.invalid/opengeni:test",
       },
       terminal: { status: "disabled" },
       browser: {

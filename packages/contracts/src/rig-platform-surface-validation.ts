@@ -2,6 +2,18 @@ import { z } from "zod";
 
 export const RIG_PLATFORM_SURFACE_VALIDATION_VERSION = 2 as const;
 
+export const RIG_PLATFORM_SURFACE_VALIDATION_AUTHORITY = "deployment_control_plane" as const;
+
+export const RigPlatformSurfaceValidationProvenance = z
+  .object({
+    authority: z.literal(RIG_PLATFORM_SURFACE_VALIDATION_AUTHORITY),
+    providerImage: z.string().min(1).max(2_048),
+  })
+  .strict();
+export type RigPlatformSurfaceValidationProvenance = z.infer<
+  typeof RigPlatformSurfaceValidationProvenance
+>;
+
 export const RigPlatformSurfaceValidationBinding = z
   .object({
     leaseId: z.string().uuid(),
@@ -24,6 +36,9 @@ export const RigPlatformSurfaceValidationReceipt = z
     version: z.union([z.literal(1), z.literal(RIG_PLATFORM_SURFACE_VALIDATION_VERSION)]),
     checkedAt: z.string().datetime(),
     binding: RigPlatformSurfaceValidationBinding,
+    // Optional only so historical v1/v2 receipts remain readable. Every new
+    // activation/promotion boundary requires this deployment-owned provenance.
+    provenance: RigPlatformSurfaceValidationProvenance.optional(),
     terminal: z.discriminatedUnion("status", [
       z.object({ status: z.literal("disabled") }).strict(),
       z
@@ -77,6 +92,18 @@ export const RigPlatformSurfaceValidationReceipt = z
 export type RigPlatformSurfaceValidationReceipt = z.infer<
   typeof RigPlatformSurfaceValidationReceipt
 >;
+
+export function hasTrustedRigPlatformSurfaceValidationProvenance(
+  receipt: RigPlatformSurfaceValidationReceipt,
+): receipt is RigPlatformSurfaceValidationReceipt & {
+  version: typeof RIG_PLATFORM_SURFACE_VALIDATION_VERSION;
+  provenance: RigPlatformSurfaceValidationProvenance;
+} {
+  return (
+    receipt.version === RIG_PLATFORM_SURFACE_VALIDATION_VERSION &&
+    receipt.provenance?.authority === RIG_PLATFORM_SURFACE_VALIDATION_AUTHORITY
+  );
+}
 
 /** Server trust-boundary projection for a change whose platform receipt may be
  * used for promotion. The public RigChange verification bag stays open-ended;

@@ -4367,6 +4367,7 @@ function registerRigTools(
         if (!rig.activeVersion) {
           throw new Error("rig has no active version");
         }
+        const verificationGrant = await resourceGrant();
         const versionAttempt = await beginRigVersionVerificationAttempt(
           deps.db,
           {
@@ -4374,7 +4375,13 @@ function registerRigTools(
             rigId: rig.id,
             versionId: rig.activeVersion.id,
           },
-          { allowAlreadyPending: true },
+          {
+            allowAlreadyPending: true,
+            audit: {
+              accountId: verificationGrant.accountId,
+              subjectId: verificationGrant.subjectId,
+            },
+          },
         );
         try {
           await deps.workflowClient.startRigVerification({
