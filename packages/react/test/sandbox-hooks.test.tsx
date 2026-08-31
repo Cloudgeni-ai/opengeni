@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type AttachViewerRequest, type SessionEvent } from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
 import {
   fakeAttachResponse,
   fakeCapabilities,
@@ -213,6 +214,23 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
+  test("viewer attach 402 surfaces the canonical credit-exhaustion error", async () => {
+    const client = fakeClient({
+      getStreamCapabilities: async () => fakeCapabilities(),
+      attachViewer: async () => {
+        throw new OpenGeniApiError(402, "insufficient OpenGeni credits");
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachDesktop: true }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.state).toBe("error");
+    expect(hook.result.current.error?.message).toBe(CREDIT_EXHAUSTION_MESSAGE);
+    await hook.unmount();
+  });
+
   test("a successful desktop attach folds the minted live address into the doc", async () => {
     const client = fakeClient({
       getStreamCapabilities: async () =>
@@ -245,6 +263,22 @@ describe("useSessionCapabilities", () => {
     );
     await flush();
     expect(hook.result.current.state).toBe("error");
+    await hook.unmount();
+  });
+
+  test("a 402 capability negotiation surfaces the canonical credit-exhaustion error", async () => {
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        throw new OpenGeniApiError(402, "insufficient OpenGeni credits");
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.state).toBe("error");
+    expect(hook.result.current.error?.message).toBe(CREDIT_EXHAUSTION_MESSAGE);
     await hook.unmount();
   });
 

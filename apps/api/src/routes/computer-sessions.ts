@@ -46,6 +46,7 @@ import {
   releaseLeaseHolder,
   readLease,
   recordLeaseControllerDataPlaneUrl,
+  SandboxViewerAdmissionBlockedError,
   terminalizeStaleConnectedInteractionPlacement,
   touchComputerSessionController,
   type ComputerSessionControlRecord,
@@ -101,6 +102,7 @@ import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat"
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
 import { interactionControlApiError } from "../http/interaction-control-error";
+import { httpExceptionForSandboxViewerAdmission } from "../http/sandbox-viewer-admission-error";
 import {
   createInteractionFrameProxyAttachment,
   placementUsesInteractionFrameProxy,
@@ -263,13 +265,31 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           }
           if (isTerminalOperation(prepared.operation.state)) return prepared;
 
-          const interactionHeld = await ensureInteractionHolder(
-            grant,
-            sourceSession,
-            prepared.session.id,
-            placement,
-            context.req.raw.signal,
-          );
+          let interactionHeld = false;
+          try {
+            interactionHeld = await ensureInteractionHolder(
+              grant,
+              sourceSession,
+              prepared.session.id,
+              placement,
+              context.req.raw.signal,
+            );
+          } catch (error) {
+            if (error instanceof SandboxViewerAdmissionBlockedError) {
+              await failComputerSessionOperation(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                operationId: request.operationId,
+                computerSessionId: prepared.session.id,
+                error: {
+                  code: "resource_unavailable",
+                  message: error.message,
+                  retryable: false,
+                },
+              });
+            }
+            throw error;
+          }
           const record = await ensureDispatchedGeneration(
             grant,
             workspaceId,
@@ -1868,6 +1888,8 @@ function interactionFailure(error: unknown) {
 }
 
 function computerRouteError(error: unknown): HTTPException {
+  const admission = httpExceptionForSandboxViewerAdmission(error);
+  if (admission) return admission;
   const connectedMachineError = interactionControlApiError(error, "computer");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;

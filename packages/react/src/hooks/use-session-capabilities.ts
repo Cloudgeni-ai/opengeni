@@ -7,6 +7,7 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { CREDIT_EXHAUSTION_MESSAGE } from "../lib/format";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { usePageLiveActivity } from "./internal";
@@ -424,6 +425,10 @@ export function useSessionCapabilities(
                 setState("error");
                 setError(cause);
                 return;
+              } else if (cause.status === 402) {
+                setState("error");
+                setError(new Error(CREDIT_EXHAUSTION_MESSAGE));
+                return;
               } else {
                 throw cause;
               }
@@ -466,6 +471,11 @@ export function useSessionCapabilities(
         if (cause instanceof OpenGeniApiError && cause.status === 403) {
           setState("error");
           setError(new Error("not permitted to view this session's sandbox"));
+          return;
+        }
+        if (cause instanceof OpenGeniApiError && cause.status === 402) {
+          setState("error");
+          setError(new Error(CREDIT_EXHAUSTION_MESSAGE));
           return;
         }
         setState("error");

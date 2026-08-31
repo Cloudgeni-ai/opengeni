@@ -406,6 +406,33 @@ describe("SandboxFiles guarded-file routing", () => {
     await r.unmount();
   });
 
+  test("a capability error beats the waking state and offers a retry", async () => {
+    let retries = 0;
+    const r = await renderComponent(
+      <SandboxFiles
+        files={filesResult()}
+        git={gitResult()}
+        workspaceWaking
+        capabilitiesError={new Error("Out of OpenGeni credits")}
+        onRetryCapabilities={() => {
+          retries += 1;
+        }}
+      />,
+    );
+    await flush();
+    const alert = r.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Sandbox unavailable");
+    expect(alert?.textContent).toContain("Out of OpenGeni credits");
+    expect(r.container.textContent).not.toContain("Waking workspace");
+    const retry = Array.from(r.container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Retry",
+    );
+    expect(retry).toBeDefined();
+    await actRun(() => retry!.click());
+    expect(retries).toBe(1);
+    await r.unmount();
+  });
+
   test("an already-warm capture fallback retries the live list instead of issuing a no-op wake", async () => {
     let refreshCalls = 0;
     let wakeCalls = 0;
