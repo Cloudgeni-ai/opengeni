@@ -203,9 +203,21 @@ describe("model-policy", () => {
         label: "DeepSeek V4 Flash 0731",
         shortLabel: "V4 Flash",
       }),
+      catalogModel({
+        id: "gemini-3.7-flash",
+        label: "Gemini 3.7 Flash",
+        shortLabel: "3.7 Flash",
+      }),
+      catalogModel({
+        id: "glm-5.3",
+        label: "GLM 5.3",
+        shortLabel: "GLM 5.3",
+      }),
     ]);
     expect(rows.find((row) => row.id === "gpt-5.6-sol")?.shortLabel).toBe("5.6 Sol");
     expect(rows.find((row) => row.id === "deepseek-v4-flash-0731")?.shortLabel).toBe("V4 Flash");
+    expect(rows.find((row) => row.id === "gemini-3.7-flash")?.shortLabel).toBe("3.7 Flash");
+    expect(rows.find((row) => row.id === "glm-5.3")?.shortLabel).toBe("GLM 5.3");
   });
 
   test("groups catalog rows by billing class", () => {

@@ -2060,6 +2060,7 @@ export const GatewayCatalogModel = z
     shortLabel: z.string().min(1).max(64).optional(),
     providers: z.array(z.string().min(1)).min(1),
     implicitCaching: z.boolean().default(false),
+    reasoningEfforts: z.array(ReasoningEffort).min(1).optional(),
     vision: z.boolean().default(false),
     inputFileMediaTypes: z.array(z.string().min(1)).default([]),
     contextWindowTokens: z.number().int().positive().default(1_000_000),
@@ -2402,6 +2403,15 @@ export const SUPERGROK_REALTIME_MODEL_ID = "supergrok/grok-voice-think-fast-2.0"
 export const OPENGENI_REALTIME_MODEL_ID_PREFIX = "opengeni-gateway/" as const;
 export const WORKSPACE_REALTIME_MODEL_ID_PREFIX = "workspace-gateway/" as const;
 
+const GATEWAY_REASONING_EFFORTS_THROUGH_XHIGH = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+] as const satisfies readonly z.infer<typeof ReasoningEffort>[];
+
 /** Curated voice models exposed through AI Gateway's normalized realtime API. */
 export const AI_GATEWAY_REALTIME_MODELS = {
   openaiRealtime21: {
@@ -2453,6 +2463,11 @@ export const OPENGENI_GATEWAY_MODELS = {
     shortLabel: "V4 Flash",
     providers: ["baseten", "novita", "deepinfra"],
     implicitCaching: true,
+    vision: false,
+    inputFileMediaTypes: [] as const,
+    contextWindowTokens: 1_000_000,
+    effectiveContextWindowTokens: 900_000,
+    autoCompactTokenLimit: 850_000,
   },
   kimi: {
     productId: "kimi-k3",
@@ -2462,6 +2477,41 @@ export const OPENGENI_GATEWAY_MODELS = {
     shortLabel: "Kimi K3",
     providers: ["baseten", "fireworks"],
     implicitCaching: true,
+    vision: true,
+    inputFileMediaTypes: ["application/pdf"] as const,
+    contextWindowTokens: 1_000_000,
+    effectiveContextWindowTokens: 900_000,
+    autoCompactTokenLimit: 850_000,
+  },
+  gemini: {
+    productId: "gemini-3.7-flash",
+    workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}gemini-3.7-flash`,
+    upstreamModelId: "google/gemini-3.7-flash",
+    label: "Gemini 3.7 Flash",
+    shortLabel: "3.7 Flash",
+    providers: ["google", "vertex"],
+    implicitCaching: true,
+    reasoningEfforts: GATEWAY_REASONING_EFFORTS_THROUGH_XHIGH,
+    vision: true,
+    inputFileMediaTypes: ["application/pdf"] as const,
+    contextWindowTokens: 1_000_000,
+    effectiveContextWindowTokens: 900_000,
+    autoCompactTokenLimit: 850_000,
+  },
+  glm: {
+    productId: "glm-5.3",
+    workspaceProductId: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}glm-5.3`,
+    upstreamModelId: "zai/glm-5.3",
+    label: "GLM 5.3",
+    shortLabel: "GLM 5.3",
+    providers: ["zai"],
+    implicitCaching: true,
+    reasoningEfforts: GATEWAY_REASONING_EFFORTS_THROUGH_XHIGH,
+    vision: false,
+    inputFileMediaTypes: [] as const,
+    contextWindowTokens: 1_000_000,
+    effectiveContextWindowTokens: 900_000,
+    autoCompactTokenLimit: 850_000,
   },
 } as const;
 
@@ -2507,24 +2557,7 @@ export const OPENGENI_OPENROUTER_MODELS: readonly OpenRouterCatalogModel[] = [
 ];
 
 function defaultGatewayCatalogModels(): GatewayCatalogModel[] {
-  return [
-    {
-      ...OPENGENI_GATEWAY_MODELS.deepseek,
-      vision: false,
-      inputFileMediaTypes: [],
-      contextWindowTokens: 1_000_000,
-      effectiveContextWindowTokens: 900_000,
-      autoCompactTokenLimit: 850_000,
-    },
-    {
-      ...OPENGENI_GATEWAY_MODELS.kimi,
-      vision: true,
-      inputFileMediaTypes: ["application/pdf"],
-      contextWindowTokens: 1_000_000,
-      effectiveContextWindowTokens: 900_000,
-      autoCompactTokenLimit: 850_000,
-    },
-  ].map((model) => GatewayCatalogModel.parse(model));
+  return Object.values(OPENGENI_GATEWAY_MODELS).map((model) => GatewayCatalogModel.parse(model));
 }
 
 function configuredGatewayCatalogModels(settings: Settings): GatewayCatalogModel[] {
@@ -2659,7 +2692,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   // billing uses the exact response Gateway `cost` / `inferenceCost` and applies
   // the same margin. These token rates are used only if that
   // metadata is absent. DeepSeek therefore carries the highest approved route
-  // (Novita); both approved Kimi routes have the same list price.
+  // (Novita); both approved Kimi routes have the same list price; Gemini uses
+  // Vertex regional as the highest approved non-priority route; GLM has one
+  // pinned Z.AI route.
   [OPENGENI_GATEWAY_MODELS.deepseek.productId]: {
     default: {
       inputMicrosPerMillionTokens: 140_000,
@@ -2673,6 +2708,22 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       inputMicrosPerMillionTokens: 3_000_000,
       cachedInputMicrosPerMillionTokens: 300_000,
       outputMicrosPerMillionTokens: 15_000_000,
+      marginBps: 2_500,
+    },
+  },
+  [OPENGENI_GATEWAY_MODELS.gemini.productId]: {
+    default: {
+      inputMicrosPerMillionTokens: 825_000,
+      cachedInputMicrosPerMillionTokens: 82_500,
+      outputMicrosPerMillionTokens: 4_125_000,
+      marginBps: 2_500,
+    },
+  },
+  [OPENGENI_GATEWAY_MODELS.glm.productId]: {
+    default: {
+      inputMicrosPerMillionTokens: 1_400_000,
+      cachedInputMicrosPerMillionTokens: 260_000,
+      outputMicrosPerMillionTokens: 4_400_000,
       marginBps: 2_500,
     },
   },
@@ -3677,6 +3728,7 @@ function gatewayModelCapabilities(
   settings: Settings,
   input: {
     implicitCaching: boolean;
+    reasoningEfforts?: readonly z.infer<typeof ReasoningEffort>[];
     vision: boolean;
     inputFileMediaTypes?: string[];
   },
@@ -3685,8 +3737,25 @@ function gatewayModelCapabilities(
     reasoningEffort: true,
     hostedWebSearch: false,
   });
+  const supportedReasoningEfforts = input.reasoningEfforts
+    ? new Set<z.infer<typeof ReasoningEffort>>(input.reasoningEfforts)
+    : null;
+  const reasoningEfforts = supportedReasoningEfforts
+    ? legacy.reasoning.efforts.filter((effort) => supportedReasoningEfforts.has(effort))
+    : legacy.reasoning.efforts;
+  const defaultReasoningEffort =
+    legacy.reasoning.defaultEffort !== null &&
+    reasoningEfforts.includes(legacy.reasoning.defaultEffort)
+      ? legacy.reasoning.defaultEffort
+      : (reasoningEfforts.at(-1) ?? null);
   return normalizeCapabilities({
     ...legacy,
+    reasoning: {
+      ...legacy.reasoning,
+      runnable: reasoningEfforts.length > 0,
+      efforts: reasoningEfforts,
+      defaultEffort: defaultReasoningEffort,
+    },
     functionCalling: { upstream: "supported", runnable: true },
     inputModalities: input.vision ? ["text", "image"] : ["text"],
     inputFileMediaTypes: input.inputFileMediaTypes ?? [],
@@ -3697,7 +3766,7 @@ function gatewayModelCapabilities(
     promptCaching: input.implicitCaching
       ? { upstream: "supported", runnable: true, mode: "implicit" }
       : { upstream: "unsupported", runnable: false, mode: "none" },
-    // Both Gateway products expose one reviewed route policy and no separately
+    // Gateway products expose one reviewed route policy and no separately
     // billed latency mode.
     latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
   });
@@ -3734,12 +3803,18 @@ function gatewayRegistryProvider(
           label?: string | null;
         }[];
       },
-): InternalRegistryProvider {
+): InternalRegistryProvider | null {
   const workspace = input.kind === "vercel-gateway-workspace";
   const organization = input.kind === "vercel-gateway-organization";
   const scoped = workspace || organization;
-  const curated = organization ? [] : configuredGatewayCatalogModels(settings);
-  const upstreamIds = new Set(curated.map((model) => model.upstreamModelId));
+  const allCurated = organization ? [] : configuredGatewayCatalogModels(settings);
+  const configuredReasoningEfforts = new Set(configuredAllowedReasoningEfforts(settings));
+  const curated = allCurated.filter(
+    (model) =>
+      model.reasoningEfforts === undefined ||
+      model.reasoningEfforts.some((effort) => configuredReasoningEfforts.has(effort)),
+  );
+  const upstreamIds = new Set(allCurated.map((model) => model.upstreamModelId));
   const productIds = new Set(
     parseModelProvidersJson(settings.modelProvidersJson)
       .filter(
@@ -3765,6 +3840,9 @@ function gatewayRegistryProvider(
       ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
       capabilities: gatewayModelCapabilities(settings, {
         implicitCaching: model.implicitCaching,
+        ...(model.reasoningEfforts === undefined
+          ? {}
+          : { reasoningEfforts: model.reasoningEfforts }),
         vision: model.vision,
         inputFileMediaTypes: model.inputFileMediaTypes,
       }),
@@ -3801,6 +3879,7 @@ function gatewayRegistryProvider(
       });
     }
   }
+  if (models.length === 0) return null;
   return {
     kind: input.kind,
     id: workspace
@@ -3925,12 +4004,11 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
   const providers = parseModelProvidersJson(settings.modelProvidersJson);
   const injected: InternalRegistryProvider[] = [...providers];
   if (settings.vercelAiGatewayApiKey && configuredGatewayCatalogModels(settings).length > 0) {
-    injected.push(
-      gatewayRegistryProvider(settings, {
-        kind: "vercel-gateway-managed",
-        apiKey: settings.vercelAiGatewayApiKey,
-      }),
-    );
+    const gateway = gatewayRegistryProvider(settings, {
+      kind: "vercel-gateway-managed",
+      apiKey: settings.vercelAiGatewayApiKey,
+    });
+    if (gateway) injected.push(gateway);
   }
   const openrouter = settings.openrouterApiKey
     ? openRouterRegistryProvider(settings, {
@@ -3956,15 +4034,14 @@ export function withWorkspaceGatewayCatalogProvider(
   );
   const curatedCount = configuredGatewayCatalogModels(settings).length;
   if (curatedCount === 0 && customModels.length === 0) return settings;
+  const provider = gatewayRegistryProvider(settings, {
+    kind: "vercel-gateway-workspace",
+    customModels,
+  });
+  if (!provider) return settings;
   return {
     ...settings,
-    modelProvidersJson: JSON.stringify([
-      ...withoutWorkspace,
-      gatewayRegistryProvider(settings, {
-        kind: "vercel-gateway-workspace",
-        customModels,
-      }),
-    ]),
+    modelProvidersJson: JSON.stringify([...withoutWorkspace, provider]),
   };
 }
 
@@ -4042,6 +4119,7 @@ export function withOrganizationGatewayCatalogProvider(
     kind: "vercel-gateway-organization",
     customModels,
   });
+  if (!provider) return { ...settings, modelProvidersJson: JSON.stringify(providers) };
   return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
 }
 
@@ -4272,6 +4350,34 @@ export function runnableLatencyModesForModel(settings: Settings, modelId: string
   return resolved.model.capabilities.latencyModes
     .filter((mode) => mode.runnable)
     .map((mode) => LatencyMode.parse(mode.id));
+}
+
+function runnableReasoningEffortsForModel(
+  settings: Settings,
+  modelId: string,
+): Array<z.infer<typeof ReasoningEffort>> | null {
+  const catalogSettings = settingsForTurnExecutionPolicy(settings, modelId);
+  const resolved = resolveModelProvider(
+    catalogSettings,
+    canonicalizeConfiguredModelId(catalogSettings, modelId),
+  );
+  if (!resolved || !resolved.model.capabilities.reasoning.runnable) {
+    return null;
+  }
+  return [...resolved.model.capabilities.reasoning.efforts];
+}
+
+function assertReasoningEffortRunnable(
+  settings: Settings,
+  modelId: string,
+  reasoningEffort: z.infer<typeof ReasoningEffort>,
+): void {
+  const runnable = runnableReasoningEffortsForModel(settings, modelId);
+  if (runnable !== null && !runnable.includes(reasoningEffort)) {
+    throw new Error(
+      `reasoning effort ${reasoningEffort} is not runnable for model ${modelId} (allowed: ${runnable.join(", ")})`,
+    );
+  }
 }
 
 function assertLatencyModeRunnable(
@@ -5048,6 +5154,7 @@ export function resolveTurnExecutionPolicyV1(
   }
   const latencyMode = LatencyMode.parse(input.latencyMode ?? "standard");
   const latencyModeSource = input.latencyModeSource ?? "deployment";
+  assertReasoningEffortRunnable(catalogSettings, productModelId, input.reasoningEffort);
   assertLatencyModeRunnable(catalogSettings, productModelId, latencyMode);
   return TurnExecutionPolicyV1.parse({
     schemaVersion: 1,
@@ -5098,6 +5205,7 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
       "Turn execution policy does not match the accepted turn model/reasoning/latency",
     );
   }
+  assertReasoningEffortRunnable(catalogSettings, parsed.productModelId, parsed.reasoningEffort);
   assertLatencyModeRunnable(catalogSettings, parsed.productModelId, parsed.latencyMode);
   if (
     parsed.requestedModelId !== null &&
