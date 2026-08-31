@@ -12,6 +12,9 @@ import {
 } from "@opengeni/db";
 import { recordTenancyCompatibilityLaneUse, type Observability } from "@opengeni/observability";
 
+const OPENGENI_CONNECTION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function connectionTokenResolverForTurn(input: {
   db: Database;
   settings: Settings;
@@ -44,6 +47,18 @@ export function connectionTokenResolverForTurn(input: {
       })
     : buildConnectionTokenResolver(input.db, input.settings);
   return async (request) => {
+    // OpenGeni-owned Connection ids are UUIDs. A bound embedding host may use
+    // any other non-empty opaque id without mirroring its provider connection
+    // into OpenGeni. Keep that host-only lane outside the accepted-connection
+    // SQL boundary: PostgreSQL would otherwise cast the opaque id to uuid and
+    // fail before the host can authorize the immutable turn context.
+    if (
+      hostResolver &&
+      request.connectionRef.connectionId &&
+      !OPENGENI_CONNECTION_ID_PATTERN.test(request.connectionRef.connectionId)
+    ) {
+      return await baseResolver(request);
+    }
     const acceptedDelegation = input.turn.personalConnectionDelegations.find(
       (delegation) =>
         (delegation.connectionType === undefined ||
