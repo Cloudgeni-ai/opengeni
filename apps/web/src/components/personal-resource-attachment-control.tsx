@@ -1,27 +1,8 @@
-import { AlertTriangleIcon, RefreshCwIcon } from "lucide-react";
-import { useId } from "react";
+import { RefreshCwIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { PersonalResourceAttachmentController } from "@/lib/use-personal-resource-attachment";
-
-const MODE_OPTIONS = [
-  {
-    value: "once" as const,
-    label: "This message",
-    description: "Use them only for the work submitted now.",
-  },
-  {
-    value: "session" as const,
-    label: "This session",
-    description: "Keep session-scoped authority available for later work.",
-  },
-  {
-    value: "always" as const,
-    label: "Remember here",
-    description: "Make it available for future work you start in this workspace.",
-  },
-];
 
 export function PersonalResourceAttachmentControl(props: {
   controller: PersonalResourceAttachmentController;
@@ -29,7 +10,6 @@ export function PersonalResourceAttachmentControl(props: {
   compact?: boolean;
 }) {
   const { controller } = props;
-  const durationLabelId = useId();
   if (
     !controller.eligible ||
     (!controller.loading &&
@@ -59,65 +39,12 @@ export function PersonalResourceAttachmentControl(props: {
           Loading selected personal resources…
         </p>
       ) : controller.selected.resourceCount > 0 ? (
-        <>
-          <p id={durationLabelId} className="text-xs text-fg-muted">
-            {names.join(" · ")} {controller.selected.resourceCount === 1 ? "belongs" : "belong"} to
-            you. Choose how long OpenGeni may use{" "}
-            {controller.selected.resourceCount === 1 ? "it" : "them"}.
-          </p>
-          <div
-            className="mt-3 grid gap-2 sm:grid-cols-3"
-            role="radiogroup"
-            aria-labelledby={durationLabelId}
-          >
-            {MODE_OPTIONS.map((option) => (
-              <label
-                key={option.value}
-                className={cn(
-                  "flex cursor-pointer gap-2 rounded-md border p-2.5 text-left",
-                  "focus-within:ring-2 focus-within:ring-brand focus-within:ring-offset-2",
-                  controller.mode === option.value
-                    ? "border-brand/60 bg-brand/[0.08]"
-                    : "border-border bg-surface hover:bg-surface-2/60",
-                )}
-              >
-                <input
-                  type="radio"
-                  name="personal-resource-attachment-mode"
-                  value={option.value}
-                  checked={controller.mode === option.value}
-                  disabled={disabled}
-                  onChange={() => controller.setMode(option.value)}
-                  className="mt-0.5 size-4 accent-brand"
-                />
-                <span className="min-w-0">
-                  <span className="block text-xs font-medium text-fg">{option.label}</span>
-                  <span className="mt-0.5 block text-2xs leading-4 text-fg-subtle">
-                    {option.description}
-                  </span>
-                </span>
-              </label>
-            ))}
-          </div>
-          {controller.visibility === "workspace" && controller.mode ? (
-            <label className="mt-3 flex cursor-pointer items-start gap-2 rounded-md border border-warning/30 bg-warning/5 p-2.5 text-xs text-fg-muted">
-              <input
-                type="checkbox"
-                checked={controller.acknowledged}
-                disabled={disabled}
-                onChange={(event) => controller.setAcknowledged(event.target.checked)}
-                className="mt-0.5 size-4 shrink-0 accent-brand"
-              />
-              <span>
-                <span className="mb-1 flex items-center gap-1 font-medium text-fg">
-                  <AlertTriangleIcon className="size-3.5 text-warning" aria-hidden />
-                  Confirm shared-session use
-                </span>
-                {controller.warning}
-              </span>
-            </label>
-          ) : null}
-        </>
+        <p className="text-xs text-fg-muted">
+          {names.join(" · ")}{" "}
+          {controller.visibility === "private"
+            ? "is available in this private session."
+            : "will be used only for messages you send. Other members may see the result, but cannot use your credential."}
+        </p>
       ) : null}
       {controller.notice ? (
         <p className="mt-2 text-xs text-fg-muted" role="status" aria-live="polite">
@@ -127,8 +54,8 @@ export function PersonalResourceAttachmentControl(props: {
       {controller.error ? (
         <div className="mt-2 flex items-center justify-between gap-3" role="alert">
           <span className="text-xs text-danger">
-            The selected personal resource is unavailable. Try again, or choose a different
-            resource.
+            The selected personal resource is unavailable. Retry, or open Variable Sets to replace
+            or remove it.
           </span>
           <Button
             type="button"

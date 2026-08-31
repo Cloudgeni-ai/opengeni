@@ -280,7 +280,7 @@ describe("personal resource attachment authority", () => {
     ).toBe(false);
   });
 
-  test("resets acknowledgement and refreshes both catalogs after a definitive conflict", async () => {
+  test("refreshes both catalogs after a definitive conflict", async () => {
     const events: string[] = [];
     const recovered = await recoverNewSessionPersonalResourceAttachment({
       error: new OpenGeniApiError(409, "stale personal resource"),
@@ -291,14 +291,13 @@ describe("personal resource attachment authority", () => {
           sharedOutputWarningVersion: 1,
         },
       },
-      resetAcknowledgement: () => events.push("reset"),
       refreshCatalogs: async () => {
         events.push("variable_sets");
         events.push("rigs");
       },
     });
     expect(recovered).toBe(true);
-    expect(events).toEqual(["reset", "variable_sets", "rigs"]);
+    expect(events).toEqual(["variable_sets", "rigs"]);
 
     events.length = 0;
     expect(
@@ -311,7 +310,6 @@ describe("personal resource attachment authority", () => {
             sharedOutputWarningVersion: 1,
           },
         },
-        resetAcknowledgement: () => events.push("reset"),
         refreshCatalogs: async () => {
           events.push("variable_sets");
           events.push("rigs");
@@ -341,7 +339,7 @@ describe("personal resource attachment authority", () => {
     if (!scope) throw new Error("fixture owner scope missing");
     const client = {
       listVariableSets: async (routeWorkspaceId: string) => {
-        expect(routeWorkspaceId).toBe(personalWorkspaceId);
+        expect(routeWorkspaceId).toBe(workspaceId);
         return [personalVariableSet(workspaceId)];
       },
       listRigs: async () => [],
@@ -638,10 +636,8 @@ describe("personal resource attachment authority", () => {
       newSessionPersonalResourceAttachment({
         personalResourceCount: 2,
         visibility: "private",
-        sharedAcknowledged: false,
       }),
     ).toEqual({
-      requiresAcknowledgement: false,
       intent: {
         mode: "session",
         workspaceSharedAcknowledged: false,
@@ -650,24 +646,15 @@ describe("personal resource attachment authority", () => {
     });
   });
 
-  test("workspace-visible personal resources use one inline acknowledgement", () => {
+  test("workspace-visible personal resources use message-only authority without a second toggle", () => {
     expect(
       newSessionPersonalResourceAttachment({
         personalResourceCount: 1,
         visibility: "workspace",
-        sharedAcknowledged: false,
-      }),
-    ).toEqual({ requiresAcknowledgement: true, intent: undefined });
-    expect(
-      newSessionPersonalResourceAttachment({
-        personalResourceCount: 1,
-        visibility: "workspace",
-        sharedAcknowledged: true,
       }),
     ).toEqual({
-      requiresAcknowledgement: false,
       intent: {
-        mode: "session",
+        mode: "once",
         workspaceSharedAcknowledged: true,
         sharedOutputWarningVersion: 1,
       },
