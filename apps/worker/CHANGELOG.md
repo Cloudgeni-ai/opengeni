@@ -1,5 +1,16 @@
 # @opengeni/worker-bundle
 
+## 0.23.4
+
+### Patch Changes
+
+- 3589136: Release abandoned shared rig setup ownership as soon as the superseded turn proves its sandbox writers are physically quiesced.
+- Updated dependencies [3589136]
+  - @opengeni/db@3.7.4
+  - @opengeni/core@2.6.4
+  - @opengeni/documents@0.8.14
+  - @opengeni/events@0.4.12
+
 ## 0.23.3
 
 ### Patch Changes
