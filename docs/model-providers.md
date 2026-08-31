@@ -110,7 +110,10 @@ complete application-login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply the migration with the
 catalog-aware release, and restart only that release in `code` mode. Then
 validate and upsert a document that is semantically equivalent to the active
-code/env catalog before changing any source flag:
+code/env catalog before changing any source flag. Run the command from the
+catalog-aware release environment with the exact runtime model provider,
+credential, cost-policy, and pricing variables present; the database variables
+shown below are additions, not a complete environment:
 
 ```bash
 OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
@@ -121,13 +124,18 @@ OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
 Omit `OPENGENI_DB_SCHEMA` for `public`; embedded deployments must set the same
 dedicated schema used by migrations and runtime connections.
 
+Before opening its write transaction, the command applies the candidate to the
+same database-mode deployment settings and secret bindings used by runtime and
+requires the fully resolved catalog to be executable. It therefore rejects
+host-provider transport mismatches, missing provider credentials, invalid
+defaults, and incompatible cost/pricing policy without changing the singleton.
 The upsert increments `version` only when the normalized document changes. It
 never writes provider credentials or the separate cost policy. The mandatory
 `--expected-version` is a compare-and-swap fence: use `0` only for an absent
-singleton, then pass the exact reported version for every later update. A
-stale version is rejected without changing the document or version. The
-operator transaction has bounded lock and statement timeouts, so another
-operator cannot leave the command waiting indefinitely.
+singleton, then pass the exact reported version for every later update. A stale
+version is rejected without changing the document or version. The operator
+transaction has bounded lock and statement timeouts, so another operator cannot
+leave the command waiting indefinitely.
 
 Roll every API, control worker, and turn worker to database mode only while the
 database document remains equivalent to the code catalog. Verify client config,

@@ -1,5 +1,12 @@
 #!/usr/bin/env bun
-import { dbSearchPath, parseModelCatalogDocument } from "@opengeni/config";
+import {
+  applyModelCatalogDocument,
+  dbSearchPath,
+  getSettings,
+  parseModelCatalogDocument,
+  validateModelCatalogSettings,
+  type ModelCatalogDocument,
+} from "@opengeni/config";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import postgres from "postgres";
@@ -40,6 +47,20 @@ export function modelCatalogDatabaseSearchPath(
   return dbSearchPath({ dbSchema: env.OPENGENI_DB_SCHEMA?.trim() ?? "" });
 }
 
+export function preflightModelCatalogDocument(
+  raw: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+): ModelCatalogDocument {
+  const document = parseModelCatalogDocument(raw);
+  const databaseRuntimeEnv = {
+    ...env,
+    OPENGENI_MODEL_CATALOG_SOURCE: "database",
+  };
+  const settings = applyModelCatalogDocument(getSettings(databaseRuntimeEnv), document);
+  validateModelCatalogSettings(settings, databaseRuntimeEnv);
+  return document;
+}
+
 function postgresErrorCode(error: unknown): string | null {
   let current: unknown = error;
   const seen = new Set<unknown>();
@@ -70,7 +91,7 @@ export async function runModelCatalogUpsert(
       { cause: error },
     );
   }
-  const document = parseModelCatalogDocument(raw);
+  const document = preflightModelCatalogDocument(raw, env);
   const searchPath = modelCatalogDatabaseSearchPath(env);
   const sql = postgres(databaseUrl, {
     max: 1,

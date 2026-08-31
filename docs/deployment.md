@@ -1898,7 +1898,10 @@ fleet is unsupported even while every process still uses `code`:
    compatibility behavior of choosing the first `builtInModels` entry.
    Membership and optional one-line notes belong in the document; keys, enabled
    flags, billing, cost policy, and pricing do not.
-6. Validate and upsert it with a migration/admin database credential:
+6. Validate and upsert it with a migration/admin database credential. Run the
+   command from the catalog-aware release environment with the exact runtime
+   model provider, credential, cost-policy, and pricing variables present; the
+   database variables shown below are additions, not a complete environment:
 
    ```bash
    OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
@@ -1915,7 +1918,11 @@ fleet is unsupported even while every process still uses `code`:
    when the singleton must not exist yet; for later changes, pass the exact
    version reported by the previous successful command. A mismatch makes no
    database change. The command uses transaction-local lock and statement
-   timeouts so a competing operator cannot block it indefinitely.
+   timeouts so a competing operator cannot block it indefinitely. Before the
+   write transaction, it applies the candidate to the same database-mode
+   deployment settings and secret bindings used by runtime and validates the
+   fully resolved executable catalog. Provider transport/credential, default
+   model, and cost/pricing failures therefore leave the live singleton intact.
 
 7. Confirm the command reports the expected version, then roll every API,
    control worker, and turn worker with

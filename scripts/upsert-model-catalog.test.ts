@@ -3,7 +3,10 @@ import { acquireSharedTestDatabase } from "@opengeni/testing";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { modelCatalogDatabaseSearchPath } from "./upsert-model-catalog";
+import {
+  modelCatalogDatabaseSearchPath,
+  preflightModelCatalogDocument,
+} from "./upsert-model-catalog";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -55,6 +58,50 @@ describe("model catalog operator CLI", () => {
       "Usage: bun run model-catalog:upsert -- --file <catalog.json> --expected-version <nonnegative integer>",
     );
     expect(result.stderr.toString()).not.toContain(" at ");
+  });
+
+  test("preflights candidates with the exact database-runtime model authority", () => {
+    const env = operatorTestEnv({
+      OPENGENI_OPENAI_API_KEY: "openai-test-key",
+      OPENGENI_MODEL_CATALOG_SOURCE: "code",
+    });
+    expect(
+      preflightModelCatalogDocument(
+        {
+          schemaVersion: 1,
+          defaultModel: "gpt-5.6-luna",
+          builtInModels: ["gpt-5.6-luna"],
+          registryProviders: [],
+          gatewayModels: [],
+          openrouterModels: [],
+          modelNotes: {},
+        },
+        env,
+      ),
+    ).toMatchObject({ defaultModel: "gpt-5.6-luna" });
+
+    expect(() =>
+      preflightModelCatalogDocument(
+        {
+          schemaVersion: 1,
+          defaultModel: "unbound-provider/database-model",
+          builtInModels: ["gpt-5.6-luna"],
+          registryProviders: [
+            {
+              id: "unbound-provider",
+              baseUrl: "https://provider.example.test/v1",
+              models: [{ id: "unbound-provider/database-model" }],
+            },
+          ],
+          gatewayModels: [],
+          openrouterModels: [],
+          modelNotes: {},
+        },
+        env,
+      ),
+    ).toThrow(
+      "database model catalog provider unbound-provider has no matching host-authorized api-key transport",
+    );
   });
 
   test("upserts only the deployment catalog in a configured dedicated schema", async () => {
@@ -165,6 +212,57 @@ describe("model catalog operator CLI", () => {
       );
       expect(updated.exitCode).toBe(0);
       expect(updated.stdout.toString()).toContain("Model catalog updated; version 2.");
+
+      await writeFile(
+        file,
+        JSON.stringify({
+          schemaVersion: 1,
+          defaultModel: "unbound-provider/database-model",
+          builtInModels: ["gpt-5.6-luna"],
+          registryProviders: [
+            {
+              id: "unbound-provider",
+              baseUrl: "https://provider.example.test/v1",
+              models: [{ id: "unbound-provider/database-model" }],
+            },
+          ],
+          gatewayModels: [],
+          openrouterModels: [],
+          modelNotes: {},
+        }),
+      );
+      const incompatible = Bun.spawnSync(
+        [
+          process.execPath,
+          "scripts/upsert-model-catalog.ts",
+          "--file",
+          file,
+          "--expected-version",
+          "2",
+        ],
+        {
+          cwd: repoRoot,
+          env: operatorTestEnv({
+            OPENGENI_MIGRATIONS_DATABASE_URL: shared.adminUrl,
+            OPENGENI_DB_SCHEMA: schema,
+          }),
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(incompatible.exitCode).toBe(1);
+      expect(incompatible.stderr.toString()).toContain(
+        "database model catalog provider unbound-provider has no matching host-authorized api-key transport",
+      );
+
+      const afterIncompatible = await shared.admin.unsafe<
+        Array<{ version: number; builtInModels: string[] }>
+      >(
+        `select version::int as version, document->'builtInModels' as "builtInModels" from "${schema}".deployment_model_catalog`,
+      );
+      expect(afterIncompatible).toEqual([
+        { version: 2, builtInModels: ["gpt-5.6-luna", "gpt-5.6-sol"] },
+      ]);
 
       await writeFile(
         file,
