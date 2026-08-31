@@ -852,6 +852,9 @@ deduplicate those keys. Session ordering is authoritative by `event.sequence`; c
 stable across sessions but deliberately not claimed to be causal. High-volume raw delta event types
 are excluded from the host stream; their completed semantic events remain. Event types are bounded
 but forward-tolerant so an older consumer can carry a newer writer's event during a rolling upgrade.
+Canonical session events remain lossless. When one payload exceeds the bounded host wire, the
+outbox carries a content-free truncation receipt keyed to the canonical event instead of blocking
+the source transaction or copying an unbounded payload into the host stream.
 Each session-bound event and usage fact also carries the immutable lineage `rootSessionId` captured
 with the outbox row in the source transaction. A host can therefore retain the immediate child id
 for audit while attributing usage or host-owned business signals to one root binding. Only a
