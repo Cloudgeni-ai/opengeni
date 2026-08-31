@@ -18,14 +18,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0383 model catalog activation requires an explicit application database role list'
+      '0388 model catalog activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0383 model catalog activation received a malformed application database role list'
+      '0388 model catalog activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -44,7 +44,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0383 model catalog activation received an invalid application database role list'
+      '0388 model catalog activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -56,7 +56,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0383 model catalog activation requires all configured OpenGeni application database sessions to be stopped'
+      '0388 model catalog activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -234,7 +234,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0383 model catalog activation observed a configured OpenGeni application database session after schema installation'
+      '0388 model catalog activation observed a configured OpenGeni application database session after schema installation'
       USING ERRCODE = '55000';
   END IF;
 END

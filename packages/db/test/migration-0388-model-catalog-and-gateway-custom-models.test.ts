@@ -55,6 +55,8 @@ describe("migration 0388 model catalog and Gateway custom models", () => {
     expect(migration).toContain("model_catalog_runtime_drain_before");
     expect(migration).toContain("model_catalog_runtime_drain_after");
     expect(migration).toContain("pg_stat_activity");
+    expect(migration.match(/0388 model catalog activation/g)).toHaveLength(5);
+    expect(migration).not.toContain("0383 model catalog activation");
     expect(migration).toContain("CREATE TABLE deployment_model_catalog");
     expect(migration).toContain("CREATE TABLE workspace_gateway_custom_models");
     expect(migration).toContain("session_command_receipts_prompt_actor_operation_idx");
