@@ -583,11 +583,12 @@ repository selector.
 
 OpenGeni-owned Connection ids are UUIDs and remain subject to the accepted-use
 snapshot and per-provider-request audit fence. An embedding host that does not
-mirror its provider connection into OpenGeni must use a non-UUID opaque
-`connectionId`; with `mcpCredentials` bound, that shape routes directly to the
-host resolver with the immutable turn lineage. This distinction prevents an
+mirror its provider connection into OpenGeni must use an opaque `connectionId`
+that is not a canonical UUID (including UUID-shaped values with an invalid
+version or variant); with `mcpCredentials` bound, that shape routes directly to
+the host resolver with the immutable turn lineage. This distinction prevents an
 opaque host id from being cast as an OpenGeni database UUID while preserving the
-native authority lane for UUID-backed connections.
+native authority lane for canonical UUID-backed connections.
 
 Successful results must echo account/workspace/immediate-session plus the exact
 provider, provider domain, requested connection id, OAuth scopes/resource, and

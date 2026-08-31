@@ -140,7 +140,7 @@ describe("workspace connection lane", () => {
     expect(hostCalls).toBe(0);
   });
 
-  test("an opaque host binding bypasses native UUID authority and reaches the host", async () => {
+  test("opaque host bindings bypass native UUID authority and reach the host", async () => {
     let authorizeCalls = 0;
     let hostCalls = 0;
     const resolver = workspaceResolver({
@@ -168,8 +168,27 @@ describe("workspace connection lane", () => {
 
     expect(result).toMatchObject({ status: "ok", connectionId: "cloudgeni-capability" });
     expect(result).not.toHaveProperty("authorizeProviderRequest");
+
+    const invalidUuidShapedId = "aaaaaaaa-aaaa-0aaa-0aaa-aaaaaaaaaaaa";
+    const invalidUuidShapedResult = await resolver({
+      ...workspaceRequest,
+      serverId: "host-invalid-uuid-shape",
+      destinationUrl: "https://api.example.test/embedded/host-mcp/mcp",
+      connectionRef: {
+        providerDomain: "api.example.test",
+        connectionId: invalidUuidShapedId,
+        kind: "delegated" as const,
+        subjectScope: "workspace" as const,
+      },
+    });
+
+    expect(invalidUuidShapedResult).toMatchObject({
+      status: "ok",
+      connectionId: invalidUuidShapedId,
+    });
+    expect(invalidUuidShapedResult).not.toHaveProperty("authorizeProviderRequest");
     expect(authorizeCalls).toBe(0);
-    expect(hostCalls).toBe(1);
+    expect(hostCalls).toBe(2);
   });
 
   test("a ref with no connection id keeps the bounded pre-snapshot legacy path", async () => {
