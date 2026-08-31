@@ -1846,12 +1846,32 @@ describe("buildProviderClient", () => {
       billing: { upstreamPayer: "workspace", metering: "external" },
     };
 
-    expect(buildProviderClient(provider, settings)).not.toBe(
-      buildProviderClient(provider, settings),
-    );
+    const first = buildProviderClient(provider, settings);
+    expect(first).not.toBe(buildProviderClient(provider, settings));
+    expect(settings.openaiMaxRetries).toBeGreaterThan(0);
+    expect(first.maxRetries).toBe(0);
     expect(() => buildProviderClient({ ...provider, apiKey: undefined }, settings)).toThrow(
       WorkspaceOpenRouterUnavailableError,
     );
+  });
+
+  test("managed OpenRouter clients disable blind SDK retries", () => {
+    const settings = multiProviderSettings();
+    const provider: ResolvedModelProvider = {
+      id: "openrouter",
+      label: "OpenRouter",
+      kind: "openrouter-managed",
+      api: "chat",
+      wireProfile: "openai",
+      builtin: false,
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "deployment-openrouter-key",
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    };
+
+    expect(settings.openaiMaxRetries).toBeGreaterThan(0);
+    expect(buildProviderClient(provider, settings).maxRetries).toBe(0);
   });
 
   test("an anonymous provider sends no authentication or ambient OpenAI identity headers", async () => {

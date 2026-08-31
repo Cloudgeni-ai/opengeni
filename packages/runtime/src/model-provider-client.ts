@@ -245,6 +245,8 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
   const workspaceCredentialProvider = provider.credentialSource?.kind === "workspace_connection";
   const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
+  const openRouterProvider =
+    provider.kind === "openrouter-managed" || provider.kind === "openrouter-workspace";
   const gatewayPolicies = gatewayProvider
     ? new Map(
         configuredModels(settings)
@@ -324,9 +326,11 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   ? { apiKey: provider.apiKey }
                   : {}),
               ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-              // Gateway routing is deliberately fail-closed. Avoid SDK replay after
-              // a request may have reached the one pinned endpoint.
-              maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
+              // Gateway and OpenRouter requests can incur upstream work or charges
+              // before a retryable response failure reaches this process. Neither
+              // transport has a provider idempotency key tied to our durable call,
+              // so never let the SDK replay them blindly.
+              maxRetries: gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries,
               ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
               ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
               fetch: anonymousProvider
