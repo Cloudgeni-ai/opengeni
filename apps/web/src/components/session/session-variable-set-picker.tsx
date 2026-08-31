@@ -54,17 +54,23 @@ export function SessionVariableSetPicker(props: {
   const [draftIds, setDraftIds] = useState(currentIds);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [refreshRequired, setRefreshRequired] = useState(false);
-  const [committedKey, setCommittedKey] = useState<string | null>(null);
+  const [committedSelection, setCommittedSelection] = useState<{
+    sessionId: string;
+    key: string;
+  } | null>(null);
+  const refreshRequired = committedSelection?.sessionId === props.session.id;
 
   useEffect(() => {
-    setDraftIds(currentIds);
-    if (committedKey === null || currentKey === committedKey) {
-      setCommittedKey(null);
-      setRefreshRequired(false);
-      setError(null);
+    if (
+      committedSelection?.sessionId === props.session.id &&
+      currentKey !== committedSelection.key
+    ) {
+      return;
     }
-  }, [committedKey, currentIds, currentKey, props.session.id]);
+    setDraftIds(currentIds);
+    setCommittedSelection(null);
+    setError(null);
+  }, [committedSelection, currentIds, currentKey, props.session.id]);
 
   const selectedChanged = draftIds.join("\u0000") !== currentKey;
   const availableVariableSets = variableSets.variableSets.filter(
@@ -76,7 +82,7 @@ export function SessionVariableSetPicker(props: {
   const canEdit = props.canControl && props.canAttach && !refreshRequired;
   const canAdd = canEdit && props.canUse && props.canList;
   const busy = props.busy || props.goalActive;
-  const visible = currentIds.length > 0 || canAdd;
+  const visible = refreshRequired || currentIds.length > 0 || canAdd;
   if (!visible) return null;
 
   const save = async () => {
@@ -87,8 +93,7 @@ export function SessionVariableSetPicker(props: {
         variableSetIds: draftIds,
       });
       const nextCommittedKey = draftIds.join("\u0000");
-      setCommittedKey(nextCommittedKey);
-      setRefreshRequired(true);
+      setCommittedSelection({ sessionId: props.session.id, key: nextCommittedKey });
       try {
         await props.onReloadSession();
       } catch (cause) {

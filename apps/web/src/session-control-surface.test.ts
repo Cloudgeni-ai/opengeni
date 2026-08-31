@@ -143,6 +143,10 @@ describe("session control surface architecture", () => {
     expect(establishedPicker).toContain("The update committed");
     expect(establishedPicker).toContain("Retry refresh");
     expect(establishedPicker).toContain("updateSessionVariableSets");
+    expect(establishedPicker).toContain(
+      "const visible = refreshRequired || currentIds.length > 0 || canAdd",
+    );
+    expect(establishedPicker).toContain("committedSelection?.sessionId === props.session.id &&");
     expect(establishedPicker).toContain("props.canControl && props.canAttach");
     expect(
       establishedRoute.match(
