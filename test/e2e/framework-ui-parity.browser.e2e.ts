@@ -15,6 +15,7 @@ import {
   type WebKitBrowser,
 } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { isExpectedFirefoxWebGLUnavailableWarning } from "../../scripts/framework-ui-browser-diagnostics";
 
 type EngineId = "chromium" | "firefox" | "webkit";
 type Engine = readonly [
@@ -339,6 +340,9 @@ function assertExpectedDiagnostics(
   expect(diagnostics.filter(isExpectedFirefoxHarnessWarning)).toHaveLength(
     engineId === "firefox" ? 1 : 0,
   );
+  expect(diagnostics.filter(isExpectedFirefoxWebGLUnavailableWarning).length).toBeLessThanOrEqual(
+    engineId === "firefox" ? 1 : 0,
+  );
   expect(diagnostics.filter(isExpectedWebKitTerminalTaskQueueWarning).length).toBeLessThanOrEqual(
     1,
   );
@@ -347,6 +351,7 @@ function assertExpectedDiagnostics(
       (diagnostic) =>
         !isExpectedReducedMotionWarning(diagnostic) &&
         !isExpectedFirefoxHarnessWarning(diagnostic) &&
+        !isExpectedFirefoxWebGLUnavailableWarning(diagnostic) &&
         !isExpectedWebKitTerminalTaskQueueWarning(diagnostic),
     ),
   ).toEqual([]);
