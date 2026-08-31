@@ -43773,6 +43773,28 @@ export async function releaseLeaseHolder(
         const row = rows[0];
         if (!row) return null; // already cold-and-reaped; release is an idempotent no-op
 
+        // Cancellation can delete the holder before the shared rig coordinator
+        // catches its abort. That coordinator must then fail closed because its
+        // ordinary settlement requires the holder to remain present. Once the
+        // later proof-bearing release confirms every attempt-owned sandbox
+        // writer is physically quiesced, close the abandoned single-flight too.
+        // Matching the canonical holder to the durable owner attempt keeps this
+        // idempotent and prevents an eager, proof-free release from admitting a
+        // replacement while the old rig command may still be running.
+        if (input.kind === "turn" && input.workspaceWritersQuiesced === true) {
+          await tx.execute(sql`
+            update sandbox_leases
+            set shared_preparation_status = 'failed',
+                shared_preparation_revision = shared_preparation_revision + 1,
+                shared_preparation_settled_at = now(),
+                updated_at = now()
+            where id = ${row.id}
+              and shared_preparation_status = 'running'
+              and lower(${input.holderId}) =
+                'turn-attempt:' || shared_preparation_owner_attempt_id::text
+          `);
+        }
+
         // Idempotent: deleting an already-gone holder affects 0 rows, fine.
         await tx.execute(sql`
         delete from sandbox_lease_holders
