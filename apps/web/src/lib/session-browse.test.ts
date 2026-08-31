@@ -77,7 +77,7 @@ describe("session browse projections", () => {
     expect(sessionCreatorLabel(scheduler)).toBe("Service · service:scheduler");
   });
 
-  test("groups flat browse results by creator or created-date buckets", () => {
+  test("groups root browse results by creator or created-date buckets", () => {
     const ada = session({ id: "ada" });
     const grace = session({
       id: "grace",
@@ -91,6 +91,71 @@ describe("session browse projections", () => {
     expect(
       groupSessionsForBrowse([grace, ada], "created", { now: NOW }).grouped.map((g) => g.label),
     ).toEqual(["Created today", "Created earlier"]);
+  });
+
+  test("groups workstream roots while preserving their descendant hierarchy", () => {
+    const manager = session({
+      id: "manager",
+      createdAt: "2026-08-01T12:00:00.000Z",
+      updatedAt: "2026-08-13T10:00:00.000Z",
+    });
+    const worker = session({
+      id: "worker",
+      parentSessionId: manager.id,
+      createdAt: "2026-08-14T09:00:00.000Z",
+      updatedAt: "2026-08-14T11:00:00.000Z",
+      createdBy: { kind: "subject", subjectId: "user:grace", label: "Grace Hopper" },
+    });
+
+    const byCreated = groupSessionsForBrowse([worker, manager], "created", { now: NOW });
+    expect(byCreated.grouped.map((group) => group.label)).toEqual(["Created earlier"]);
+    expect(byCreated.grouped[0]?.sessions.map((node) => node.session.id)).toEqual(["manager"]);
+    expect(byCreated.grouped[0]?.sessions[0]?.children.map((node) => node.session.id)).toEqual([
+      "worker",
+    ]);
+
+    const byCreator = groupSessionsForBrowse([worker, manager], "creator", { now: NOW });
+    expect(byCreator.grouped.map((group) => group.label)).toEqual(["Ada Lovelace"]);
+    expect(byCreator.grouped[0]?.sessions[0]?.children[0]?.session.id).toBe("worker");
+
+    const withActiveWorker = groupSessionsForBrowse(
+      [{ ...worker, status: "running" }, manager],
+      "created",
+      { now: NOW },
+    );
+    expect(withActiveWorker.running.map((node) => node.session.id)).toEqual(["manager"]);
+    expect(withActiveWorker.running[0]?.children.map((node) => node.session.id)).toEqual([
+      "worker",
+    ]);
+  });
+
+  test("hierarchical filters keep complete matching workstreams instead of orphaning children", () => {
+    const manager = session({ id: "manager" });
+    const worker = session({
+      id: "worker",
+      parentSessionId: manager.id,
+      createdAt: "2026-08-14T09:00:00.000Z",
+      createdBy: { kind: "subject", subjectId: "user:grace", label: "Grace Hopper" },
+    });
+
+    expect(
+      filterSessionsForBrowse([manager, worker], {
+        creator: "subject:user:ada",
+        dateField: "activity",
+        dateRange: "any",
+        hierarchical: true,
+        now: NOW,
+      }).map((item) => item.id),
+    ).toEqual(["manager", "worker"]);
+    expect(
+      filterSessionsForBrowse([manager, worker], {
+        creator: "subject:user:grace",
+        dateField: "activity",
+        dateRange: "any",
+        hierarchical: true,
+        now: NOW,
+      }),
+    ).toEqual([]);
   });
 
   test("disambiguates duplicate frozen creator labels with opaque identities", () => {
@@ -181,22 +246,20 @@ describe("flat rail projection", () => {
     expect(child.parentSessionId).toBe("manager");
   });
 
-  test("browse groupings and search sections agree on which rows are top-level", () => {
-    // Both flat consumers must read the same projection. Feeding one of them
-    // the raw rows leaves a chip-less child sitting beside chipped roots in a
-    // list where every row is top-level and no parent is on screen.
-    const projected = projectRailSessions([parent, child], false);
-    const grouped = groupSessionsForBrowse(projected, "created", { now: NOW });
-    const searched = buildPinnedRailSections(projected);
+  test("browse grouping preserves lineage while search results stay top-level", () => {
+    const grouped = groupSessionsForBrowse([parent, child], "created", { now: NOW });
+    const searched = buildPinnedRailSections(projectRailSessions([parent, child], false));
 
     const groupedRows = [
       ...grouped.running,
       ...grouped.grouped.flatMap((bucket) => bucket.sessions),
     ];
-    expect(groupedRows.map((node) => node.session.id).sort()).toEqual(["manager", "worker"]);
-    for (const node of groupedRows) {
-      expect(railRowCreator(node.session)).not.toBeNull();
-    }
+    expect(groupedRows.map((node) => node.session.id)).toEqual(["manager"]);
+    expect(groupedRows[0]?.children.map((node) => node.session.id)).toEqual(["worker"]);
+    expect(railRowCreator(groupedRows[0]!.children[0]!.session)).toBeNull();
+
+    const searchedRows = searched.ordinary.grouped.flatMap((bucket) => bucket.sessions);
+    expect(searchedRows.map((node) => node.session.id).sort()).toEqual(["manager", "worker"]);
     for (const node of searched.ordinary.grouped.flatMap((bucket) => bucket.sessions)) {
       expect(railRowCreator(node.session)).not.toBeNull();
     }

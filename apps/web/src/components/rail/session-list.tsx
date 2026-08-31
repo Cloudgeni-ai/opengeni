@@ -137,7 +137,7 @@ import {
   buildPinnedRailSections,
   channelRailSections,
   filterSessionsForBrowse,
-  groupSessionsForBrowse,
+  groupSessionForestForBrowse,
   projectRailSessions,
   groupSessionsForRail,
   mergeSessionForRail,
@@ -316,7 +316,10 @@ export function SessionList() {
   }, [searchDraft]);
   const browseControlsActive =
     browseGroupBy !== "activity" || browseDateRange !== "any" || browseCreator !== null;
-  const hierarchyMode = search.length === 0 && !browseControlsActive;
+  // Search is the one intentionally flat projection: it can surface a match
+  // from anywhere in a workstream. Sorting and filtering still operate on
+  // root workstreams and preserve their expandable descendant hierarchy.
+  const hierarchyMode = search.length === 0;
   const clearBrowseControls = useCallback(() => {
     setBrowseGroupBy("activity");
     setBrowseDateField("activity");
@@ -397,12 +400,12 @@ export function SessionList() {
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
   // The continuation generation is keyed to workspace/search and whether the
-  // projection is a root hierarchy or flat browse. Polling page one rotates
+  // projection is a root hierarchy or flat search. Polling page one rotates
   // the server's short-lived snapshot, but must not discard older pages the
   // user already loaded from the prior snapshot.
   const paginationKey = sessionPageKey(
     rail.workspaceId,
-    `${search}\n${hierarchyMode ? "tree" : "browse"}`,
+    `${search}\n${hierarchyMode ? "tree" : "search"}`,
   );
   const paginationIdentity = useRef({ key: paginationKey, generation: 0 });
   paginationIdentity.current = advanceSessionPageIdentity(
@@ -896,7 +899,14 @@ export function SessionList() {
       });
     });
   }, [rail.workspaceId]);
-  const creatorLabels = useMemo(() => sessionCreatorLabelMap(allSessions), [allSessions]);
+  const creatorSessions = useMemo(() => {
+    if (!hierarchyMode) return allSessions;
+    const loadedIds = new Set(allSessions.map((session) => session.id));
+    return allSessions.filter(
+      (session) => !session.parentSessionId || !loadedIds.has(session.parentSessionId),
+    );
+  }, [allSessions, hierarchyMode]);
+  const creatorLabels = useMemo(() => sessionCreatorLabelMap(creatorSessions), [creatorSessions]);
   const creatorOptions = useMemo(() => {
     return [...creatorLabels].map(([value, label]) => ({ value, label }));
   }, [creatorLabels]);
@@ -913,9 +923,17 @@ export function SessionList() {
           creator: browseCreator,
           dateField: browseDateField,
           dateRange: browseDateRange,
+          hierarchical: hierarchyMode,
         },
       ),
-    [allSessions, archiveTransitions, browseCreator, browseDateField, browseDateRange],
+    [
+      allSessions,
+      archiveTransitions,
+      browseCreator,
+      browseDateField,
+      browseDateRange,
+      hierarchyMode,
+    ],
   );
 
   // A complete pins-only page makes presence authoritative, but absence does
@@ -1082,11 +1100,9 @@ export function SessionList() {
   // permission to move this scroll container.
   const rowRevealIntent = useRef<string | null>(activeSessionId);
 
-  // Search results and browse groupings are deliberately flat: a partial match
-  // set is not a tree, and a browse bucket is a list. Normal navigation instead
-  // carries only true roots, lazily loaded children, and the active lineage.
-  // Both flat consumers read the SAME normalized rows, so a session rendered as
-  // a top-level row never still claims a parent that is nowhere on screen.
+  // Search results are deliberately flat because a partial match set is not a
+  // tree. Normal and custom-grouped browsing carry true roots, lazily loaded
+  // children, and the active lineage.
   const projectedSessions = useMemo(
     () => projectRailSessions(browseSessions, hierarchyMode),
     [browseSessions, hierarchyMode],
@@ -1101,18 +1117,14 @@ export function SessionList() {
     () =>
       browseGroupBy === "activity"
         ? railSections.ordinary
-        : groupSessionsForBrowse(
-            projectedSessions.filter((session) => !session.pinned),
-            browseGroupBy,
-            { creatorLabels },
-          ),
-    [browseGroupBy, projectedSessions, creatorLabels, railSections.ordinary],
+        : groupSessionForestForBrowse(railSections.ordinary, browseGroupBy, { creatorLabels }),
+    [browseGroupBy, creatorLabels, railSections.ordinary],
   );
   const pinnedNodes = railSections.pinned;
   // The hierarchy rail always has the same shape: unfiled Recents first, then
   // workstreams. A workspace with no created workstreams should not fall back
   // to a completely different recency UI.
-  const channelMode = hierarchyMode;
+  const channelMode = hierarchyMode && !browseControlsActive;
   const channelSections = useMemo(
     () => (channelMode ? channelRailSections(forest, channels) : []),
     [channelMode, forest, channels],
@@ -2017,7 +2029,7 @@ export function SessionList() {
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex min-w-0 items-center justify-between gap-2 pb-1 pl-[18px] pr-3 pt-1">
         <span className="text-sm font-normal text-fg-muted">
-          {hierarchyMode ? "Sessions" : search ? "Search results" : "Browse sessions"}
+          {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
         </span>
       </div>
 
@@ -2044,7 +2056,7 @@ export function SessionList() {
             className="h-7 w-full min-w-0 rounded-md border border-border bg-bg/45 pl-7 pr-2 text-xs text-fg outline-none placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:h-11 pointer-coarse:text-base"
           />
         </label>
-        {hierarchyMode ? (
+        {channelMode ? (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -2173,7 +2185,7 @@ export function SessionList() {
       <div
         ref={listRef}
         role="region"
-        aria-label={hierarchyMode ? "Sessions" : search ? "Session search results" : "Sessions"}
+        aria-label={search ? "Session search results" : "Sessions"}
         data-sessionpin-session-list
         onKeyDown={onKeyDown}
         onPointerDown={() => {
@@ -2194,7 +2206,7 @@ export function SessionList() {
           {announcement}
         </p>
         {(loading && allSessions.length === 0) ||
-        (hierarchyMode && channelsQuery.loading && channels.length === 0) ? (
+        (channelMode && channelsQuery.loading && channels.length === 0) ? (
           // The second clause holds the skeleton until the initial channels
           // read resolves, so the rail paints Recents/workstreams directly
           // instead of flashing the old recency layout first.
@@ -2365,7 +2377,7 @@ export function SessionList() {
                 ))}
               </>
             )}
-            {hierarchyMode ? (
+            {channelMode ? (
               <SessionGroup
                 label="Archived"
                 sectionId="archived"

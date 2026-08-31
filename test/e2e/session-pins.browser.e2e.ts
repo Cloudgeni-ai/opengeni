@@ -171,6 +171,66 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 60_000);
 
+  test("keeps created-date browse results nested under their parent workstream", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const manager = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Created grouping manager",
+      );
+      const child = await createTitledSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: "Created grouping child",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        parentSessionId: manager.id,
+      });
+
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const rail = page.locator("[data-sessionpin-session-list]");
+      const managerRow = rail.locator(`a[data-session-row="${manager.id}"]`);
+      await managerRow.waitFor();
+
+      await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("menuitemradio", { name: "Created date" }).click();
+      await page.getByRole("button", { name: "Session filters, active" }).waitFor();
+
+      // Browse grouping keeps root-only pagination and lazy child loading. The
+      // child must not appear beside its manager as another top-level result.
+      expect(await rail.locator(`a[data-session-row="${child.id}"]`).count()).toBe(0);
+      const managerItem = managerRow.locator("xpath=../..");
+      await managerItem.getByRole("button", { name: "Expand spawned sessions" }).click();
+      const childRow = rail.locator(`a[data-session-row="${child.id}"]`);
+      await childRow.waitFor();
+      expect(
+        await childRow.evaluate((element) =>
+          element.closest('[role="list"]')?.getAttribute("aria-label"),
+        ),
+      ).toBe("Spawned sessions from Created grouping manager");
+      expect(await rail.locator(`a[data-session-row="${child.id}"]`).count()).toBe(1);
+      await expectNoAxeViolations(page, ["[data-sessionpin-session-list]"]);
+      await page.screenshot({
+        path: "/tmp/opengeni-session-created-group-hierarchy.png",
+        fullPage: true,
+      });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("acknowledges later output without leaving and reopening the active chat", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
