@@ -1,5 +1,5 @@
 import type { WorkspaceModelAccessPolicy, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { CheckIcon, Loader2Icon, LockKeyholeIcon, PlusIcon, XIcon } from "lucide-react";
+import { ChevronDownIcon, Loader2Icon, LockKeyholeIcon, PlusIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -104,6 +104,7 @@ export function ModelAccessPolicySection({
   const [pendingReplacementMode, setPendingReplacementMode] = useState<
     "unrestricted" | "selected" | null
   >(null);
+  const [open, setOpen] = useState(false);
   const loadGeneration = useRef(0);
   const scopeRef = useRef({ client, mounted: false, workspaceId });
 
@@ -219,262 +220,258 @@ export function ModelAccessPolicySection({
 
   const providerRestrictionActive = draft?.originalPolicy.allowedProviders !== null;
   const visiblePolicyAllowedCount = models.filter((model) => model.policyAllowed).length;
+  const summaryStatus = error
+    ? "Unavailable"
+    : loading || !draft
+      ? "…"
+      : draft.mode === "unrestricted"
+        ? "All models"
+        : draft.mode === "selected"
+          ? `${draft.selectedModelIds.size} selected`
+          : draft.policyVerdictComplete
+            ? `${visiblePolicyAllowedCount} of ${models.length}`
+            : "Restricted";
 
   return (
-    <section aria-labelledby="workspace-model-access-heading" className="grid min-w-0 gap-2">
-      <div className="flex items-start gap-2">
-        <LockKeyholeIcon className="mt-0.5 size-4 shrink-0 text-brand" />
-        <div className="min-w-0">
-          <h2 id="workspace-model-access-heading" className="text-sm font-medium">
+    <section aria-labelledby="workspace-model-access-heading">
+      <details
+        className="group rounded-lg border border-border"
+        open={open || error != null}
+        onToggle={(event) => {
+          const next = event.currentTarget.open;
+          if (error != null && !next) {
+            event.currentTarget.open = true;
+            return;
+          }
+          setOpen(next);
+        }}
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
+          <LockKeyholeIcon className="size-3.5 shrink-0 text-brand" />
+          <h2
+            id="workspace-model-access-heading"
+            className="min-w-0 flex-1 truncate text-sm font-medium"
+          >
             Model access
           </h2>
-          <p className="text-xs text-fg-subtle">
-            Choose which model IDs may serve turns in this workspace. This is enforced again when a
-            turn runs.
-          </p>
-        </div>
-      </div>
+          <span className="text-2xs text-fg-subtle">{summaryStatus}</span>
+          <ChevronDownIcon className="size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180" />
+        </summary>
 
-      <div className="rounded-lg border border-border p-3">
-        {error ? (
-          <LoadErrorState
-            title="Couldn't load model access"
-            error={error}
-            onRetry={() => void load()}
-          />
-        ) : loading || !draft ? (
-          <div className="grid gap-3">
-            <Skeleton className="h-5 w-48" />
-            <Skeleton className="h-16 w-full" />
-            <Skeleton className="h-24 w-full" />
-          </div>
-        ) : (
-          <div className="grid gap-3">
-            {draft.mode === "provider" ? (
-              <>
-                {draft.policyVerdictComplete ? (
-                  <Notice tone="info" title="Provider-level restriction active">
-                    Provider identities stay server-private. The current rule permits{" "}
-                    {visiblePolicyAllowedCount} of {models.length} configured model IDs and may also
-                    cover future models from the same provider.
-                  </Notice>
-                ) : (
-                  <Notice tone="waiting" title="Refresh after the control plane update">
-                    This browser does not yet have a complete model-policy projection. The existing
-                    provider-level restriction remains unchanged, and replacement is disabled.
-                  </Notice>
-                )}
-                {canManage && draft.policyVerdictComplete ? (
-                  <div className="flex flex-wrap justify-end gap-2">
+        <div className="grid gap-3 border-t border-border/70 px-3 py-3">
+          {error ? (
+            <LoadErrorState
+              title="Couldn't load model access"
+              error={error}
+              onRetry={() => void load()}
+            />
+          ) : loading || !draft ? (
+            <div className="grid gap-2">
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-2/3" />
+            </div>
+          ) : draft.mode === "provider" ? (
+            <>
+              {draft.policyVerdictComplete ? (
+                <Notice tone="info" title="Provider-level restriction active">
+                  {visiblePolicyAllowedCount} of {models.length} models allowed. Future models from
+                  the same provider may also run.
+                </Notice>
+              ) : (
+                <Notice tone="waiting" title="Refresh after the control plane update">
+                  This browser does not yet have a complete model-policy projection. The existing
+                  provider-level restriction remains unchanged, and replacement is disabled.
+                </Notice>
+              )}
+              {canManage && draft.policyVerdictComplete ? (
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => setPendingReplacementMode("unrestricted")}
+                  >
+                    Allow all
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => setPendingReplacementMode("selected")}
+                  >
+                    Choose exact models
+                  </Button>
+                </div>
+              ) : (
+                <span className="text-2xs text-fg-subtle">
+                  {canManage
+                    ? "Provider policy replacement unavailable"
+                    : "Admin required to change"}
+                </span>
+              )}
+            </>
+          ) : (
+            <>
+              {providerRestrictionActive ? (
+                <Notice
+                  tone="waiting"
+                  title="Provider-level restriction will be replaced"
+                  action={
                     <Button
                       type="button"
-                      variant="secondary"
-                      onClick={() => setPendingReplacementMode("unrestricted")}
+                      variant="ghost"
+                      size="xs"
+                      disabled={saving}
+                      onClick={() => {
+                        const next = modelAccessPolicyDraft(draft.originalPolicy, models);
+                        setDraft(next);
+                      }}
                     >
-                      Allow all instead
+                      Cancel
                     </Button>
-                    <Button type="button" onClick={() => setPendingReplacementMode("selected")}>
-                      Choose exact models
-                    </Button>
-                  </div>
-                ) : (
-                  <span className="text-2xs text-fg-subtle">
-                    {canManage
-                      ? "Provider policy replacement unavailable"
-                      : "Workspace admin required to change"}
-                  </span>
-                )}
-              </>
-            ) : (
-              <>
-                {providerRestrictionActive ? (
-                  <Notice
-                    tone="waiting"
-                    title="Provider-level restriction will be replaced"
-                    action={
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={saving}
-                        onClick={() => {
-                          const next = modelAccessPolicyDraft(draft.originalPolicy, models);
-                          setDraft(next);
-                        }}
-                      >
-                        Cancel
-                      </Button>
-                    }
-                  >
-                    Review the exact model IDs below, then save to confirm the semantic change.
-                  </Notice>
-                ) : null}
+                  }
+                >
+                  Save to replace the provider-wide rule with these IDs.
+                </Notice>
+              ) : null}
 
-                <label className="flex items-start gap-2 rounded-md border border-border/70 p-2.5">
+              <div className="grid gap-0.5">
+                <label className="flex items-center gap-2 py-1">
                   <input
                     type="radio"
                     name={`model-access-${workspaceId}`}
                     checked={draft.mode === "unrestricted"}
                     disabled={!canManage || saving}
                     onChange={() => setMode("unrestricted")}
-                    className="mt-0.5 size-4 accent-brand"
+                    className="size-3.5 accent-brand"
                   />
-                  <span>
-                    <span className="block text-sm font-medium">Allow all configured models</span>
-                    <span className="block text-xs text-fg-subtle">
-                      New models become available automatically when their credentials are ready.
-                    </span>
-                  </span>
+                  <span className="text-sm">All models</span>
                 </label>
-                <label className="flex items-start gap-2 rounded-md border border-border/70 p-2.5">
+                <label className="flex items-center gap-2 py-1">
                   <input
                     type="radio"
                     name={`model-access-${workspaceId}`}
                     checked={draft.mode === "selected"}
                     disabled={!canManage || saving}
                     onChange={() => setMode("selected")}
-                    className="mt-0.5 size-4 accent-brand"
+                    className="size-3.5 accent-brand"
                   />
-                  <span>
-                    <span className="block text-sm font-medium">Allow selected model IDs</span>
-                    <span className="block text-xs text-fg-subtle">
-                      Only the checked or explicitly entered IDs may run.
-                    </span>
-                  </span>
+                  <span className="text-sm">Selected models</span>
                 </label>
+              </div>
 
-                {draft.mode === "selected" ? (
-                  <div className="grid gap-3 border-t border-border/70 pt-3">
-                    {groups.length === 0 ? (
-                      <p className="text-xs text-fg-subtle">No configured models are visible.</p>
-                    ) : (
-                      groups.map(([providerLabel, providerModels]) => (
-                        <fieldset key={providerLabel} className="grid gap-1.5">
-                          <legend className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-                            {providerLabel}
-                          </legend>
-                          {providerModels.map((model) => (
-                            <label
-                              key={model.id}
-                              className="flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 hover:bg-surface-2/60"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={draft.selectedModelIds.has(model.id)}
-                                disabled={!canManage || saving}
-                                onChange={(event) =>
-                                  setModelSelected(model.id, event.target.checked)
-                                }
-                                className="size-4 shrink-0 accent-brand"
-                              />
-                              <span className="min-w-0 flex-1">
-                                <span className="block truncate text-sm">{model.label}</span>
-                                <span className="block truncate font-mono text-2xs text-fg-subtle">
-                                  {model.id}
-                                </span>
-                              </span>
-                              <span className="shrink-0 text-2xs text-fg-subtle">
-                                {model.credentialReadiness.status === "ready"
-                                  ? "Ready"
-                                  : "Not ready"}
-                              </span>
-                            </label>
-                          ))}
-                        </fieldset>
-                      ))
-                    )}
-
-                    {customIds.length > 0 ? (
-                      <div className="grid gap-1.5">
-                        <div className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-                          Other model IDs
-                        </div>
-                        {customIds.map((modelId) => (
-                          <div
-                            key={modelId}
-                            className="flex min-w-0 items-center gap-2 rounded-md bg-surface-2/60 px-2 py-1.5"
+              {draft.mode === "selected" ? (
+                <div className="grid gap-2">
+                  {groups.length === 0 ? (
+                    <p className="text-xs text-fg-subtle">No configured models are visible.</p>
+                  ) : (
+                    groups.map(([providerLabel, providerModels]) => (
+                      <fieldset key={providerLabel} className="grid gap-0.5">
+                        <legend className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+                          {providerLabel}
+                        </legend>
+                        {providerModels.map((model) => (
+                          <label
+                            key={model.id}
+                            title={model.id}
+                            className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 hover:bg-surface-2/60"
                           >
-                            <code className="min-w-0 flex-1 truncate text-xs">{modelId}</code>
-                            {canManage ? (
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-sm"
-                                disabled={saving}
-                                aria-label={`Remove ${modelId}`}
-                                onClick={() => setModelSelected(modelId, false)}
-                              >
-                                <XIcon className="size-3.5" />
-                              </Button>
-                            ) : null}
-                          </div>
+                            <input
+                              type="checkbox"
+                              checked={draft.selectedModelIds.has(model.id)}
+                              disabled={!canManage || saving}
+                              onChange={(event) => setModelSelected(model.id, event.target.checked)}
+                              className="size-3.5 shrink-0 accent-brand"
+                            />
+                            <span className="min-w-0 flex-1 truncate text-sm">{model.label}</span>
+                            <span className="shrink-0 text-2xs text-fg-subtle">
+                              {model.credentialReadiness.status === "ready" ? "Ready" : "Not ready"}
+                            </span>
+                          </label>
                         ))}
+                      </fieldset>
+                    ))
+                  )}
+
+                  {customIds.length > 0 ? (
+                    <div className="grid gap-0.5">
+                      <div className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+                        Other IDs
                       </div>
-                    ) : null}
+                      {customIds.map((modelId) => (
+                        <div key={modelId} className="flex min-w-0 items-center gap-2 px-1 py-1">
+                          <code className="min-w-0 flex-1 truncate text-xs">{modelId}</code>
+                          {canManage ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-xs"
+                              disabled={saving}
+                              aria-label={`Remove ${modelId}`}
+                              onClick={() => setModelSelected(modelId, false)}
+                            >
+                              <XIcon />
+                            </Button>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
 
-                    {canManage ? (
-                      <form
-                        className="flex min-w-0 gap-2"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          addCustomModelId();
-                        }}
-                      >
-                        <Input
-                          value={customModelId}
-                          disabled={saving}
-                          placeholder="Future or custom model ID"
-                          aria-label="Add model ID"
-                          onChange={(event) => setCustomModelId(event.target.value)}
-                        />
-                        <Button
-                          type="submit"
-                          variant="secondary"
-                          disabled={saving || !customModelId.trim()}
-                        >
-                          <PlusIcon className="size-3.5" />
-                          Add
-                        </Button>
-                      </form>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                <div className="flex items-center justify-between gap-3 border-t border-border/70 pt-3">
-                  <span className="text-xs text-fg-subtle">
-                    {draft.mode === "unrestricted"
-                      ? "All configured models are permitted by workspace policy."
-                      : `${draft.selectedModelIds.size} model ID${draft.selectedModelIds.size === 1 ? "" : "s"} permitted.`}
-                  </span>
                   {canManage ? (
+                    <form
+                      className="flex min-w-0 gap-2"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        addCustomModelId();
+                      }}
+                    >
+                      <Input
+                        value={customModelId}
+                        disabled={saving}
+                        placeholder="Custom model ID"
+                        aria-label="Add model ID"
+                        className="h-8"
+                        onChange={(event) => setCustomModelId(event.target.value)}
+                      />
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="secondary"
+                        disabled={saving || !customModelId.trim()}
+                      >
+                        <PlusIcon className="size-3.5" />
+                        Add
+                      </Button>
+                    </form>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {canManage ? (
+                dirty || saving ? (
+                  <div className="flex justify-end">
                     <Button
                       type="button"
                       size="sm"
                       disabled={!dirty || saving}
                       onClick={() => void save()}
                     >
-                      {saving ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <CheckIcon className="size-3.5" />
-                      )}
+                      {saving ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
                       Save
                     </Button>
-                  ) : (
-                    <span className="text-2xs text-fg-subtle">
-                      Workspace admin required to change
-                    </span>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </div>
+                  </div>
+                ) : null
+              ) : (
+                <span className="text-2xs text-fg-subtle">Admin required to change</span>
+              )}
+            </>
+          )}
+        </div>
+      </details>
       <ConfirmDialog
         open={pendingReplacementMode !== null}
-        onOpenChange={(open) => {
-          if (!open) setPendingReplacementMode(null);
+        onOpenChange={(dialogOpen) => {
+          if (!dialogOpen) setPendingReplacementMode(null);
         }}
         title="Replace the provider-level model policy?"
         description={

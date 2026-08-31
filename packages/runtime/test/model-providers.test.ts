@@ -102,6 +102,50 @@ describe("Vercel AI Gateway request fence", () => {
     });
   });
 
+  test("orders Gemini across only the approved Google and Vertex routes", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch);
+    await routed("https://ai-gateway.vercel.sh/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "google/gemini-3.7-flash" }),
+    });
+    expect(captured?.providerOptions).toEqual({
+      gateway: {
+        only: ["google", "vertex"],
+        order: ["google", "vertex"],
+        caching: "auto",
+      },
+    });
+  });
+
+  test("orders GLM 5.3 across only the approved Z.AI route", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch);
+    await routed("https://ai-gateway.vercel.sh/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "zai/glm-5.3" }),
+    });
+    expect(captured?.providerOptions).toEqual({
+      gateway: {
+        only: ["zai"],
+        order: ["zai"],
+        caching: "auto",
+      },
+    });
+  });
+
   test("pairs only complete Kimi parallel call/result batches without changing their fields", async () => {
     let captured: Record<string, unknown> | null = null;
     const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async (
@@ -156,7 +200,23 @@ describe("Vercel AI Gateway request fence", () => {
     ]);
   });
 
-  test("does not alter incomplete Kimi or complete DeepSeek call/result batches", async () => {
+  test("does not alter incomplete Kimi or complete DeepSeek, Gemini, or GLM call/result batches", async () => {
+    const grouped = [
+      {
+        type: "function_call",
+        call_id: "a",
+        name: "alpha",
+        arguments: "{}",
+      },
+      {
+        type: "function_call",
+        call_id: "b",
+        name: "beta",
+        arguments: "{}",
+      },
+      { type: "function_call_output", call_id: "a", output: "one" },
+      { type: "function_call_output", call_id: "b", output: "two" },
+    ];
     for (const value of [
       {
         model: "moonshotai/kimi-k3",
@@ -176,25 +236,9 @@ describe("Vercel AI Gateway request fence", () => {
           { type: "function_call_output", call_id: "a", output: "done" },
         ],
       },
-      {
-        model: "deepseek/deepseek-v4-flash-0731",
-        input: [
-          {
-            type: "function_call",
-            call_id: "a",
-            name: "alpha",
-            arguments: "{}",
-          },
-          {
-            type: "function_call",
-            call_id: "b",
-            name: "beta",
-            arguments: "{}",
-          },
-          { type: "function_call_output", call_id: "a", output: "one" },
-          { type: "function_call_output", call_id: "b", output: "two" },
-        ],
-      },
+      { model: "deepseek/deepseek-v4-flash-0731", input: grouped },
+      { model: "google/gemini-3.7-flash", input: grouped },
+      { model: "zai/glm-5.3", input: grouped },
     ]) {
       let captured: Record<string, unknown> | null = null;
       const routed = vercelGatewayRoutingFetch("vercel-gateway-managed", (async (

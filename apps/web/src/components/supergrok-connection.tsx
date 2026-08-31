@@ -12,6 +12,7 @@ import {
   PencilIcon,
   PlusIcon,
   Trash2Icon,
+  TriangleAlertIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -20,8 +21,9 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
-import { Select } from "@/components/ui/select";
+import { XaiMark } from "@/components/xai-mark";
 import { useAppContext } from "@/context";
+import { cn } from "@/lib/utils";
 
 import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
 
@@ -30,17 +32,57 @@ type PendingDeviceCode = {
   verificationUri: string;
 };
 
+function SuperGrokScopeToggle({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: SuperGrokAccountScope;
+  disabled: boolean;
+  onChange: (scope: SuperGrokAccountScope) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="SuperGrok connection scope"
+      className="flex rounded-md border border-border/70 p-0.5"
+    >
+      {(["workspace", "user"] as const).map((option) => (
+        <button
+          key={option}
+          type="button"
+          disabled={disabled}
+          className={cn(
+            "h-7 rounded px-2 text-xs disabled:opacity-50",
+            value === option ? "bg-surface-2 text-fg" : "text-fg-subtle hover:text-fg",
+          )}
+          aria-pressed={value === option}
+          onClick={() => onChange(option)}
+        >
+          {option === "workspace" ? "Workspace" : "Only me"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function SuperGrokDeviceCodePanel(props: PendingDeviceCode) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="grid gap-3 rounded-lg border border-brand/30 bg-brand/5 p-3">
+    <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
+      <div className="text-xs text-fg-muted">
+        Enter this code at the xAI page (opened in a new tab).
+      </div>
       <div className="flex flex-wrap items-center gap-2">
-        <code data-supergrok-device-code="" className="rounded bg-bg px-2 py-1 font-mono text-sm">
+        <code
+          data-supergrok-device-code=""
+          className="rounded bg-surface-2 px-3 py-1.5 font-mono text-lg font-semibold tracking-widest"
+        >
           {props.userCode}
         </code>
         <Button
           type="button"
-          variant="outline"
+          variant="secondary"
           size="sm"
           aria-label={copied ? "Code copied" : "Copy code"}
           onClick={() => {
@@ -53,15 +95,15 @@ export function SuperGrokDeviceCodePanel(props: PendingDeviceCode) {
           {copied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
           {copied ? "Copied" : "Copy code"}
         </Button>
-        <Button asChild variant="outline" size="sm">
+        <Button asChild variant="secondary" size="sm">
           <a href={props.verificationUri} target="_blank" rel="noopener noreferrer">
-            Open xAI <ExternalLinkIcon className="size-3.5" />
+            Open auth page <ExternalLinkIcon className="size-3.5" />
           </a>
         </Button>
       </div>
-      <p className="flex items-center gap-2 text-xs text-fg-subtle">
-        <Loader2Icon className="size-3.5 animate-spin" /> Waiting for xAI authorization…
-      </p>
+      <div className="flex items-center gap-2 text-xs text-fg-subtle">
+        <Loader2Icon className="size-3.5 animate-spin" /> Waiting for authorization…
+      </div>
     </div>
   );
 }
@@ -87,6 +129,7 @@ export function SuperGrokSubscriptionsCard({
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const cancelled = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
+  const autoExpandedReloginRef = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -179,34 +222,58 @@ export function SuperGrokSubscriptionsCard({
   );
 
   const accounts = data?.accounts ?? [];
+
+  useEffect(() => {
+    autoExpandedReloginRef.current = false;
+    setExpandedId(null);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (autoExpandedReloginRef.current || expandedId != null || !data) return;
+    const needsRelogin = data.accounts.find(
+      (account) => account.status !== "active" && account.lastError != null,
+    );
+    if (!needsRelogin) return;
+    autoExpandedReloginRef.current = true;
+    setExpandedId(needsRelogin.id);
+  }, [data, expandedId]);
+
+  const connectControls = canManage ? (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      <SuperGrokScopeToggle value={scope} disabled={busy} onChange={setScope} />
+      {accounts.length === 0 ? (
+        <Button type="button" size="sm" disabled={busy} onClick={connect}>
+          {busy ? (
+            <Loader2Icon className="size-3.5 animate-spin" />
+          ) : (
+            <XaiMark className="size-3.5" />
+          )}{" "}
+          Connect SuperGrok
+        </Button>
+      ) : (
+        <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={connect}>
+          <PlusIcon className="size-3.5" /> Connect
+        </Button>
+      )}
+    </div>
+  ) : null;
+
   return (
-    <section aria-labelledby="supergrok-heading" className="grid gap-2">
+    <section aria-labelledby="supergrok-subscriptions-heading" className="grid gap-2">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <h2 id="supergrok-heading" className="text-sm font-medium">
+          <h2
+            id="supergrok-subscriptions-heading"
+            className="flex items-center gap-1.5 text-sm font-medium"
+          >
+            <XaiMark className="size-3.5 text-brand" />
             SuperGrok subscriptions
           </h2>
           <p className="mt-0.5 text-2xs text-fg-subtle">
-            xAI plans for Grok models — subscription usage, not OpenGeni credits.
+            xAI plans for Grok models — subscription usage, not API credits.
           </p>
         </div>
-        {canManage && accounts.length > 0 && !pending ? (
-          <div className="flex items-center gap-1">
-            <Select
-              aria-label="SuperGrok connection scope"
-              className="h-8 border-0 bg-transparent text-xs"
-              value={scope}
-              disabled={busy}
-              onChange={(event) => setScope(event.target.value as SuperGrokAccountScope)}
-            >
-              <option value="workspace">Workspace</option>
-              <option value="user">Only me</option>
-            </Select>
-            <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={connect}>
-              <PlusIcon className="size-3.5" /> Connect
-            </Button>
-          </div>
-        ) : null}
+        {accounts.length > 0 && !pending ? connectControls : null}
       </div>
 
       {accounts.length > 1 && canManage ? (
@@ -241,35 +308,17 @@ export function SuperGrokSubscriptionsCard({
         <SuperGrokDeviceCodePanel {...pending} />
       ) : accounts.length === 0 ? (
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs text-fg-subtle">No SuperGrok subscriptions connected.</p>
-          {canManage ? (
-            <div className="flex items-center gap-2">
-              <Select
-                aria-label="SuperGrok connection scope"
-                className="h-8 text-xs"
-                value={scope}
-                disabled={busy}
-                onChange={(event) => setScope(event.target.value as SuperGrokAccountScope)}
-              >
-                <option value="workspace">Workspace</option>
-                <option value="user">Only me</option>
-              </Select>
-              <Button type="button" size="sm" disabled={busy} onClick={connect}>
-                {busy ? (
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                ) : (
-                  <PlusIcon className="size-3.5" />
-                )}
-                Connect
-              </Button>
-            </div>
-          ) : null}
+          <p className="text-xs text-fg-subtle">
+            Not connected. Connecting needs admin access and a SuperGrok plan.
+          </p>
+          {connectControls}
         </div>
       ) : (
         <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
           {accounts.map((account) => {
             const expanded = expandedId === account.id;
             const isActive = account.id === data?.activeAccountId;
+            const needsRelogin = account.status !== "active" && account.lastError != null;
             return (
               <article
                 key={account.id}
@@ -305,13 +354,17 @@ export function SuperGrokSubscriptionsCard({
                         }}
                       />
                     </label>
-                    <div className="flex min-w-0 flex-1 basis-36 items-center gap-1">
+                    <div
+                      className="flex min-w-0 flex-1 basis-36 items-center gap-1"
+                      onClick={(event) => {
+                        if (editing?.id === account.id) event.stopPropagation();
+                      }}
+                    >
                       {editing?.id === account.id ? (
                         <Input
                           autoFocus
                           value={editing.value}
                           className="h-7 text-sm"
-                          onClick={(event) => event.stopPropagation()}
                           onChange={(event) =>
                             setEditing({
                               id: account.id,
@@ -330,6 +383,10 @@ export function SuperGrokSubscriptionsCard({
                                 ),
                               "SuperGrok account renamed",
                             );
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") event.currentTarget.blur();
+                            if (event.key === "Escape") setEditing(null);
                           }}
                         />
                       ) : (
@@ -376,7 +433,11 @@ export function SuperGrokSubscriptionsCard({
                         {account.status.replaceAll("_", " ")}
                       </MetaChip>
                     ) : null}
-                    {account.quota?.usedPercent != null ? (
+                    {needsRelogin ? (
+                      <span className="flex items-center gap-1 text-2xs text-status-waiting">
+                        <TriangleAlertIcon className="size-3" /> Reconnect
+                      </span>
+                    ) : account.quota?.usedPercent != null ? (
                       <span className="shrink-0 text-2xs text-fg-subtle">
                         {Math.round(account.quota.usedPercent)}%
                       </span>
@@ -395,13 +456,16 @@ export function SuperGrokSubscriptionsCard({
                         onClick={(event) => event.stopPropagation()}
                       >
                         <ChevronDownIcon
-                          className={`size-4 text-fg-subtle transition-transform ${expanded ? "rotate-180" : ""}`}
+                          className={cn(
+                            "size-4 text-fg-subtle transition-transform",
+                            expanded ? "rotate-180" : "",
+                          )}
                         />
                       </Button>
                     </CollapsibleTrigger>
                   </div>
                   <CollapsibleContent className="grid gap-2 border-t border-border/60 px-2.5 py-2.5">
-                    <label className="flex min-h-10 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5">
+                    <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-border/70 bg-surface/50 px-2.5">
                       <span className="text-xs font-medium">Use for new automatic turns</span>
                       <span className="flex items-center gap-2 text-xs text-fg-muted">
                         <input
@@ -425,10 +489,11 @@ export function SuperGrokSubscriptionsCard({
                         </span>
                       </span>
                     </label>
-                    {account.lastError ? (
-                      <p className="rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
-                        {account.lastError}
-                      </p>
+                    {needsRelogin ? (
+                      <div className="flex items-center gap-1.5 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
+                        <TriangleAlertIcon className="size-3.5" />{" "}
+                        {account.lastError ?? "Reconnect needed."}
+                      </div>
                     ) : null}
                     {canManage ? (
                       <div>
@@ -458,9 +523,17 @@ export function SuperGrokSubscriptionsCard({
 
       {accounts.length > 0 && !pending && !loading ? (
         <p className="text-2xs text-fg-subtle">
-          {data?.settings.rotationEnabled && accounts.length > 1
-            ? `New sessions rotate across ${accounts.length} eligible subscriptions.`
-            : "The active subscription runs sessions that aren't pinned to a specific account."}
+          {data?.settings.rotationEnabled && accounts.length > 1 ? (
+            <>
+              Sessions are spread across all {accounts.length} subscriptions. Pinned sessions stay
+              on their pin.
+            </>
+          ) : (
+            <>
+              The <span className="font-medium">active</span> subscription runs every session that
+              isn't pinned to a specific one.
+            </>
+          )}
         </p>
       ) : null}
     </section>
