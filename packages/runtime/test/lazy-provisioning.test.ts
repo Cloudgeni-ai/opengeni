@@ -276,13 +276,13 @@ describe("lazy provisioning synthetic manifest", () => {
     });
 
     expect(commands).toHaveLength(1);
-    expect(commands[0]?.workdir).toBe("/workspace");
+    expect(commands[0]?.workdir).toBe("/srv/project");
     expect(commands[0]?.cmd).toContain(".opengeni/files/file-1/input.txt");
     expect(commands[0]?.cmd).not.toContain("/workspace/.opengeni/files/file-1/input.txt");
     expect(commands[0]?.cmd).not.toContain("platform-hook-ran");
     expect(commands[0]?.cmd).toContain('actual_size=$(wc -c < "$candidate"');
     expect(commands[0]?.cmd).toContain('actual_sha=$(sha256sum "$candidate"');
-    expect(JSON.stringify(events)).toContain("/workspace/.opengeni/files/file-1/input.txt");
+    expect(JSON.stringify(events)).toContain("/srv/project/.opengeni/files/file-1/input.txt");
     expect(JSON.stringify(events)).not.toContain("sig=secret");
   });
 
