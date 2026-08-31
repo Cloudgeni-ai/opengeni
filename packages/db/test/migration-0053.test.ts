@@ -241,6 +241,16 @@ describe("migration 0053 (Codex credential leases)", () => {
         select count(*)::int as count from codex_credential_leases`;
       expect(inert!.count).toBe(0);
 
+      // The assertions above freeze the exact 0053 schema-first boundary for
+      // an old worker. The current worker's lease query also reads additive
+      // cooldown metadata from 0383, so install and record exactly that later
+      // rolling migration without advancing unrelated product migrations that
+      // intentionally normalize the legacy rotation strategy.
+      await applyFile(admin, "0383_codex_cooldown_reconciliation.sql");
+      await admin`
+        insert into schema_migrations (name)
+        values ('0383_codex_cooldown_reconciliation.sql') on conflict do nothing`;
+
       const appUrl = new URL(databaseUrl);
       appUrl.username = "opengeni_app";
       appUrl.password = "apppw";
@@ -346,10 +356,9 @@ describe("migration 0053 (Codex credential leases)", () => {
       // Rotation OFF is untouched by sharded-rotation policy: the selector returns the workspace
       // active pointer, exactly as before.
       expect(featureOffAgain.credentialId).toBe(oldWorkerAfterCutover!.active_credential_id);
-      // The current migration chain includes the one-way 0117 maintenance
-      // cutover, which correctly requires every opengeni_app session to stop.
-      // Close this compatibility fixture's app pool before proving the chain is
-      // idempotent; the admin connection remains available for assertions.
+      // Close this compatibility fixture's app pool before proving that the
+      // complete current migration chain remains idempotent; the admin
+      // connection remains available for assertions.
       await app.close();
       app = null;
       await migrate(databaseUrl);
