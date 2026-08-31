@@ -200,20 +200,20 @@ async function referenceBytes(
     );
   }
   return {
-    bytes: await readStoredFile(input.objectStorage, file),
+    bytes: await readStoredImageReferenceFile(input.objectStorage, file),
     file,
   };
 }
 
-async function readStoredFile(objectStorage: ObjectStorage, file: FileAsset): Promise<Uint8Array> {
-  const bytes = await objectStorage.getFileRange(file, {
-    start: 0,
-    end: file.sizeBytes - 1,
-  });
-  if (!bytes) {
+export async function readStoredImageReferenceFile(
+  objectStorage: Pick<ObjectStorage, "getFileBytes">,
+  file: FileAsset,
+): Promise<Uint8Array> {
+  const bytes = await objectStorage.getFileBytes(file);
+  if (bytes.byteLength !== file.sizeBytes) {
     throw new ImageGenerationReferenceError(
-      "reference_unavailable",
-      "The durable image reference bytes are unavailable.",
+      "reference_integrity_mismatch",
+      "The durable image reference bytes do not match their file metadata.",
     );
   }
   return bytes;
