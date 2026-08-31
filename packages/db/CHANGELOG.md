@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 3.7.4
+
+### Patch Changes
+
+- 3589136: Release abandoned shared rig setup ownership as soon as the superseded turn proves its sandbox writers are physically quiesced.
+
 ## 3.7.3
 
 ### Patch Changes
