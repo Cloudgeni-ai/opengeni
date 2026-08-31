@@ -6,10 +6,14 @@ import { readFile } from "node:fs/promises";
 import {
   createDb,
   createWorkspaceGatewayCustomModel,
+  createWorkspaceOpenRouterCustomModel,
   deleteWorkspaceGatewayCustomModel,
+  deleteWorkspaceOpenRouterCustomModel,
   getDeploymentModelCatalog,
   getWorkspaceGatewayCustomModelForExecution,
+  getWorkspaceOpenRouterCustomModelForExecution,
   listWorkspaceGatewayCustomModels,
+  listWorkspaceOpenRouterCustomModels,
   migrate,
   provisionRoles,
   type DbClient,
@@ -75,6 +79,11 @@ describe("migration 0387 model catalog and Gateway custom models", () => {
     expect(migration).toContain("upstream_model_id ~ '^[!-~]+$'");
     expect(migration).toContain("upstream_model_id !~ '[|]'");
     expect(migration).toContain("version integer NOT NULL DEFAULT 1");
+    expect(migration).toContain("provider_kind text NOT NULL");
+    expect(migration).toContain("provider_kind IN ('vercel_gateway', 'openrouter')");
+    expect(migration).toContain("(workspace_id, provider_kind, upstream_model_id)");
+    expect(migration).toContain("(workspace_id, provider_kind, create_operation_id)");
+    expect(migration).toContain("(workspace_id, provider_kind, delete_operation_id)");
     expect(migration).toContain("create_operation_id uuid NOT NULL");
     expect(migration).toContain("create_request_hash text NOT NULL");
     expect(migration).toContain("delete_operation_id uuid");
@@ -247,19 +256,39 @@ describe("migration 0387 model catalog and Gateway custom models", () => {
         createdBySubjectId: "user:migration-0384",
       }),
     ).rejects.toThrow();
+    const sharedOperationId = randomUUID();
     const created = await createWorkspaceGatewayCustomModel(client.db, {
       accountId: account!.id,
       workspaceId: firstWorkspace!.id,
       upstreamModelId: "anthropic/claude-sonnet-4.6",
-      operationId: randomUUID(),
+      operationId: sharedOperationId,
       requestHash: "2".repeat(64),
       createdBySubjectId: "user:migration-0384",
     });
     if (!created) throw new Error("custom model create unexpectedly conflicted");
     expect(created.upstreamModelId).toBe("anthropic/claude-sonnet-4.6");
+    expect(created.providerKind).toBe("vercel_gateway");
     expect(created.version).toBe(1);
+    const openRouter = await createWorkspaceOpenRouterCustomModel(client.db, {
+      accountId: account!.id,
+      workspaceId: firstWorkspace!.id,
+      upstreamModelId: created.upstreamModelId,
+      operationId: sharedOperationId,
+      requestHash: "7".repeat(64),
+      createdBySubjectId: "user:migration-0384",
+    });
+    expect(openRouter).toMatchObject({
+      providerKind: "openrouter",
+      upstreamModelId: created.upstreamModelId,
+    });
     expect(
       await listWorkspaceGatewayCustomModels(client.db, {
+        accountId: account!.id,
+        workspaceId: firstWorkspace!.id,
+      }),
+    ).toHaveLength(1);
+    expect(
+      await listWorkspaceOpenRouterCustomModels(client.db, {
         accountId: account!.id,
         workspaceId: firstWorkspace!.id,
       }),
@@ -313,6 +342,23 @@ describe("migration 0387 model catalog and Gateway custom models", () => {
         upstreamModelId: created.upstreamModelId,
       }),
     ).toMatchObject({ id: created.id, retiredAt: expect.any(Date) });
+    expect(
+      await getWorkspaceOpenRouterCustomModelForExecution(client.db, {
+        accountId: account!.id,
+        workspaceId: firstWorkspace!.id,
+        upstreamModelId: created.upstreamModelId,
+      }),
+    ).toMatchObject({ id: openRouter!.id, retiredAt: null });
+    expect(
+      await deleteWorkspaceOpenRouterCustomModel(client.db, {
+        accountId: account!.id,
+        workspaceId: firstWorkspace!.id,
+        customModelId: openRouter!.id,
+        expectedVersion: openRouter!.version,
+        operationId: deleteOperationId,
+        requestHash: "8".repeat(64),
+      }),
+    ).toMatchObject({ outcome: "success", model: { providerKind: "openrouter" } });
     const replacement = await createWorkspaceGatewayCustomModel(client.db, {
       accountId: account!.id,
       workspaceId: firstWorkspace!.id,

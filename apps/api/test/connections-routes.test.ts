@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
+  WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+  WORKSPACE_OPENROUTER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
@@ -8,6 +10,8 @@ import {
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   signDelegatedAccessToken,
@@ -22,6 +26,7 @@ import {
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
   loadConnectionCredentialForBroker,
+  loadWorkspaceOpenRouterApiKey,
   loadWorkspaceVercelAiGatewayApiKey,
   revokeWorkspaceVercelAiGatewayConnections,
   type DbClient,
@@ -1266,6 +1271,130 @@ describe("connections routes", () => {
     expect(
       await getConnectionMetadata(client.db, workspace.workspaceId, reconnectedId, "subject-a"),
     ).toMatchObject({ status: "active" });
+  });
+
+  test("OpenRouter uses an independent workspace API-key generation and provider-specific receipts", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const createOperationId = randomUUID();
+    const openRouterBody = (apiKey: string, operationId: string) =>
+      JSON.stringify({
+        providerDomain: WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+        kind: "api_key",
+        credential: { apiKey },
+        grantedScopes: [],
+        metadata: {
+          credentialRole: WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+          credentialLabel: "OpenRouter",
+        },
+        operationId,
+      });
+    const created = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: openRouterBody("openrouter-first", createOperationId),
+    });
+    expect(created.status).toBe(201);
+    const createdConnection = (await created.json()) as {
+      connection: { id: string; version: number; metadata: Record<string, unknown> };
+    };
+    expect(
+      createdConnection.connection.metadata[OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY],
+    ).toBeUndefined();
+    expect(
+      createdConnection.connection.metadata[OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY],
+    ).toBeUndefined();
+    expect(await loadWorkspaceOpenRouterApiKey(client.db, settings, workspace.workspaceId)).toBe(
+      "openrouter-first",
+    );
+
+    const replay = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: openRouterBody("openrouter-first", createOperationId),
+    });
+    expect(replay.status).toBe(201);
+    expect(((await replay.json()) as { connection: { id: string } }).connection.id).toBe(
+      createdConnection.connection.id,
+    );
+    const conflictingReplay = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections`,
+      {
+        method: "POST",
+        headers,
+        body: openRouterBody("must-not-overwrite", createOperationId),
+      },
+    );
+    expect(conflictingReplay.status).toBe(409);
+
+    const gateway = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+        kind: "api_key",
+        credential: { apiKey: "gateway-independent" },
+        metadata: { credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE },
+        operationId: randomUUID(),
+      }),
+    });
+    expect(gateway.status).toBe(201);
+
+    const rotateOperationId = randomUUID();
+    const rotateBody = JSON.stringify({
+      status: "active",
+      credential: { apiKey: "openrouter-rotated" },
+      expectedVersion: createdConnection.connection.version,
+      operationId: rotateOperationId,
+    });
+    const rotated = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${createdConnection.connection.id}`,
+      { method: "PATCH", headers, body: rotateBody },
+    );
+    expect(rotated.status).toBe(200);
+    const rotatedConnection = (await rotated.json()) as {
+      connection: { id: string; version: number; metadata: Record<string, unknown> };
+    };
+    expect(rotatedConnection.connection.id).not.toBe(createdConnection.connection.id);
+    expect(
+      rotatedConnection.connection.metadata[OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY],
+    ).toBeUndefined();
+    expect(
+      rotatedConnection.connection.metadata[OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY],
+    ).toBeUndefined();
+    const replayedRotate = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${createdConnection.connection.id}`,
+      { method: "PATCH", headers, body: rotateBody },
+    );
+    expect(replayedRotate.status).toBe(200);
+    expect(((await replayedRotate.json()) as { connection: { id: string } }).connection.id).toBe(
+      rotatedConnection.connection.id,
+    );
+    expect(await loadWorkspaceOpenRouterApiKey(client.db, settings, workspace.workspaceId)).toBe(
+      "openrouter-rotated",
+    );
+    expect(
+      await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
+    ).toBe("gateway-independent");
+
+    const removed = await app().request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/${rotatedConnection.connection.id}`,
+      { method: "DELETE", headers },
+    );
+    expect(removed.status).toBe(200);
+    expect(
+      await loadWorkspaceOpenRouterApiKey(client.db, settings, workspace.workspaceId),
+    ).toBeNull();
+    expect(
+      await loadWorkspaceVercelAiGatewayApiKey(client.db, settings, workspace.workspaceId),
+    ).toBe("gateway-independent");
   });
 
   test("providerDomain is canonicalized on create and update", async () => {

@@ -60,6 +60,41 @@ describe("list_models", () => {
     ).toBe("Current: gpt-5.6-sol\nNo models are available in this workspace.");
   });
 
+  test("lists workspace OpenRouter custom models only when that workspace connection is ready", () => {
+    const customModels = [
+      { upstreamModelId: "anthropic/claude-sonnet-4.6", label: "Workspace Claude" },
+    ];
+    const connected = resolveWorkspaceModelSelection({
+      settings: testSettings(),
+      policy: null,
+      codexSubscriptionActive: false,
+      workspaceOpenRouterConnectionActive: true,
+      workspaceOpenRouterCustomModels: customModels,
+    });
+    const disconnected = resolveWorkspaceModelSelection({
+      settings: testSettings(),
+      policy: null,
+      codexSubscriptionActive: false,
+      workspaceOpenRouterConnectionActive: false,
+      workspaceOpenRouterCustomModels: customModels,
+    });
+    const modelId = "workspace-openrouter/anthropic/claude-sonnet-4.6";
+
+    expect(connected.find((entry) => entry.model.id === modelId)).toMatchObject({
+      model: {
+        label: "Workspace Claude",
+        cost: "workspace",
+        billing: { upstreamPayer: "workspace", metering: "external" },
+      },
+      credentialReadiness: { status: "ready" },
+      availability: { selectable: true },
+    });
+    expect(disconnected.find((entry) => entry.model.id === modelId)).toMatchObject({
+      credentialReadiness: { status: "not_ready", reason: "needs_reauth" },
+      availability: { selectable: false, reason: "needs_reauth" },
+    });
+  });
+
   test("keeps every rendered field on one unambiguous line", () => {
     const selection = resolveWorkspaceModelSelection({
       settings: testSettings(),

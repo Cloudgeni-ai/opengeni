@@ -65,15 +65,48 @@ describe("model-policy", () => {
     expect(rows.map((row) => row.id)).toEqual(["managed"]);
   });
 
-  test("labels a connected workspace Gateway as Your Gateway", () => {
+  test("labels a connected workspace Gateway as a workspace provider", () => {
     const rows = projectPickerRows([
       catalogModel({
         id: "workspace-gateway/kimi-k3",
         label: "Kimi K3",
+        provider: "workspace-gateway",
         source: "workspace_gateway",
+        cost: "workspace",
       }),
     ]);
-    expect(rows[0]).toMatchObject({ billingClass: "byok", billingClassLabel: "Your Gateway" });
+    expect(rows[0]).toMatchObject({
+      billingClass: "byok",
+      billingClassLabel: "Workspace providers",
+    });
+    expect(payerSummaryForModel(rows[0]!.catalog)).toBe("Billed to the workspace Vercel account");
+  });
+
+  test("keeps workspace OpenRouter billing separate from deployment OpenRouter", () => {
+    const workspaceModel = catalogModel({
+      id: "workspace-openrouter/anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6",
+      provider: "workspace-openrouter",
+      providerLabel: "Workspace OpenRouter",
+      source: "openrouter",
+      cost: "workspace",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+    });
+    const deploymentModel = catalogModel({
+      id: "openrouter/anthropic/claude-sonnet-4.6:free",
+      label: "Claude Sonnet 4.6 Free",
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      source: "openrouter",
+      cost: "free",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    });
+
+    expect(billingClassForModel(workspaceModel)).toBe("byok");
+    expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the workspace OpenRouter account");
+    expect(advancedSourceSummary(workspaceModel)).toBe("Workspace OpenRouter connection");
+    expect(billingClassForModel(deploymentModel)).toBe("external");
+    expect(payerSummaryForModel(deploymentModel)).toBe("Free in this deployment");
   });
 
   test("labels an anonymous deployment route as External", () => {
@@ -136,12 +169,13 @@ describe("model-policy", () => {
         catalogModel({
           id: "workspace-gateway/model",
           label: "Gateway model",
+          provider: "workspace-gateway",
           source: "workspace_gateway",
           cost: "workspace",
           billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
         }),
       ),
-    ).toBe("Billed to your AI Gateway");
+    ).toBe("Billed to the workspace Vercel account");
   });
 
   test("projects curated shortLabel into picker rows", () => {

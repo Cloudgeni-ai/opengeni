@@ -251,11 +251,15 @@ import {
   HumanInputQuestion as HumanInputQuestionContract,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
+  OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
 import {
   environmentsEncryptionKeyBytes,
+  WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+  WORKSPACE_OPENROUTER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
@@ -5366,7 +5370,7 @@ export type CreateConnectionInput = {
   updatedBySubjectId?: string | null;
 };
 
-export type UpsertWorkspaceVercelAiGatewayConnectionInput = {
+type UpsertWorkspaceProviderApiKeyConnectionInput = {
   accountId: string;
   workspaceId: string;
   operationId: string;
@@ -5378,7 +5382,7 @@ export type UpsertWorkspaceVercelAiGatewayConnectionInput = {
   updatedBySubjectId: string;
 };
 
-export type RotateWorkspaceVercelAiGatewayConnectionInput = {
+type RotateWorkspaceProviderApiKeyConnectionInput = {
   accountId: string;
   workspaceId: string;
   connectionId: string;
@@ -5392,13 +5396,24 @@ export type RotateWorkspaceVercelAiGatewayConnectionInput = {
   updatedBySubjectId: string;
 };
 
-export type RevokeWorkspaceVercelAiGatewayConnectionsInput = {
+type RevokeWorkspaceProviderApiKeyConnectionsInput = {
   accountId: string;
   workspaceId: string;
   connectionId: string;
   expectedVersion: number;
   updatedBySubjectId: string;
 };
+
+export type UpsertWorkspaceVercelAiGatewayConnectionInput =
+  UpsertWorkspaceProviderApiKeyConnectionInput;
+export type RotateWorkspaceVercelAiGatewayConnectionInput =
+  RotateWorkspaceProviderApiKeyConnectionInput;
+export type RevokeWorkspaceVercelAiGatewayConnectionsInput =
+  RevokeWorkspaceProviderApiKeyConnectionsInput;
+export type UpsertWorkspaceOpenRouterConnectionInput = UpsertWorkspaceProviderApiKeyConnectionInput;
+export type RotateWorkspaceOpenRouterConnectionInput = RotateWorkspaceProviderApiKeyConnectionInput;
+export type RevokeWorkspaceOpenRouterConnectionsInput =
+  RevokeWorkspaceProviderApiKeyConnectionsInput;
 
 export type UpdateConnectionInput = {
   workspaceId: string;
@@ -9500,31 +9515,61 @@ export async function createConnection(
   );
 }
 
-async function lockWorkspaceVercelAiGatewayConnection(
-  db: Database,
-  workspaceId: string,
-): Promise<void> {
-  await db.execute(
-    sql`select pg_advisory_xact_lock(hashtextextended(${`workspace-vercel-ai-gateway:${workspaceId}`}, 0))`,
-  );
+type WorkspaceProviderApiKeyConnectionKind = "vercel_gateway" | "openrouter";
+
+type WorkspaceProviderApiKeyConnectionSpec = {
+  providerDomain: string;
+  credentialRole: string;
+  operationIdMetadataKey: string;
+  operationDigestMetadataKey: string;
+  label: string;
+};
+
+function workspaceProviderApiKeyConnectionSpec(
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): WorkspaceProviderApiKeyConnectionSpec {
+  return providerKind === "vercel_gateway"
+    ? {
+        providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+        credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+        operationIdMetadataKey: VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+        operationDigestMetadataKey: VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+        label: "Vercel AI Gateway",
+      }
+    : {
+        providerDomain: WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+        credentialRole: WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+        operationIdMetadataKey: OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+        operationDigestMetadataKey: OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+        label: "OpenRouter",
+      };
 }
 
-/**
- * Create one workspace-shared Vercel AI Gateway row, or replay the exact
- * operation that already created it. A different operation must use PATCH so a
- * stale create cannot overwrite a newer administrator's credential.
- */
-export async function upsertWorkspaceVercelAiGatewayConnection(
+async function lockWorkspaceProviderApiKeyConnection(
   db: Database,
-  input: UpsertWorkspaceVercelAiGatewayConnectionInput,
+  workspaceId: string,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): Promise<void> {
+  const lockKey =
+    providerKind === "vercel_gateway"
+      ? `workspace-vercel-ai-gateway:${workspaceId}`
+      : `workspace-openrouter:${workspaceId}`;
+  await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+}
+
+async function upsertWorkspaceProviderApiKeyConnection(
+  db: Database,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+  input: UpsertWorkspaceProviderApiKeyConnectionInput,
 ): Promise<ConnectionMetadataWithVerification | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        await lockWorkspaceVercelAiGatewayConnection(tx, input.workspaceId);
+        await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
           .select(connectionMetadataColumns)
           .from(schema.connections)
@@ -9533,9 +9578,9 @@ export async function upsertWorkspaceVercelAiGatewayConnection(
               eq(schema.connections.accountId, input.accountId),
               eq(schema.connections.workspaceId, input.workspaceId),
               isNull(schema.connections.subjectId),
-              sql`lower(${schema.connections.providerDomain}) = lower(${VERCEL_AI_GATEWAY_CONNECTION_DOMAIN})`,
+              sql`lower(${schema.connections.providerDomain}) = lower(${spec.providerDomain})`,
               eq(schema.connections.kind, "api_key"),
-              sql`${schema.connections.metadata} ->> 'credentialRole' = ${VERCEL_AI_GATEWAY_CONNECTION_ROLE}`,
+              sql`${schema.connections.metadata} ->> 'credentialRole' = ${spec.credentialRole}`,
             ),
           )
           .orderBy(
@@ -9547,19 +9592,15 @@ export async function upsertWorkspaceVercelAiGatewayConnection(
           .for("update");
         const metadata = {
           ...(input.metadata ?? {}),
-          credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
-          [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: input.operationId,
-          [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: input.requestDigest,
+          credentialRole: spec.credentialRole,
+          [spec.operationIdMetadataKey]: input.operationId,
+          [spec.operationDigestMetadataKey]: input.requestDigest,
         };
         const operationRow = rows.find(
-          (row) =>
-            row.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY] ===
-            input.operationId,
+          (row) => row.metadata[spec.operationIdMetadataKey] === input.operationId,
         );
         if (operationRow) {
-          return operationRow.metadata[
-            VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY
-          ] === input.requestDigest
+          return operationRow.metadata[spec.operationDigestMetadataKey] === input.requestDigest
             ? mapConnectionMetadata(operationRow)
             : null;
         }
@@ -9568,7 +9609,7 @@ export async function upsertWorkspaceVercelAiGatewayConnection(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: null,
-          providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+          providerDomain: spec.providerDomain,
           kind: "api_key",
           status: "active",
           credentialEncrypted: input.credentialEncrypted,
@@ -9582,23 +9623,19 @@ export async function upsertWorkspaceVercelAiGatewayConnection(
   );
 }
 
-/**
- * Rotate one exact non-revoked Gateway generation and revoke legacy active
- * duplicates under the workspace advisory lock. The operation receipt makes a
- * lost-response replay idempotent without attributing another administrator's
- * write to this request.
- */
-export async function rotateWorkspaceVercelAiGatewayConnection(
+async function rotateWorkspaceProviderApiKeyConnection(
   db: Database,
-  input: RotateWorkspaceVercelAiGatewayConnectionInput,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+  input: RotateWorkspaceProviderApiKeyConnectionInput,
 ): Promise<ConnectionMetadataWithVerification | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        await lockWorkspaceVercelAiGatewayConnection(tx, input.workspaceId);
+        await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const rows = await tx
           .select(connectionMetadataColumns)
           .from(schema.connections)
@@ -9607,22 +9644,19 @@ export async function rotateWorkspaceVercelAiGatewayConnection(
               eq(schema.connections.accountId, input.accountId),
               eq(schema.connections.workspaceId, input.workspaceId),
               isNull(schema.connections.subjectId),
-              sql`lower(${schema.connections.providerDomain}) = lower(${VERCEL_AI_GATEWAY_CONNECTION_DOMAIN})`,
+              sql`lower(${schema.connections.providerDomain}) = lower(${spec.providerDomain})`,
               eq(schema.connections.kind, "api_key"),
-              sql`${schema.connections.metadata} ->> 'credentialRole' = ${VERCEL_AI_GATEWAY_CONNECTION_ROLE}`,
+              sql`${schema.connections.metadata} ->> 'credentialRole' = ${spec.credentialRole}`,
             ),
           )
           .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
           .for("update");
         const operationRow = rows.find(
-          (row) =>
-            row.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY] ===
-            input.operationId,
+          (row) => row.metadata[spec.operationIdMetadataKey] === input.operationId,
         );
         if (operationRow) {
           return operationRow.status !== "revoked" &&
-            operationRow.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY] ===
-              input.requestDigest
+            operationRow.metadata[spec.operationDigestMetadataKey] === input.requestDigest
             ? mapConnectionMetadata(operationRow)
             : null;
         }
@@ -9636,9 +9670,9 @@ export async function rotateWorkspaceVercelAiGatewayConnection(
         }
         const metadata = {
           ...(input.metadata ?? {}),
-          credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
-          [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: input.operationId,
-          [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: input.requestDigest,
+          credentialRole: spec.credentialRole,
+          [spec.operationIdMetadataKey]: input.operationId,
+          [spec.operationDigestMetadataKey]: input.requestDigest,
         };
         for (const row of rows.filter((candidate) => candidate.status !== "revoked")) {
           const revoked = await revokeConnectionInScope(
@@ -9649,14 +9683,14 @@ export async function rotateWorkspaceVercelAiGatewayConnection(
             row.version,
           );
           if (!revoked) {
-            throw new Error("Vercel AI Gateway connection changed during rotation");
+            throw new Error(`${spec.label} connection changed during rotation`);
           }
         }
         return await createConnectionInScope(tx, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: null,
-          providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+          providerDomain: spec.providerDomain,
           kind: "api_key",
           status: "active",
           credentialEncrypted: input.credentialEncrypted,
@@ -9670,18 +9704,19 @@ export async function rotateWorkspaceVercelAiGatewayConnection(
   );
 }
 
-/** Revoke the selected Gateway row and every legacy active duplicate atomically. */
-export async function revokeWorkspaceVercelAiGatewayConnections(
+async function revokeWorkspaceProviderApiKeyConnections(
   db: Database,
-  input: RevokeWorkspaceVercelAiGatewayConnectionsInput,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+  input: RevokeWorkspaceProviderApiKeyConnectionsInput,
 ): Promise<ConnectionMetadataWithVerification | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        await lockWorkspaceVercelAiGatewayConnection(tx, input.workspaceId);
+        await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
         const [targetRow] = await tx
           .select(connectionMetadataColumns)
           .from(schema.connections)
@@ -9697,14 +9732,14 @@ export async function revokeWorkspaceVercelAiGatewayConnections(
           .limit(1);
         if (
           !targetRow ||
-          targetRow.providerDomain.toLowerCase() !== VERCEL_AI_GATEWAY_CONNECTION_DOMAIN ||
+          targetRow.providerDomain.toLowerCase() !== spec.providerDomain ||
           targetRow.kind !== "api_key" ||
-          targetRow.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE
+          targetRow.metadata.credentialRole !== spec.credentialRole
         ) {
           return null;
         }
         // A replay of an already-committed DELETE is idempotent for that exact
-        // connection generation. It must not sweep a newer Gateway connection
+        // connection generation. It must not sweep a newer provider connection
         // that was established after the original response was lost.
         if (targetRow.status === "revoked") {
           return mapConnectionMetadata(targetRow);
@@ -9712,7 +9747,7 @@ export async function revokeWorkspaceVercelAiGatewayConnections(
         if (targetRow.version !== input.expectedVersion) {
           return null;
         }
-        const gatewayRows = await tx
+        const providerRows = await tx
           .select(connectionMetadataColumns)
           .from(schema.connections)
           .where(
@@ -9720,16 +9755,16 @@ export async function revokeWorkspaceVercelAiGatewayConnections(
               eq(schema.connections.accountId, input.accountId),
               eq(schema.connections.workspaceId, input.workspaceId),
               isNull(schema.connections.subjectId),
-              sql`lower(${schema.connections.providerDomain}) = lower(${VERCEL_AI_GATEWAY_CONNECTION_DOMAIN})`,
+              sql`lower(${schema.connections.providerDomain}) = lower(${spec.providerDomain})`,
               eq(schema.connections.kind, "api_key"),
               ne(schema.connections.status, "revoked"),
-              sql`${schema.connections.metadata} ->> 'credentialRole' = ${VERCEL_AI_GATEWAY_CONNECTION_ROLE}`,
+              sql`${schema.connections.metadata} ->> 'credentialRole' = ${spec.credentialRole}`,
             ),
           )
           .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
           .for("update");
         let result = mapConnectionMetadata(targetRow);
-        for (const row of gatewayRows) {
+        for (const row of providerRows) {
           const revoked = await revokeConnectionInScope(
             tx,
             input.workspaceId,
@@ -9738,13 +9773,58 @@ export async function revokeWorkspaceVercelAiGatewayConnections(
             row.version,
           );
           if (!revoked) {
-            throw new Error("Vercel AI Gateway connection changed during disconnect");
+            throw new Error(`${spec.label} connection changed during disconnect`);
           }
           if (row.id === input.connectionId) result = revoked;
         }
         return result;
       }),
   );
+}
+
+/** Compatibility wrapper for the existing Vercel AI Gateway create/replay contract. */
+export async function upsertWorkspaceVercelAiGatewayConnection(
+  db: Database,
+  input: UpsertWorkspaceVercelAiGatewayConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await upsertWorkspaceProviderApiKeyConnection(db, "vercel_gateway", input);
+}
+
+export async function upsertWorkspaceOpenRouterConnection(
+  db: Database,
+  input: UpsertWorkspaceOpenRouterConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await upsertWorkspaceProviderApiKeyConnection(db, "openrouter", input);
+}
+
+/** Compatibility wrapper for the existing Vercel AI Gateway rotation contract. */
+export async function rotateWorkspaceVercelAiGatewayConnection(
+  db: Database,
+  input: RotateWorkspaceVercelAiGatewayConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await rotateWorkspaceProviderApiKeyConnection(db, "vercel_gateway", input);
+}
+
+export async function rotateWorkspaceOpenRouterConnection(
+  db: Database,
+  input: RotateWorkspaceOpenRouterConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await rotateWorkspaceProviderApiKeyConnection(db, "openrouter", input);
+}
+
+/** Compatibility wrapper for the existing Vercel AI Gateway revoke contract. */
+export async function revokeWorkspaceVercelAiGatewayConnections(
+  db: Database,
+  input: RevokeWorkspaceVercelAiGatewayConnectionsInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await revokeWorkspaceProviderApiKeyConnections(db, "vercel_gateway", input);
+}
+
+export async function revokeWorkspaceOpenRouterConnections(
+  db: Database,
+  input: RevokeWorkspaceOpenRouterConnectionsInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await revokeWorkspaceProviderApiKeyConnections(db, "openrouter", input);
 }
 
 /**
@@ -13782,11 +13862,21 @@ export async function loadConnectionCredentialForBroker(
   );
 }
 
-export async function workspaceVercelAiGatewayConnectionActive(
+async function getWorkspaceProviderApiKeyConnectionMetadata(
   db: Database,
   workspaceId: string,
-): Promise<boolean> {
-  return (await getWorkspaceVercelAiGatewayConnectionMetadata(db, workspaceId)) !== null;
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): Promise<{ connectionId: string; version: number } | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
+  const connection = (await listConnectionsMetadata(db, workspaceId, null)).find(
+    (candidate) =>
+      candidate.subjectId === null &&
+      candidate.providerDomain.toLowerCase() === spec.providerDomain &&
+      candidate.kind === "api_key" &&
+      candidate.status === "active" &&
+      candidate.metadata.credentialRole === spec.credentialRole,
+  );
+  return connection ? { connectionId: connection.id, version: connection.version } : null;
 }
 
 /** Metadata-only capability revision input; never selects/decrypts the API key. */
@@ -13794,17 +13884,64 @@ export async function getWorkspaceVercelAiGatewayConnectionMetadata(
   db: Database,
   workspaceId: string,
 ): Promise<{ connectionId: string; version: number } | null> {
-  const gatewayConnection = (await listConnectionsMetadata(db, workspaceId, null)).find(
-    (candidate) =>
-      candidate.subjectId === null &&
-      candidate.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
-      candidate.kind === "api_key" &&
-      candidate.status === "active" &&
-      candidate.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  return await getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, "vercel_gateway");
+}
+
+export async function getWorkspaceOpenRouterConnectionMetadata(
+  db: Database,
+  workspaceId: string,
+): Promise<{ connectionId: string; version: number } | null> {
+  return await getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, "openrouter");
+}
+
+export async function workspaceVercelAiGatewayConnectionActive(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return (await getWorkspaceVercelAiGatewayConnectionMetadata(db, workspaceId)) !== null;
+}
+
+export async function workspaceOpenRouterConnectionActive(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return (await getWorkspaceOpenRouterConnectionMetadata(db, workspaceId)) !== null;
+}
+
+async function loadWorkspaceProviderApiKey(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): Promise<string | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
+  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
+    (connection) =>
+      connection.subjectId === null &&
+      connection.providerDomain.toLowerCase() === spec.providerDomain &&
+      connection.kind === "api_key" &&
+      connection.status === "active" &&
+      connection.metadata.credentialRole === spec.credentialRole,
   );
-  return gatewayConnection
-    ? { connectionId: gatewayConnection.id, version: gatewayConnection.version }
-    : null;
+  if (!metadata) {
+    return null;
+  }
+  const connection = await loadConnectionCredentialForBroker(db, settings, {
+    workspaceId,
+    connectionId: metadata.id,
+    providerDomain: spec.providerDomain,
+    kind: "api_key",
+    allowSubjectOwned: false,
+  });
+  if (
+    !connection ||
+    connection.status !== "active" ||
+    connection.metadata.credentialRole !== spec.credentialRole
+  ) {
+    return null;
+  }
+  const apiKey = connection.credential.apiKey;
+  return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
 }
 
 /** Resolve only the reviewed workspace-shared AI Gateway credential shape. */
@@ -13813,33 +13950,16 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
   settings: Settings,
   workspaceId: string,
 ): Promise<string | null> {
-  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
-    (connection) =>
-      connection.subjectId === null &&
-      connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
-      connection.kind === "api_key" &&
-      connection.status === "active" &&
-      connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
-  );
-  if (!metadata) {
-    return null;
-  }
-  const connection = await loadConnectionCredentialForBroker(db, settings, {
-    workspaceId,
-    connectionId: metadata.id,
-    providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
-    kind: "api_key",
-    allowSubjectOwned: false,
-  });
-  if (
-    !connection ||
-    connection.status !== "active" ||
-    connection.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE
-  ) {
-    return null;
-  }
-  const apiKey = connection.credential.apiKey;
-  return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
+  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "vercel_gateway");
+}
+
+/** Resolve only the reviewed workspace-shared OpenRouter credential shape. */
+export async function loadWorkspaceOpenRouterApiKey(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+): Promise<string | null> {
+  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "openrouter");
 }
 
 /**
@@ -72062,6 +72182,8 @@ function mapConnectionMetadata(row: {
   updatedAt: Date;
 }): ConnectionMetadataWithVerification {
   const {
+    [OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _openRouterOperationId,
+    [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
     ...publicMetadata

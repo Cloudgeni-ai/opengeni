@@ -1,7 +1,4 @@
-import {
-  environmentsEncryptionKeyBytes,
-  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-} from "@opengeni/config";
+import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   CreatePrReviewAppRegistrationRequest,
   CreatePrReviewRepositoryBindingRequest,
@@ -16,7 +13,7 @@ import {
   canonicalConfiguredModel,
   defaultPrReviewProviderBaseUrl,
   getCapabilityPack,
-  isWorkspaceGatewayCustomModelId,
+  workspaceCustomModelReference,
   prReviewWebhookAuthKind,
   normalizePrReviewProviderBaseUrl,
   prReviewPackConnectorId,
@@ -38,6 +35,7 @@ import {
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
   lockActiveWorkspaceGatewayCustomModelForAdmission,
+  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   nestedPostgresSqlState,
   recordAuditEvent,
   updatePrReviewAppRegistration,
@@ -556,13 +554,21 @@ function prReviewCustomModelCommitGuard(input: {
   workspaceId: string;
   modelId: string;
 }): ((tx: ApiRouteDeps["db"]) => Promise<void>) | undefined {
-  if (!isWorkspaceGatewayCustomModelId(input.settings, input.modelId)) return undefined;
+  const reference = workspaceCustomModelReference(input.settings, input.modelId);
+  if (!reference) return undefined;
   return async (tx): Promise<void> => {
-    const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      upstreamModelId: input.modelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length),
-    });
+    const active =
+      reference.providerKind === "openrouter"
+        ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          })
+        : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          });
     if (!active) {
       throw new HTTPException(422, {
         message: `model is not available: ${input.modelId}`,

@@ -3156,6 +3156,16 @@ export type DeleteWorkspaceGatewayCustomModelRequest = {
   operationId: string;
 };
 
+export type WorkspaceOpenRouterCustomModel = WorkspaceGatewayCustomModel;
+
+export type WorkspaceOpenRouterCustomModelsResponse = {
+  models: WorkspaceOpenRouterCustomModel[];
+};
+
+export type CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+
+export type DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
  * that dimension; an empty array is an explicit total block.

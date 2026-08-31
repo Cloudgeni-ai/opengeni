@@ -43,6 +43,7 @@ import {
   summarizeForCompaction,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   vercelGatewayRoutingFetch,
+  WorkspaceOpenRouterUnavailableError,
   XaiSubscriptionUnavailableError,
 } from "../src/index";
 import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-body";
@@ -1828,6 +1829,29 @@ describe("buildProviderClient", () => {
       (candidate) => candidate.id === "opengeni-gateway",
     )!;
     expect(buildProviderClient(secondProvider, secondSettings)).not.toBe(firstClient);
+  });
+
+  test("workspace OpenRouter clients are attempt-local and require the workspace key", () => {
+    const settings = multiProviderSettings();
+    const provider: ResolvedModelProvider = {
+      id: "workspace-openrouter",
+      label: "Your OpenRouter",
+      kind: "openrouter-workspace",
+      api: "chat",
+      wireProfile: "openai",
+      builtin: false,
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "workspace-openrouter-key",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "workspace", metering: "external" },
+    };
+
+    expect(buildProviderClient(provider, settings)).not.toBe(
+      buildProviderClient(provider, settings),
+    );
+    expect(() => buildProviderClient({ ...provider, apiKey: undefined }, settings)).toThrow(
+      WorkspaceOpenRouterUnavailableError,
+    );
   });
 
   test("an anonymous provider sends no authentication or ambient OpenAI identity headers", async () => {

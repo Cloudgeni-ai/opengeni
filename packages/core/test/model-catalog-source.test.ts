@@ -9,6 +9,7 @@ import { testSettings } from "@opengeni/testing";
 import { canonicalConfiguredModel } from "../src/domain/sessions";
 import {
   isWorkspaceGatewayCustomModelId,
+  isWorkspaceOpenRouterCustomModelId,
   resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
 } from "../src/model-catalog";
@@ -111,6 +112,10 @@ describe("model catalog source resolution", () => {
   });
 
   test("adds only the workspace's durable custom Gateway rows to executable settings", async () => {
+    const listOpenRouter = spyOn(
+      opengeniDb,
+      "listWorkspaceOpenRouterCustomModels",
+    ).mockResolvedValue([]);
     const listCustom = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([
       {
         id: "33333333-3333-4333-8333-333333333333",
@@ -170,11 +175,67 @@ describe("model catalog source resolution", () => {
         canonicalConfiguredModel(resolved.settings, "workspace-gateway/unstored/model"),
       ).toThrow("model is not available");
     } finally {
+      listOpenRouter.mockRestore();
       listCustom.mockRestore();
     }
   });
 
+  test("adds the workspace's durable custom OpenRouter rows on a separate workspace-paid rail", async () => {
+    const listGateway = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([]);
+    const listOpenRouter = spyOn(
+      opengeniDb,
+      "listWorkspaceOpenRouterCustomModels",
+    ).mockResolvedValue([
+      {
+        id: "44444444-4444-4444-8444-444444444444",
+        accountId,
+        workspaceId,
+        upstreamModelId: "anthropic/claude-sonnet-4.6",
+        label: "Workspace Claude",
+        version: 1,
+        createdBySubjectId: "subject-a",
+        createdAt: new Date("2026-08-31T12:00:00.000Z"),
+        updatedAt: new Date("2026-08-31T12:00:00.000Z"),
+      },
+    ] as any);
+    try {
+      const resolved = await resolveWorkspaceCatalogSettings(
+        {} as opengeniDb.Database,
+        testSettings(),
+        { accountId, workspaceId },
+      );
+      const modelId = "workspace-openrouter/anthropic/claude-sonnet-4.6";
+      const policy = resolveTurnExecutionPolicyV1(resolved.settings, {
+        modelId,
+        requestedModelId: modelId,
+        modelSource: "explicit",
+        reasoningEffort: "low",
+        reasoningSource: "explicit",
+        latencyMode: "standard",
+        latencyModeSource: "explicit",
+      });
+
+      expect(policy).toMatchObject({
+        providerId: "workspace-openrouter",
+        upstreamModelId: "anthropic/claude-sonnet-4.6",
+        billing: { upstreamPayer: "workspace", metering: "external" },
+      });
+      expect(isWorkspaceOpenRouterCustomModelId(resolved.settings, modelId)).toBe(true);
+      expect(isWorkspaceGatewayCustomModelId(resolved.settings, modelId)).toBe(false);
+      expect(() =>
+        canonicalConfiguredModel(resolved.settings, "workspace-openrouter/unstored/model"),
+      ).toThrow("model is not available");
+    } finally {
+      listOpenRouter.mockRestore();
+      listGateway.mockRestore();
+    }
+  });
+
   test("lets deployment Gateway membership shadow a colliding custom row", async () => {
+    const listOpenRouter = spyOn(
+      opengeniDb,
+      "listWorkspaceOpenRouterCustomModels",
+    ).mockResolvedValue([]);
     const listCustom = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([
       {
         id: "33333333-3333-4333-8333-333333333333",
@@ -203,11 +264,16 @@ describe("model catalog source resolution", () => {
         label: expect.not.stringContaining("Stale custom label"),
       });
     } finally {
+      listOpenRouter.mockRestore();
       listCustom.mockRestore();
     }
   });
 
   test("retains every distinct retired custom model needed by an existing-session decision", async () => {
+    const listOpenRouter = spyOn(
+      opengeniDb,
+      "listWorkspaceOpenRouterCustomModels",
+    ).mockResolvedValue([]);
     const listCustom = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([]);
     const getRetained = spyOn(
       opengeniDb,
@@ -242,6 +308,7 @@ describe("model catalog source resolution", () => {
       expect(getRetained).toHaveBeenCalledTimes(2);
     } finally {
       getRetained.mockRestore();
+      listOpenRouter.mockRestore();
       listCustom.mockRestore();
     }
   });

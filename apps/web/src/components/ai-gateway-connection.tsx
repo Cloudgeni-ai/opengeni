@@ -1,11 +1,17 @@
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
+import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
+import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { ChevronDownIcon, Loader2Icon, PlusIcon, RouteIcon, Trash2Icon } from "lucide-react";
 import {
-  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
-  WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH,
-} from "@opengeni/contracts";
-import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { ChevronDownIcon, Loader2Icon, PlusIcon, Trash2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type SVGProps } from "react";
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type SVGProps,
+} from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
@@ -13,8 +19,69 @@ import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 
+type WorkspaceProviderCustomModel = WorkspaceGatewayCustomModel;
+
+type CustomModelCreateRequest = {
+  operationId: string;
+  upstreamModelId: string;
+};
+
+type CustomModelDeleteRequest = {
+  expectedVersion: number;
+  operationId: string;
+};
+
+type ProviderConnectionConfig = {
+  id: "vercel-ai-gateway" | "openrouter";
+  providerDomain: string;
+  credentialRole: string;
+  credentialLabel: string;
+  readinessProvider: string;
+  title: string;
+  mark: (className: string) => ReactNode;
+  billingDescription: string;
+  connectionManagerDescription: string;
+  keyAriaLabel: string;
+  keyPlaceholder: (connected: boolean) => string;
+  customModelsHeading: string;
+  customModelsDescription: string;
+  customModelInputAriaLabel: string;
+  customModelPlaceholder: string;
+  customModelConnectedHelp: string;
+  customModelDisconnectedHelp: string;
+  emptyCustomModelsDescription: string;
+  readyModelDescription: string;
+  waitingModelDescription: string;
+  unavailableModelDescription: string;
+  modelToastName: string;
+  listCustomModels: (
+    client: OpenGeniBrowserClient,
+    workspaceId: string,
+  ) => Promise<{ models: WorkspaceProviderCustomModel[] }>;
+  createCustomModel: (
+    client: OpenGeniBrowserClient,
+    workspaceId: string,
+    request: CustomModelCreateRequest,
+  ) => Promise<WorkspaceProviderCustomModel>;
+  deleteCustomModel: (
+    client: OpenGeniBrowserClient,
+    workspaceId: string,
+    customModelId: string,
+    request: CustomModelDeleteRequest,
+  ) => Promise<void>;
+};
+
+type ModelProviderConnectionCardProps = {
+  workspaceId: string;
+  canManageConnection: boolean;
+  canManageCustomModels: boolean;
+  onConnectionChange?: (() => void) | undefined;
+};
+
 const GATEWAY_DOMAIN = "ai-gateway.vercel.sh";
 const GATEWAY_ROLE = "vercel_ai_gateway";
+const OPENROUTER_DOMAIN = "openrouter.ai";
+const OPENROUTER_ROLE = "openrouter";
 
 /** Vercel mark (simple-icons path) — currentColor so it matches surrounding chrome. */
 function VercelMark({ className, ...props }: SVGProps<SVGSVGElement>) {
@@ -31,35 +98,126 @@ function VercelMark({ className, ...props }: SVGProps<SVGSVGElement>) {
   );
 }
 
-function isGatewayConnection(connection: ConnectionMetadata): boolean {
+const VERCEL_AI_GATEWAY_CONFIG: ProviderConnectionConfig = {
+  id: "vercel-ai-gateway",
+  providerDomain: GATEWAY_DOMAIN,
+  credentialRole: GATEWAY_ROLE,
+  credentialLabel: "Vercel AI Gateway",
+  readinessProvider: "workspace-gateway",
+  title: "Bring your own Vercel AI Gateway",
+  mark: (className) => <VercelMark className={className} />,
+  billingDescription:
+    "Use models through this workspace's Vercel account. The workspace's Vercel account is billed directly instead of using OpenGeni credits.",
+  connectionManagerDescription:
+    "Members with connection-management access manage this Vercel AI Gateway connection.",
+  keyAriaLabel: "Vercel AI Gateway key",
+  keyPlaceholder: (connected) =>
+    connected ? "Replace Vercel AI Gateway key" : "Vercel AI Gateway key",
+  customModelsHeading: "Models from your Gateway",
+  customModelsDescription:
+    "Add an exact Vercel model slug. OpenGeni uses the Gateway's routing and does not inspect or pin a provider for custom entries.",
+  customModelInputAriaLabel: "Vercel AI Gateway model slug",
+  customModelPlaceholder: "anthropic/claude-sonnet-4.6",
+  customModelConnectedHelp: "The model becomes selectable when workspace policy allows it.",
+  customModelDisconnectedHelp:
+    "You can configure models now; they become selectable after you connect the Gateway.",
+  emptyCustomModelsDescription:
+    "No custom model slugs yet. The curated Gateway models remain available separately.",
+  readyModelDescription: "Ready through Your Gateway",
+  waitingModelDescription: "Waiting for a Gateway connection",
+  unavailableModelDescription: "Gateway connection status unavailable",
+  modelToastName: "Gateway model",
+  listCustomModels: (client, workspaceId) => client.listWorkspaceGatewayCustomModels(workspaceId),
+  createCustomModel: (client, workspaceId, request) =>
+    client.createWorkspaceGatewayCustomModel(workspaceId, request),
+  deleteCustomModel: (client, workspaceId, customModelId, request) =>
+    client.deleteWorkspaceGatewayCustomModel(workspaceId, customModelId, request),
+};
+
+const OPENROUTER_CONFIG: ProviderConnectionConfig = {
+  id: "openrouter",
+  providerDomain: OPENROUTER_DOMAIN,
+  credentialRole: OPENROUTER_ROLE,
+  credentialLabel: "OpenRouter",
+  readinessProvider: "workspace-openrouter",
+  title: "Bring your own OpenRouter",
+  mark: (className) => <RouteIcon className={className} aria-hidden />,
+  billingDescription:
+    "Use models through this workspace's OpenRouter account. The workspace's OpenRouter account is billed directly. This is separate from deployment-provided OpenRouter models, including free models and models funded by deployment credits.",
+  connectionManagerDescription:
+    "Members with connection-management access manage this workspace OpenRouter connection.",
+  keyAriaLabel: "OpenRouter API key",
+  keyPlaceholder: (connected) => (connected ? "Replace OpenRouter API key" : "OpenRouter API key"),
+  customModelsHeading: "Models from workspace OpenRouter",
+  customModelsDescription:
+    "Add an exact OpenRouter model slug for this workspace account. Deployment-provided OpenRouter models remain separate.",
+  customModelInputAriaLabel: "OpenRouter model slug",
+  customModelPlaceholder: "anthropic/claude-sonnet-4.6",
+  customModelConnectedHelp: "The model becomes selectable when workspace policy allows it.",
+  customModelDisconnectedHelp:
+    "You can configure models now; they become selectable after you connect OpenRouter.",
+  emptyCustomModelsDescription:
+    "No custom model slugs yet. Deployment-provided OpenRouter models remain available separately.",
+  readyModelDescription: "Ready through workspace OpenRouter",
+  waitingModelDescription: "Waiting for an OpenRouter connection",
+  unavailableModelDescription: "OpenRouter connection status unavailable",
+  modelToastName: "OpenRouter model",
+  listCustomModels: (client, workspaceId) =>
+    client.listWorkspaceOpenRouterCustomModels(workspaceId),
+  createCustomModel: (client, workspaceId, request) =>
+    client.createWorkspaceOpenRouterCustomModel(workspaceId, request),
+  deleteCustomModel: (client, workspaceId, customModelId, request) =>
+    client.deleteWorkspaceOpenRouterCustomModel(workspaceId, customModelId, request),
+};
+
+function isProviderConnection(
+  connection: ConnectionMetadata,
+  config: ProviderConnectionConfig,
+): boolean {
   return (
     connection.subjectId === null &&
-    connection.providerDomain === GATEWAY_DOMAIN &&
+    connection.providerDomain === config.providerDomain &&
     connection.kind === "api_key" &&
-    connection.metadata.credentialRole === GATEWAY_ROLE
+    connection.metadata.credentialRole === config.credentialRole
   );
 }
 
-type AiGatewayConnectionCardProps = {
-  workspaceId: string;
-  canManageConnection: boolean;
-  canManageCustomModels: boolean;
-  onConnectionChange?: (() => void) | undefined;
-};
-
-export function AiGatewayConnectionCard(props: AiGatewayConnectionCardProps) {
+export function AiGatewayConnectionCard(props: ModelProviderConnectionCardProps) {
   const client = useAppContext().client;
   return <AiGatewayConnectionCardWithClient key={props.workspaceId} {...props} client={client} />;
 }
 
 /** Isolated product fixture seam; production callers use AiGatewayConnectionCard. */
 export function AiGatewayConnectionCardWithClient(
-  props: AiGatewayConnectionCardProps & { client: OpenGeniBrowserClient },
+  props: ModelProviderConnectionCardProps & { client: OpenGeniBrowserClient },
+) {
+  return <ModelProviderConnectionCardWithClient {...props} config={VERCEL_AI_GATEWAY_CONFIG} />;
+}
+
+export function OpenRouterConnectionCard(props: ModelProviderConnectionCardProps) {
+  const client = useAppContext().client;
+  return <OpenRouterConnectionCardWithClient key={props.workspaceId} {...props} client={client} />;
+}
+
+/** Isolated product fixture seam; production callers use OpenRouterConnectionCard. */
+export function OpenRouterConnectionCardWithClient(
+  props: ModelProviderConnectionCardProps & { client: OpenGeniBrowserClient },
+) {
+  return <ModelProviderConnectionCardWithClient {...props} config={OPENROUTER_CONFIG} />;
+}
+
+function ModelProviderConnectionCardWithClient(
+  props: ModelProviderConnectionCardProps & {
+    client: OpenGeniBrowserClient;
+    config: ProviderConnectionConfig;
+  },
 ) {
   const client = props.client;
+  const config = props.config;
+  const modelSlugHelpId = useId();
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [readOnlyConnected, setReadOnlyConnected] = useState(false);
-  const [customModels, setCustomModels] = useState<WorkspaceGatewayCustomModel[]>([]);
+  const [customModels, setCustomModels] = useState<WorkspaceProviderCustomModel[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [customModelsLoaded, setCustomModelsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,12 +228,13 @@ export function AiGatewayConnectionCardWithClient(
   const [modelBusy, setModelBusy] = useState(false);
   const [removingModelId, setRemovingModelId] = useState<string | null>(null);
   const [modelPendingRemoval, setModelPendingRemoval] =
-    useState<WorkspaceGatewayCustomModel | null>(null);
+    useState<WorkspaceProviderCustomModel | null>(null);
   const [open, setOpen] = useState(false);
   const activeRef = useRef(true);
   const connectionRequestGenerationRef = useRef(0);
   const customModelsRequestGenerationRef = useRef(0);
   const modelInputRef = useRef<HTMLInputElement | null>(null);
+  const addWorkflowRef = useRef<HTMLDivElement | null>(null);
   const removeButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const removeFocusTargetRef = useRef<HTMLElement | null>(null);
   const restoreModelInputFocusRef = useRef(false);
@@ -94,25 +253,35 @@ export function AiGatewayConnectionCardWithClient(
   }, []);
 
   const connection = useMemo(() => {
-    const gatewayConnections = connections.filter(isGatewayConnection);
+    const providerConnections = connections.filter((candidate) =>
+      isProviderConnection(candidate, config),
+    );
     return (
-      gatewayConnections.find((candidate) => candidate.status === "active") ??
-      gatewayConnections[0] ??
+      providerConnections.find((candidate) => candidate.status === "active") ??
+      providerConnections[0] ??
       null
     );
-  }, [connections]);
+  }, [config, connections]);
   const connected = props.canManageConnection ? connection?.status === "active" : readOnlyConnected;
   const modelSlugValid =
     modelSlug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
     /^[!-{}-~]+$/.test(modelSlug);
   const modelSlugExists = customModels.some((model) => model.upstreamModelId === modelSlug);
+  const modelSlugInvalid = modelSlug.length > 0 && (!modelSlugValid || modelSlugExists);
+  const modelSlugHelp = modelSlugExists
+    ? "That slug is already configured for this workspace."
+    : modelSlug && !modelSlugValid
+      ? "Use the exact printable slug with no spaces or |."
+      : connected
+        ? config.customModelConnectedHelp
+        : config.customModelDisconnectedHelp;
 
   const refreshCustomModels = useCallback(async (): Promise<
-    WorkspaceGatewayCustomModel[] | null
+    WorkspaceProviderCustomModel[] | null
   > => {
     const requestGeneration = ++customModelsRequestGenerationRef.current;
     try {
-      const result = await client.listWorkspaceGatewayCustomModels(props.workspaceId);
+      const result = await config.listCustomModels(client, props.workspaceId);
       if (!activeRef.current || requestGeneration !== customModelsRequestGenerationRef.current) {
         return null;
       }
@@ -128,7 +297,7 @@ export function AiGatewayConnectionCardWithClient(
       setCustomModelsLoaded(true);
       return null;
     }
-  }, [client, props.workspaceId]);
+  }, [client, config, props.workspaceId]);
 
   const refreshConnection = useCallback(async (): Promise<ConnectionMetadata[] | null> => {
     const requestGeneration = ++connectionRequestGenerationRef.current;
@@ -150,7 +319,8 @@ export function AiGatewayConnectionCardWithClient(
       setReadOnlyConnected(
         result.models.some(
           (model) =>
-            model.source === "workspace_gateway" && model.credentialReadiness.status === "ready",
+            model.provider === config.readinessProvider &&
+            model.credentialReadiness.status === "ready",
         ),
       );
       setError(null);
@@ -166,7 +336,7 @@ export function AiGatewayConnectionCardWithClient(
       setLoaded(true);
       return null;
     }
-  }, [client, props.canManageConnection, props.workspaceId]);
+  }, [client, config.readinessProvider, props.canManageConnection, props.workspaceId]);
 
   const refresh = useCallback(async () => {
     await Promise.all([refreshConnection(), refreshCustomModels()]);
@@ -179,7 +349,14 @@ export function AiGatewayConnectionCardWithClient(
   useEffect(() => {
     if (modelBusy || !restoreModelInputFocusRef.current) return;
     restoreModelInputFocusRef.current = false;
-    modelInputRef.current?.focus();
+    const activeElement = document.activeElement;
+    if (
+      activeElement === null ||
+      activeElement === document.body ||
+      (activeElement instanceof HTMLElement && addWorkflowRef.current?.contains(activeElement))
+    ) {
+      modelInputRef.current?.focus();
+    }
   }, [modelBusy]);
 
   useEffect(() => {
@@ -196,59 +373,64 @@ export function AiGatewayConnectionCardWithClient(
     const operationId = crypto.randomUUID();
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
-    try {
-      const metadata = {
-        credentialRole: GATEWAY_ROLE,
-        credentialLabel: "Vercel AI Gateway",
-      };
-      const saved =
-        connection && connection.status !== "revoked"
-          ? await client.updateConnection(props.workspaceId, connection.id, {
-              status: "active",
-              credential: { apiKey: value },
-              metadata,
-              expectedVersion: connection.version,
-              operationId,
-            })
-          : await client.createConnection(props.workspaceId, {
-              providerDomain: GATEWAY_DOMAIN,
-              kind: "api_key",
-              subjectId: null,
-              credential: { apiKey: value },
-              grantedScopes: [],
-              metadata,
-              operationId,
-            });
-      if (!activeRef.current) return;
+    const metadata = {
+      credentialRole: config.credentialRole,
+      credentialLabel: config.credentialLabel,
+    };
+    const saveConnection = async () =>
+      connection && connection.status !== "revoked"
+        ? await client.updateConnection(props.workspaceId, connection.id, {
+            status: "active",
+            credential: { apiKey: value },
+            metadata,
+            expectedVersion: connection.version,
+            operationId,
+          })
+        : await client.createConnection(props.workspaceId, {
+            providerDomain: config.providerDomain,
+            kind: "api_key",
+            subjectId: null,
+            credential: { apiKey: value },
+            grantedScopes: [],
+            metadata,
+            operationId,
+          });
+    const commitSavedConnection = (saved: ConnectionMetadata) => {
       connectionRequestGenerationRef.current += 1;
-      setConnections((current) => [saved, ...current.filter((item) => !isGatewayConnection(item))]);
+      setConnections((current) => [
+        saved,
+        ...current.filter((item) => !isProviderConnection(item, config)),
+      ]);
       setError(null);
       setLoaded(true);
       setApiKey("");
       setOpen(false);
       props.onConnectionChange?.();
-      toast.success("Vercel AI Gateway connected");
+      toast.success(`${config.credentialLabel} connected`);
+    };
+    try {
+      const saved = await saveConnection();
+      if (!activeRef.current) return;
+      commitSavedConnection(saved);
     } catch (caught) {
       if (!activeRef.current) return;
-      const reconciled = await refreshConnection();
-      if (!activeRef.current) return;
-      const committed =
-        reconciled?.some(
-          (candidate) =>
-            isGatewayConnection(candidate) &&
-            candidate.status === "active" &&
-            candidate.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY] ===
-              operationId,
-        ) === true;
-      if (committed) {
-        setApiKey("");
-        setOpen(false);
-        props.onConnectionChange?.();
-        toast.success("Vercel AI Gateway connected");
-        return;
+      let finalError = caught;
+      const outcomeUnknown =
+        caught instanceof OpenGeniApiError ? caught.outcomeUnknown : caught instanceof Error;
+      if (outcomeUnknown) {
+        try {
+          const replayed = await saveConnection();
+          if (!activeRef.current) return;
+          commitSavedConnection(replayed);
+          return;
+        } catch (retryError) {
+          finalError = retryError;
+        }
       }
-      toast.error("Couldn't save Vercel AI Gateway key", {
-        description: caught instanceof Error ? caught.message : String(caught),
+      await refreshConnection();
+      if (!activeRef.current) return;
+      toast.error(`Couldn't save ${config.credentialLabel} key`, {
+        description: finalError instanceof Error ? finalError.message : String(finalError),
       });
     } finally {
       if (activeRef.current) setBusy(false);
@@ -267,20 +449,20 @@ export function AiGatewayConnectionCardWithClient(
       const committed =
         reconciled !== null &&
         !reconciled.some(
-          (candidate) => isGatewayConnection(candidate) && candidate.status === "active",
+          (candidate) => isProviderConnection(candidate, config) && candidate.status === "active",
         );
       if (!committed) {
-        toast.error("Couldn't confirm Vercel AI Gateway disconnect", {
+        toast.error(`Couldn't confirm ${config.credentialLabel} disconnect`, {
           description:
             reconciled === null
               ? "Reload the connection state before trying again."
-              : "A newer Vercel AI Gateway connection is still active.",
+              : `A newer ${config.credentialLabel} connection is still active.`,
         });
         return;
       }
       setOpen(false);
       props.onConnectionChange?.();
-      toast.success("Vercel AI Gateway disconnected");
+      toast.success(`${config.credentialLabel} disconnected`);
     } catch (caught) {
       if (!activeRef.current) return;
       const reconciled = await refreshConnection();
@@ -288,15 +470,15 @@ export function AiGatewayConnectionCardWithClient(
       const committed =
         reconciled !== null &&
         !reconciled.some(
-          (candidate) => isGatewayConnection(candidate) && candidate.status === "active",
+          (candidate) => isProviderConnection(candidate, config) && candidate.status === "active",
         );
       if (committed) {
         setOpen(false);
         props.onConnectionChange?.();
-        toast.success("Vercel AI Gateway disconnected");
+        toast.success(`${config.credentialLabel} disconnected`);
         return;
       }
-      toast.error("Couldn't disconnect Vercel AI Gateway", {
+      toast.error(`Couldn't disconnect ${config.credentialLabel}`, {
         description: caught instanceof Error ? caught.message : String(caught),
       });
     } finally {
@@ -319,11 +501,11 @@ export function AiGatewayConnectionCardWithClient(
     setModelBusy(true);
     try {
       const create = () =>
-        client.createWorkspaceGatewayCustomModel(props.workspaceId, {
+        config.createCustomModel(client, props.workspaceId, {
           operationId,
           upstreamModelId: submittedSlug,
         });
-      let saved: WorkspaceGatewayCustomModel;
+      let saved: WorkspaceProviderCustomModel;
       try {
         saved = await create();
       } catch {
@@ -342,16 +524,16 @@ export function AiGatewayConnectionCardWithClient(
       setCustomModelsLoaded(true);
       setModelSlug((current) => (current === submittedSlug ? "" : current));
       props.onConnectionChange?.();
-      toast.success("Gateway model added", {
+      toast.success(`${config.modelToastName} added`, {
         description: connected
           ? "It can now appear in this workspace's model picker."
-          : "It will become selectable after the Gateway is connected.",
+          : `It will become selectable after ${config.credentialLabel} is connected.`,
       });
     } catch (caught) {
       if (!activeRef.current) return;
       await refreshCustomModels();
       if (!activeRef.current) return;
-      toast.error("Couldn't confirm Gateway model add", {
+      toast.error(`Couldn't confirm ${config.modelToastName} add`, {
         description: caught instanceof Error ? caught.message : String(caught),
       });
     } finally {
@@ -359,7 +541,7 @@ export function AiGatewayConnectionCardWithClient(
     }
   }
 
-  async function removeCustomModel(model: WorkspaceGatewayCustomModel): Promise<boolean> {
+  async function removeCustomModel(model: WorkspaceProviderCustomModel): Promise<boolean> {
     const modelIndex = customModels.findIndex((candidate) => candidate.id === model.id);
     const focusModelId =
       customModels[modelIndex + 1]?.id ?? customModels[modelIndex - 1]?.id ?? null;
@@ -377,11 +559,11 @@ export function AiGatewayConnectionCardWithClient(
         ? (removeButtonRefs.current.get(focusModelId) ?? modelInputRef.current)
         : modelInputRef.current;
       props.onConnectionChange?.();
-      toast.success("Gateway model removed");
+      toast.success(`${config.modelToastName} removed`);
     };
     try {
       const remove = () =>
-        client.deleteWorkspaceGatewayCustomModel(props.workspaceId, model.id, {
+        config.deleteCustomModel(client, props.workspaceId, model.id, {
           expectedVersion: model.version,
           operationId,
         });
@@ -411,7 +593,7 @@ export function AiGatewayConnectionCardWithClient(
           setModelPendingRemoval(replacement);
         }
       }
-      toast.error("Couldn't confirm Gateway model removal", {
+      toast.error(`Couldn't confirm ${config.modelToastName} removal`, {
         description: caught instanceof Error ? caught.message : String(caught),
       });
       return false;
@@ -443,29 +625,32 @@ export function AiGatewayConnectionCardWithClient(
     return null;
   }
 
+  const summaryStatus =
+    !loaded || !customModelsLoaded
+      ? "…"
+      : error || customModelsError
+        ? "Unavailable"
+        : connected
+          ? "Connected"
+          : "Off";
+
   return (
     <>
       <details
         className="group rounded-lg border border-border"
+        data-testid={`${config.id}-connection-card`}
         open={open}
         onToggle={(event) => setOpen(event.currentTarget.open)}
       >
         <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
-          <VercelMark className="size-3.5 shrink-0 text-fg" />
-          <span className="min-w-0 flex-1 truncate text-sm font-medium">
-            Bring your own Vercel AI Gateway
-          </span>
-          <span className="text-2xs text-fg-subtle">
-            {!loaded ? "…" : connected ? "Connected" : error ? "Unavailable" : "Off"}
-          </span>
+          {config.mark("size-3.5 shrink-0 text-fg")}
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">{config.title}</span>
+          <span className="text-2xs text-fg-subtle">{summaryStatus}</span>
           <ChevronDownIcon className="size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180" />
         </summary>
 
         <div className="grid gap-3 border-t border-border/70 px-3 py-3">
-          <p className="text-2xs text-fg-subtle">
-            Use models through this workspace's Vercel account. Vercel bills usage directly instead
-            of using OpenGeni credits.
-          </p>
+          <p className="text-2xs text-fg-subtle">{config.billingDescription}</p>
           {error ? <p className="text-xs text-destructive">{error}</p> : null}
           {props.canManageConnection ? (
             <>
@@ -476,10 +661,8 @@ export function AiGatewayConnectionCardWithClient(
                   value={apiKey}
                   onChange={(event) => setApiKey(event.target.value)}
                   className="h-9"
-                  placeholder={
-                    connected ? "Replace Vercel AI Gateway key" : "Vercel AI Gateway key"
-                  }
-                  aria-label="Vercel AI Gateway key"
+                  placeholder={config.keyPlaceholder(connected)}
+                  aria-label={config.keyAriaLabel}
                 />
                 <Button type="button" disabled={busy || !apiKey.trim()} onClick={save}>
                   {busy ? (
@@ -511,18 +694,15 @@ export function AiGatewayConnectionCardWithClient(
               </div>
             </>
           ) : (
-            <p className="text-xs text-fg-subtle">
-              Members with connection-management access manage this Vercel AI Gateway connection.
-            </p>
+            <p className="text-xs text-fg-subtle">{config.connectionManagerDescription}</p>
           )}
 
           <div className="grid gap-2.5 border-t border-border/70 pt-3">
             <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
               <div className="grid gap-0.5">
-                <p className="text-xs font-medium text-fg">Models from your Gateway</p>
+                <p className="text-xs font-medium text-fg">{config.customModelsHeading}</p>
                 <p className="max-w-xl text-2xs leading-relaxed text-fg-subtle">
-                  Add an exact Vercel model slug. OpenGeni uses the Gateway's routing and does not
-                  inspect or pin a provider for custom entries.
+                  {config.customModelsDescription}
                 </p>
               </div>
               <span className="text-2xs text-fg-subtle" aria-live="polite">
@@ -535,7 +715,7 @@ export function AiGatewayConnectionCardWithClient(
             </div>
 
             {props.canManageCustomModels ? (
-              <div className="grid gap-1.5">
+              <div ref={addWorkflowRef} className="grid gap-1.5">
                 <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
                   <Input
                     ref={modelInputRef}
@@ -549,9 +729,10 @@ export function AiGatewayConnectionCardWithClient(
                     }}
                     disabled={modelBusy}
                     className="h-9 font-mono text-base md:text-base"
-                    placeholder="anthropic/claude-sonnet-4.6"
-                    aria-label="Vercel AI Gateway model slug"
-                    aria-describedby="gateway-model-slug-help"
+                    placeholder={config.customModelPlaceholder}
+                    aria-label={config.customModelInputAriaLabel}
+                    aria-describedby={modelSlugHelpId}
+                    aria-invalid={modelSlugInvalid || undefined}
                     autoComplete="off"
                     autoCapitalize="none"
                     autoCorrect="off"
@@ -561,7 +742,7 @@ export function AiGatewayConnectionCardWithClient(
                     type="button"
                     variant="secondary"
                     disabled={modelBusy || !modelSlugValid || modelSlugExists}
-                    onClick={addCustomModel}
+                    onClick={() => void addCustomModel()}
                     className="min-h-11"
                   >
                     {modelBusy ? (
@@ -572,14 +753,13 @@ export function AiGatewayConnectionCardWithClient(
                     Add model
                   </Button>
                 </div>
-                <p id="gateway-model-slug-help" className="text-2xs text-fg-subtle">
-                  {modelSlugExists
-                    ? "That slug is already configured for this workspace."
-                    : modelSlug && !modelSlugValid
-                      ? "Use the exact printable slug with no spaces or |."
-                      : connected
-                        ? "The model becomes selectable when workspace policy allows it."
-                        : "You can configure models now; they become selectable after you connect the Gateway."}
+                <p
+                  id={modelSlugHelpId}
+                  className="text-2xs text-fg-subtle"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  {modelSlugHelp}
                 </p>
               </div>
             ) : null}
@@ -602,7 +782,7 @@ export function AiGatewayConnectionCardWithClient(
 
             {customModelsLoaded && !customModelsError && customModels.length === 0 ? (
               <div className="rounded-md bg-surface-2/55 px-3 py-2.5 text-2xs text-fg-subtle">
-                No custom model slugs yet. The curated Gateway models remain available separately.
+                {config.emptyCustomModelsDescription}
               </div>
             ) : null}
 
@@ -614,10 +794,10 @@ export function AiGatewayConnectionCardWithClient(
                       <p className="truncate font-mono text-xs text-fg">{model.upstreamModelId}</p>
                       <p className="mt-0.5 text-2xs text-fg-subtle">
                         {error
-                          ? "Gateway connection status unavailable"
+                          ? config.unavailableModelDescription
                           : connected
-                            ? "Ready through Your Gateway"
-                            : "Waiting for a Gateway connection"}
+                            ? config.readyModelDescription
+                            : config.waitingModelDescription}
                       </p>
                     </div>
                     {props.canManageCustomModels ? (
@@ -661,12 +841,11 @@ export function AiGatewayConnectionCardWithClient(
         title={
           modelPendingRemoval ? (
             <>
-              Remove Gateway model “
-              <span className="break-all">{modelPendingRemoval.upstreamModelId}</span>
-              ”?
+              Remove {config.modelToastName} “
+              <span className="break-all">{modelPendingRemoval.upstreamModelId}</span>”?
             </>
           ) : (
-            "Remove Gateway model?"
+            `Remove ${config.modelToastName}?`
           )
         }
         description="The model disappears from new selections. Already accepted turns and existing sessions can continue with their retained definition."

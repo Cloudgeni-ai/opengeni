@@ -1,7 +1,4 @@
-import {
-  environmentsEncryptionKeyBytes,
-  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-} from "@opengeni/config";
+import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
   AUTOMATION_MAX_MATCHED_TRIGGERS,
@@ -29,11 +26,13 @@ import {
   listAutomationSources,
   listAutomationTriggers,
   lockActiveWorkspaceGatewayCustomModelForAdmission,
+  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   recordAutomationEvent,
   resolveAutomationWebhookEndpoint,
   updateAutomationSource,
   updateAutomationTrigger,
   withWorkspaceGatewayCustomModelReadLock,
+  withWorkspaceOpenRouterCustomModelReadLock,
   type AutomationSourceSecret,
 } from "@opengeni/db";
 import {
@@ -41,7 +40,7 @@ import {
   assertWorkspaceModelPolicyAllows,
   buildAutomationAcceptedExecution,
   canonicalConfiguredModel,
-  isWorkspaceGatewayCustomModelId,
+  workspaceCustomModelReference,
   requireAccessGrant,
   requireAutomationAdapter,
   requirePermission,
@@ -181,7 +180,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       sessionTemplate: { ...request.sessionTemplate, model },
     };
     const beforeCreateCommit = model
-      ? workspaceGatewayCustomModelCommitGuard({
+      ? workspaceCustomModelCommitGuard({
           settings: catalogSettings,
           accountId: grant.accountId,
           workspaceId,
@@ -260,7 +259,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       (request.status === "active" && existing.status !== "active");
     const beforeUpdateCommit =
       materialExecutionChange && effectiveModel
-        ? workspaceGatewayCustomModelCommitGuard({
+        ? workspaceCustomModelCommitGuard({
             settings: catalogSettings,
             accountId: grant.accountId,
             workspaceId,
@@ -476,53 +475,60 @@ export async function acceptAutomationEvent(
       : await withWorkspaceGatewayCustomModelReadLock(
           deps.db,
           { accountId: source.accountId, workspaceId: source.workspaceId },
-          async (lockedDb) => {
-            const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
-            const catalogSettings = (
-              await resolveWorkspaceCatalogSettings(lockedDb, catalogSourceSettings, {
-                accountId: source.accountId,
-                workspaceId: source.workspaceId,
-              })
-            ).settings;
-            const matchingAtAcceptance = [];
-            for (const trigger of matchingByEvent) {
-              try {
-                const render = adapter.render({
-                  event: input.normalizedEvent,
-                  trigger,
-                  source,
+          async (gatewayLockedDb) =>
+            await withWorkspaceOpenRouterCustomModelReadLock(
+              gatewayLockedDb,
+              { accountId: source.accountId, workspaceId: source.workspaceId },
+              async (lockedDb) => {
+                const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
+                const catalogSettings = (
+                  await resolveWorkspaceCatalogSettings(lockedDb, catalogSourceSettings, {
+                    accountId: source.accountId,
+                    workspaceId: source.workspaceId,
+                  })
+                ).settings;
+                const matchingAtAcceptance = [];
+                for (const trigger of matchingByEvent) {
+                  try {
+                    const render = adapter.render({
+                      event: input.normalizedEvent,
+                      trigger,
+                      source,
+                    });
+                    const requestedModel =
+                      render.sessionTemplate.model ?? catalogSettings.openaiModel;
+                    const model = canonicalConfiguredModel(catalogSettings, requestedModel);
+                    if (!model) continue;
+                    await assertWorkspaceModelPolicyAllows(
+                      lockedDb,
+                      catalogSettings,
+                      source.workspaceId,
+                      model,
+                    );
+                    matchingAtAcceptance.push(trigger);
+                  } catch (error) {
+                    if (isUnprocessableEntity(error)) continue;
+                    throw error;
+                  }
+                }
+                return await recordAutomationEvent(lockedDb, {
+                  accountId: source.accountId,
+                  workspaceId: source.workspaceId,
+                  sourceId: source.id,
+                  sourceVersion: source.version,
+                  sourceConfiguration: source.configuration,
+                  matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
+                    triggerId: trigger.id,
+                    revision: trigger.revision,
+                  })),
+                  deliveryKey: input.deliveryKey,
+                  requestDigest: input.requestDigest,
+                  normalizedEvent: input.normalizedEvent,
+                  ignoredReason:
+                    matchingAtAcceptance.length === 0 ? "no_executable_triggers" : null,
                 });
-                const requestedModel = render.sessionTemplate.model ?? catalogSettings.openaiModel;
-                const model = canonicalConfiguredModel(catalogSettings, requestedModel);
-                if (!model) continue;
-                await assertWorkspaceModelPolicyAllows(
-                  lockedDb,
-                  catalogSettings,
-                  source.workspaceId,
-                  model,
-                );
-                matchingAtAcceptance.push(trigger);
-              } catch (error) {
-                if (isUnprocessableEntity(error)) continue;
-                throw error;
-              }
-            }
-            return await recordAutomationEvent(lockedDb, {
-              accountId: source.accountId,
-              workspaceId: source.workspaceId,
-              sourceId: source.id,
-              sourceVersion: source.version,
-              sourceConfiguration: source.configuration,
-              matchedTriggerRevisions: matchingAtAcceptance.map((trigger) => ({
-                triggerId: trigger.id,
-                revision: trigger.revision,
-              })),
-              deliveryKey: input.deliveryKey,
-              requestDigest: input.requestDigest,
-              normalizedEvent: input.normalizedEvent,
-              ignoredReason: matchingAtAcceptance.length === 0 ? "no_executable_triggers" : null,
-            });
-          },
+              },
+            ),
         );
   const matching = await getAutomationTriggerRevisions(deps.db, {
     workspaceId: source.workspaceId,
@@ -589,19 +595,27 @@ function isUnprocessableEntity(error: unknown): boolean {
   );
 }
 
-function workspaceGatewayCustomModelCommitGuard(input: {
+function workspaceCustomModelCommitGuard(input: {
   settings: ApiRouteDeps["settings"];
   accountId: string;
   workspaceId: string;
   modelId: string;
 }): ((tx: ApiRouteDeps["db"]) => Promise<void>) | undefined {
-  if (!isWorkspaceGatewayCustomModelId(input.settings, input.modelId)) return undefined;
+  const reference = workspaceCustomModelReference(input.settings, input.modelId);
+  if (!reference) return undefined;
   return async (tx): Promise<void> => {
-    const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      upstreamModelId: input.modelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length),
-    });
+    const active =
+      reference.providerKind === "openrouter"
+        ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          })
+        : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          });
     if (!active) {
       throw new HTTPException(422, {
         message: `model is not available: ${input.modelId}`,

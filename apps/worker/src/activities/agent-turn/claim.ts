@@ -24,6 +24,7 @@ import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
   settingsWithWorkspaceGatewayCredential,
+  settingsWithWorkspaceOpenRouterCredential,
   withXaiSubscriptionProvider,
 } from "../capabilities";
 import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-telemetry-authority";
@@ -234,11 +235,18 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const xaiSettings = codexSettings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionProvider(codexSettings)
     : codexSettings;
-  const capabilitySettings = await settingsWithWorkspaceGatewayCredential(
+  const gatewaySettings = await settingsWithWorkspaceGatewayCredential(
     db,
     input.accountId,
     input.workspaceId,
     xaiSettings,
+    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
+  );
+  const capabilitySettings = await settingsWithWorkspaceOpenRouterCredential(
+    db,
+    input.accountId,
+    input.workspaceId,
+    gatewaySettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
   const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled

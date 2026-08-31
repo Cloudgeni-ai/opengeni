@@ -7,6 +7,7 @@ import {
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -87,7 +88,9 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
     if (
       inheritedContinuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
-      session.model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
+      inheritedContinuationModel.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) ||
+      session.model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
+      session.model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)
     ) {
       settings = (
         await resolveWorkspaceCatalogSettings(db, catalogSourceSettings, {

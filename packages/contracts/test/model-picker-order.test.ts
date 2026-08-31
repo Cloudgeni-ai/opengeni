@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { CreateWorkspaceGatewayCustomModelRequest } from "../src";
+import {
+  CreateWorkspaceGatewayCustomModelRequest,
+  CreateWorkspaceOpenRouterCustomModelRequest,
+} from "../src";
 import { compareModelPickerOrder, modelPickerBillingClassFor } from "../src/model-picker-order";
 
 describe("model picker shared ordering", () => {
@@ -63,6 +66,21 @@ describe("workspace Gateway upstream slug", () => {
     ).toBe(true);
     expect(
       CreateWorkspaceGatewayCustomModelRequest.safeParse({
+        operationId: crypto.randomUUID(),
+        upstreamModelId: "anthropic|claude",
+      }).success,
+    ).toBe(false);
+  });
+
+  test("applies the same exact printable-slug boundary to workspace OpenRouter", () => {
+    expect(
+      CreateWorkspaceOpenRouterCustomModelRequest.safeParse({
+        operationId: crypto.randomUUID(),
+        upstreamModelId: "anthropic/claude-sonnet-4.6",
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateWorkspaceOpenRouterCustomModelRequest.safeParse({
         operationId: crypto.randomUUID(),
         upstreamModelId: "anthropic|claude",
       }).success,

@@ -2353,6 +2353,26 @@ export type WorkspaceGatewayCustomModelsResponse = z.infer<
   typeof WorkspaceGatewayCustomModelsResponse
 >;
 
+export const CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+export type CreateWorkspaceOpenRouterCustomModelRequest = z.infer<
+  typeof CreateWorkspaceOpenRouterCustomModelRequest
+>;
+
+export const DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+export type DeleteWorkspaceOpenRouterCustomModelRequest = z.infer<
+  typeof DeleteWorkspaceOpenRouterCustomModelRequest
+>;
+
+export const WorkspaceOpenRouterCustomModel = WorkspaceGatewayCustomModel;
+export type WorkspaceOpenRouterCustomModel = z.infer<typeof WorkspaceOpenRouterCustomModel>;
+
+export const WorkspaceOpenRouterCustomModelsResponse = z.object({
+  models: z.array(WorkspaceOpenRouterCustomModel),
+});
+export type WorkspaceOpenRouterCustomModelsResponse = z.infer<
+  typeof WorkspaceOpenRouterCustomModelsResponse
+>;
+
 const turnInitiatorIdentityFields = {
   subjectId: z.string().min(1),
   /** Immutable display snapshot; never an authorization input. */
@@ -10551,6 +10571,10 @@ export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY =
   "vercelAiGatewayCredentialOperationId" as const;
 export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
   "vercelAiGatewayCredentialOperationDigest" as const;
+export const OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY =
+  "openRouterCredentialOperationId" as const;
+export const OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
+  "openRouterCredentialOperationDigest" as const;
 
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),

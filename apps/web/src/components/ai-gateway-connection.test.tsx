@@ -9,7 +9,6 @@ import type {
   WorkspaceGatewayCustomModel,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
-import { VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY } from "@opengeni/contracts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -52,6 +51,24 @@ const deleteWorkspaceGatewayCustomModel = mock(
     _request: DeleteWorkspaceGatewayCustomModelRequest,
   ): Promise<void> => {},
 );
+const listWorkspaceOpenRouterCustomModels = mock(
+  async (_workspaceId: string): Promise<{ models: WorkspaceGatewayCustomModel[] }> => ({
+    models: [],
+  }),
+);
+const createWorkspaceOpenRouterCustomModel = mock(
+  async (
+    _workspaceId: string,
+    request: CreateWorkspaceGatewayCustomModelRequest,
+  ): Promise<WorkspaceGatewayCustomModel> => customModel(request.upstreamModelId),
+);
+const deleteWorkspaceOpenRouterCustomModel = mock(
+  async (
+    _workspaceId: string,
+    _customModelId: string,
+    _request: DeleteWorkspaceGatewayCustomModelRequest,
+  ): Promise<void> => {},
+);
 const toastSuccess = mock((_message: string) => {});
 const toastError = mock((_message: string) => {});
 
@@ -65,6 +82,9 @@ const context = {
     listWorkspaceGatewayCustomModels,
     createWorkspaceGatewayCustomModel,
     deleteWorkspaceGatewayCustomModel,
+    listWorkspaceOpenRouterCustomModels,
+    createWorkspaceOpenRouterCustomModel,
+    deleteWorkspaceOpenRouterCustomModel,
   },
 };
 
@@ -103,7 +123,8 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     ) : null,
 }));
 
-const { AiGatewayConnectionCard } = await import("./ai-gateway-connection");
+const { AiGatewayConnectionCard, OpenRouterConnectionCard } =
+  await import("./ai-gateway-connection");
 
 function customModel(upstreamModelId: string): WorkspaceGatewayCustomModel {
   return {
@@ -150,6 +171,25 @@ function gatewayConnection(
   };
 }
 
+function openRouterConnection(
+  status: ConnectionMetadata["status"] = "active",
+  overrides: Partial<ConnectionMetadata> = {},
+): ConnectionMetadata {
+  const connection = gatewayConnection(status, {
+    id: "66666666-6666-4666-8666-666666666666",
+    providerDomain: "openrouter.ai",
+    metadata: {
+      credentialRole: "openrouter",
+      credentialLabel: "OpenRouter",
+    },
+  });
+  return {
+    ...connection,
+    ...overrides,
+    metadata: { ...connection.metadata, ...overrides.metadata },
+  };
+}
+
 function gatewayCatalogModel(): WorkspaceModelCatalogModel {
   return {
     id: "workspace-gateway/deepseek/deepseek-v3.2",
@@ -173,8 +213,28 @@ function gatewayCatalogModel(): WorkspaceModelCatalogModel {
   };
 }
 
+function openRouterCatalogModel(): WorkspaceModelCatalogModel {
+  return {
+    ...gatewayCatalogModel(),
+    id: "workspace-openrouter/deepseek/deepseek-v3.2",
+    provider: "workspace-openrouter",
+    providerLabel: "Workspace OpenRouter",
+    source: "openrouter",
+  };
+}
+
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, reject, resolve };
 }
 
 async function renderCard(
@@ -188,6 +248,28 @@ async function renderCard(
   await act(async () => {
     root.render(
       <AiGatewayConnectionCard
+        workspaceId="workspace-a"
+        canManageConnection={canManageConnection}
+        canManageCustomModels={canManageCustomModels}
+        onConnectionChange={onConnectionChange}
+      />,
+    );
+    await flush();
+  });
+  return { container, onConnectionChange, root };
+}
+
+async function renderOpenRouterCard(
+  canManageConnection = true,
+  onConnectionChange = mock(() => {}),
+  canManageCustomModels = canManageConnection,
+) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <OpenRouterConnectionCard
         workspaceId="workspace-a"
         canManageConnection={canManageConnection}
         canManageCustomModels={canManageCustomModels}
@@ -250,6 +332,9 @@ beforeEach(() => {
   listWorkspaceGatewayCustomModels.mockClear();
   createWorkspaceGatewayCustomModel.mockClear();
   deleteWorkspaceGatewayCustomModel.mockClear();
+  listWorkspaceOpenRouterCustomModels.mockClear();
+  createWorkspaceOpenRouterCustomModel.mockClear();
+  deleteWorkspaceOpenRouterCustomModel.mockClear();
   toastSuccess.mockClear();
   toastError.mockClear();
   listConnections.mockImplementation(async () => []);
@@ -264,6 +349,13 @@ beforeEach(() => {
     customModel(request.upstreamModelId),
   );
   deleteWorkspaceGatewayCustomModel.mockImplementation(async () => {});
+  listWorkspaceOpenRouterCustomModels.mockImplementation(async () => ({
+    models: [],
+  }));
+  createWorkspaceOpenRouterCustomModel.mockImplementation(async (_workspaceId, request) =>
+    customModel(request.upstreamModelId),
+  );
+  deleteWorkspaceOpenRouterCustomModel.mockImplementation(async () => {});
 });
 
 describe("AiGatewayConnectionCard custom models", () => {
@@ -329,6 +421,10 @@ describe("AiGatewayConnectionCard custom models", () => {
       await setInputValue(input, "anthropic/claude sonnet");
       expect(add.disabled).toBe(true);
       expect(container.textContent).toContain("exact printable slug with no spaces");
+      expect(input.getAttribute("aria-invalid")).toBe("true");
+      const help = document.getElementById(input.getAttribute("aria-describedby")!);
+      expect(help?.getAttribute("aria-live")).toBe("polite");
+      expect(help?.getAttribute("aria-atomic")).toBe("true");
 
       await setInputValue(input, "anthropic|claude");
       expect(add.disabled).toBe(true);
@@ -338,10 +434,38 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(add.disabled).toBe(true);
       expect(container.textContent).toContain("exact printable slug with no spaces");
 
+      await setInputValue(input, "anthropic/unique-model");
+      expect(add.disabled).toBe(false);
+      expect(input.getAttribute("aria-invalid")).toBeNull();
+
       await setInputValue(input, "anthropic/claude-sonnet-4.6");
       expect(add.disabled).toBe(true);
       expect(container.textContent).toContain("already configured for this workspace");
+      expect(input.getAttribute("aria-invalid")).toBe("true");
       expect(createWorkspaceGatewayCustomModel).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("keeps the collapsed summary loading until custom models settle and surfaces failure", async () => {
+    const pendingModels = deferred<{ models: WorkspaceGatewayCustomModel[] }>();
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => await pendingModels.promise);
+    const { container, root } = await renderCard();
+
+    try {
+      const summary = container.querySelector("summary")!;
+      expect(summary.textContent).toContain("…");
+      expect(summary.textContent).not.toContain("Off");
+
+      await act(async () => {
+        pendingModels.reject(new Error("custom models unavailable"));
+        await flush();
+      });
+
+      expect(summary.textContent).toContain("Unavailable");
+      expect(summary.textContent).not.toContain("Off");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -420,14 +544,14 @@ describe("AiGatewayConnectionCard custom models", () => {
           ?.click();
         await flush();
       });
-      expect(container.textContent).toContain("Connected");
+      expect(container.querySelector("summary")?.textContent).toContain("…");
       expect(container.textContent).toContain("Disconnect");
 
       await act(async () => {
         resolveInitialModels?.({ models: [] });
         await flush();
       });
-      expect(container.textContent).toContain("Connected");
+      expect(container.querySelector("summary")?.textContent).toContain("Connected");
       expect(container.textContent).toContain("Disconnect");
       expect(createConnection).toHaveBeenCalledTimes(1);
     } finally {
@@ -440,20 +564,8 @@ describe("AiGatewayConnectionCard custom models", () => {
     let resolveInitialModels:
       | ((value: { models: WorkspaceGatewayCustomModel[] }) => void)
       | undefined;
-    let connectionCommitted = false;
-    let committedOperationId: string | null = null;
     let modelReadCount = 0;
-    listConnections.mockImplementation(async () =>
-      connectionCommitted
-        ? [
-            gatewayConnection("active", {
-              metadata: {
-                [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: committedOperationId,
-              },
-            }),
-          ]
-        : [],
-    );
+    listConnections.mockImplementation(async () => []);
     listWorkspaceGatewayCustomModels.mockImplementation(async () => {
       modelReadCount += 1;
       if (modelReadCount > 1) return { models: [] };
@@ -462,9 +574,10 @@ describe("AiGatewayConnectionCard custom models", () => {
       });
     });
     createConnection.mockImplementation(async (_workspaceId, request) => {
-      committedOperationId = request.operationId ?? null;
-      connectionCommitted = true;
-      throw new Error("response lost after commit");
+      if (createConnection.mock.calls.length === 1) {
+        throw new Error("response lost after commit");
+      }
+      return gatewayConnection("active", { metadata: request.metadata });
     });
     const onConnectionChange = mock(() => {});
     const { container, root } = await renderCard(true, onConnectionChange);
@@ -480,12 +593,15 @@ describe("AiGatewayConnectionCard custom models", () => {
           ?.click();
         await flush();
       });
-      expect(container.textContent).toContain("Connected");
+      expect(container.querySelector("summary")?.textContent).toContain("…");
       expect(container.textContent).toContain("Disconnect");
       expect(keyInput.value).toBe("");
-      expect(createConnection).toHaveBeenCalledTimes(1);
+      expect(createConnection).toHaveBeenCalledTimes(2);
       expect(createConnection.mock.calls[0]?.[1].operationId).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+      );
+      expect(createConnection.mock.calls[1]?.[1].operationId).toBe(
+        createConnection.mock.calls[0]?.[1].operationId,
       );
       expect(modelReadCount).toBe(1);
       expect(onConnectionChange).toHaveBeenCalledTimes(1);
@@ -497,32 +613,29 @@ describe("AiGatewayConnectionCard custom models", () => {
         await flush();
       });
       expect(container.textContent).toContain("Connected");
-      expect(createConnection).toHaveBeenCalledTimes(1);
+      expect(createConnection).toHaveBeenCalledTimes(2);
     } finally {
       await act(async () => root.unmount());
       container.remove();
     }
   });
 
-  test("reconciles an outcome-unknown key replacement from its operation receipt", async () => {
+  test("reconciles an outcome-unknown key replacement through idempotent replay", async () => {
     let connectionVersion = 1;
-    let committedOperationId: string | null = null;
     listConnections.mockImplementation(async () => [
       gatewayConnection("active", {
         version: connectionVersion,
-        metadata: {
-          ...(committedOperationId
-            ? {
-                [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: committedOperationId,
-              }
-            : {}),
-        },
       }),
     ]);
     updateConnection.mockImplementation(async (_workspaceId, _connectionId, request) => {
-      committedOperationId = request.operationId ?? null;
-      connectionVersion = 2;
-      throw new Error("response lost after replacement commit");
+      if (updateConnection.mock.calls.length === 1) {
+        connectionVersion = 2;
+        throw new Error("response lost after replacement commit");
+      }
+      return gatewayConnection("active", {
+        version: 2,
+        metadata: request.metadata,
+      });
     });
     const onConnectionChange = mock(() => {});
     const { container, root } = await renderCard(true, onConnectionChange);
@@ -541,11 +654,13 @@ describe("AiGatewayConnectionCard custom models", () => {
 
       expect(container.textContent).toContain("Connected");
       expect(keyInput.value).toBe("");
-      expect(updateConnection).toHaveBeenCalledTimes(1);
+      expect(updateConnection).toHaveBeenCalledTimes(2);
       expect(updateConnection.mock.calls[0]?.[2]).toMatchObject({
         expectedVersion: 1,
-        operationId: committedOperationId,
       });
+      expect(updateConnection.mock.calls[1]?.[2].operationId).toBe(
+        updateConnection.mock.calls[0]?.[2].operationId,
+      );
       expect(onConnectionChange).toHaveBeenCalledTimes(1);
       expect(toastSuccess).toHaveBeenCalledWith("Vercel AI Gateway connected");
       expect(toastError).not.toHaveBeenCalled();
@@ -561,11 +676,6 @@ describe("AiGatewayConnectionCard custom models", () => {
     listConnections.mockImplementation(async () => [
       gatewayConnection("active", {
         version: replacementObserved ? 2 : 1,
-        metadata: replacementObserved
-          ? {
-              [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: unrelatedOperationId,
-            }
-          : {},
       }),
     ]);
     updateConnection.mockImplementation(async () => {
@@ -589,8 +699,11 @@ describe("AiGatewayConnectionCard custom models", () => {
 
       expect(container.textContent).toContain("Connected");
       expect(keyInput.value).toBe("replacement-key");
-      expect(updateConnection).toHaveBeenCalledTimes(1);
+      expect(updateConnection).toHaveBeenCalledTimes(2);
       expect(updateConnection.mock.calls[0]?.[2].operationId).not.toBe(unrelatedOperationId);
+      expect(updateConnection.mock.calls[1]?.[2].operationId).toBe(
+        updateConnection.mock.calls[0]?.[2].operationId,
+      );
       expect(onConnectionChange).not.toHaveBeenCalled();
       expect(toastSuccess).not.toHaveBeenCalled();
       expect(toastError).toHaveBeenCalledWith(
@@ -1345,6 +1458,97 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
+  test("does not steal deliberately moved focus after a deferred add succeeds", async () => {
+    const created = customModel("anthropic/claude-sonnet-4.6");
+    const pendingCreate = deferred<WorkspaceGatewayCustomModel>();
+    createWorkspaceGatewayCustomModel.mockImplementation(async () => await pendingCreate.promise);
+    const outside = document.createElement("button");
+    outside.textContent = "Outside add workflow";
+    document.body.append(outside);
+    const { container, root } = await renderCard();
+
+    try {
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway model slug"]',
+      )!;
+      await setInputValue(input, created.upstreamModelId);
+      input.focus();
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+      outside.focus();
+
+      await act(async () => {
+        pendingCreate.resolve(created);
+        await flush();
+      });
+
+      expect(document.activeElement).toBe(outside);
+      expect(input.value).toBe("");
+      expect(container.textContent).toContain(created.upstreamModelId);
+    } finally {
+      outside.remove();
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("does not steal deliberately moved focus after both deferred add attempts fail", async () => {
+    const firstAttempt = deferred<WorkspaceGatewayCustomModel>();
+    const secondAttempt = deferred<WorkspaceGatewayCustomModel>();
+    createWorkspaceGatewayCustomModel.mockImplementation(async () =>
+      createWorkspaceGatewayCustomModel.mock.calls.length === 1
+        ? await firstAttempt.promise
+        : await secondAttempt.promise,
+    );
+    const outside = document.createElement("button");
+    outside.textContent = "Outside add workflow";
+    document.body.append(outside);
+    const { container, root } = await renderCard();
+
+    try {
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway model slug"]',
+      )!;
+      await setInputValue(input, "anthropic/claude-sonnet-4.6");
+      input.focus();
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+      outside.focus();
+
+      await act(async () => {
+        firstAttempt.reject(new Error("first deferred failure"));
+        await flush();
+      });
+      expect(createWorkspaceGatewayCustomModel).toHaveBeenCalledTimes(2);
+      expect(document.activeElement).toBe(outside);
+
+      await act(async () => {
+        secondAttempt.reject(new Error("second deferred failure"));
+        await flush();
+      });
+
+      expect(document.activeElement).toBe(outside);
+      expect(input.value).toBe("anthropic/claude-sonnet-4.6");
+      expect(input.disabled).toBe(false);
+      expect(toastError).toHaveBeenCalledWith(
+        "Couldn't confirm Gateway model add",
+        expect.any(Object),
+      );
+    } finally {
+      outside.remove();
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("restores removal focus to the next stable model action", async () => {
     const first = customModel("anthropic/claude-sonnet-4.6");
     const second = customModel("xai/grok-4.1-fast");
@@ -1373,6 +1577,110 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(document.activeElement).toBe(
         container.querySelector(`button[aria-label="Remove ${second.upstreamModelId}"]`),
       );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("supports workspace OpenRouter as a peer connection and custom-model provider", async () => {
+    const created = customModel("anthropic/claude-sonnet-4.6");
+    createConnection.mockImplementation(async (_workspaceId, request) => {
+      if (createConnection.mock.calls.length === 1) {
+        throw new Error("response lost after OpenRouter commit");
+      }
+      return openRouterConnection("active", { metadata: request.metadata });
+    });
+    createWorkspaceOpenRouterCustomModel.mockImplementation(async () => created);
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderOpenRouterCard(true, onConnectionChange);
+
+    try {
+      expect(container.textContent).toContain("Bring your own OpenRouter");
+      expect(container.textContent).toContain(
+        "The workspace's OpenRouter account is billed directly.",
+      );
+      expect(container.textContent).toContain(
+        "separate from deployment-provided OpenRouter models",
+      );
+
+      const keyInput = container.querySelector<HTMLInputElement>(
+        'input[aria-label="OpenRouter API key"]',
+      )!;
+      await setInputValue(keyInput, "workspace-openrouter-key");
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Connect"))
+          ?.click();
+        await flush();
+      });
+
+      expect(createConnection).toHaveBeenCalledWith("workspace-a", {
+        providerDomain: "openrouter.ai",
+        kind: "api_key",
+        subjectId: null,
+        credential: { apiKey: "workspace-openrouter-key" },
+        grantedScopes: [],
+        metadata: {
+          credentialRole: "openrouter",
+          credentialLabel: "OpenRouter",
+        },
+        operationId: expect.any(String),
+      });
+      expect(createConnection).toHaveBeenCalledTimes(2);
+      expect(createConnection.mock.calls[1]?.[1].operationId).toBe(
+        createConnection.mock.calls[0]?.[1].operationId,
+      );
+      expect(container.textContent).toContain("Connected");
+      expect(toastSuccess).toHaveBeenCalledWith("OpenRouter connected");
+
+      const modelInput = container.querySelector<HTMLInputElement>(
+        'input[aria-label="OpenRouter model slug"]',
+      )!;
+      await setInputValue(modelInput, created.upstreamModelId);
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+
+      expect(createWorkspaceOpenRouterCustomModel).toHaveBeenCalledWith("workspace-a", {
+        operationId: expect.any(String),
+        upstreamModelId: created.upstreamModelId,
+      });
+      expect(createWorkspaceGatewayCustomModel).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Ready through workspace OpenRouter");
+      expect(toastSuccess).toHaveBeenCalledWith("OpenRouter model added", expect.any(Object));
+      expect(onConnectionChange).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("reads workspace OpenRouter readiness without conflating deployment OpenRouter", async () => {
+    getWorkspaceModelCatalog.mockImplementation(async () => ({
+      models: [
+        {
+          ...openRouterCatalogModel(),
+          provider: "openrouter",
+          id: "openrouter/deployment-model:free",
+        },
+        openRouterCatalogModel(),
+      ],
+    }));
+    listWorkspaceOpenRouterCustomModels.mockImplementation(async () => ({
+      models: [customModel("deepseek/deepseek-v3.2")],
+    }));
+    const { container, root } = await renderOpenRouterCard(false);
+
+    try {
+      expect(container.textContent).toContain("Connected");
+      expect(container.textContent).toContain("Ready through workspace OpenRouter");
+      expect(container.querySelector("input")).toBeNull();
+      expect(listConnections).not.toHaveBeenCalled();
+      expect(listWorkspaceGatewayCustomModels).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();

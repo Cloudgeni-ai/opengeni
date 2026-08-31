@@ -1,6 +1,13 @@
-# Implementation specification: catalog source, custom Gateway, managed OpenRouter, and `list_models`
+# Implementation specification: catalog source, workspace providers, OpenRouter rails, and `list_models`
 
 Status: implementation specification captured on 2026-08-27.
+
+Scope revision on 2026-08-31: OpenRouter is now also a workspace-managed peer
+to Vercel AI Gateway. The deployment-managed `openrouter/*` rail remains intact;
+the additive workspace rail uses `workspace-openrouter/*`, an encrypted
+workspace key, provider-qualified custom-model rows, workspace-paid external
+billing, and matching HTTP/UI/SDK lifecycle. Statements below that previously
+excluded workspace OpenRouter are superseded by this revision.
 
 Implementation correction on 2026-08-28: migration 0387 is maintenance-only.
 Although its tables are additive, it changes OpenGeni's exact runtime-posture
@@ -18,14 +25,15 @@ part of the supplied specification.
 ## 1. Goal
 
 One supported-catalog source (code/env, or one deployment DB row), workspace-admin custom AI
-Gateway slugs, a managed OpenRouter `:free` rail on OpenGeni's key, and an agent tool that returns
-one text list of models this workspace can use right now, with optional free-text notes per ID.
+Gateway and OpenRouter slugs, a deployment-managed OpenRouter `:free` rail on OpenGeni's key, a
+separate workspace-managed OpenRouter rail, and an agent tool that returns one text list of models
+this workspace can use right now, with optional free-text notes per ID.
 Catalog membership, enablement, and billing stay three systems.
 
 ## 2. Intent
 
 Supported catalog means which product IDs exist (code/env, or the singleton row when toggled),
-plus, per workspace, slugs the admin typed for Your Gateway.
+plus, per workspace and provider, slugs the admin typed for Vercel AI Gateway or OpenRouter.
 
 Enabled means existing policy, connections, and key readiness. It is not stored on catalog rows.
 
@@ -37,10 +45,11 @@ upstream. Billing policy is not stored on catalog membership rows.
 - Local/self-host: today's `getSettings()` (env plus code constants). Default.
 - Managed: `OPENGENI_MODEL_CATALOG_SOURCE=database` reads one row. No boot reseed. No Settings UI.
   An operator script writes the row.
-- Custom Gateway: type a Vercel slug. Product ID `workspace-gateway/<slug>`. No capability form and
-  no `/models` scrape.
+- Custom provider: type an exact Vercel AI Gateway or OpenRouter slug. Product IDs are
+  `workspace-gateway/<slug>` and `workspace-openrouter/<slug>`. No capability form and no
+  `/models` scrape.
 - Managed OpenRouter: `OPENGENI_OPENROUTER_API_KEY` injects curated `:free` IDs for every
-  workspace. No user connection. Not credits.
+  workspace on the deployment rail. The workspace rail uses its own encrypted key and billing.
 - Agent tool: flat selectable list plus optional notes. Not cheap/intelligent sections.
 
 `TurnExecutionPolicyV1` already freezes the accepted turn. Do not add a second freeze.
@@ -51,7 +60,8 @@ upstream. Billing policy is not stored on catalog membership rows.
 - Database mode performs a live read of the singleton, or uses a TTL of at most a few seconds if a
   hot path is proven. Fail closed if missing or invalid. Never overwrite the row from code.
 - Keys stay in env even in database mode. No keys in the document.
-- Custom means Your Gateway only. Curated DeepSeek/Kimi stay pinned. Custom slugs are unpinned.
+- Custom means Vercel AI Gateway or workspace OpenRouter. Curated Gateway routes stay pinned;
+  provider custom slugs are unpinned and use the reviewed provider-specific generic envelope.
 - OpenRouter v1 is curated `:free` only. Reserved provider ID: `openrouter`. Host JSON must not
   declare that ID.
 - OpenRouter billing is a reserved derived kind, internal and not a host-JSON kind: deployment API
@@ -64,9 +74,9 @@ upstream. Billing policy is not stored on catalog membership rows.
 ## 4. Non-goals
 
 - Gateway/OpenRouter `GET /models`.
-- First-party Anthropic/Google, paid OpenRouter, or workspace OpenRouter BYOK.
-- Changing Codex/SuperGrok overlays or model policy, except admitting stored custom
-  `workspace-gateway/*` IDs.
+- First-party Anthropic/Google or paid deployment-managed OpenRouter membership.
+- Changing Codex/SuperGrok overlays or model policy, except admitting stored provider custom
+  `workspace-gateway/*` and `workspace-openrouter/*` IDs.
 - AA, Pareto, scored ranking, JSON tool results, or cheap/intelligent sections.
 - Per-workspace notes table.
 - Baking the list into `Agent.instructions`.
@@ -116,8 +126,9 @@ These were wrong or missing in earlier drafts and are now decisions.
   reviewed instruct `:free` IDs with capabilities that include tools. If a working slug cannot be
   named at implementation time, ship the rail with an empty model table (key set, zero models)
   instead of a text-only model. Tests pin the constant, not live OpenRouter.
-- "Always available" means no workspace OpenRouter connection. Policy can still hide the models.
-  Say that in docs.
+- "Always available" applies only to deployment-managed OpenRouter membership when the deployment
+  key is set. The separate workspace OpenRouter rail requires its workspace connection. Policy can
+  still hide either rail. Say that in docs.
 - Usage settlement is already correct with `metering: external` because `externallyBilled` skips
   `calculateModelUsageCostMicros`. Do not add dummy pricing to make credits work.
 - Rename the tool `list_models`. `model_guidance` is leftover band terminology.
@@ -127,7 +138,7 @@ These were wrong or missing in earlier drafts and are now decisions.
 Four seams:
 
 - A: catalog source.
-- B: custom Gateway.
+- B: custom Gateway and workspace OpenRouter.
 - C: managed OpenRouter.
 - D: `list_models` plus `modelNotes`.
 
@@ -159,11 +170,13 @@ the PR if another caller appears:
   `assertTurnExecutionPolicyMatchesConfigV1`.
 - `list_models` implementation.
 
-Custom input is a Gateway upstream ID. Product ID is `workspace-gateway/` plus the exact slug.
-Collision with a curated workspace product ID returns 422.
+Custom input is a provider upstream ID. Product ID is `workspace-gateway/` or
+`workspace-openrouter/` plus the exact slug. Collision with a curated product ID for that provider
+returns 422; the two workspace providers and deployment `openrouter/*` do not collide.
 
-Custom `ConfiguredModel` uses the existing Gateway capability builder (DeepSeek-shaped). It is a
-runtime record, not a user "unproven" rail.
+Custom `ConfiguredModel` uses the reviewed conservative capability builder for its provider.
+Gateway keeps its Responses-oriented generic envelope; OpenRouter uses Chat/text/function-calling.
+Both are runtime records, not a user-defined capability form.
 
 Request fence behavior:
 
@@ -213,17 +226,22 @@ Current: gpt-5.6-sol
   prefix change. The schema stays empty.
 - Starter notes are optional prose on a few IDs, not an enum.
 - No workspace notes table.
-- Custom Gateway slugs appear when selectable and receive no automatic note.
+- Custom Gateway and OpenRouter slugs appear when selectable and receive no automatic note.
 
-### Managed OpenRouter contract
+### OpenRouter contracts
 
 - `api: chat`.
 - `wireProfile: openai`.
 - `baseUrl: https://openrouter.ai/api/v1`.
 - Generic dispatch.
 - Public `HTTP-Referer` and `X-Title` headers are allowed.
-- Product ID is `openrouter/<upstream>`, preserving `:free`.
-- No paid OpenRouter and no workspace OpenRouter custom slugs.
+- Deployment product ID is `openrouter/<upstream>`, preserving `:free`; credential source is the
+  deployment key and billing is deployment/external with deployment-defined `free|credits` cost.
+- Workspace product ID is `workspace-openrouter/<upstream>`; credential source is the encrypted
+  workspace connection and billing is workspace/external.
+- Both use generic dispatch. Workspace custom slugs are admitted through provider-qualified
+  custom-model storage and receive the reviewed Chat/text/function-calling envelope.
+- No paid deployment-managed OpenRouter membership and no OpenRouter `/models` discovery.
 
 ## 7. Codebase facts
 
@@ -234,7 +252,8 @@ Current: gpt-5.6-sol
 - Curated Gateway: `OPENGENI_GATEWAY_MODELS` when
   `OPENGENI_VERCEL_AI_GATEWAY_API_KEY` is set, or through
   `withWorkspaceGatewayCatalogProvider`.
-- Codex/SuperGrok are overlays, not env JSON. There is no OpenRouter rail today.
+- Codex/SuperGrok are overlays, not env JSON. OpenRouter has separate deployment-managed and
+  workspace-managed overlays with distinct product/provider identities.
 - The picker already has an External rail through `billingClassForModel`.
 - `canonicalConfiguredModel` already admits any `workspace-gateway/*` at the HTTP edge; the worker
   still needs a `ConfiguredModel`. `normalizeVercelGatewayRequestBody` throws unless the slug is in
@@ -317,16 +336,18 @@ NON-RLS or no direct DML; application role has SELECT only. It is not in
 Operator flow: `bun run upsert` after Zod validation. Document it in
 `docs/model-providers.md` and `docs/deployment.md`. Local remains `code`.
 
-### B. Custom Gateway
+### B. Custom workspace providers
 
-Table: `workspace_gateway_custom_models` with account, workspace, `upstream_model_id` unique,
-optional label, actor, `retired_at`, and timestamps. FORCE RLS. DELETE retires rather than destroys
-the row: new selection excludes it, accepted/existing execution may retain it, and re-adding the
-same slug creates a fresh generation so stale mutations cannot affect its successor. The runtime
-bounds each workspace to 100 active slugs and 1,000 retained generations; retirement cannot reclaim
-history while accepted turns or existing sessions may still depend on it.
+Table: `workspace_gateway_custom_models` with account, workspace, provider discriminator,
+`upstream_model_id`, optional label, actor, `retired_at`, and timestamps. FORCE RLS. Active slug and
+operation uniqueness include the provider. DELETE retires rather than destroys the row: new
+selection excludes it, accepted/existing execution may retain it, and re-adding the same slug
+creates a fresh generation so stale mutations cannot affect its successor. The runtime bounds each
+provider/workspace pair to 100 active slugs and 1,000 retained generations; retirement cannot
+reclaim history while accepted turns or existing sessions may still depend on it.
 
-HTTP: `GET`/`POST`/`DELETE /v1/workspaces/:id/gateway-custom-models`.
+HTTP: `GET`/`POST`/`DELETE /v1/workspaces/:id/gateway-custom-models` and the parallel
+`/v1/workspaces/:id/openrouter-custom-models` surface.
 
 Reject empty, oversized, whitespace, curated collision, and duplicate values.
 
@@ -371,17 +392,20 @@ Do not ship OpenRouter as API-key credits. Do not ship database mode without fai
 - AC2: `code` plus no OpenRouter key means `configuredModels()` matches today's env behavior.
   Existing `packages/config/test/model-providers.test.ts` stays green without fixture rewrites.
 - AC3: `database` plus a valid row means client and workspace catalogs use that document, plus
-  Codex/xAI/custom overlays. Env list JSON, code Gateway, and code OpenRouter tables are not the
-  source. OpenRouter rows still require the env key.
+  Codex/xAI/provider-custom overlays. Env list JSON, code Gateway, and code OpenRouter tables are
+  not the source. Deployment OpenRouter rows still require the deployment key; workspace
+  OpenRouter rows require the workspace key.
 - AC4: Missing or invalid row means API and worker are not ready.
 - AC5: Boot does not update the row.
 - AC6: `POST { upstreamModelId: "anthropic/claude-sonnet-4.6" }` yields
   `workspace-gateway/anthropic/claude-sonnet-4.6` in that workspace catalog when Gateway is
-  connected.
+  connected; the parallel OpenRouter route yields
+  `workspace-openrouter/anthropic/claude-sonnet-4.6` when OpenRouter is connected.
 - AC7: API rejects extra capability, billing, and credential fields. UI is one input.
-- AC8: Custom is not selectable without a Gateway connection.
+- AC8: A custom model is not selectable without its matching provider connection.
 - AC9: Duplicate, curated collision, empty, or oversized values return 422. Non-admin returns 403.
-- AC10: Unknown `workspace-gateway/*` that is neither curated nor stored returns 422 at the edge.
+- AC10: Unknown `workspace-gateway/*` or `workspace-openrouter/*` that is neither curated nor
+  stored for that provider returns 422 at the edge.
 - AC11: A custom slug does not throw and receives no curated `only`/`order`. Curated pins remain
   unchanged.
 - AC12: Existing turn-policy freeze remains. Custom IDs have `definitionVersion`; removing a slug
@@ -389,7 +413,8 @@ Do not ship OpenRouter as API-key credits. Do not ship database mode without fai
   definition drift still fails closed.
 - AC13: A policy allowlist still makes Send return 422 for blocked models.
 - AC14: `/v1/config/client` never lists workspace-custom models.
-- AC15: No Gateway/OpenRouter keys appear in documents, events, or picker payloads.
+- AC15: No deployment or workspace Gateway/OpenRouter keys appear in documents, events, or picker
+  payloads.
 - AC16: Update `docs/model-providers.md`, `docs/architecture.md`, `docs/deployment.md`, and
   `AGENTS.md` with `list_models` in the first-request set.
 - AC17: New SQL appears in all three release-schema sites. Migration guards pass. Ordinal is the
@@ -404,19 +429,25 @@ Do not ship OpenRouter as API-key credits. Do not ship database mode without fai
 - AC23: Changing notes does not change the tool JSON schema.
 - AC24: Every transport's first-request set includes `list_models`.
 - AC25: Notes are not present on a `ClientModel` or picker row.
-- AC26: No OpenRouter key means no `openrouter/*`.
-- AC27: Key set means curated IDs appear in client and workspace catalogs without a connection.
-  They are selectable unless policy blocks them.
-- AC28: OpenRouter rows use `metering: external` and `upstreamPayer: deployment`, render on the
-  External picker rail, and create no credit debit.
+- AC26: No deployment OpenRouter key means no deployment-managed `openrouter/*`; a workspace with
+  its own key may still select the separate `workspace-openrouter/*` rail.
+- AC27: Deployment key set means curated `openrouter/*` IDs appear in client and workspace
+  catalogs without a workspace connection. Workspace `workspace-openrouter/*` IDs require the
+  workspace connection. Policy may block either.
+- AC28: Deployment OpenRouter rows use `metering: external` and `upstreamPayer: deployment`;
+  workspace OpenRouter rows use `metering: external` and `upstreamPayer: workspace`. Neither
+  creates a credit debit unless the deployment rail is explicitly sold as credits by the separate
+  cost/pricing policy.
 - AC29: Host JSON using provider ID `openrouter` fails boot.
 - AC30: The managed starter deployment policy marks its curated OpenRouter lines `free`; that label
   comes from deployment billing policy, not from the OpenRouter provider ID or settlement kind.
-- AC31: There is no OpenRouter custom HTTP/UI.
+- AC31: OpenRouter has workspace connection create/rotate/revoke, custom-model list/create/retire,
+  SDK methods, and a Settings card with the same replay, concurrency, and accessibility guarantees
+  as Vercel AI Gateway.
 - AC32: The database document contains slugs and notes, never the key.
-- AC33: `projectClientModel` exposes provider `openrouter`, not `opengeni`, for OpenRouter rows,
-  omits the optional legacy closed `ClientModel.source` field for same-major compatibility, and
-  never uses provider label `OpenGeni`.
+- AC33: `projectClientModel` exposes provider `openrouter` for deployment rows and
+  `workspace-openrouter` for workspace rows, never `opengeni`; both use the public OpenRouter
+  source classification and never use provider label `OpenGeni`.
 - AC34: `getSettings()` does not query the catalog table. Database mode uses
   `resolveCatalogSettings`.
 - AC35: Cost `free` applies exactly to product IDs the deployment billing policy marks free,
@@ -424,17 +455,22 @@ Do not ship OpenRouter as API-key credits. Do not ship database mode without fai
 - AC36: Starter OpenRouter models are tool-capable, or the table is empty.
 - AC37: The tool description and `Current:` line make clear that calling it does not change the
   session model.
+- AC38: The custom-model table discriminator participates in active-slug uniqueness, operation
+  replay uniqueness, advisory locks, and per-provider active/history limits, so Gateway and
+  OpenRouter cannot race or collide through a shared workspace slug.
+- AC39: A workspace OpenRouter turn resolves its key only at workspace turn scope and never reuses
+  a process-global provider client containing another workspace's credential.
 
 ## 13. Verification
 
 | Acceptance criteria | Verification |
 | --- | --- |
-| AC1-AC2, AC26-AC30, AC33, AC35 | `packages/config/test/model-providers.test.ts` plus `projectClientModel` tests |
+| AC1-AC2, AC26-AC30, AC33, AC35, AC39 | `packages/config/test/model-providers.test.ts`, runtime client-cache tests, plus `projectClientModel` tests |
 | AC3-AC5, AC32, AC34 | API/boot tests with template DB |
-| AC6-AC10, AC13-AC14 | `apps/api/test/model-catalog.test.ts` plus `gateway-custom-models.test.ts` |
+| AC6-AC10, AC13-AC14, AC31, AC38 | `apps/api/test/model-catalog.test.ts`, Gateway/OpenRouter custom-model tests, connection-route tests, SDK parity, and provider-card UI/browser tests |
 | AC11 | `packages/runtime/test/model-providers.test.ts` |
 | AC12 | Existing turn-policy tests plus one custom ID |
-| AC16-AC18, AC31 | `check:docs-refs`, migration guards, and ripgrep |
+| AC16-AC18 | `check:docs-refs`, migration guards, and ripgrep |
 | AC19-AC25, AC36-AC37 | `list_models` resolver, notes Zod, and first-request-set tests |
 | UI | Component test for add/remove |
 
@@ -471,8 +507,8 @@ Connect Gateway, add a known slug, select it under Your Gateway, and perform one
 
 - Log catalog source and document version at boot, never the document body.
 - Bound `upstream_model_id` to 238 printable, non-whitespace characters so the
-  generated `workspace-gateway/` product ID remains within the 256-character
-  model-policy contract.
+  generated `workspace-gateway/` and `workspace-openrouter/` product IDs remain
+  within the 256-character model-policy contract.
 - Do not log keys.
 
 ## 19. Risks

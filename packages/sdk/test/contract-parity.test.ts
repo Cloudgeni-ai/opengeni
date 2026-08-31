@@ -24,6 +24,10 @@ import {
   DeleteWorkspaceGatewayCustomModelRequest as ContractDeleteWorkspaceGatewayCustomModelRequest,
   WorkspaceGatewayCustomModel as ContractWorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse as ContractWorkspaceGatewayCustomModelsResponse,
+  CreateWorkspaceOpenRouterCustomModelRequest as ContractCreateWorkspaceOpenRouterCustomModelRequest,
+  DeleteWorkspaceOpenRouterCustomModelRequest as ContractDeleteWorkspaceOpenRouterCustomModelRequest,
+  WorkspaceOpenRouterCustomModel as ContractWorkspaceOpenRouterCustomModel,
+  WorkspaceOpenRouterCustomModelsResponse as ContractWorkspaceOpenRouterCustomModelsResponse,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
   CreateSessionResponse as ContractCreateSessionResponse,
@@ -178,6 +182,10 @@ import type {
   DeleteWorkspaceGatewayCustomModelRequest,
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
+  CreateWorkspaceOpenRouterCustomModelRequest,
+  DeleteWorkspaceOpenRouterCustomModelRequest,
+  WorkspaceOpenRouterCustomModel,
+  WorkspaceOpenRouterCustomModelsResponse,
   ClientSessionEventInput,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -1358,11 +1366,30 @@ describe("SDK / contracts parity", () => {
     const acceptDeleteRequest = (
       value: DeleteWorkspaceGatewayCustomModelRequest,
     ): z.input<typeof ContractDeleteWorkspaceGatewayCustomModelRequest> => value;
+    const acceptOpenRouterModel = (
+      value: z.infer<typeof ContractWorkspaceOpenRouterCustomModel>,
+    ): WorkspaceOpenRouterCustomModel => value;
+    const acceptOpenRouterModels = (
+      value: z.infer<typeof ContractWorkspaceOpenRouterCustomModelsResponse>,
+    ): WorkspaceOpenRouterCustomModelsResponse => value;
+    const acceptOpenRouterCreateRequest = (
+      value: CreateWorkspaceOpenRouterCustomModelRequest,
+    ): z.input<typeof ContractCreateWorkspaceOpenRouterCustomModelRequest> => value;
+    const acceptOpenRouterDeleteRequest = (
+      value: DeleteWorkspaceOpenRouterCustomModelRequest,
+    ): z.input<typeof ContractDeleteWorkspaceOpenRouterCustomModelRequest> => value;
 
     expect(
-      [acceptModel, acceptModels, acceptCreateRequest, acceptDeleteRequest].every(
-        (value) => typeof value === "function",
-      ),
+      [
+        acceptModel,
+        acceptModels,
+        acceptCreateRequest,
+        acceptDeleteRequest,
+        acceptOpenRouterModel,
+        acceptOpenRouterModels,
+        acceptOpenRouterCreateRequest,
+        acceptOpenRouterDeleteRequest,
+      ].every((value) => typeof value === "function"),
     ).toBe(true);
   });
 });

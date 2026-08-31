@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_OPENROUTER_MODEL_ID } from "@opengeni/config";
+import {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+} from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import { z } from "zod";
 import { buildWorkspaceModelCatalog } from "../src/model-catalog";
@@ -210,6 +213,56 @@ describe("workspace model catalog availability", () => {
     });
     expect(model).not.toHaveProperty("source");
     expect(JSON.stringify(model)).not.toContain("openrouter-workspace-secret");
+  });
+
+  test("projects the workspace OpenRouter rail without a deployment key and gates it independently", () => {
+    const settings = testSettings({
+      codexSubscriptionEnabled: false,
+      openrouterApiKey: undefined,
+    });
+    const curatedWorkspaceId = `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${DEFAULT_OPENROUTER_MODEL_ID.slice("openrouter/".length)}`;
+    const disconnected = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+      workspaceGatewayConnectionActive: true,
+      workspaceOpenRouterConnectionActive: false,
+      workspaceOpenRouterCustomModels: [
+        { upstreamModelId: "anthropic/claude-sonnet-4.6", label: "Claude Sonnet 4.6" },
+      ],
+    });
+    expect(disconnected.models.some((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID)).toBe(
+      false,
+    );
+    expect(disconnected.models.find((model) => model.id === curatedWorkspaceId)).toMatchObject({
+      provider: "workspace-openrouter",
+      providerLabel: "Your OpenRouter",
+      cost: "workspace",
+      billing: { upstreamPayer: "workspace", metering: "external" },
+      credentialReadiness: { status: "not_ready", reason: "needs_reauth" },
+      availability: { status: "unavailable", selectable: false, reason: "needs_reauth" },
+    });
+    expect(
+      disconnected.models.find(
+        (model) =>
+          model.id === `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}anthropic/claude-sonnet-4.6`,
+      ),
+    ).toMatchObject({ label: "Claude Sonnet 4.6", cost: "workspace" });
+
+    const connected = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+      workspaceGatewayConnectionActive: false,
+      workspaceOpenRouterConnectionActive: true,
+    });
+    expect(connected.models.find((model) => model.id === curatedWorkspaceId)).toMatchObject({
+      credentialReadiness: { status: "ready", basis: "connection" },
+      availability: { status: "unknown", selectable: true, reason: null },
+    });
+    expect(
+      connected.models.find((model) => model.id === "workspace-gateway/deepseek-v4-flash-0731"),
+    ).toMatchObject({ credentialReadiness: { status: "not_ready" } });
   });
 
   test("unknown health is selectable only after credential and policy gates pass", () => {

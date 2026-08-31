@@ -1,8 +1,4 @@
-import {
-  resolveFirstPartyMcpToolPolicy,
-  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-  type Settings,
-} from "@opengeni/config";
+import { resolveFirstPartyMcpToolPolicy, type Settings } from "@opengeni/config";
 import type {
   AccessGrant,
   McpPersonalConnectionDelegation,
@@ -39,6 +35,7 @@ import {
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
   lockActiveWorkspaceGatewayCustomModelForAdmission,
+  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   nestedPostgresSqlState,
   requireWorkspace,
   scopedKnowledgeScopeKey,
@@ -59,7 +56,7 @@ import {
 } from "../session-authorization";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
-import { isWorkspaceGatewayCustomModelId } from "../model-catalog";
+import { workspaceCustomModelReference } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateVariableSetAttachment } from "./environments";
 import {
@@ -105,19 +102,27 @@ export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
   );
 }
 
-function workspaceGatewayCustomModelCommitGuard(input: {
+function workspaceCustomModelCommitGuard(input: {
   settings: Settings;
   accountId: string;
   workspaceId: string;
   modelId: string;
 }): ((tx: Database) => Promise<void>) | undefined {
-  if (!isWorkspaceGatewayCustomModelId(input.settings, input.modelId)) return undefined;
+  const reference = workspaceCustomModelReference(input.settings, input.modelId);
+  if (!reference) return undefined;
   return async (tx: Database): Promise<void> => {
-    const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      upstreamModelId: input.modelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length),
-    });
+    const active =
+      reference.providerKind === "openrouter"
+        ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          })
+        : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          });
     if (!active) {
       throw new HTTPException(422, {
         message: `model is not available: ${input.modelId}`,
@@ -264,7 +269,7 @@ export async function createValidatedScheduledTask(input: {
         });
   const beforeCreateCommit =
     !knowledgeAction && input.payload.runMode !== "existing_session"
-      ? workspaceGatewayCustomModelCommitGuard({
+      ? workspaceCustomModelCommitGuard({
           settings: input.settings,
           accountId: input.grant.accountId,
           workspaceId: input.grant.workspaceId,
@@ -772,7 +777,7 @@ export async function validatedScheduledTaskUpdate(input: {
       !isDeepStrictEqual(input.payload.metadata, input.existing.metadata)) ||
     (input.existing.status === "paused" && input.payload.status === "active");
   if (materialExecutionChange && nextRunMode !== "existing_session") {
-    const beforeUpdateCommit = workspaceGatewayCustomModelCommitGuard({
+    const beforeUpdateCommit = workspaceCustomModelCommitGuard({
       settings: input.settings,
       accountId: input.existing.accountId,
       workspaceId: input.existing.workspaceId,

@@ -138,11 +138,12 @@ and active turns that still name the old definition; accepted turns fail closed
 on definition drift rather than silently switching providers. A maintenance
 window that stops all catalog consumers is the simpler alternative.
 
-Workspace-admin removal of a custom Vercel AI Gateway slug is a retirement,
-not a hard delete. The slug leaves new model selection immediately, while an
-already accepted turn or an existing-session continuation can still resolve
-its retained definition. Re-adding the same slug creates a fresh row identity;
-stale mutations against an older generation cannot affect the replacement.
+Workspace-admin removal of a custom Vercel AI Gateway or OpenRouter slug is a
+retirement, not a hard delete. The provider-qualified slug leaves new model
+selection immediately, while an already accepted turn or an existing-session
+continuation can still resolve its retained definition. Re-adding the same slug
+creates a fresh row identity; stale mutations against an older generation
+cannot affect the replacement.
 Fresh session admission, an explicit follow-up switch from another model, a new
 or materially reaccepted scheduled task, automation trigger, or PR-review
 repository binding, and a fresh generated-session scheduled occurrence recheck
@@ -155,11 +156,11 @@ initialization or replay after retirement without reopening fresh-selection
 authority.
 Retirement takes the exclusive counterpart, so a successful removal cannot be
 followed by new work committing from a stale pre-removal catalog snapshot.
-Deployment-curated workspace Gateway products share the public prefix but have
-no custom row and bypass this row-admission fence. Existing-session scheduled
-tasks and administrative-only task/trigger edits retain their already accepted
-model definition.
-Each workspace may keep 100 active slugs and 1,000 retained generations.
+Deployment-curated workspace provider products share their provider's public
+prefix but have no custom row and bypass this row-admission fence.
+Existing-session scheduled tasks and administrative-only task/trigger edits
+retain their already accepted model definition. Each workspace may keep 100
+active slugs and 1,000 retained generations per provider.
 Retirement does not reclaim generation capacity because those rows remain the
 execution authority for accepted turns and existing sessions.
 
@@ -234,13 +235,15 @@ full capability record is also present, the legacy booleans must agree with it.
 Generic registry JSON cannot set `credentialSource` or `billing`. OpenGeni
 derives both from the provider kind:
 
-| Provider kind | Credential source | Upstream payer | Metering |
-| --- | --- | --- | --- |
-| Built-in or registry API key | deployment | deployment | OpenGeni credits |
-| Anonymous registry route | deployment, no authentication | deployment | external |
-| Azure without an API key | deployment Azure AD bearer | deployment | OpenGeni credits |
-| Connected Codex subscription | connected subscription | connected subscription | external |
-| Connected SuperGrok/xAI subscription | connected subscription | connected subscription | external |
+| Provider kind                        | Credential source             | Upstream payer         | Metering         |
+| ------------------------------------ | ----------------------------- | ---------------------- | ---------------- |
+| Built-in or registry API key         | deployment                    | deployment             | OpenGeni credits |
+| Anonymous registry route             | deployment, no authentication | deployment             | external         |
+| Azure without an API key             | deployment Azure AD bearer    | deployment             | OpenGeni credits |
+| Connected Codex subscription         | connected subscription        | connected subscription | external         |
+| Connected SuperGrok/xAI subscription | connected subscription        | connected subscription | external         |
+| Workspace Vercel AI Gateway          | workspace connection          | workspace              | external         |
+| Workspace OpenRouter                 | workspace connection          | workspace              | external         |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
@@ -344,10 +347,10 @@ models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
 
-| Product | Approved provider order | Supplier input / cache read / output | Conservative retail fallback (+25%) |
-| --- | --- | --- | --- |
+| Product                | Approved provider order      | Supplier input / cache read / output                                                                   | Conservative retail fallback (+25%)                     |
+| ---------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
 | DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.26; Novita $0.14 / $0.028 / $0.28; DeepInfra $0.09 / $0.018 / $0.18 per 1M | $0.175 / $0.035 / $0.35 per 1M (highest approved route) |
-| Kimi K3 | Baseten → Fireworks | $3 / $0.30 / $15 per 1M on both routes | $3.75 / $0.375 / $18.75 per 1M |
+| Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $15 per 1M on both routes                                                                 | $3.75 / $0.375 / $18.75 per 1M                          |
 
 Prices are a reviewed 2026-08-03 snapshot from public Gateway endpoint metadata.
 Managed turns normally debit the exact Gateway-reported inference cost for the
@@ -410,12 +413,14 @@ the workspace Gateway connection is active and policy allows them, and are
 available to session, automation, scheduled-task, and goal-continuation policy
 resolution through the same workspace-scoped catalog overlay.
 
-## Managed OpenRouter
+## OpenRouter rails
 
 `OPENGENI_OPENROUTER_API_KEY` enables a deployment-managed OpenRouter provider
 at `https://openrouter.ai/api/v1`. It uses the generic OpenAI-compatible Chat
 Completions dispatcher, public `X-Title` / optional `HTTP-Referer` metadata, and
-deployment-owned credentials. No workspace OpenRouter connection exists.
+deployment-owned credentials. Its provider ID is `openrouter`, and product IDs
+use `openrouter/<upstream>`. This deployment rail is independent of any
+workspace-owned OpenRouter connection.
 
 The reviewed code catalog currently ships one v1 starter:
 
@@ -439,11 +444,31 @@ decides whether the workspace sees `free` or `credits`. The shipped default is
 `free`. If an operator changes it to `credits`, managed billing also requires a
 separate `OPENGENI_MODEL_PRICING_JSON` entry.
 
-The generic dispatch path can carry future reviewed OpenRouter chat models,
-but paid OpenRouter membership is intentionally not admitted by the v1 catalog
-contract. For example, GLM 5.3 Flash was metadata-probed on August 27, 2026 but
-is not shipped; adding it requires an explicit schema/catalog review, current
-tool probe, capability definition, cost policy, and pricing decision.
+The generic dispatch path can carry future reviewed deployment OpenRouter chat
+models, but paid deployment-managed OpenRouter membership is intentionally not
+admitted by the v1 deployment-catalog contract. For example, GLM 5.3 Flash was
+metadata-probed on August 27, 2026 but is not shipped on the deployment rail;
+adding it there requires an explicit schema/catalog review, current tool probe,
+capability definition, cost policy, and pricing decision.
+
+A workspace admin can separately connect **OpenRouter** in workspace Settings.
+That key is stored in the encrypted workspace connection table and resolved
+only for that workspace's turn. The peer provider ID is `workspace-openrouter`,
+and its products use `workspace-openrouter/<upstream>`. Curated OpenRouter
+membership is available through this workspace rail even when the deployment
+has no `OPENGENI_OPENROUTER_API_KEY`; selectability still requires the workspace
+connection and policy. These turns have `upstreamPayer: workspace` and
+`metering: external`, so OpenGeni neither debits credits nor treats them as the
+deployment's free/credits rail. Billing settles directly through the
+workspace's OpenRouter account.
+
+Admins may add exact OpenRouter slugs in the same card. The API does not call
+OpenRouter `GET /models` or infer capabilities dynamically. Custom IDs receive
+the reviewed conservative text/function-calling Chat envelope, and the admin is
+asserting that the upstream slug supports that behavior. OpenGeni does not claim
+a reasoning vocabulary or context-window size for these unreviewed slugs.
+Duplicate and curated collisions are scoped to the OpenRouter workspace
+provider, not to Vercel AI Gateway or deployment-managed `openrouter/*`.
 
 ## `list_models` agent tool
 
@@ -748,7 +773,7 @@ activation.
 The SDK method is:
 
 ```ts
-client.getWorkspaceModelCatalog(workspaceId)
+client.getWorkspaceModelCatalog(workspaceId);
 ```
 
 ## Per-turn execution policy

@@ -10,4 +10,4 @@
 "@opengeni/worker-bundle": minor
 ---
 
-Add deployment-defined model catalogs and cost policy, workspace-managed custom Gateway models, a managed OpenRouter free-model rail, live catalog refresh, the `list_models` agent tool, and model-picker/API/SDK support for the new catalog surfaces.
+Add deployment-defined model catalogs and cost policy, workspace-managed Gateway and OpenRouter credentials plus custom models, a separate deployment-managed OpenRouter rail, live catalog refresh, the `list_models` agent tool, and model-picker/API/SDK support for the new catalog surfaces.

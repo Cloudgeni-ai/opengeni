@@ -1,5 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import {
+  WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+  WORKSPACE_OPENROUTER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
 } from "@opengeni/config";
@@ -25,6 +27,8 @@ import {
   IntegrationClientMetadata,
   ListSlackInstallationBindingsResponse,
   ListConnectionsResponse,
+  OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
   OAuthStartRequest,
@@ -76,14 +80,17 @@ import {
   persistSlackBotInstallationWithSuccessAudit,
   recordSlackBotInstallCallbackFailure,
   revokeConnection,
+  revokeWorkspaceOpenRouterConnections,
   revokeWorkspaceVercelAiGatewayConnections,
   revokeConnectionWithSlackBotSuccessAudit,
   rotateWorkspaceVercelAiGatewayConnection,
+  rotateWorkspaceOpenRouterConnection,
   SlackBotLifecycleSuccessAuditError,
   SlackInstallationBindingConflictError,
   updateConnection,
   updateSlackBotDocumentDestination,
   upsertWorkspaceVercelAiGatewayConnection,
+  upsertWorkspaceOpenRouterConnection,
   type SlackBotInstallCallbackFailureReason,
   type SlackBotInstallCallbackFailureStage,
 } from "@opengeni/db";
@@ -204,26 +211,30 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertNotDirectAtlassianOAuth(providerDomain, payload.kind, payload.metadata);
     assertNotDirectPersonalGitHubOAuth(providerDomain, payload.kind, payload.metadata);
     const credentialEncrypted = encryptCredentialBundle(key, payload.credential);
-    const isVercelAiGateway = isWorkspaceVercelAiGatewayConnection({
+    const workspaceProviderKind = workspaceProviderApiKeyConnectionKind({
       subjectId,
       providerDomain,
       kind: payload.kind,
       metadata: payload.metadata,
     });
-    const connection = isVercelAiGateway
+    const connection = workspaceProviderKind
       ? await (async () => {
+          const provider = workspaceProviderApiKeyConnectionSpec(workspaceProviderKind);
           if (!payload.operationId) {
             throw new HTTPException(400, {
-              message: "connecting Vercel AI Gateway requires an operationId",
+              message: `connecting ${provider.label} requires an operationId`,
             });
           }
           const expiresAt = payload.expiresAt ? new Date(payload.expiresAt) : null;
-          const metadata = vercelAiGatewayCredentialMetadata(payload.metadata);
-          const created = await upsertWorkspaceVercelAiGatewayConnection(db, {
+          const metadata = workspaceProviderCredentialMetadata(
+            workspaceProviderKind,
+            payload.metadata,
+          );
+          const input = {
             accountId: grant.accountId,
             workspaceId,
             operationId: payload.operationId,
-            requestDigest: vercelAiGatewayCredentialRequestDigest(key, {
+            requestDigest: workspaceProviderCredentialRequestDigest(key, {
               action: "create",
               providerDomain,
               kind: payload.kind,
@@ -238,10 +249,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             expiresAt,
             metadata,
             updatedBySubjectId: grant.subjectId,
-          });
+          };
+          const created =
+            workspaceProviderKind === "vercel_gateway"
+              ? await upsertWorkspaceVercelAiGatewayConnection(db, input)
+              : await upsertWorkspaceOpenRouterConnection(db, input);
           if (!created || created.status === "revoked") {
             throw new HTTPException(409, {
-              message: "Vercel AI Gateway is already connected; reload before replacing its key",
+              message: `${provider.label} is already connected; reload before replacing its key`,
             });
           }
           return created;
@@ -851,17 +866,18 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         payload.subjectId === undefined
           ? existing.subjectId
           : writableSubjectId(payload.subjectId, grant.subjectId);
-      if (
-        !isWorkspaceVercelAiGatewayConnection(existing) &&
-        isWorkspaceVercelAiGatewayConnection({
-          subjectId,
-          providerDomain,
-          kind,
-          metadata: payload.metadata ?? existing.metadata,
-        })
-      ) {
+      const targetWorkspaceProviderKind = workspaceProviderApiKeyConnectionKind({
+        subjectId,
+        providerDomain,
+        kind,
+        metadata: payload.metadata ?? existing.metadata,
+      });
+      if (!workspaceProviderApiKeyConnectionKind(existing) && targetWorkspaceProviderKind) {
         throw new HTTPException(422, {
-          message: "use the Vercel AI Gateway connect flow to create this connection",
+          message:
+            targetWorkspaceProviderKind === "vercel_gateway"
+              ? "use the Vercel AI Gateway connect flow to create this connection"
+              : "use the OpenRouter connect flow to create this connection",
         });
       }
       assertNotDirectPersonalSlackOAuth(providerDomain, kind);
@@ -889,7 +905,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
     }
-    if (existing && isWorkspaceVercelAiGatewayConnection(existing)) {
+    const existingWorkspaceProviderKind = existing
+      ? workspaceProviderApiKeyConnectionKind(existing)
+      : null;
+    if (existing && existingWorkspaceProviderKind) {
+      const provider = workspaceProviderApiKeyConnectionSpec(existingWorkspaceProviderKind);
       const providerDomain = canonicalProviderDomain(
         payload.providerDomain ?? existing.providerDomain,
       );
@@ -900,24 +920,23 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       const kind = payload.kind ?? existing.kind;
       if (
         subjectId !== null ||
-        providerDomain !== VERCEL_AI_GATEWAY_CONNECTION_DOMAIN ||
+        providerDomain !== provider.providerDomain ||
         kind !== "api_key" ||
         (payload.metadata?.credentialRole !== undefined &&
-          payload.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE)
+          payload.metadata.credentialRole !== provider.credentialRole)
       ) {
         throw new HTTPException(422, {
-          message: "Vercel AI Gateway connection identity cannot be changed",
+          message: `${provider.label} connection identity cannot be changed`,
         });
       }
       if (payload.credential === undefined) {
         throw new HTTPException(400, {
-          message: "updating a Vercel AI Gateway connection requires a new credential",
+          message: `updating a ${provider.label} connection requires a new credential`,
         });
       }
       if (payload.expectedVersion === undefined || payload.operationId === undefined) {
         throw new HTTPException(400, {
-          message:
-            "updating a Vercel AI Gateway connection requires expectedVersion and operationId",
+          message: `updating a ${provider.label} connection requires expectedVersion and operationId`,
         });
       }
       const key = requireEnvironmentEncryption(settings);
@@ -930,17 +949,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           : existing.expiresAt
             ? new Date(existing.expiresAt)
             : null;
-      const metadata = vercelAiGatewayCredentialMetadata({
+      const metadata = workspaceProviderCredentialMetadata(existingWorkspaceProviderKind, {
         ...existing.metadata,
         ...(payload.metadata ?? {}),
       });
-      const connection = await rotateWorkspaceVercelAiGatewayConnection(db, {
+      const input = {
         accountId: grant.accountId,
         workspaceId,
         connectionId: existing.id,
         expectedVersion: payload.expectedVersion,
         operationId: payload.operationId,
-        requestDigest: vercelAiGatewayCredentialRequestDigest(key, {
+        requestDigest: workspaceProviderCredentialRequestDigest(key, {
           action: "rotate",
           connectionId: existing.id,
           expectedVersion: payload.expectedVersion,
@@ -954,10 +973,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         expiresAt,
         metadata,
         updatedBySubjectId: grant.subjectId,
-      });
+      };
+      const connection =
+        existingWorkspaceProviderKind === "vercel_gateway"
+          ? await rotateWorkspaceVercelAiGatewayConnection(db, input)
+          : await rotateWorkspaceOpenRouterConnection(db, input);
       if (!connection) {
         throw new HTTPException(409, {
-          message: "Vercel AI Gateway connection changed; reload before replacing its key",
+          message: `${provider.label} connection changed; reload before replacing its key`,
         });
       }
       return c.json(ConnectionResponse.parse({ connection }));
@@ -1022,7 +1045,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       existing.providerDomain === ATLASSIAN_PROVIDER_DOMAIN &&
       existing.kind === "oauth2" &&
       AtlassianConnectionMetadata.safeParse(existing.metadata).success;
-    const isVercelAiGateway = isWorkspaceVercelAiGatewayConnection(existing);
+    const workspaceProviderKind = workspaceProviderApiKeyConnectionKind(existing);
     const disconnectPayload = await c.req.json().catch(() => null);
     const googleDriveDisconnect = isGoogleDrive
       ? GoogleDriveDisconnectRequest.safeParse(disconnectPayload)
@@ -1058,7 +1081,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       !isGoogleDrive &&
       !isAtlassian &&
       !isPersonalGitHub &&
-      !isVercelAiGateway
+      !workspaceProviderKind
     ) {
       return c.json(ConnectionResponse.parse({ connection: existing }));
     }
@@ -1094,14 +1117,22 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
                 slackTeamId: openGeniSlackBotMetadata(existing.metadata)!.slackTeamId,
               })
-            : isVercelAiGateway
-              ? await revokeWorkspaceVercelAiGatewayConnections(db, {
-                  accountId: grant.accountId,
-                  workspaceId,
-                  connectionId,
-                  expectedVersion: existing.version,
-                  updatedBySubjectId: grant.subjectId,
-                })
+            : workspaceProviderKind
+              ? workspaceProviderKind === "vercel_gateway"
+                ? await revokeWorkspaceVercelAiGatewayConnections(db, {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    connectionId,
+                    expectedVersion: existing.version,
+                    updatedBySubjectId: grant.subjectId,
+                  })
+                : await revokeWorkspaceOpenRouterConnections(db, {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    connectionId,
+                    expectedVersion: existing.version,
+                    updatedBySubjectId: grant.subjectId,
+                  })
               : await revokeConnection(
                   db,
                   workspaceId,
@@ -1525,18 +1556,49 @@ function assertNotReservedPersonalGitHubMetadata(
   }
 }
 
-function isWorkspaceVercelAiGatewayConnection(input: {
+type WorkspaceProviderApiKeyConnectionKind = "vercel_gateway" | "openrouter";
+
+function workspaceProviderApiKeyConnectionSpec(
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): {
+  providerDomain: string;
+  credentialRole: string;
+  label: string;
+} {
+  return providerKind === "vercel_gateway"
+    ? {
+        providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+        credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+        label: "Vercel AI Gateway",
+      }
+    : {
+        providerDomain: WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+        credentialRole: WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+        label: "OpenRouter",
+      };
+}
+
+function workspaceProviderApiKeyConnectionKind(input: {
   subjectId?: string | null;
   providerDomain: string;
   kind: string;
   metadata?: Record<string, unknown>;
-}): boolean {
-  return (
-    input.subjectId == null &&
-    input.providerDomain.toLowerCase() === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
-    input.kind === "api_key" &&
+}): WorkspaceProviderApiKeyConnectionKind | null {
+  if (input.subjectId != null || input.kind !== "api_key") return null;
+  const providerDomain = input.providerDomain.toLowerCase();
+  if (
+    providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
     input.metadata?.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE
-  );
+  ) {
+    return "vercel_gateway";
+  }
+  if (
+    providerDomain === WORKSPACE_OPENROUTER_CONNECTION_DOMAIN &&
+    input.metadata?.credentialRole === WORKSPACE_OPENROUTER_CONNECTION_ROLE
+  ) {
+    return "openrouter";
+  }
+  return null;
 }
 
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {
@@ -1598,21 +1660,24 @@ function encryptCredentialBundle(key: Uint8Array, credential: Record<string, unk
   return encryptEnvironmentValue(key, JSON.stringify(credential));
 }
 
-function vercelAiGatewayCredentialMetadata(
+function workspaceProviderCredentialMetadata(
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
   metadata: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   const {
+    [OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _openRouterOperationId,
+    [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
     ...effectiveMetadata
   } = metadata ?? {};
   return {
     ...effectiveMetadata,
-    credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+    credentialRole: workspaceProviderApiKeyConnectionSpec(providerKind).credentialRole,
   };
 }
 
-function vercelAiGatewayCredentialRequestDigest(key: Uint8Array, value: unknown): string {
+function workspaceProviderCredentialRequestDigest(key: Uint8Array, value: unknown): string {
   return createHmac("sha256", key).update(stableJson(value), "utf8").digest("hex");
 }
 

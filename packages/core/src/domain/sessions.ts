@@ -3,6 +3,7 @@ import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
@@ -91,6 +92,7 @@ import {
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
   lockActiveWorkspaceGatewayCustomModelForAdmission,
+  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   requireSession,
   replaySubmittedHumanPromptFromBoundaryReceipt,
   submitHumanPromptInTransaction,
@@ -134,7 +136,11 @@ import {
 } from "../session-authorization";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { managedSessionGroupBackend } from "../sandbox/runtime-settings";
-import { isWorkspaceGatewayCustomModelId, resolveWorkspaceCatalogSettings } from "../model-catalog";
+import {
+  isWorkspaceCustomModelId,
+  resolveWorkspaceCatalogSettings,
+  workspaceCustomModelReference,
+} from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
@@ -665,9 +671,13 @@ export async function createAndStartSessionWithOutcome(input: {
   /** The custom workspace model was frozen by an earlier accepted boundary or
    * inherited from an existing session, so retirement must not invalidate it. */
   retainWorkspaceGatewayModel?: boolean;
+  /** Provider-neutral successor to retainWorkspaceGatewayModel. */
+  retainWorkspaceCustomModel?: boolean;
   /** The selected workspace Gateway product is backed by a mutable custom row,
    * rather than deployment-curated Gateway membership. */
   workspaceGatewayCustomModel?: boolean;
+  /** Provider-neutral successor to workspaceGatewayCustomModel. */
+  workspaceCustomModel?: boolean;
   accountId: string;
   workspaceId: string;
   visibility?: "user_private" | "workspace_shared";
@@ -800,21 +810,34 @@ export async function createAndStartSessionWithOutcome(input: {
     input.createdByContext,
     input.initialAutomaticTitle,
   );
-  const requiresActiveWorkspaceGatewayModel =
-    input.workspaceGatewayCustomModel === true && input.retainWorkspaceGatewayModel !== true;
+  const requiresActiveWorkspaceCustomModel =
+    (input.workspaceCustomModel === true || input.workspaceGatewayCustomModel === true) &&
+    input.retainWorkspaceCustomModel !== true &&
+    input.retainWorkspaceGatewayModel !== true;
   const beforeCreateCommit =
-    requiresActiveWorkspaceGatewayModel || input.beforeCreateCommit
+    requiresActiveWorkspaceCustomModel || input.beforeCreateCommit
       ? async (tx: Database, sessionId: string, context?: { created: boolean }): Promise<void> => {
           // A committed keyed replay already crossed this fence when its shell
           // was first accepted. Revalidate only the transaction inserting a new
           // session, while still running caller linkage on every replay.
-          if (requiresActiveWorkspaceGatewayModel && context?.created !== false) {
-            const upstreamModelId = input.model.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length);
-            const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              upstreamModelId,
-            });
+          if (requiresActiveWorkspaceCustomModel && context?.created !== false) {
+            const openRouter = input.model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX);
+            const upstreamModelId = input.model.slice(
+              openRouter
+                ? WORKSPACE_OPENROUTER_MODEL_ID_PREFIX.length
+                : WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length,
+            );
+            const active = openRouter
+              ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  upstreamModelId,
+                })
+              : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  upstreamModelId,
+                });
             if (!active) {
               throw new HTTPException(422, {
                 message: `model is not available: ${input.model}`,
@@ -1463,9 +1486,9 @@ export async function postUserMessageTurn(
   assertConfiguredModel(settings, requestedModel);
   const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
   const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
-  const freshWorkspaceGatewayModel =
+  const freshWorkspaceCustomModel =
     requestedModel !== null &&
-    isWorkspaceGatewayCustomModelId(settings, requestedModel) &&
+    isWorkspaceCustomModelId(settings, requestedModel) &&
     requestedModel !== sessionForModelGate.model
       ? requestedModel
       : null;
@@ -1534,20 +1557,31 @@ export async function postUserMessageTurn(
                   }
                 : {}),
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-              ...(freshWorkspaceGatewayModel
+              ...(freshWorkspaceCustomModel
                 ? {
                     beforeFreshPromptCommit: async (tx: Database): Promise<void> => {
-                      const upstreamModelId = freshWorkspaceGatewayModel.slice(
-                        WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length,
+                      const reference = workspaceCustomModelReference(
+                        settings,
+                        freshWorkspaceCustomModel,
                       );
-                      const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-                        accountId,
-                        workspaceId,
-                        upstreamModelId,
-                      });
+                      if (!reference) {
+                        throw new Error("workspace custom model reference disappeared");
+                      }
+                      const active =
+                        reference.providerKind === "openrouter"
+                          ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
+                              accountId,
+                              workspaceId,
+                              upstreamModelId: reference.upstreamModelId,
+                            })
+                          : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+                              accountId,
+                              workspaceId,
+                              upstreamModelId: reference.upstreamModelId,
+                            });
                       if (!active) {
                         throw new HTTPException(422, {
-                          message: `model is not available: ${freshWorkspaceGatewayModel}`,
+                          message: `model is not available: ${freshWorkspaceCustomModel}`,
                         });
                       }
                     },
@@ -1642,9 +1676,9 @@ async function resolveWorkspaceModelBoundarySettings(
   modelIds: readonly (string | null | undefined)[],
   retainedProductModelId?: string | null,
 ): Promise<Settings> {
-  const retainedWorkspaceModel = retainedProductModelId?.startsWith(
-    WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-  );
+  const retainedWorkspaceModel =
+    retainedProductModelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true ||
+    retainedProductModelId?.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) === true;
   if (deps.catalogSourceSettings) {
     // The adapter already resolved one exact workspace catalog snapshot for
     // this request. Preserve it for fresh selections, but an existing session
@@ -1656,7 +1690,9 @@ async function resolveWorkspaceModelBoundarySettings(
   }
   const workspaceModelIds = modelIds.filter(
     (modelId): modelId is string =>
-      typeof modelId === "string" && modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX),
+      typeof modelId === "string" &&
+      (modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
+        modelId.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)),
   );
   const needsWorkspaceResolution =
     deps.settings.modelCatalogSource === "database" || workspaceModelIds.length > 0;
@@ -2666,8 +2702,8 @@ export async function createSessionForRequestWithOutcome(
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
-      workspaceGatewayCustomModel: isWorkspaceGatewayCustomModelId(settings, model),
-      retainWorkspaceGatewayModel: parentSession !== null && model === inheritedModel,
+      workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
+      retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,

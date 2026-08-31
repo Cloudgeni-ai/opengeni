@@ -14,7 +14,10 @@ import type {
   McpToolCallOutcome,
   RuntimeMetricsHooks,
 } from "./metrics";
-import { WorkspaceGatewayUnavailableError } from "./model-provider-errors";
+import {
+  WorkspaceGatewayUnavailableError,
+  WorkspaceOpenRouterUnavailableError,
+} from "./model-provider-errors";
 import {
   azureModelRequestPolicy,
   modelRequestPolicyForProvider,
@@ -93,8 +96,10 @@ export function buildOpenAIClientFromSettings(
 }
 
 /**
- * One OpenAI client per resolved provider configuration, built lazily and
- * cached for the process. The built-in openai/azure provider reuses
+ * One OpenAI client per deployment-scoped provider configuration, built lazily
+ * and cached for the process. Workspace-connection providers are deliberately
+ * rebuilt per immutable turn settings snapshot so a workspace key never enters
+ * a cross-workspace cache. The built-in openai/azure provider reuses
  * buildOpenAIClientFromSettings verbatim (so its Azure AD/api-version/base-URL
  * construction stays byte-for-byte identical to configureOpenAI); a registry
  * provider gets a plain client pointed at its base URL with its resolved key,
@@ -238,6 +243,7 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
+  const workspaceCredentialProvider = provider.credentialSource?.kind === "workspace_connection";
   const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
   const gatewayPolicies = gatewayProvider
     ? new Map(
@@ -247,11 +253,14 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
       )
     : undefined;
   const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies);
-  const cached = workspaceGateway ? undefined : providerClientCache.get(cacheKey);
+  const cached = workspaceCredentialProvider ? undefined : providerClientCache.get(cacheKey);
   if (cached) {
     return cached;
   }
-  if (workspaceGateway && !provider.apiKey) {
+  if (workspaceCredentialProvider && !provider.apiKey) {
+    if (provider.kind === "openrouter-workspace") {
+      throw new WorkspaceOpenRouterUnavailableError();
+    }
     throw new WorkspaceGatewayUnavailableError();
   }
   const anonymousProvider = provider.kind === "anonymous";
@@ -334,7 +343,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             },
             { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
           );
-  if (!workspaceGateway) {
+  if (!workspaceCredentialProvider) {
     cacheProviderClient(cacheKey, provider.id, client);
   }
   return client;

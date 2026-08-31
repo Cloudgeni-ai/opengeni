@@ -1,4 +1,8 @@
-import { OPENROUTER_PROVIDER_ID, type ConfiguredModel } from "@opengeni/config";
+import {
+  OPENROUTER_PROVIDER_ID,
+  WORKSPACE_OPENROUTER_PROVIDER_ID,
+  type ConfiguredModel,
+} from "@opengeni/config";
 import {
   ClientModel,
   WorkspaceModelCatalogResponse,
@@ -21,7 +25,8 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
   // id/label and billing metadata; omitting this optional legacy grouping field
   // lets tolerant older contracts parse the additive provider.
   const source =
-    model.providerId === OPENROUTER_PROVIDER_ID
+    model.providerId === OPENROUTER_PROVIDER_ID ||
+    model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
       ? undefined
       : model.credentialSource.kind === "connected_subscription"
         ? model.credentialSource.provider === "xai"
@@ -36,13 +41,15 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     ? { provider: model.providerId, providerLabel: model.providerLabel }
     : model.providerId === OPENROUTER_PROVIDER_ID
       ? { provider: "openrouter", providerLabel: "OpenRouter" }
-      : source === "codex"
-        ? { provider: "codex", providerLabel: "Codex" }
-        : source === "supergrok"
-          ? { provider: "supergrok", providerLabel: "SuperGrok" }
-          : source === "workspace_gateway"
-            ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
-            : { provider: "opengeni", providerLabel: "OpenGeni" };
+      : model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
+        ? { provider: "workspace-openrouter", providerLabel: "Your OpenRouter" }
+        : source === "codex"
+          ? { provider: "codex", providerLabel: "Codex" }
+          : source === "supergrok"
+            ? { provider: "supergrok", providerLabel: "SuperGrok" }
+            : source === "workspace_gateway"
+              ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
+              : { provider: "opengeni", providerLabel: "OpenGeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,

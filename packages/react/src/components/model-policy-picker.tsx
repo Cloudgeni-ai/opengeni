@@ -69,7 +69,7 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
     external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
-    byok: "Billed to your AI Gateway",
+    byok: "Billed to the workspace provider account",
   },
 };
 
@@ -159,7 +159,7 @@ export function BillingClassMark(props: {
     external: "External provider",
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
-    byok: "Bring your own key",
+    byok: "Workspace provider account",
   };
   const label = props["aria-label"] ?? labels[props.billingClass];
   const accessibility =
@@ -198,6 +198,7 @@ function isCodexModel(model: ClientModel): boolean {
 
 function billingClassForMissingSelection(modelId: string): PickerBillingClass {
   if (modelId.startsWith("workspace-gateway/")) return "byok";
+  if (modelId.startsWith("workspace-openrouter/")) return "byok";
   if (modelId.startsWith("openrouter/")) return "external";
   if (modelId.startsWith("codex/")) return "codex_subscription";
   if (modelId.startsWith("supergrok/")) return "supergrok_subscription";

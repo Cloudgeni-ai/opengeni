@@ -1803,6 +1803,9 @@ The runtime secret must provide values such as:
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
 - optional paired `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET` and `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET` for managed social sign-in
 - `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
+- Workspace-owned Vercel AI Gateway and OpenRouter keys are entered by workspace
+  admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
+  those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
 - sandbox backend credentials when required
 
@@ -1948,16 +1951,18 @@ credential. The database document controls model membership and labels. Any
 transport mismatch fails closed instead of forwarding a host credential to a
 database-selected endpoint.
 
-Workspace custom Vercel AI Gateway slugs are not part of this singleton. They
-are admin-managed rows protected by FORCE RLS, overlaid only for that workspace,
-and become selectable only when the encrypted workspace Gateway connection and
-workspace policy are ready. The table is bounded to 100 rows per workspace. If
-a deployment catalog later claims the same Gateway upstream slug, the reviewed
-deployment entry wins and the colliding custom row is omitted from executable
-membership. Removing a custom slug retires its row: it disappears from new
-selection, while already accepted turns and existing-session continuations may
-still resolve the frozen definition. Re-adding the same slug restores that row
-without rewriting its label or definition identity.
+Workspace custom Vercel AI Gateway and OpenRouter slugs are not part of this
+singleton. They are provider-qualified admin-managed rows protected by FORCE
+RLS, overlaid only for that workspace, and become selectable only when the
+matching encrypted workspace provider connection and workspace policy are
+ready. The table is bounded to 100 active rows and 1,000 retained generations
+per provider and workspace. If a deployment catalog later claims the same
+provider/upstream slug, the reviewed deployment entry wins and the colliding
+custom row is omitted from executable membership. Removing a custom slug
+retires its row: it disappears from new selection, while already accepted turns
+and existing-session continuations may still resolve the frozen definition.
+Re-adding the same slug creates a fresh generation without rewriting the
+retired execution authority.
 
 ### Optional OpenSandbox Kubernetes provider
 

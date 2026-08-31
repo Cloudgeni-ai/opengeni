@@ -12665,6 +12665,7 @@ export const workspaceGatewayCustomModels = pgTable(
     workspaceId: uuid("workspace_id")
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
+    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
     version: integer("version").notNull().default(1),
@@ -12684,15 +12685,20 @@ export const workspaceGatewayCustomModels = pgTable(
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
     workspaceUpstream: uniqueIndex("workspace_gateway_custom_models_workspace_upstream_uq")
-      .on(table.workspaceId, table.upstreamModelId)
+      .on(table.workspaceId, table.providerKind, table.upstreamModelId)
       .where(sql`${table.retiredAt} is null`),
     createOperation: uniqueIndex("workspace_gateway_custom_models_create_operation_uq").on(
       table.workspaceId,
+      table.providerKind,
       table.createOperationId,
     ),
     deleteOperation: uniqueIndex("workspace_gateway_custom_models_delete_operation_uq")
-      .on(table.workspaceId, table.deleteOperationId)
+      .on(table.workspaceId, table.providerKind, table.deleteOperationId)
       .where(sql`${table.deleteOperationId} is not null`),
+    providerKindCheck: check(
+      "workspace_gateway_custom_models_provider_kind_chk",
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+    ),
     upstreamCheck: check(
       "workspace_gateway_custom_models_upstream_chk",
       sql`octet_length(${table.upstreamModelId}) between 1 and 238 and ${table.upstreamModelId} ~ '^[!-~]+$' and ${table.upstreamModelId} !~ '[|]'`,

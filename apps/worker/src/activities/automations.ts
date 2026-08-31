@@ -1,4 +1,8 @@
-import { resolveTurnExecutionPolicyV1, WORKSPACE_GATEWAY_MODEL_ID_PREFIX } from "@opengeni/config";
+import {
+  resolveTurnExecutionPolicyV1,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+} from "@opengeni/config";
 import {
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
@@ -96,15 +100,17 @@ export function createAutomationActivities(
 
         const template = accepted.sessionTemplate;
         const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
-        const catalogSettings = requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
-          ? (
-              await resolveWorkspaceCatalogSettings(service.db, catalogSourceSettings, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                retainedProductModelId: requestedModel,
-              })
-            ).settings
-          : deploymentCatalogSettings;
+        const catalogSettings =
+          requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
+          requestedModel.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)
+            ? (
+                await resolveWorkspaceCatalogSettings(service.db, catalogSourceSettings, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  retainedProductModelId: requestedModel,
+                })
+              ).settings
+            : deploymentCatalogSettings;
         const catalogService = { ...service, settings: catalogSettings };
         let model: string;
         try {
@@ -207,7 +213,9 @@ export function createAutomationActivities(
           policyRole: template.policyRole,
           firstPartyMcpPermissions: template.firstPartyMcpPermissions,
           firstPartyMcpTools: template.firstPartyMcpTools,
-          retainWorkspaceGatewayModel: model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX),
+          retainWorkspaceCustomModel:
+            model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
+            model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX),
           createIdempotencyKey: `automation-run:${run.id}`,
           subjectId: accepted.serviceSubjectId,
         });

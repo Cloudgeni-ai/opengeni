@@ -36,11 +36,17 @@ const testFiles =
 for (const testFile of testFiles) {
   const engineIds = testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts")
     ? (["chromium", "firefox", "webkit"] as const)
-    : ([undefined] as const);
+    : testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+      ? (["chromium", "webkit"] as const)
+      : ([undefined] as const);
   for (const engineId of engineIds) {
     // Keep native browser engines in separate Bun processes so one engine's teardown cannot
     // influence another engine's performance or liveness result.
-    const environment = engineId ? { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId } : {};
+    const environment = engineId
+      ? testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+        ? { OPENGENI_AI_GATEWAY_BROWSER_ENGINE: engineId }
+        : { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId }
+      : {};
     const status = runTestFile(testFile, environment);
     if (status !== 0) process.exit(status);
   }

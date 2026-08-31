@@ -26,7 +26,10 @@ import { CodexSubscriptionsCard } from "@/components/codex-connection";
 import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import { ModelAccessPolicySection } from "@/components/model-access-policy";
 import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
-import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
+import {
+  AiGatewayConnectionCard,
+  OpenRouterConnectionCard,
+} from "@/components/ai-gateway-connection";
 import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
@@ -544,6 +547,12 @@ export function WorkspaceSettingsRoute({
               canManage={canManageConnections}
             />
             <AiGatewayConnectionCard
+              workspaceId={workspaceId}
+              canManageConnection={canManageConnections}
+              canManageCustomModels={canRename}
+              onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+            />
+            <OpenRouterConnectionCard
               workspaceId={workspaceId}
               canManageConnection={canManageConnections}
               canManageCustomModels={canRename}

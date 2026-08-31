@@ -2,8 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+  WORKSPACE_OPENROUTER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   resolveModelProvider,
 } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
@@ -124,6 +128,16 @@ beforeAll(async () => {
     kind: "api_key",
     credentialEncrypted: "not-read-by-metadata-only-catalog-tests",
     metadata: { credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE },
+    createdBySubjectId: grant.subjectId,
+  });
+  await createConnection(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: null,
+    providerDomain: WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+    kind: "api_key",
+    credentialEncrypted: "not-read-by-metadata-only-openrouter-catalog-tests",
+    metadata: { credentialRole: WORKSPACE_OPENROUTER_CONNECTION_ROLE },
     createdBySubjectId: grant.subjectId,
   });
 
@@ -270,6 +284,77 @@ describe("workspace Gateway custom model API", () => {
       });
       expect(collision.status).toBe(422);
     }
+  });
+
+  test("keeps OpenRouter custom-model operations and identities independent from Gateway", async () => {
+    if (!app || !grant) return;
+    const curatedOpenRouterUpstreamId = DEFAULT_OPENROUTER_MODEL_ID.slice("openrouter/".length);
+    const curatedCollision = await request("/openrouter-custom-models", {
+      method: "POST",
+      body: {
+        operationId: crypto.randomUUID(),
+        upstreamModelId: curatedOpenRouterUpstreamId,
+      },
+    });
+    expect(curatedCollision.status).toBe(422);
+
+    const upstreamModelId = `meta-llama/llama-4-scout-${crypto.randomUUID()}`;
+    const operationId = crypto.randomUUID();
+    const createBody = {
+      operationId,
+      upstreamModelId,
+      label: "Llama 4 Scout",
+    };
+    const [gatewayCreated, openRouterCreated] = await Promise.all([
+      request("/gateway-custom-models", { method: "POST", body: createBody }),
+      request("/openrouter-custom-models", { method: "POST", body: createBody }),
+    ]);
+    expect(gatewayCreated.status).toBe(201);
+    expect(openRouterCreated.status).toBe(201);
+    const gatewayModel = (await gatewayCreated.json()) as { id: string; version: number };
+    const openRouterModel = (await openRouterCreated.json()) as { id: string; version: number };
+    expect(openRouterModel.id).not.toBe(gatewayModel.id);
+
+    expect(await (await request("/openrouter-custom-models")).json()).toMatchObject({
+      models: [{ id: openRouterModel.id, upstreamModelId, label: "Llama 4 Scout" }],
+    });
+    expect(await (await request("/gateway-custom-models")).json()).toMatchObject({
+      models: [{ id: gatewayModel.id, upstreamModelId, label: "Llama 4 Scout" }],
+    });
+    const catalog = (await (await request("/model-catalog")).json()) as {
+      models: Array<Record<string, unknown>>;
+    };
+    expect(
+      catalog.models.find(
+        (model) => model.id === `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${upstreamModelId}`,
+      ),
+    ).toMatchObject({
+      provider: "workspace-openrouter",
+      providerLabel: "Your OpenRouter",
+      cost: "workspace",
+      billing: { upstreamPayer: "workspace", metering: "external" },
+      credentialReadiness: { status: "ready", basis: "connection" },
+      availability: { selectable: true },
+    });
+    expect(
+      catalog.models.find((model) => model.id === `workspace-gateway/${upstreamModelId}`),
+    ).toMatchObject({ provider: "workspace-gateway", availability: { selectable: true } });
+
+    const deleteOperationId = crypto.randomUUID();
+    const removedOpenRouter = await request(`/openrouter-custom-models/${openRouterModel.id}`, {
+      method: "DELETE",
+      body: { expectedVersion: openRouterModel.version, operationId: deleteOperationId },
+    });
+    expect(removedOpenRouter.status).toBe(204);
+    expect(await (await request("/openrouter-custom-models")).json()).toEqual({ models: [] });
+    expect(await (await request("/gateway-custom-models")).json()).toMatchObject({
+      models: [{ id: gatewayModel.id }],
+    });
+    const removedGateway = await request(`/gateway-custom-models/${gatewayModel.id}`, {
+      method: "DELETE",
+      body: { expectedVersion: gatewayModel.version, operationId: deleteOperationId },
+    });
+    expect(removedGateway.status).toBe(204);
   });
 
   test("creates one exact slug, exposes it only to the workspace catalog, and deletes it", async () => {
@@ -1276,6 +1361,7 @@ describe("workspace Gateway custom model API", () => {
         id,
         account_id,
         workspace_id,
+        provider_kind,
         upstream_model_id,
         label,
         create_operation_id,
@@ -1286,6 +1372,7 @@ describe("workspace Gateway custom model API", () => {
         gen_random_uuid(),
         ${grant.accountId}::uuid,
         ${grant.workspaceId}::uuid,
+        'vercel_gateway',
         'limit/provider-model-' || ordinal::text,
         null,
         gen_random_uuid(),
@@ -1293,6 +1380,15 @@ describe("workspace Gateway custom model API", () => {
         ${grant.subjectId}
       from generate_series(1, ${MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS - 1}) as ordinal
     `;
+
+    const independentOpenRouter = await request("/openrouter-custom-models", {
+      method: "POST",
+      body: {
+        operationId: crypto.randomUUID(),
+        upstreamModelId: "limit/openrouter-independent",
+      },
+    });
+    expect(independentOpenRouter.status).toBe(201);
 
     const results = await Promise.all(
       ["limit/provider-model-final-a", "limit/provider-model-final-b"].map(
@@ -1324,6 +1420,7 @@ describe("workspace Gateway custom model API", () => {
         id,
         account_id,
         workspace_id,
+        provider_kind,
         upstream_model_id,
         label,
         create_operation_id,
@@ -1335,6 +1432,7 @@ describe("workspace Gateway custom model API", () => {
         gen_random_uuid(),
         ${grant.accountId}::uuid,
         ${grant.workspaceId}::uuid,
+        'vercel_gateway',
         'history/provider-model-' || ordinal::text,
         null,
         gen_random_uuid(),
@@ -1343,6 +1441,15 @@ describe("workspace Gateway custom model API", () => {
         clock_timestamp()
       from generate_series(1, ${MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS}) as ordinal
     `;
+
+    const independentOpenRouter = await request("/openrouter-custom-models", {
+      method: "POST",
+      body: {
+        operationId: crypto.randomUUID(),
+        upstreamModelId: "history/openrouter-independent",
+      },
+    });
+    expect(independentOpenRouter.status).toBe(201);
 
     const overflow = await request("/gateway-custom-models", {
       method: "POST",

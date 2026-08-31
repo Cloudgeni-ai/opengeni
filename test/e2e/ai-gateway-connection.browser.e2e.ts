@@ -2,16 +2,27 @@ import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
+import {
+  chromium,
+  webkit,
+  type Browser,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from "playwright";
 
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const fixturePath = "/test/ai-gateway-connection.html";
-const evidenceDir = new URL("../../.agent/evidence/ai-gateway-connection/", import.meta.url)
-  .pathname;
+const browserEngine =
+  process.env.OPENGENI_AI_GATEWAY_BROWSER_ENGINE === "webkit" ? "webkit" : "chromium";
+const evidenceDir = new URL(
+  `../../.agent/evidence/ai-gateway-connection/${browserEngine}/`,
+  import.meta.url,
+).pathname;
 
-describe("AI Gateway custom model settings in Chromium", () => {
+describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
   let browser: Browser;
   let context: BrowserContext;
   let page: Page;
@@ -46,10 +57,12 @@ describe("AI Gateway custom model settings in Chromium", () => {
         timeoutMs: 45_000,
       },
     );
-    const executablePath = existsSync("/usr/local/bin/chromium")
-      ? "/usr/local/bin/chromium"
-      : undefined;
-    browser = await chromium.launch(executablePath ? { executablePath } : undefined);
+    const executablePath =
+      browserEngine === "chromium" && existsSync("/usr/local/bin/chromium")
+        ? "/usr/local/bin/chromium"
+        : undefined;
+    const browserType = browserEngine === "webkit" ? webkit : chromium;
+    browser = await browserType.launch(executablePath ? { executablePath } : undefined);
     context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
     });
@@ -62,25 +75,31 @@ describe("AI Gateway custom model settings in Chromium", () => {
 
   test("supports exact add/remove flows with a polished desktop layout", async () => {
     await openFixture(page, baseUrl);
-    await page.locator("summary").click();
-    await page.getByText("2 models", { exact: true }).waitFor();
-    expect(await page.getByText("Connected", { exact: true }).count()).toBe(1);
-    expect(await page.getByLabel("Vercel AI Gateway model slug").count()).toBe(1);
+    const gatewayCard = providerCard(page, "vercel-ai-gateway");
+    await gatewayCard.locator("summary").click();
+    await gatewayCard.getByText("2 models", { exact: true }).waitFor();
+    expect(await gatewayCard.getByText("Connected", { exact: true }).count()).toBe(1);
+    expect(await gatewayCard.getByLabel("Vercel AI Gateway model slug").count()).toBe(1);
 
-    const slug = page.getByLabel("Vercel AI Gateway model slug");
-    const add = page.getByRole("button", { name: "Add model" });
+    const slug = gatewayCard.getByLabel("Vercel AI Gateway model slug");
+    const add = gatewayCard.getByRole("button", { name: "Add model" });
     await slug.fill("anthropic/claude sonnet");
     expect(await add.isDisabled()).toBe(true);
+    expect(await slug.getAttribute("aria-invalid")).toBe("true");
     await page
       .getByText("Use the exact printable slug with no spaces or |.", {
         exact: true,
       })
       .waitFor();
+    const helpId = await slug.getAttribute("aria-describedby");
+    expect(helpId).not.toBeNull();
+    expect(await page.locator(`[id="${helpId}"]`).getAttribute("aria-live")).toBe("polite");
 
     await slug.fill("fixture/fail-add");
     await add.click();
     await expectReceipt(page, {
       action: "create-model-error",
+      provider: "gateway",
       upstreamModelId: "fixture/fail-add",
     });
     await waitForAriaLabelFocus(page, "Vercel AI Gateway model slug");
@@ -93,9 +112,10 @@ describe("AI Gateway custom model settings in Chromium", () => {
     await waitForAriaLabelFocus(page, "Vercel AI Gateway model slug");
     await expectReceipt(page, {
       action: "create-model",
+      provider: "gateway",
       upstreamModelId: "xai/grok-4.1-fast",
     });
-    await page.getByRole("button", { name: "Remove xai/grok-4.1-fast" }).click();
+    await gatewayCard.getByRole("button", { name: "Remove xai/grok-4.1-fast" }).click();
     const removeDialog = page.getByRole("dialog");
     await removeDialog
       .getByRole("heading", {
@@ -109,8 +129,47 @@ describe("AI Gateway custom model settings in Chromium", () => {
       )
       .waitFor();
     await removeDialog.getByRole("button", { name: "Remove model", exact: true }).click();
-    await page.getByText("xai/grok-4.1-fast", { exact: true }).waitFor({ state: "detached" });
+    await gatewayCard
+      .getByText("xai/grok-4.1-fast", { exact: true })
+      .waitFor({ state: "detached" });
     await waitForAriaLabelFocus(page, "Remove deepseek/deepseek-v3.2");
+
+    const openRouterCard = providerCard(page, "openrouter");
+    await openRouterCard.locator("summary").click();
+    await openRouterCard.getByText("2 models", { exact: true }).waitFor();
+    await openRouterCard
+      .getByText("The workspace's OpenRouter account is billed directly.", { exact: false })
+      .waitFor();
+    await openRouterCard
+      .getByText("separate from deployment-provided OpenRouter models", { exact: false })
+      .waitFor();
+
+    const openRouterSlug = openRouterCard.getByLabel("OpenRouter model slug");
+    const openRouterAdd = openRouterCard.getByRole("button", { name: "Add model" });
+    const focusTarget = page.getByRole("button", { name: "Fixture focus target" });
+
+    await openRouterSlug.fill("fixture/deferred-success");
+    await openRouterAdd.click();
+    await focusTarget.focus();
+    await expectReceipt(page, {
+      action: "create-model",
+      provider: "openrouter",
+      upstreamModelId: "fixture/deferred-success",
+    });
+    await openRouterCard.getByText("fixture/deferred-success", { exact: true }).waitFor();
+    await waitForAriaLabelFocus(page, "Fixture focus target");
+
+    await openRouterSlug.fill("fixture/deferred-failure");
+    await openRouterAdd.click();
+    await focusTarget.focus();
+    await expectReceipt(page, {
+      action: "create-model-error",
+      provider: "openrouter",
+      upstreamModelId: "fixture/deferred-failure",
+    });
+    await waitForEnabled(openRouterSlug);
+    await waitForAriaLabelFocus(page, "Fixture focus target");
+    expect(await openRouterSlug.inputValue()).toBe("fixture/deferred-failure");
 
     await assertAccessibleAndBounded(page);
     await page.screenshot({
@@ -128,13 +187,14 @@ describe("AI Gateway custom model settings in Chromium", () => {
     const mobilePage = await mobileContext.newPage();
     try {
       await openFixture(mobilePage, baseUrl);
-      await mobilePage.locator("summary").click();
-      await mobilePage.getByText("Models from your Gateway", { exact: true }).waitFor();
+      const gatewayCard = providerCard(mobilePage, "vercel-ai-gateway");
+      await gatewayCard.locator("summary").click();
+      await gatewayCard.getByText("Models from your Gateway", { exact: true }).waitFor();
 
-      const slug = mobilePage.getByLabel("Vercel AI Gateway model slug");
-      const add = mobilePage.getByRole("button", { name: "Add model" });
-      const key = mobilePage.getByLabel("Vercel AI Gateway key");
-      const remove = mobilePage.getByRole("button", {
+      const slug = gatewayCard.getByLabel("Vercel AI Gateway model slug");
+      const add = gatewayCard.getByRole("button", { name: "Add model" });
+      const key = gatewayCard.getByLabel("Vercel AI Gateway key");
+      const remove = gatewayCard.getByRole("button", {
         name: "Remove deepseek/deepseek-v3.2",
       });
       expect(await slug.inputValue()).toBe("");
@@ -168,9 +228,10 @@ describe("AI Gateway custom model settings in Chromium", () => {
       await add.click();
       await expectReceipt(mobilePage, {
         action: "create-model",
+        provider: "gateway",
         upstreamModelId: maximumSlug,
       });
-      await mobilePage.getByRole("button", { name: `Remove ${maximumSlug}` }).click();
+      await gatewayCard.getByRole("button", { name: `Remove ${maximumSlug}` }).click();
       const expectedTitle = `Remove Gateway model “${maximumSlug}”?`;
       const dialog = mobilePage.getByRole("dialog", {
         name: expectedTitle,
@@ -195,6 +256,11 @@ async function openFixture(page: Page, baseUrl: string): Promise<void> {
   await page.goto(`${baseUrl}${fixturePath}`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "AI model connections", exact: true }).waitFor();
   await page.getByText("Bring your own Vercel AI Gateway", { exact: true }).waitFor();
+  await page.getByText("Bring your own OpenRouter", { exact: true }).waitFor();
+}
+
+function providerCard(page: Page, provider: "vercel-ai-gateway" | "openrouter"): Locator {
+  return page.getByTestId(`${provider}-connection-card`);
 }
 
 async function expectReceipt(page: Page, expected: Record<string, unknown>): Promise<void> {
@@ -222,6 +288,15 @@ async function waitForAriaLabelFocus(page: Page, ariaLabel: string): Promise<voi
     (expectedAriaLabel) => document.activeElement?.getAttribute("aria-label") === expectedAriaLabel,
     ariaLabel,
   );
+}
+
+async function waitForEnabled(locator: Locator): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await locator.isEnabled()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  expect(await locator.isEnabled()).toBe(true);
 }
 
 async function assertDialogBounded(page: Page, dialog: Locator): Promise<void> {

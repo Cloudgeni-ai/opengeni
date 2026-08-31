@@ -3,12 +3,16 @@ import {
   configuredGatewayWorkspaceProductModelIds,
   configuredModels,
   configuredModelNotes,
+  configuredOpenRouterWorkspaceProductModelIds,
   configuredProviders,
   validateModelCatalogSettings,
   withCodexCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
+  withWorkspaceOpenRouterCatalogProvider,
   withXaiSubscriptionCatalogProvider,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_PROVIDER_ID,
   type ConfiguredModel,
   type Settings,
 } from "@opengeni/config";
@@ -21,7 +25,9 @@ import {
 import {
   getDeploymentModelCatalog,
   getWorkspaceGatewayCustomModelForExecution,
+  getWorkspaceOpenRouterCustomModelForExecution,
   listWorkspaceGatewayCustomModels,
+  listWorkspaceOpenRouterCustomModels,
   type Database,
 } from "@opengeni/db";
 
@@ -42,6 +48,41 @@ export function isWorkspaceGatewayCustomModelId(settings: Settings, modelId: str
     modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) &&
     !configuredGatewayWorkspaceProductModelIds(settings).includes(modelId)
   );
+}
+
+export function isWorkspaceOpenRouterCustomModelId(settings: Settings, modelId: string): boolean {
+  return (
+    modelId.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) &&
+    !configuredOpenRouterWorkspaceProductModelIds(settings).includes(modelId)
+  );
+}
+
+export type WorkspaceCustomModelReference = {
+  providerKind: "vercel_gateway" | "openrouter";
+  upstreamModelId: string;
+};
+
+export function workspaceCustomModelReference(
+  settings: Settings,
+  modelId: string,
+): WorkspaceCustomModelReference | null {
+  if (isWorkspaceGatewayCustomModelId(settings, modelId)) {
+    return {
+      providerKind: "vercel_gateway",
+      upstreamModelId: modelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length),
+    };
+  }
+  if (isWorkspaceOpenRouterCustomModelId(settings, modelId)) {
+    return {
+      providerKind: "openrouter",
+      upstreamModelId: modelId.slice(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX.length),
+    };
+  }
+  return null;
+}
+
+export function isWorkspaceCustomModelId(settings: Settings, modelId: string): boolean {
+  return workspaceCustomModelReference(settings, modelId) !== null;
 }
 
 /**
@@ -92,42 +133,88 @@ export async function resolveWorkspaceCatalogSettings(
     retainedProductModelIds?: readonly (string | null | undefined)[];
   },
 ): Promise<ResolvedCatalogSettings> {
-  const retainedUpstreamModelIds = [
+  const retainedProductModelIds = [
     ...(input.retainedProductModelIds ?? []),
     input.retainedProductModelId,
-  ].flatMap((productModelId) =>
-    productModelId?.startsWith("workspace-gateway/")
-      ? [productModelId.slice("workspace-gateway/".length)]
+  ];
+  const retainedGatewayUpstreamModelIds = retainedProductModelIds.flatMap((productModelId) =>
+    productModelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)
+      ? [productModelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length)]
       : [],
   );
-  const [resolved, activeCustomModels, ...retainedCustomModels] = await Promise.all([
+  const retainedOpenRouterUpstreamModelIds = retainedProductModelIds.flatMap((productModelId) =>
+    productModelId?.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)
+      ? [productModelId.slice(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX.length)]
+      : [],
+  );
+  const [
+    resolved,
+    activeGatewayCustomModels,
+    activeOpenRouterCustomModels,
+    retainedGatewayCustomModels,
+    retainedOpenRouterCustomModels,
+  ] = await Promise.all([
     resolveCatalogSettings(db, envSettings),
     listWorkspaceGatewayCustomModels(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
     }),
-    ...[...new Set(retainedUpstreamModelIds)].map(
-      async (upstreamModelId) =>
-        await getWorkspaceGatewayCustomModelForExecution(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          upstreamModelId,
-        }),
+    listWorkspaceOpenRouterCustomModels(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    }),
+    Promise.all(
+      [...new Set(retainedGatewayUpstreamModelIds)].map(
+        async (upstreamModelId) =>
+          await getWorkspaceGatewayCustomModelForExecution(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId,
+          }),
+      ),
+    ),
+    Promise.all(
+      [...new Set(retainedOpenRouterUpstreamModelIds)].map(
+        async (upstreamModelId) =>
+          await getWorkspaceOpenRouterCustomModelForExecution(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId,
+          }),
+      ),
     ),
   ]);
-  const customModels = [...activeCustomModels];
-  const includedUpstreamModelIds = new Set(
-    activeCustomModels.map((model) => model.upstreamModelId),
-  );
-  for (const retainedCustomModel of retainedCustomModels) {
-    if (retainedCustomModel && !includedUpstreamModelIds.has(retainedCustomModel.upstreamModelId)) {
-      customModels.push(retainedCustomModel);
-      includedUpstreamModelIds.add(retainedCustomModel.upstreamModelId);
+  const includeRetainedModels = <T extends { upstreamModelId: string }>(
+    activeModels: readonly T[],
+    retainedModels: readonly (T | null)[],
+  ): T[] => {
+    const customModels = [...activeModels];
+    const includedUpstreamModelIds = new Set(activeModels.map((model) => model.upstreamModelId));
+    for (const retainedCustomModel of retainedModels) {
+      if (
+        retainedCustomModel &&
+        !includedUpstreamModelIds.has(retainedCustomModel.upstreamModelId)
+      ) {
+        customModels.push(retainedCustomModel);
+        includedUpstreamModelIds.add(retainedCustomModel.upstreamModelId);
+      }
     }
-  }
+    return customModels;
+  };
+  const gatewayCustomModels = includeRetainedModels(
+    activeGatewayCustomModels,
+    retainedGatewayCustomModels,
+  );
+  const openRouterCustomModels = includeRetainedModels(
+    activeOpenRouterCustomModels,
+    retainedOpenRouterCustomModels,
+  );
   return {
     ...resolved,
-    settings: withWorkspaceGatewayCatalogProvider(resolved.settings, customModels),
+    settings: withWorkspaceOpenRouterCatalogProvider(
+      withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
+      openRouterCustomModels,
+    ),
   };
 }
 
@@ -154,7 +241,12 @@ export type WorkspaceModelSelectionInput = {
   codexSubscriptionActive: boolean;
   xaiSubscriptionActive?: boolean;
   workspaceGatewayConnectionActive?: boolean;
+  workspaceOpenRouterConnectionActive?: boolean;
   workspaceGatewayCustomModels?: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[];
+  workspaceOpenRouterCustomModels?: readonly {
     upstreamModelId: string;
     label?: string | null;
   }[];
@@ -239,6 +331,7 @@ function credentialReadinessFor(input: {
   codexSubscriptionActive: boolean;
   xaiSubscriptionActive: boolean;
   workspaceGatewayConnectionActive: boolean;
+  workspaceOpenRouterConnectionActive: boolean;
   observation: ModelCredentialReadinessObservation | undefined;
   nowMs: number;
   maxAgeMs: number;
@@ -257,7 +350,11 @@ function credentialReadinessFor(input: {
         };
   }
   if (source.kind === "workspace_connection") {
-    return input.workspaceGatewayConnectionActive
+    const connectionActive =
+      input.model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
+        ? input.workspaceOpenRouterConnectionActive
+        : input.workspaceGatewayConnectionActive;
+    return connectionActive
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {
           status: "not_ready",
@@ -415,9 +512,9 @@ export function resolveWorkspaceModelSelection(
   const xaiSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(codexSettings)
     : codexSettings;
-  const catalogSettings = withWorkspaceGatewayCatalogProvider(
-    xaiSettings,
-    input.workspaceGatewayCustomModels ?? [],
+  const catalogSettings = withWorkspaceOpenRouterCatalogProvider(
+    withWorkspaceGatewayCatalogProvider(xaiSettings, input.workspaceGatewayCustomModels ?? []),
+    input.workspaceOpenRouterCustomModels ?? [],
   );
   const providers = new Map(
     configuredProviders(catalogSettings).map((provider) => [provider.id, provider]),
@@ -446,6 +543,7 @@ export function resolveWorkspaceModelSelection(
       codexSubscriptionActive: input.codexSubscriptionActive,
       xaiSubscriptionActive: input.xaiSubscriptionActive === true,
       workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
+      workspaceOpenRouterConnectionActive: input.workspaceOpenRouterConnectionActive === true,
       observation: input.credentialReadinessObservations?.[model.definitionVersion],
       nowMs,
       maxAgeMs,

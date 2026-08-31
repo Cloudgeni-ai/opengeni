@@ -28,7 +28,7 @@ const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   external: "External",
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
-  byok: "Your Gateway",
+  byok: "Workspace providers",
 };
 
 const AVAILABILITY_REASON_LABELS: Record<string, string> = {
@@ -42,6 +42,9 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
+  if (model.provider === "workspace-gateway" || model.provider === "workspace-openrouter") {
+    return "byok";
+  }
   return modelPickerBillingClassFor(model);
 }
 
@@ -122,7 +125,7 @@ export function payerSummaryForModel(model: ClientModel): string {
       : "Codex subscription · external billing";
   }
   if (model.cost === "workspace") {
-    return "Billed to your AI Gateway";
+    return workspaceProviderPayerSummary(model);
   }
 
   // Older client-config payloads do not carry `cost`; preserve their existing
@@ -140,7 +143,7 @@ export function payerSummaryForModel(model: ClientModel): string {
       : "Codex subscription · external billing";
   }
   if (billing.upstreamPayer === "workspace") {
-    return "Billed to your AI Gateway";
+    return workspaceProviderPayerSummary(model);
   }
   return "External provider · no OpenGeni credits";
 }
@@ -158,7 +161,13 @@ export function advancedSourceSummary(model: ClientModel): string | null {
       : "Connected Codex subscription";
   }
   if (source.kind === "workspace_connection") {
-    return "Workspace AI Gateway";
+    if (model.provider === "workspace-openrouter") {
+      return "Workspace OpenRouter connection";
+    }
+    if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
+      return "Workspace Vercel AI Gateway";
+    }
+    return "Workspace provider connection";
   }
   if (source.kind === "deployment") {
     return source.mechanism === "azure_ad_bearer"
@@ -166,6 +175,16 @@ export function advancedSourceSummary(model: ClientModel): string | null {
       : "Deployment API key";
   }
   return null;
+}
+
+function workspaceProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "workspace-openrouter") {
+    return "Billed to the workspace OpenRouter account";
+  }
+  if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
+    return "Billed to the workspace Vercel account";
+  }
+  return "Billed to the workspace provider account";
 }
 
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {

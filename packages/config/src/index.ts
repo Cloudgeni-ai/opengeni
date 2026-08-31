@@ -1833,6 +1833,7 @@ export const RegistryProviderKind = z.enum([
   "xai-subscription",
   "vercel-gateway-managed",
   "vercel-gateway-workspace",
+  "openrouter-workspace",
 ]);
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
@@ -1960,6 +1961,8 @@ export const WORKSPACE_GATEWAY_PROVIDER_ID = "workspace-gateway" as const;
 export const WORKSPACE_GATEWAY_MODEL_ID_PREFIX = "workspace-gateway/" as const;
 export const OPENROUTER_PROVIDER_ID = "openrouter" as const;
 export const OPENROUTER_MODEL_ID_PREFIX = "openrouter/" as const;
+export const WORKSPACE_OPENROUTER_PROVIDER_ID = "workspace-openrouter" as const;
+export const WORKSPACE_OPENROUTER_MODEL_ID_PREFIX = "workspace-openrouter/" as const;
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1" as const;
 
 const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
@@ -1970,6 +1973,7 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   OPENGENI_GATEWAY_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   OPENROUTER_PROVIDER_ID,
+  WORKSPACE_OPENROUTER_PROVIDER_ID,
 ]);
 
 export const ModelCostClass = z.enum(["free", "credits"]);
@@ -2136,7 +2140,11 @@ export const ModelCatalogDocument = z
         });
       }
       if (productIds.has(id)) {
-        context.addIssue({ code: "custom", path, message: `duplicate product id ${id}` });
+        context.addIssue({
+          code: "custom",
+          path,
+          message: `duplicate product id ${id}`,
+        });
       }
       productIds.add(id);
     };
@@ -2354,6 +2362,8 @@ export const VERCEL_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1" as c
 export const VERCEL_AI_GATEWAY_AI_SDK_BASE_URL = "https://ai-gateway.vercel.sh/v4/ai" as const;
 export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as const;
 export const VERCEL_AI_GATEWAY_CONNECTION_ROLE = "vercel_ai_gateway" as const;
+export const WORKSPACE_OPENROUTER_CONNECTION_DOMAIN = "openrouter.ai" as const;
+export const WORKSPACE_OPENROUTER_CONNECTION_ROLE = "openrouter" as const;
 
 export const CODEX_REALTIME_MODEL_ID = "gpt-live-1-boulder-alpha" as const;
 export const SUPERGROK_REALTIME_MODEL_ID = "supergrok/grok-voice-think-fast-2.0" as const;
@@ -2509,6 +2519,24 @@ function configuredOpenRouterCatalogModels(settings: Settings): OpenRouterCatalo
     return [...OPENGENI_OPENROUTER_MODELS];
   }
   return z.array(OpenRouterCatalogModel).parse(JSON.parse(settings.resolvedOpenRouterModelsJson));
+}
+
+export function configuredOpenRouterUpstreamModelIds(settings: Settings): string[] {
+  return configuredOpenRouterCatalogModels(settings).map((model) => model.upstreamModelId);
+}
+
+function workspaceOpenRouterProductId(modelId: string): string {
+  return `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${
+    modelId.startsWith(OPENROUTER_MODEL_ID_PREFIX)
+      ? modelId.slice(OPENROUTER_MODEL_ID_PREFIX.length)
+      : modelId
+  }`;
+}
+
+export function configuredOpenRouterWorkspaceProductModelIds(settings: Settings): string[] {
+  return configuredOpenRouterCatalogModels(settings).flatMap((model) =>
+    [model.upstreamModelId, ...model.aliases].map(workspaceOpenRouterProductId),
+  );
 }
 
 /**
@@ -3602,7 +3630,11 @@ export function gatewayRequestPolicyForUpstreamModel(
 
 function gatewayModelCapabilities(
   settings: Settings,
-  input: { implicitCaching: boolean; vision: boolean; inputFileMediaTypes?: string[] },
+  input: {
+    implicitCaching: boolean;
+    vision: boolean;
+    inputFileMediaTypes?: string[];
+  },
 ): ModelCapabilitiesV1 {
   const legacy = legacyModelCapabilities(settings, {
     reasoningEffort: true,
@@ -3626,6 +3658,25 @@ function gatewayModelCapabilities(
   });
 }
 
+function openRouterCustomModelCapabilities(settings: Settings): ModelCapabilitiesV1 {
+  const legacy = legacyModelCapabilities(settings, {
+    reasoningEffort: false,
+    hostedWebSearch: false,
+  });
+  return normalizeCapabilities({
+    ...legacy,
+    functionCalling: { upstream: "supported", runnable: true },
+    inputModalities: ["text"],
+    inputFileMediaTypes: [],
+    transports: {
+      ...legacy.transports,
+      sse: { upstream: "supported", runnable: true },
+    },
+    promptCaching: { upstream: "unsupported", runnable: false, mode: "none" },
+    latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+  });
+}
+
 function gatewayRegistryProvider(
   settings: Settings,
   input:
@@ -3633,7 +3684,10 @@ function gatewayRegistryProvider(
     | {
         kind: "vercel-gateway-workspace";
         apiKey?: string;
-        customModels?: readonly { upstreamModelId: string; label?: string | null }[];
+        customModels?: readonly {
+          upstreamModelId: string;
+          label?: string | null;
+        }[];
       },
 ): InternalRegistryProvider {
   const workspace = input.kind === "vercel-gateway-workspace";
@@ -3706,40 +3760,85 @@ function gatewayRegistryProvider(
   };
 }
 
-function openRouterRegistryProvider(settings: Settings): InternalRegistryProvider | null {
-  if (!settings.openrouterApiKey) return null;
-  const models = configuredOpenRouterCatalogModels(settings).map((model) => ({
-    id: `${OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`,
-    upstreamModelId: model.upstreamModelId,
-    aliases: model.aliases,
-    label: model.label,
-    ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
-    capabilities: model.capabilities,
-    ...(model.contextWindowTokens === undefined
-      ? {}
-      : { contextWindowTokens: model.contextWindowTokens }),
-    ...(model.effectiveContextWindowTokens === undefined
-      ? {}
-      : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
-    ...(model.autoCompactTokenLimit === undefined
-      ? {}
-      : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
-    toolOutputTruncationTokens:
-      model.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens,
-  }));
+function openRouterRegistryProvider(
+  settings: Settings,
+  input:
+    | { kind: "openrouter-managed"; apiKey: string }
+    | {
+        kind: "openrouter-workspace";
+        apiKey?: string;
+        customModels?: readonly {
+          upstreamModelId: string;
+          label?: string | null;
+        }[];
+      },
+): InternalRegistryProvider | null {
+  const workspace = input.kind === "openrouter-workspace";
+  const curated = configuredOpenRouterCatalogModels(settings);
+  const upstreamIds = new Set(curated.map((model) => model.upstreamModelId));
+  const productIds = new Set(
+    parseModelProvidersJson(settings.modelProvidersJson)
+      .filter((provider) => provider.id !== WORKSPACE_OPENROUTER_PROVIDER_ID)
+      .flatMap((provider) =>
+        provider.models.flatMap((model) => [model.id, ...(model.aliases ?? [])]),
+      ),
+  );
+  const models: RegistryProvider["models"] = curated.map((model) => {
+    const id = workspace
+      ? workspaceOpenRouterProductId(model.upstreamModelId)
+      : `${OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`;
+    const aliases = workspace ? model.aliases.map(workspaceOpenRouterProductId) : model.aliases;
+    productIds.add(id);
+    for (const alias of aliases) productIds.add(alias);
+    return {
+      id,
+      upstreamModelId: model.upstreamModelId,
+      aliases,
+      label: model.label,
+      ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+      capabilities: model.capabilities,
+      ...(model.contextWindowTokens === undefined
+        ? {}
+        : { contextWindowTokens: model.contextWindowTokens }),
+      ...(model.effectiveContextWindowTokens === undefined
+        ? {}
+        : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
+      ...(model.autoCompactTokenLimit === undefined
+        ? {}
+        : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
+      toolOutputTruncationTokens:
+        model.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens,
+    };
+  });
+  if (workspace) {
+    for (const custom of input.customModels ?? []) {
+      const productId = `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
+      if (upstreamIds.has(custom.upstreamModelId) || productIds.has(productId)) continue;
+      upstreamIds.add(custom.upstreamModelId);
+      productIds.add(productId);
+      models.push({
+        id: productId,
+        upstreamModelId: custom.upstreamModelId,
+        aliases: [],
+        label: custom.label?.trim() || custom.upstreamModelId,
+        capabilities: openRouterCustomModelCapabilities(settings),
+        toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      });
+    }
+  }
   if (models.length === 0) return null;
   const defaultHeaders: Record<string, string> = {
     "x-title": "OpenGeni",
     ...(settings.publicBaseUrl ? { "http-referer": settings.publicBaseUrl } : {}),
   };
   return {
-    kind: "openrouter-managed",
-    id: OPENROUTER_PROVIDER_ID,
-    label: "OpenRouter",
+    kind: input.kind,
+    id: workspace ? WORKSPACE_OPENROUTER_PROVIDER_ID : OPENROUTER_PROVIDER_ID,
+    label: workspace ? "Your OpenRouter" : "OpenRouter",
     api: "chat",
     wireProfile: "openai",
     baseUrl: OPENROUTER_BASE_URL,
-    apiKey: settings.openrouterApiKey,
+    ...(input.apiKey ? { apiKey: input.apiKey } : {}),
     defaultHeaders,
     publicDefaultHeaderNames: Object.keys(defaultHeaders),
     models,
@@ -3757,7 +3856,12 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
       }),
     );
   }
-  const openrouter = openRouterRegistryProvider(settings);
+  const openrouter = settings.openrouterApiKey
+    ? openRouterRegistryProvider(settings, {
+        kind: "openrouter-managed",
+        apiKey: settings.openrouterApiKey,
+      })
+    : null;
   if (openrouter) injected.push(openrouter);
   return injected;
 }
@@ -3765,7 +3869,10 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
 /** Static catalog overlay; it contains no concrete workspace credential. */
 export function withWorkspaceGatewayCatalogProvider(
   settings: Settings,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson);
   const withoutWorkspace = providers.filter(
@@ -3777,7 +3884,10 @@ export function withWorkspaceGatewayCatalogProvider(
     ...settings,
     modelProvidersJson: JSON.stringify([
       ...withoutWorkspace,
-      gatewayRegistryProvider(settings, { kind: "vercel-gateway-workspace", customModels }),
+      gatewayRegistryProvider(settings, {
+        kind: "vercel-gateway-workspace",
+        customModels,
+      }),
     ]),
   };
 }
@@ -3786,7 +3896,10 @@ export function withWorkspaceGatewayCatalogProvider(
 export function withWorkspaceGatewayCredential(
   settings: Settings,
   apiKey: string,
-  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
 ): Settings {
   if (!apiKey.trim()) {
     throw new Error("workspace AI Gateway credential is empty");
@@ -3794,6 +3907,48 @@ export function withWorkspaceGatewayCredential(
   const catalogSettings = withWorkspaceGatewayCatalogProvider(settings, customModels);
   const providers = parseModelProvidersJson(catalogSettings.modelProvidersJson).map((provider) =>
     provider.id === WORKSPACE_GATEWAY_PROVIDER_ID ? { ...provider, apiKey } : provider,
+  );
+  return { ...catalogSettings, modelProvidersJson: JSON.stringify(providers) };
+}
+
+/** Static OpenRouter catalog overlay; it contains no concrete workspace credential. */
+export function withWorkspaceOpenRouterCatalogProvider(
+  settings: Settings,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  const withoutWorkspace = providers.filter(
+    (provider) => provider.id !== WORKSPACE_OPENROUTER_PROVIDER_ID,
+  );
+  const provider = openRouterRegistryProvider(settings, {
+    kind: "openrouter-workspace",
+    customModels,
+  });
+  if (!provider) return settings;
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify([...withoutWorkspace, provider]),
+  };
+}
+
+/** Runtime overlay after the worker resolves the workspace's encrypted OpenRouter key. */
+export function withWorkspaceOpenRouterCredential(
+  settings: Settings,
+  apiKey: string,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
+  if (!apiKey.trim()) {
+    throw new Error("workspace OpenRouter credential is empty");
+  }
+  const catalogSettings = withWorkspaceOpenRouterCatalogProvider(settings, customModels);
+  const providers = parseModelProvidersJson(catalogSettings.modelProvidersJson).map((provider) =>
+    provider.id === WORKSPACE_OPENROUTER_PROVIDER_ID ? { ...provider, apiKey } : provider,
   );
   return { ...catalogSettings, modelProvidersJson: JSON.stringify(providers) };
 }
@@ -4006,6 +4161,7 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "xai-subscription":
       return { kind: "connected_subscription", provider: "xai" };
     case "vercel-gateway-workspace":
+    case "openrouter-workspace":
       return { kind: "workspace_connection", mechanism: "api_key" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -4027,6 +4183,7 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "xai-subscription":
       return { upstreamPayer: "connected_subscription", metering: "external" };
     case "vercel-gateway-workspace":
+    case "openrouter-workspace":
       return { upstreamPayer: "workspace", metering: "external" };
     case "api-key":
     case "vercel-gateway-managed":
@@ -4157,7 +4314,9 @@ function legacyImplicitOpenAiDefinitionVersionFor(
 ): string | null {
   if (provider.wireProfile !== "openai") return null;
   const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
-  return definitionVersionFor(modelWithoutVersion, provider, { includeWireProfile: false });
+  return definitionVersionFor(modelWithoutVersion, provider, {
+    includeWireProfile: false,
+  });
 }
 
 /**
@@ -4317,8 +4476,14 @@ export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings
         { id: "standard", upstream: "supported", runnable: true },
         { id: "fast", upstream: "supported", runnable: true },
       ];
-      capabilities.hostedTools.xSearch = { upstream: "supported", runnable: true };
-      capabilities.hostedTools.imageGeneration = { upstream: "supported", runnable: true };
+      capabilities.hostedTools.xSearch = {
+        upstream: "supported",
+        runnable: true,
+      };
+      capabilities.hostedTools.imageGeneration = {
+        upstream: "supported",
+        runnable: true,
+      };
       return {
         id: `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}${slug}`,
         upstreamModelId: slug,
@@ -4336,7 +4501,10 @@ export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings
       };
     }),
   };
-  return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify([...providers, provider]),
+  };
 }
 
 /**
@@ -4362,6 +4530,9 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   }
   if (canonicalModelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return WORKSPACE_GATEWAY_PROVIDER_ID;
+  }
+  if (canonicalModelId.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)) {
+    return WORKSPACE_OPENROUTER_PROVIDER_ID;
   }
   const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
   return configured?.providerId ?? builtinProviderId(settings);
@@ -4674,6 +4845,12 @@ function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Se
       return settings;
     }
     return withWorkspaceGatewayCatalogProvider(settings);
+  }
+  if (modelId.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)) {
+    if (resolveModelProvider(settings, modelId)) {
+      return settings;
+    }
+    return withWorkspaceOpenRouterCatalogProvider(settings);
   }
   return settings;
 }
@@ -6563,6 +6740,7 @@ export function validateModelCatalogSettings(
     if (
       provider.kind === "vercel-gateway-managed" ||
       provider.kind === "vercel-gateway-workspace" ||
+      provider.kind === "openrouter-workspace" ||
       provider.kind === "xai-subscription"
     ) {
       throw new Error(
@@ -6628,6 +6806,7 @@ export function validateModelCatalogSettings(
     const productId = `${OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`;
     deploymentProductIds.add(productId);
     noteProductIds.add(productId);
+    noteProductIds.add(`${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`);
   }
   if (settings.modelCatalogSource === "code") {
     for (const productId of Object.keys(costPolicy)) {

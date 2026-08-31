@@ -1,6 +1,7 @@
 -- deployment-mode: maintenance
--- Migration 0387: deployment-owned model catalog authority, workspace custom
--- Vercel AI Gateway slugs, and indexed pre-catalog prompt receipt replay.
+-- Migration 0387: deployment-owned model catalog authority, provider-scoped
+-- workspace Vercel AI Gateway/OpenRouter slugs, and indexed pre-catalog prompt
+-- receipt replay.
 -- This changes the exact runtime-posture table/grant contract. Stop every API,
 -- control worker, and turn worker before applying it, and never restart a
 -- pre-0387 image after commit.
@@ -81,6 +82,7 @@ CREATE TABLE workspace_gateway_custom_models (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL REFERENCES managed_accounts(id) ON DELETE CASCADE,
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  provider_kind text NOT NULL,
   upstream_model_id text NOT NULL,
   label text,
   version integer NOT NULL DEFAULT 1,
@@ -95,6 +97,9 @@ CREATE TABLE workspace_gateway_custom_models (
   CONSTRAINT workspace_gateway_custom_models_workspace_account_fk
     FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
+  CONSTRAINT workspace_gateway_custom_models_provider_kind_chk CHECK (
+    provider_kind IN ('vercel_gateway', 'openrouter')
+  ),
   CONSTRAINT workspace_gateway_custom_models_upstream_chk CHECK (
     octet_length(upstream_model_id) BETWEEN 1 AND 238
     AND upstream_model_id ~ '^[!-~]+$'
@@ -124,14 +129,14 @@ CREATE TABLE workspace_gateway_custom_models (
 );
 
 CREATE UNIQUE INDEX workspace_gateway_custom_models_workspace_upstream_uq
-  ON workspace_gateway_custom_models (workspace_id, upstream_model_id)
+  ON workspace_gateway_custom_models (workspace_id, provider_kind, upstream_model_id)
   WHERE retired_at IS NULL;
 
 CREATE UNIQUE INDEX workspace_gateway_custom_models_create_operation_uq
-  ON workspace_gateway_custom_models (workspace_id, create_operation_id);
+  ON workspace_gateway_custom_models (workspace_id, provider_kind, create_operation_id);
 
 CREATE UNIQUE INDEX workspace_gateway_custom_models_delete_operation_uq
-  ON workspace_gateway_custom_models (workspace_id, delete_operation_id)
+  ON workspace_gateway_custom_models (workspace_id, provider_kind, delete_operation_id)
   WHERE delete_operation_id IS NOT NULL;
 
 -- New Send/Steer receipts persist one parsed boundary-request fingerprint and
@@ -212,7 +217,7 @@ END
 $model_catalog_table_acl_reset$;
 
 COMMENT ON TABLE workspace_gateway_custom_models IS
-  'Workspace-owned Vercel AI Gateway upstream slugs. Retired rows remain execution evidence; capabilities and billing are never stored here.';
+  'Workspace-owned Vercel AI Gateway and OpenRouter upstream slugs. Retired rows remain execution evidence; capabilities and billing are never stored here.';
 
 DO $model_catalog_runtime_drain_after$
 DECLARE

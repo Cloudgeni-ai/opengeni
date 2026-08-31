@@ -2,12 +2,14 @@ import {
   getScheduledVariableSetExpectedGenerationForAttempt,
   getWorkspaceModelPolicy,
   listWorkspaceGatewayCustomModels,
+  listWorkspaceOpenRouterCustomModels,
   persistAttemptToolCatalog,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
   workspaceCodexSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
+  workspaceOpenRouterConnectionActive,
   workspaceXaiSubscriptionActiveForAuthority,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -532,6 +534,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           xaiSubscriptionActive,
           workspaceGatewayConnectionActive,
           workspaceGatewayCustomModels,
+          openRouterConnectionActive,
+          workspaceOpenRouterCustomModels,
         ] = await Promise.all([
           getWorkspaceModelPolicy(db, input.workspaceId),
           workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
@@ -546,6 +550,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
           }),
+          workspaceOpenRouterConnectionActive(db, input.workspaceId),
+          listWorkspaceOpenRouterCustomModels(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          }),
         ]);
         return {
           selections: resolveWorkspaceModelSelection({
@@ -555,6 +564,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             xaiSubscriptionActive,
             workspaceGatewayConnectionActive,
             workspaceGatewayCustomModels,
+            workspaceOpenRouterConnectionActive: openRouterConnectionActive,
+            workspaceOpenRouterCustomModels,
           }),
           modelNotes: currentCatalog.modelNotes,
         };
