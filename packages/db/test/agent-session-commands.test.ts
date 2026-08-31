@@ -1266,7 +1266,7 @@ describe("attempt-fenced Agent session commands", () => {
         temporalWorkflowId: `session-${target.id}`,
         wakeRevision: receiptWake!.wakeRevision,
       }),
-    ).toEqual({ action: "acknowledged" });
+    ).toEqual({ action: "pending_admission", blocker: "pending_prompt_turn" });
     const [oldQuiescedAt] = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
       const [attempt] = await db
         .select({ quiescedAt: schema.sessionTurnAttempts.quiescedAt })
@@ -1309,6 +1309,15 @@ describe("attempt-fenced Agent session commands", () => {
     });
     if (humanClaim.action !== "claimed") throw new Error("Human queue did not resume");
     expect(humanClaim.turn.id).toBe(queued.turnId);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: receiptWake!.wakeRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
   });
 
   test("a human Steer claims ahead of an older pending Agent Steer and carries it as context", async () => {

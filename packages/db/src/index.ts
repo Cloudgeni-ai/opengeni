@@ -68143,21 +68143,24 @@ export async function claimPendingSessionWorkflowWakes(
  * accepted direction or an interrupted attempt awaiting writer-set proof.
  * Temporal accepting a signal is transport evidence, not proof that a closing
  * workflow observed Postgres. While active control still has an actionable
- * Agent Steer or pending quiescence, retain the revision so the bounded outbox
- * dispatcher retries signalWithStart. The attempt-fenced claim consumes an
- * Agent Steer once; a real Pause is the typed blocker and may acknowledge this
+ * Agent Steer, a current wake still owns an accepted queued human/API turn, or
+ * an attempt awaits quiescence, retain the revision so the bounded outbox
+ * dispatcher retries signalWithStart. The attempt-fenced claim consumes each
+ * direction once; a real Pause is the typed blocker and may acknowledge this
  * revision because Resume commits a new one.
  *
  * An older sender may advance only its own revision; it cannot clear a claim or
- * failure state belonging to a newer revision. The control -> workspace ->
- * session lock prefix serializes this decision with Steer, Pause/Resume, and
- * claim without weakening physical-quiescence admission.
+ * failure state belonging to a newer revision. Therefore queued prompt work
+ * blocks acknowledgement only for the current coalesced revision: a stale
+ * acknowledgement still leaves the newer revision outstanding. The control ->
+ * workspace -> session lock prefix serializes this decision with Send, Steer,
+ * Pause/Resume, and claim without weakening physical-quiescence admission.
  */
 export type SessionWorkflowWakeDeliveryResult =
   | { action: "acknowledged" }
   | {
       action: "pending_admission";
-      blocker: "pending_agent_steer" | "pending_quiescence";
+      blocker: "pending_agent_steer" | "pending_prompt_turn" | "pending_quiescence";
     };
 
 export async function markSessionWorkflowWakeDelivered(
@@ -68211,6 +68214,36 @@ export async function markSessionWorkflowWakeDelivered(
               action: "pending_admission",
               blocker: "pending_quiescence",
             } as const;
+          }
+          const [currentWake] = await tx
+            .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+            .from(schema.sessionWorkflowWakeOutbox)
+            .where(
+              and(
+                eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+                eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if (currentWake?.wakeRevision === input.wakeRevision) {
+            const [pendingPromptTurn] = await tx
+              .select({ id: schema.sessionTurns.id })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                  eq(schema.sessionTurns.status, "queued"),
+                  inArray(schema.sessionTurns.source, ["user", "api"]),
+                ),
+              )
+              .limit(1);
+            if (pendingPromptTurn) {
+              return {
+                action: "pending_admission",
+                blocker: "pending_prompt_turn",
+              } as const;
+            }
           }
         }
         const [row] = await tx

@@ -491,7 +491,10 @@ flowchart LR
    events, queue/control state, audit facts, and workflow-wake intent in
    Postgres.
 4. The API returns the committed projection. NATS fanout and immediate Temporal
-   wake delivery happen as replayable follow-up work.
+   wake delivery happen as replayable follow-up work. Temporal transport
+   acceptance does not acknowledge the current durable wake while an accepted
+   human/API turn is still queued or an Agent Steer is still pending; only the
+   attempt-fenced Postgres claim proves admission.
 5. The session workflow observes the durable obligation and dispatches a turn
    activity.
 6. The worker claims the logical turn, registers an exact attempt, freezes its
