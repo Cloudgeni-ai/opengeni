@@ -10,8 +10,10 @@ browser hydration.
 <script lang="ts">
   import { createSessionEvents, MessageTimeline } from "@opengeni/svelte";
   import "@opengeni/svelte/compiled.css";
+  import { onDestroy } from "svelte";
 
   const events = createSessionEvents({ client, workspaceId, sessionId });
+  onDestroy(() => events.destroy());
 </script>
 
 <div class="og-root">

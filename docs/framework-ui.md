@@ -114,8 +114,10 @@ Svelte hosts can use explicit clients or provide context:
     MessageTimeline,
   } from "@opengeni/svelte/session-ui";
   import "@opengeni/svelte/compiled.css";
+  import { onDestroy } from "svelte";
 
   const events = createSessionEvents({ client, workspaceId, sessionId });
+  onDestroy(() => events.destroy());
 </script>
 
 <div class="og-root" data-og-theme="dark" data-og-density="compact">

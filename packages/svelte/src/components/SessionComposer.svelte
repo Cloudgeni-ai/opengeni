@@ -3,6 +3,7 @@
     FileAttachmentStore,
     SessionComposerRuntimeStore,
   } from "@opengeni/sdk/session";
+  import { canSubmitSessionComposer, submitSessionComposer } from "../composer-submit";
   import { readableFromController } from "../store";
   import AttachmentList from "./AttachmentList.svelte";
 
@@ -25,16 +26,17 @@
   } = $props();
   let snapshot = $derived(readableFromController(controller, { owned: false }));
   let attachmentSnapshot = $derived(attachments ? readableFromController(attachments, { owned: false }) : null);
+  let attachmentState = $derived(attachmentSnapshot ? ($attachmentSnapshot ?? null) : null);
+  let canSubmit = $derived(canSubmitSessionComposer($snapshot, attachmentState));
   let fileInput = $state<HTMLInputElement>();
 
-  function submit(delivery: "send" | "steer" = "send") {
-    const resources = attachmentSnapshot ? $attachmentSnapshot?.readyResources ?? [] : [];
-    void controller.submit(delivery, { resources: [...resources] });
+  async function submit(delivery: "send" | "steer" = "send") {
+    await submitSessionComposer(controller, attachments, delivery);
   }
   function onKeydown(event: KeyboardEvent) {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
     event.preventDefault();
-    submit(event.metaKey || event.ctrlKey ? "steer" : "send");
+    void submit(event.metaKey || event.ctrlKey ? "steer" : "send");
   }
   function addFiles(files: FileList | null) {
     if (files && attachments) attachments.addFiles(files);
@@ -80,7 +82,7 @@
       {/each}
     </div>
     <div class="og-composer__actions og-composer-actions" data-og-part="actions">
-      <button class="og-button" data-og-variant="primary" type="button" disabled={(!$snapshot.canSend && (attachmentSnapshot ? ($attachmentSnapshot?.readyResources.length ?? 0) === 0 : true)) || $snapshot.submitting || Boolean(attachmentSnapshot && $attachmentSnapshot?.hasUnresolved)} onclick={() => submit("send")}>
+      <button class="og-button" data-og-variant="primary" type="button" disabled={!canSubmit} onclick={() => void submit("send")}>
         Send
       </button>
     </div>

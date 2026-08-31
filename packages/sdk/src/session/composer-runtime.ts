@@ -158,10 +158,7 @@ export type SessionComposerRuntimeStore = OpenGeniExternalStore<SessionComposerR
   hasDraftContent(): boolean;
   send(text?: string): Promise<boolean>;
   steer(text?: string): Promise<boolean>;
-  submit(
-    delivery?: "send" | "steer",
-    extras?: SessionComposerSendExtras,
-  ): Promise<SubmitComposerDraftResponse | null>;
+  submit(delivery?: "send" | "steer", extras?: SessionComposerSendExtras): Promise<boolean>;
   retryOptimisticMessage(clientEventId: string): void;
   removeOptimisticMessage(clientEventId: string): void;
   pause(reason?: string): Promise<void>;
@@ -788,7 +785,6 @@ export function createSessionComposerRuntimeStore(
   let restoredResources = [...(initialShadow?.resources ?? [])];
   let error: Error | null = null;
   let lastRouting: SessionPromptRouting | null = null;
-  let lastSubmitResponse: SubmitComposerDraftResponse | null = null;
   let localEditRevision = initialShadow ? 1 : 0;
   let generation = 0;
   let readGeneration = 0;
@@ -1581,7 +1577,6 @@ export function createSessionComposerRuntimeStore(
               mutationFailureObserved = true;
               throw cause;
             });
-          lastSubmitResponse = acceptedResult;
           lastRouting = acceptedResult.routing;
           adoptDraftBase(acceptedResult.draft);
         } else {
@@ -1718,7 +1713,6 @@ export function createSessionComposerRuntimeStore(
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),
       });
-      lastSubmitResponse = result;
       lastRouting = result.routing;
       adoptDraftBase(result.draft);
       return result;
@@ -2396,11 +2390,10 @@ export function createSessionComposerRuntimeStore(
     async submit(
       delivery: "send" | "steer" = "send",
       extras: SessionComposerSendExtras = {},
-    ): Promise<SubmitComposerDraftResponse | null> {
-      lastSubmitResponse = null;
-      if (delivery === "steer") await dispatch("steer", undefined, extras);
-      else await sendOrdinary(undefined, extras);
-      return lastSubmitResponse;
+    ): Promise<boolean> {
+      return delivery === "steer"
+        ? await dispatch("steer", undefined, extras)
+        : await sendOrdinary(undefined, extras);
     },
     retryOptimisticMessage,
     removeOptimisticMessage,

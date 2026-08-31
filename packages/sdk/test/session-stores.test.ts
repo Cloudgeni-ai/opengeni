@@ -1084,6 +1084,43 @@ describe("framework-neutral session stores", () => {
     store.destroy();
   });
 
+  for (const action of ["pause", "resume"] as const) {
+    test(`goal ${action} commits fence an older ignored-abort read`, async () => {
+      const staleRead = deferred<SessionGoal>();
+      const staleStatus = action === "pause" ? "active" : "paused";
+      const committedStatus = action === "pause" ? "paused" : "active";
+      const staleGoal: SessionGoal = {
+        ...sessionGoal("goal-stale", "stale objective"),
+        status: staleStatus,
+      };
+      const committedGoal: SessionGoal = {
+        ...sessionGoal("goal-committed", "committed objective"),
+        status: committedStatus,
+        version: 2,
+      };
+      const store = createGoalStore({
+        client: {
+          getGoal: async () => await staleRead.promise,
+          updateGoal: async () => committedGoal,
+        } as never,
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+      });
+
+      const starting = store.start();
+      await flushMicrotasks();
+      const result = action === "pause" ? await store.pause("hold") : await store.resume();
+      expect(result?.status).toBe(committedStatus);
+      expect(store.getSnapshot().value?.status).toBe(committedStatus);
+
+      staleRead.resolve(staleGoal);
+      await starting;
+      store.clearMutationError();
+      expect(store.getSnapshot().value).toEqual(committedGoal);
+      store.destroy();
+    });
+  }
+
   test("terminal human-input races reconcile without resurrecting an error", async () => {
     let reads = 0;
     const request = humanInputRequest();

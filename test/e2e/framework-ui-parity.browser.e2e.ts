@@ -143,6 +143,7 @@ describe(`framework UI parity in ${engineName}`, () => {
       expect(geometry.overflow).toBeLessThanOrEqual(1);
       expect(geometry.inputFontSize).toBe("16px");
       expect(geometry.inputHeight).toBeGreaterThanOrEqual(44);
+      await assertReactTurnSummaryNames(page);
       await assertAxeClean(page);
       assertExpectedDiagnostics(diagnostics, { reducedMotionWarning: true });
       await page.screenshot({
@@ -277,6 +278,21 @@ async function assertAxeClean(page: Page): Promise<void> {
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
   expect(axe.violations).toEqual([]);
+}
+
+async function assertReactTurnSummaryNames(page: Page): Promise<void> {
+  const disclosures = await page.locator("[data-og-turn-summary-trigger]").evaluateAll((elements) =>
+    elements.map((element) => ({
+      expanded: element.getAttribute("aria-expanded"),
+      label: element.getAttribute("aria-label"),
+    })),
+  );
+  expect(disclosures.length).toBeGreaterThan(0);
+  expect(
+    disclosures.every(({ expanded, label }) =>
+      expanded === "true" ? label === "Hide turn steps" : label === "Show turn steps",
+    ),
+  ).toBe(true);
 }
 
 function captureDiagnostics(page: Page): string[] {

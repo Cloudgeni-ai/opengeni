@@ -273,6 +273,18 @@ export function createGoalStore(options: {
     }
   };
 
+  const acceptGoalMutation = (nextGoal: SessionGoal): void => {
+    // A read that started before this mutation committed is causally older,
+    // even when its transport ignores AbortSignal. Retire that generation
+    // before publishing the accepted mutation so a late poll/event refresh
+    // cannot restore the pre-mutation goal on a later publish.
+    generation += 1;
+    readAbort?.abort();
+    readAbort = null;
+    goal = nextGoal;
+    publish();
+  };
+
   return Object.assign(store, {
     refresh,
     applyEvents,
@@ -284,8 +296,7 @@ export function createGoalStore(options: {
         }),
       );
       if (result) {
-        goal = result;
-        publish();
+        acceptGoalMutation(result);
       }
       return result;
     },
@@ -294,8 +305,7 @@ export function createGoalStore(options: {
         options.client.updateGoal(options.workspaceId, sessionId, { status: "active" }),
       );
       if (result) {
-        goal = result;
-        publish();
+        acceptGoalMutation(result);
       }
       return result;
     },
