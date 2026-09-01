@@ -126,6 +126,7 @@ describe("build-once rig provider image runtime", () => {
       | null = null;
     const events: string[] = [];
     const recorded: string[] = [];
+    const buildFailed: string[] = [];
     const outcomeUnknown: string[] = [];
     const providerBinding = JSON.parse(PROVIDER_BINDING_KEY) as Record<string, unknown>;
     const startedAt = Date.now();
@@ -200,6 +201,10 @@ describe("build-once rig provider image runtime", () => {
             return true;
           },
           settleCleanupObligation: async () => true,
+          markCleanupBuildFailed: async (_db, input) => {
+            buildFailed.push(input.error ?? "");
+            return true;
+          },
           markCleanupOutcomeUnknown: async (_db, input) => {
             outcomeUnknown.push(input.error ?? "");
             return true;
@@ -211,6 +216,7 @@ describe("build-once rig provider image runtime", () => {
     expect(providerTimeoutMs).toBeLessThanOrEqual(40);
     expect(Date.now() - startedAt).toBeLessThan(500);
     expect(events).toEqual(["obligation", "build"]);
+    expect(buildFailed).toEqual([]);
     expect(outcomeUnknown).toEqual([]);
 
     resolveBuild?.({
@@ -227,12 +233,34 @@ describe("build-once rig provider image runtime", () => {
     expect(recorded).toEqual(["im-late-build"]);
   });
 
-  for (const [failureKind, providerError] of [
-    ["timeout", new Error("Modal snapshot deadline exceeded after admission")],
-    ["transport", new Error("Modal snapshot transport closed after admission")],
+  for (const [failureKind, providerError, expectedCleanupState] of [
+    [
+      "timeout",
+      Object.assign(new Error("Modal snapshot deadline exceeded after admission"), {
+        name: "TimeoutError",
+      }),
+      "outcome_unknown",
+    ],
+    [
+      "transport",
+      Object.assign(new Error("Modal snapshot transport closed after admission"), {
+        name: "ClientError",
+        code: 14,
+      }),
+      "outcome_unknown",
+    ],
+    [
+      "permission",
+      Object.assign(new Error("Modal snapshot permission denied"), {
+        name: "ClientError",
+        code: 7,
+      }),
+      "build_failed",
+    ],
   ] as const) {
-    test(`keeps a ${failureKind} rejection outcome-unknown for deterministic recovery`, async () => {
+    test(`classifies a ${failureKind} rejection for durable cleanup`, async () => {
       const providerBinding = JSON.parse(PROVIDER_BINDING_KEY) as Record<string, unknown>;
+      const buildFailed: string[] = [];
       const outcomeUnknown: string[] = [];
       const result = await buildVerifiedRigProviderImage(
         {
@@ -296,6 +324,10 @@ describe("build-once rig provider image runtime", () => {
             throw new Error("a rejected build has no image id to record yet");
           },
           settleCleanupObligation: async () => true,
+          markCleanupBuildFailed: async (_db, input) => {
+            buildFailed.push(input.error ?? "");
+            return true;
+          },
           markCleanupOutcomeUnknown: async (_db, input) => {
             outcomeUnknown.push(input.error ?? "");
             return true;
@@ -308,7 +340,12 @@ describe("build-once rig provider image runtime", () => {
         code: "provider_image_build_failed",
         retryable: true,
       });
-      expect(outcomeUnknown).toEqual([providerError.message]);
+      expect(buildFailed).toEqual(
+        expectedCleanupState === "build_failed" ? [providerError.message] : [],
+      );
+      expect(outcomeUnknown).toEqual(
+        expectedCleanupState === "outcome_unknown" ? [providerError.message] : [],
+      );
     });
   }
 

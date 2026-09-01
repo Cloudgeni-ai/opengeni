@@ -205,6 +205,168 @@ const MODAL_TASK_EXEC_START_ERROR_MAX_DEPTH = 8;
 const MODAL_TASK_EXEC_START_ERROR_MAX_NODES = 64;
 const MODAL_TASK_EXEC_START_ERROR_MAX_AGGREGATE_ERRORS = 32;
 
+export type ModalImmutableProviderImageBuildFailureDisposition =
+  | "definitive_rejection"
+  | "outcome_unknown";
+
+/**
+ * Preserve whether one exact Modal snapshot request was authoritatively
+ * rejected or may still have been admitted. Callers may retry only the same
+ * request id for outcome-unknown failures; the disposition never licenses a
+ * different provider operation.
+ */
+export class ModalImmutableProviderImageBuildError extends Error {
+  readonly name = "ModalImmutableProviderImageBuildError";
+
+  constructor(
+    readonly disposition: ModalImmutableProviderImageBuildFailureDisposition,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
+const MODAL_IMAGE_BUILD_DEFINITIVE_GRPC_CODES = new Set([3, 5, 7, 9, 11, 12, 16]);
+const MODAL_IMAGE_BUILD_DEFINITIVE_CODE_NAMES = new Set([
+  "INVALID_ARGUMENT",
+  "NOT_FOUND",
+  "PERMISSION_DENIED",
+  "FAILED_PRECONDITION",
+  "OUT_OF_RANGE",
+  "UNIMPLEMENTED",
+  "UNAUTHENTICATED",
+]);
+const MODAL_IMAGE_BUILD_DEFINITIVE_HTTP_STATUSES = new Set([
+  400, 401, 403, 404, 405, 412, 413, 415, 422, 501,
+]);
+const MODAL_IMAGE_BUILD_ERROR_MAX_DEPTH = 8;
+const MODAL_IMAGE_BUILD_ERROR_MAX_NODES = 64;
+const MODAL_IMAGE_BUILD_ERROR_MAX_AGGREGATE_ERRORS = 32;
+
+function modalImageBuildErrorValue(record: object, key: string): unknown {
+  try {
+    return Reflect.get(record, key);
+  } catch {
+    return undefined;
+  }
+}
+
+function modalImageBuildDirectDisposition(
+  record: Record<string, unknown>,
+): ModalImmutableProviderImageBuildFailureDisposition | null {
+  const httpValues = ["status", "statusCode", "httpStatus", "httpStatusCode"].map((key) =>
+    modalImageBuildErrorValue(record, key),
+  );
+  const response = modalImageBuildErrorValue(record, "response");
+  if (response && typeof response === "object") {
+    httpValues.push(
+      modalImageBuildErrorValue(response, "status"),
+      modalImageBuildErrorValue(response, "statusCode"),
+      modalImageBuildErrorValue(response, "httpStatus"),
+      modalImageBuildErrorValue(response, "httpStatusCode"),
+    );
+  }
+  const httpStatuses = httpValues
+    .map((value) => modalHttpStatus(value))
+    .filter((value): value is number => value !== null);
+  if (httpStatuses.length > 0) {
+    return httpStatuses.every((status) => MODAL_IMAGE_BUILD_DEFINITIVE_HTTP_STATUSES.has(status))
+      ? "definitive_rejection"
+      : "outcome_unknown";
+  }
+
+  const code = modalImageBuildErrorValue(record, "code");
+  if (typeof code === "number" && Number.isInteger(code)) {
+    return MODAL_IMAGE_BUILD_DEFINITIVE_GRPC_CODES.has(code)
+      ? "definitive_rejection"
+      : "outcome_unknown";
+  }
+  if (typeof code === "string") {
+    const normalized = code.trim().toUpperCase();
+    if (MODAL_IMAGE_BUILD_DEFINITIVE_CODE_NAMES.has(normalized)) {
+      return "definitive_rejection";
+    }
+    const numeric = Number(normalized);
+    if (Number.isInteger(numeric)) {
+      return MODAL_IMAGE_BUILD_DEFINITIVE_GRPC_CODES.has(numeric)
+        ? "definitive_rejection"
+        : "outcome_unknown";
+    }
+    return "outcome_unknown";
+  }
+  return null;
+}
+
+function classifyModalImageBuildErrorNode(
+  value: unknown,
+  depth: number,
+  seen: WeakSet<object>,
+  inspected: { count: number },
+): ModalImmutableProviderImageBuildFailureDisposition {
+  if (
+    depth > MODAL_IMAGE_BUILD_ERROR_MAX_DEPTH ||
+    inspected.count >= MODAL_IMAGE_BUILD_ERROR_MAX_NODES ||
+    !value
+  ) {
+    return "outcome_unknown";
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0 || value.length > MODAL_IMAGE_BUILD_ERROR_MAX_AGGREGATE_ERRORS) {
+      return "outcome_unknown";
+    }
+    return value.every(
+      (entry) =>
+        classifyModalImageBuildErrorNode(entry, depth + 1, seen, inspected) ===
+        "definitive_rejection",
+    )
+      ? "definitive_rejection"
+      : "outcome_unknown";
+  }
+  if (typeof value !== "object" || seen.has(value)) return "outcome_unknown";
+  seen.add(value);
+  inspected.count += 1;
+  const record = value as Record<string, unknown>;
+  const direct = modalImageBuildDirectDisposition(record);
+  if (direct === "outcome_unknown") return direct;
+
+  const children = ["cause", "error", "originalError", "innerError"]
+    .map((key) => modalImageBuildErrorValue(record, key))
+    .filter((child) => child !== undefined && child !== null);
+  const aggregate = modalImageBuildErrorValue(record, "errors");
+  if (Array.isArray(aggregate)) children.push(aggregate);
+  if (
+    children.some(
+      (child) =>
+        classifyModalImageBuildErrorNode(child, depth + 1, seen, inspected) === "outcome_unknown",
+    )
+  ) {
+    return "outcome_unknown";
+  }
+  return direct === "definitive_rejection" || children.length > 0
+    ? "definitive_rejection"
+    : "outcome_unknown";
+}
+
+/**
+ * Classify only structural provider refusal evidence. Timeout, cancellation,
+ * transport, mixed, malformed, and untyped errors remain outcome-unknown.
+ */
+export function classifyModalImmutableProviderImageBuildFailure(
+  error: unknown,
+): ModalImmutableProviderImageBuildFailureDisposition {
+  if (error instanceof ModalImmutableProviderImageBuildError) return error.disposition;
+  return classifyModalImageBuildErrorNode(error, 0, new WeakSet<object>(), { count: 0 });
+}
+
+function modalImmutableProviderImageBuildError(
+  error: unknown,
+  disposition: ModalImmutableProviderImageBuildFailureDisposition,
+): ModalImmutableProviderImageBuildError {
+  return error instanceof ModalImmutableProviderImageBuildError && error.disposition === disposition
+    ? error
+    : new ModalImmutableProviderImageBuildError(disposition, error);
+}
+
 function modalHttpStatus(value: unknown): number | null {
   if (typeof value !== "number" && typeof value !== "string") return null;
   const status = Number(value);
@@ -631,19 +793,26 @@ export const modalProvider: ProviderRegistration = {
     const mutable = session as MutableModalSandboxSession;
     const sandboxId = mutable.state?.sandboxId;
     const sandboxes = mutable.modal?.sandboxes;
-    if (!sandboxId || typeof sandboxes?.fromId !== "function") {
-      throw new Error("Modal provider image build requires an exact live sandbox identity");
-    }
-    const snapshotHandle = await sandboxes.fromId(sandboxId);
+    let snapshotHandle: MutableModalSnapshotSandbox | null = null;
+    let snapshotRequestStarted = false;
+    let snapshotRequestCompleted = false;
+    let result: ProviderImmutableImageBuildResult | null = null;
+    let failure: unknown = null;
     try {
+      if (!sandboxId || typeof sandboxes?.fromId !== "function") {
+        throw new Error("Modal provider image build requires an exact live sandbox identity");
+      }
+      snapshotHandle = await sandboxes.fromId(sandboxId);
       if (typeof snapshotHandle.snapshotFilesystem !== "function") {
         throw new Error("Modal provider image build requires snapshotFilesystem support");
       }
+      snapshotRequestStarted = true;
       const image = (await snapshotHandle.snapshotFilesystem({
         snapshotId: requestId,
         timeoutMs,
         ttlMs: null,
       })) as { imageId?: unknown; objectId?: unknown };
+      snapshotRequestCompleted = true;
       const imageId =
         typeof image.imageId === "string"
           ? image.imageId
@@ -654,7 +823,7 @@ export const modalProvider: ProviderRegistration = {
         throw new Error("Modal provider image snapshot returned no immutable image id");
       }
       const binding = await resolveModalCheckpointProviderBindingForSession(settings, session);
-      return {
+      result = {
         provider: "modal",
         backend: "modal",
         imageId,
@@ -662,9 +831,21 @@ export const modalProvider: ProviderRegistration = {
         providerBindingKey: binding.key,
         providerBinding: binding.binding,
       };
-    } finally {
-      snapshotHandle.detach?.();
+    } catch (error) {
+      const disposition = !snapshotRequestStarted
+        ? "definitive_rejection"
+        : snapshotRequestCompleted
+          ? "outcome_unknown"
+          : classifyModalImmutableProviderImageBuildFailure(error);
+      failure = modalImmutableProviderImageBuildError(error, disposition);
     }
+    try {
+      snapshotHandle?.detach?.();
+    } catch (error) {
+      failure ??= modalImmutableProviderImageBuildError(error, "outcome_unknown");
+    }
+    if (failure) throw failure;
+    return result!;
   },
   createTrustedRigPlatformSurface: createModalTrustedRigPlatformSurface,
   descriptor: CAPABILITY_DESCRIPTORS.modal,
@@ -1048,9 +1229,14 @@ export async function recoverModalImmutableProviderImageBuild(
   if (!input.sandboxId || !input.requestId || input.timeoutMs < 1) {
     throw new Error("Modal provider image recovery identity is invalid");
   }
-  const modal = await createClient(settings);
+  let modal: ModalClientLike | null = null;
   let sandbox: Awaited<ReturnType<ModalClientLike["sandboxes"]["fromId"]>> | null = null;
+  let snapshotRequestStarted = false;
+  let snapshotRequestCompleted = false;
+  let result: ProviderImmutableImageBuildResult | null = null;
+  let failure: unknown = null;
   try {
+    modal = await createClient(settings);
     const binding = canonicalModalCheckpointProviderBinding(
       await modalCheckpointProviderBindingForClient(settings, modal),
     )!;
@@ -1058,16 +1244,18 @@ export async function recoverModalImmutableProviderImageBuild(
       throw new Error("Modal provider image recovery credential binding changed");
     }
     sandbox = await modal.sandboxes.fromId(input.sandboxId);
+    snapshotRequestStarted = true;
     const image = await sandbox.snapshotFilesystem({
       snapshotId: input.requestId,
       timeoutMs: input.timeoutMs,
       ttlMs: null,
     });
+    snapshotRequestCompleted = true;
     const imageId = image.imageId;
     if (!imageId) {
       throw new Error("Modal provider image recovery returned no immutable image id");
     }
-    return {
+    result = {
       provider: "modal",
       backend: "modal",
       imageId,
@@ -1075,10 +1263,30 @@ export async function recoverModalImmutableProviderImageBuild(
       providerBindingKey: binding.key,
       providerBinding: binding.binding,
     };
-  } finally {
-    sandbox?.detach();
-    modal.close();
+  } catch (error) {
+    failure = modalImmutableProviderImageBuildError(
+      error,
+      snapshotRequestStarted && !snapshotRequestCompleted
+        ? classifyModalImmutableProviderImageBuildFailure(error)
+        : "outcome_unknown",
+    );
   }
+  try {
+    sandbox?.detach();
+  } catch (error) {
+    failure ??= snapshotRequestStarted
+      ? modalImmutableProviderImageBuildError(error, "outcome_unknown")
+      : error;
+  }
+  try {
+    modal?.close();
+  } catch (error) {
+    failure ??= snapshotRequestStarted
+      ? modalImmutableProviderImageBuildError(error, "outcome_unknown")
+      : error;
+  }
+  if (failure) throw failure;
+  return result!;
 }
 
 /**

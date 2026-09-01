@@ -188,6 +188,16 @@ async function flush() {
   });
 }
 
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+  }
+}
+
 beforeAll(() => {
   GlobalRegistrator.register();
   (
@@ -265,7 +275,10 @@ describe("organization billing StrictMode ownership", () => {
         </StrictMode>,
       );
     });
-    await flush();
+    await waitFor(
+      () => listOrganizationApiKeys.mock.calls.length >= 2,
+      "organization API key reads did not settle under StrictMode",
+    );
 
     expect(listOrganizationApiKeys.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(

@@ -37,6 +37,7 @@ import {
   isCurrentRigChangeVerificationAttempt,
   isCurrentRigVersionVerificationAttempt,
   markWarmLeaseInstanceLost,
+  markRigProviderImageCleanupObligationBuildFailed,
   markRigProviderImageCleanupObligationOutcomeUnknown,
   markSandboxCheckpointArtifactDeletePending,
   recordWarmingSandboxCreated,
@@ -51,6 +52,7 @@ import {
 import {
   attachProviderTrustedRigPlatformSurface,
   buildImmutableProviderImage,
+  classifyModalImmutableProviderImageBuildFailure,
   createTurnToolCancellationController,
   describeNativeSnapshotArchive,
   encodeNativeSnapshotRef,
@@ -1183,6 +1185,7 @@ export async function buildVerifiedRigProviderImage(
     beginCleanupObligation: typeof beginRigProviderImageCleanupObligation;
     recordCleanupObject: typeof recordRigProviderImageCleanupObject;
     settleCleanupObligation: typeof settleRigProviderImageCleanupObligation;
+    markCleanupBuildFailed: typeof markRigProviderImageCleanupObligationBuildFailed;
     markCleanupOutcomeUnknown: typeof markRigProviderImageCleanupObligationOutcomeUnknown;
   } = {
     buildImmutableProviderImage,
@@ -1190,6 +1193,7 @@ export async function buildVerifiedRigProviderImage(
     beginCleanupObligation: beginRigProviderImageCleanupObligation,
     recordCleanupObject: recordRigProviderImageCleanupObject,
     settleCleanupObligation: settleRigProviderImageCleanupObligation,
+    markCleanupBuildFailed: markRigProviderImageCleanupObligationBuildFailed,
     markCleanupOutcomeUnknown: markRigProviderImageCleanupObligationOutcomeUnknown,
   },
 ): Promise<RigProviderImageBuildVerification> {
@@ -1413,16 +1417,18 @@ export async function buildVerifiedRigProviderImage(
       built = await waitForAbortable(trackedBuildPromise, deadlineSignal);
     } catch (error) {
       if (providerBuildRejected && cleanupObligation?.state === "building") {
-        await dependencies
-          .markCleanupOutcomeUnknown(input.db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            obligationId: cleanupObligation.id,
-            buildRequestId: cleanupObligation.buildRequestId,
-            providerBindingKey: cleanupObligation.providerBindingKey,
-            error: error instanceof Error ? error.message : String(error),
-          })
-          .catch(() => false);
+        const markCleanupFailure =
+          classifyModalImmutableProviderImageBuildFailure(error) === "definitive_rejection"
+            ? dependencies.markCleanupBuildFailed
+            : dependencies.markCleanupOutcomeUnknown;
+        await markCleanupFailure(input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          obligationId: cleanupObligation.id,
+          buildRequestId: cleanupObligation.buildRequestId,
+          providerBindingKey: cleanupObligation.providerBindingKey,
+          error: error instanceof Error ? error.message : String(error),
+        }).catch(() => false);
       }
       if (!input.signal.aborted && deadlineSignal.aborted) {
         throw new RigProviderImageBuildDeadlineError();

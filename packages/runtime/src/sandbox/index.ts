@@ -118,7 +118,12 @@ export {
   type ProviderWorkspaceCapturePolicy,
   type ProviderWorkspaceCaptureTakeover,
 } from "./providers";
-export { recoverModalImmutableProviderImageBuild } from "./providers/modal";
+export {
+  ModalImmutableProviderImageBuildError,
+  classifyModalImmutableProviderImageBuildFailure,
+  recoverModalImmutableProviderImageBuild,
+  type ModalImmutableProviderImageBuildFailureDisposition,
+} from "./providers/modal";
 export {
   classifyProviderSandboxFailure,
   isProviderSandboxGoneDuringRoutedOperation,

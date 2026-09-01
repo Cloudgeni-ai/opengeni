@@ -2,8 +2,10 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import {
   __resetModalRegistryImageCacheForTest,
+  classifyModalImmutableProviderImageBuildFailure,
   ensureModalRegistryImage,
   modalProvider,
+  recoverModalImmutableProviderImageBuild,
   resolveModalImageSelector,
   type ModalModuleLoader,
 } from "../src/sandbox/providers/modal";
@@ -322,5 +324,121 @@ describe("modalProvider immutable rig image build", () => {
         environment: "main",
       },
     });
+  });
+
+  test("classifies failures before snapshot dispatch as definitive", async () => {
+    let failure: unknown;
+    try {
+      await modalProvider.buildImmutableImage!({
+        settings: testSettings({ sandboxBackend: "modal" }),
+        session: { state: {}, modal: {} },
+        requestId: "77777777-7777-4777-8777-777777777777",
+        timeoutMs: 123_456,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(classifyModalImmutableProviderImageBuildFailure(failure)).toBe("definitive_rejection");
+  });
+
+  test("keeps timeout and transport rejections ambiguous but terminalizes typed refusals", () => {
+    const timeout = Object.assign(new Error("snapshot deadline elapsed"), {
+      name: "TimeoutError",
+    });
+    const transport = Object.assign(new Error("connection unavailable"), {
+      name: "ClientError",
+      code: 14,
+    });
+    const permissionDenied = Object.assign(new Error("snapshot permission denied"), {
+      name: "ClientError",
+      code: 7,
+    });
+
+    expect(classifyModalImmutableProviderImageBuildFailure(timeout)).toBe("outcome_unknown");
+    expect(classifyModalImmutableProviderImageBuildFailure(transport)).toBe("outcome_unknown");
+    expect(classifyModalImmutableProviderImageBuildFailure(permissionDenied)).toBe(
+      "definitive_rejection",
+    );
+    const throwingAccessor = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("unreadable provider error");
+        },
+      },
+    );
+    expect(classifyModalImmutableProviderImageBuildFailure(throwingAccessor)).toBe(
+      "outcome_unknown",
+    );
+  });
+
+  test("terminalizes only a typed rejection from the exact recovery snapshot call", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", modalEnvironment: "main" });
+    const permissionDenied = () =>
+      Object.assign(new Error("snapshot permission denied"), {
+        name: "ClientError",
+        code: 7,
+      });
+    const client = (fromId: () => Promise<unknown>) => ({
+      sandboxes: { fromId },
+      cpClient: {
+        workspaceNameLookup: mock(async () => ({ workspaceName: "workspace-a" })),
+      },
+      profile: { serverUrl: "https://api.modal.com" },
+      environmentName: mock(() => "main"),
+      close: mock(() => undefined),
+    });
+    const input = {
+      sandboxId: "sb-rig-verifier",
+      requestId: "77777777-7777-4777-8777-777777777777",
+      timeoutMs: 123_456,
+      expectedProviderBindingKey: JSON.stringify({
+        version: 1,
+        serverUrl: "https://api.modal.com",
+        workspaceName: "workspace-a",
+        environment: "main",
+      }),
+    };
+
+    let clientFailure: unknown;
+    try {
+      await recoverModalImmutableProviderImageBuild(settings, input, async () =>
+        Promise.reject(permissionDenied()),
+      );
+    } catch (error) {
+      clientFailure = error;
+    }
+    expect(classifyModalImmutableProviderImageBuildFailure(clientFailure)).toBe("outcome_unknown");
+
+    let attachFailure: unknown;
+    try {
+      await recoverModalImmutableProviderImageBuild(
+        settings,
+        input,
+        async () => client(async () => Promise.reject(permissionDenied())) as never,
+      );
+    } catch (error) {
+      attachFailure = error;
+    }
+    expect(classifyModalImmutableProviderImageBuildFailure(attachFailure)).toBe("outcome_unknown");
+
+    let snapshotFailure: unknown;
+    try {
+      await recoverModalImmutableProviderImageBuild(
+        settings,
+        input,
+        async () =>
+          client(async () => ({
+            snapshotFilesystem: async () => Promise.reject(permissionDenied()),
+            detach: mock(() => undefined),
+          })) as never,
+      );
+    } catch (error) {
+      snapshotFailure = error;
+    }
+    expect(classifyModalImmutableProviderImageBuildFailure(snapshotFailure)).toBe(
+      "definitive_rejection",
+    );
   });
 });

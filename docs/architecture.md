@@ -1089,6 +1089,13 @@ the version in one active-version-CAS transaction; deferred dispatch, enabled
 surface `unsupported`, binding drift, invalid evidence, and cleanup failure all
 leave the version inactive.
 
+Modal Rig image snapshot ownership is persisted before provider dispatch. Typed,
+authoritative provider refusals settle that cleanup obligation as terminal
+`build_failed`; timeout, cancellation, transport, malformed, and untyped failures
+remain `outcome_unknown` and may retry only the exact durable request against the
+original sandbox and provider binding. A late image can still move either state
+into bounded checkpoint garbage collection before source teardown.
+
 Sandbox snapshots and provider-native checkpoints are recovery artifacts, not
 session history. Capturing a workspace requires proof that no unaccounted writer
 can race the snapshot. A failed or unverifiable capture cannot be treated as an

@@ -8496,6 +8496,7 @@ export const sandboxCheckpointArtifacts = pgTable(
 
 export const rigProviderImageCleanupObligationStateValues = [
   "building",
+  "outcome_unknown",
   "build_failed",
   "delete_pending",
   "deleting",
@@ -8588,10 +8589,10 @@ export const rigProviderImageCleanupObligations = pgTable(
     stateValid: check(
       "rig_provider_image_cleanup_obligations_state_check",
       sql`${table.state} in (
-        'building', 'build_failed', 'delete_pending', 'deleting', 'delete_failed', 'settled', 'deleted'
+        'building', 'outcome_unknown', 'build_failed', 'delete_pending', 'deleting', 'delete_failed', 'settled', 'deleted'
       )
-      and ((${table.state} in ('building', 'build_failed') and ${table.objectId} is null)
-        or (${table.state} not in ('building', 'build_failed') and ${table.objectId} is not null))`,
+      and ((${table.state} in ('building', 'outcome_unknown', 'build_failed') and ${table.objectId} is null)
+        or (${table.state} not in ('building', 'outcome_unknown', 'build_failed') and ${table.objectId} is not null))`,
     ),
     deleteClaimValid: check(
       "rig_provider_image_cleanup_obligations_delete_claim_check",

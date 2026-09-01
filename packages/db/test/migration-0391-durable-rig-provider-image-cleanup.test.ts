@@ -5,6 +5,7 @@ import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import { createDb } from "../src/database";
 import {
+  markRigProviderImageCleanupObligationBuildFailed,
   markRigProviderImageCleanupObligationOutcomeUnknown,
   recordRigProviderImageCleanupObject,
 } from "../src/index";
@@ -15,11 +16,13 @@ import {
   FORCE_RLS_TABLES,
   RUNTIME_FULL_DML_TABLES,
 } from "../src/runtime-posture";
+import { rigProviderImageCleanupObligationStateValues } from "../src/schema";
 
 const migrationUrl = new URL(
   "../drizzle/0391_durable_rig_provider_image_cleanup.sql",
   import.meta.url,
 );
+const schemaUrl = new URL("../src/schema.ts", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const providerBinding = {
   version: 1,
@@ -32,6 +35,7 @@ const providerBindingKey = JSON.stringify(providerBinding);
 describe("migration 0391 durable Rig provider image cleanup", () => {
   test("persists pre-creation identity and protects registered artifacts from cleanup", async () => {
     const source = await Bun.file(migrationUrl).text();
+    const schemaSource = (await Bun.file(schemaUrl).text()).replace(/\s+/gu, " ");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
     expect(source).toContain("CREATE TABLE rig_provider_image_cleanup_obligations");
     expect(source).toContain(
@@ -39,6 +43,22 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
     );
     expect(source).toContain(
       "state IN ('building', 'outcome_unknown', 'build_failed') AND object_id IS NULL",
+    );
+    expect([...rigProviderImageCleanupObligationStateValues]).toEqual([
+      "building",
+      "outcome_unknown",
+      "build_failed",
+      "delete_pending",
+      "deleting",
+      "delete_failed",
+      "settled",
+      "deleted",
+    ]);
+    expect(schemaSource).toContain(
+      "'building', 'outcome_unknown', 'build_failed', 'delete_pending', 'deleting', 'delete_failed', 'settled', 'deleted'",
+    );
+    expect(schemaSource).toContain(
+      "in ('building', 'outcome_unknown', 'build_failed') and ${table.objectId} is null",
     );
     expect(source).toContain("claim_rig_provider_image_cleanup_obligations");
     expect(source).toContain("artifact.object_id = obligation.object_id");
@@ -171,6 +191,29 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
       expect(outcomeUnknownRow).toEqual({
         state: "outcome_unknown",
         last_delete_error: "Modal snapshot transport closed after admission",
+      });
+      const buildFailedMarked = await markRigProviderImageCleanupObligationBuildFailed(
+        runtimeClient.db,
+        {
+          accountId: cleanupAccountId,
+          workspaceId: cleanupWorkspaceId,
+          obligationId,
+          buildRequestId: "rig-provider-image-request",
+          providerBindingKey,
+          error: "Modal snapshot permission denied",
+        },
+      );
+      expect(buildFailedMarked).toBe(true);
+      const [buildFailedRow] = await sql<
+        Array<{ state: string; last_delete_error: string | null }>
+      >`
+        select state, last_delete_error
+        from rig_provider_image_cleanup_obligations
+        where id = ${obligationId}
+      `;
+      expect(buildFailedRow).toEqual({
+        state: "build_failed",
+        last_delete_error: "Modal snapshot permission denied",
       });
       const lateObjectRecorded = await recordRigProviderImageCleanupObject(runtimeClient.db, {
         accountId: cleanupAccountId,

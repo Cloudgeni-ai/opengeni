@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ModalImmutableProviderImageBuildError } from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing";
 import { reconcileRigProviderImageCleanupObligationsForSource } from "../src/activities/rig-provider-image-cleanup";
 
@@ -64,6 +65,9 @@ describe("durable Rig provider image cleanup reconciliation", () => {
             providerBinding: JSON.parse(PROVIDER_BINDING_KEY),
           };
         },
+        markFailed: async () => {
+          throw new Error("a recovered image must be recorded, not terminalized");
+        },
         record: async (_db, input) => {
           calls.push("record");
           expect(input).toEqual({
@@ -81,6 +85,111 @@ describe("durable Rig provider image cleanup reconciliation", () => {
 
     expect(recovered).toBe(1);
     expect(calls).toEqual(["list", "recover", "record"]);
+  });
+
+  test("terminalizes an authoritative recovery rejection and permits source teardown", async () => {
+    const rejection = new ModalImmutableProviderImageBuildError(
+      "definitive_rejection",
+      Object.assign(new Error("Modal snapshot permission denied"), {
+        name: "ClientError",
+        code: 7,
+      }),
+    );
+    const marked: unknown[] = [];
+    const recovered = await reconcileRigProviderImageCleanupObligationsForSource(
+      {
+        db: {} as never,
+        settings: testSettings({ sandboxBackend: "modal" }),
+        accountId: ACCOUNT_ID,
+        workspaceId: WORKSPACE_ID,
+        sourceLeaseId: LEASE_ID,
+        sourceInstanceId: INSTANCE_ID,
+        timeoutMs: 5_000,
+      },
+      {
+        list: async () => [
+          {
+            id: OBLIGATION_ID,
+            state: "outcome_unknown",
+            buildRequestId: "rig-provider-image-request",
+            objectId: null,
+            providerBindingKey: PROVIDER_BINDING_KEY,
+            providerBinding: JSON.parse(PROVIDER_BINDING_KEY),
+            sourceLeaseId: LEASE_ID,
+            sourceInstanceId: INSTANCE_ID,
+          },
+        ],
+        recover: async () => {
+          throw rejection;
+        },
+        markFailed: async (_db, input) => {
+          marked.push(input);
+          return true;
+        },
+        record: async () => {
+          throw new Error("a rejected recovery has no image id to record");
+        },
+      },
+    );
+
+    expect(recovered).toBe(0);
+    expect(marked).toEqual([
+      {
+        accountId: ACCOUNT_ID,
+        workspaceId: WORKSPACE_ID,
+        obligationId: OBLIGATION_ID,
+        buildRequestId: "rig-provider-image-request",
+        providerBindingKey: PROVIDER_BINDING_KEY,
+        error: "Modal snapshot permission denied",
+      },
+    ]);
+  });
+
+  test("keeps transport-ambiguous recovery failures blocking teardown", async () => {
+    const rejection = new ModalImmutableProviderImageBuildError(
+      "outcome_unknown",
+      Object.assign(new Error("Modal snapshot transport unavailable"), {
+        name: "ClientError",
+        code: 14,
+      }),
+    );
+    let marked = false;
+    await expect(
+      reconcileRigProviderImageCleanupObligationsForSource(
+        {
+          db: {} as never,
+          settings: testSettings({ sandboxBackend: "modal" }),
+          accountId: ACCOUNT_ID,
+          workspaceId: WORKSPACE_ID,
+          sourceLeaseId: LEASE_ID,
+          sourceInstanceId: INSTANCE_ID,
+          timeoutMs: 5_000,
+        },
+        {
+          list: async () => [
+            {
+              id: OBLIGATION_ID,
+              state: "outcome_unknown",
+              buildRequestId: "rig-provider-image-request",
+              objectId: null,
+              providerBindingKey: PROVIDER_BINDING_KEY,
+              providerBinding: JSON.parse(PROVIDER_BINDING_KEY),
+              sourceLeaseId: LEASE_ID,
+              sourceInstanceId: INSTANCE_ID,
+            },
+          ],
+          recover: async () => {
+            throw rejection;
+          },
+          markFailed: async () => {
+            marked = true;
+            return true;
+          },
+          record: async () => true,
+        },
+      ),
+    ).rejects.toBe(rejection);
+    expect(marked).toBe(false);
   });
 
   test("fails closed when recovery returns another provider binding", async () => {
@@ -117,6 +226,9 @@ describe("durable Rig provider image cleanup reconciliation", () => {
             providerBindingKey: PROVIDER_BINDING_KEY.replace("workspace-a", "workspace-b"),
             providerBinding: JSON.parse(PROVIDER_BINDING_KEY.replace("workspace-a", "workspace-b")),
           }),
+          markFailed: async () => {
+            throw new Error("successful recovery must validate before terminalization");
+          },
           record: async () => {
             recorded = true;
             return true;

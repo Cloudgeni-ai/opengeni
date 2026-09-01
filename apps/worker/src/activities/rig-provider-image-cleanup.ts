@@ -1,20 +1,26 @@
 import type { Settings } from "@opengeni/config";
 import {
   listRecoverableRigProviderImageCleanupObligationsForSource,
+  markRigProviderImageCleanupObligationBuildFailed,
   recordRigProviderImageCleanupObject,
   type Database,
 } from "@opengeni/db";
-import { recoverModalImmutableProviderImageBuild } from "@opengeni/runtime/sandbox";
+import {
+  classifyModalImmutableProviderImageBuildFailure,
+  recoverModalImmutableProviderImageBuild,
+} from "@opengeni/runtime/sandbox";
 
 export type ReconcileRigProviderImageCleanupDependencies = {
   list: typeof listRecoverableRigProviderImageCleanupObligationsForSource;
   recover: typeof recoverModalImmutableProviderImageBuild;
+  markFailed: typeof markRigProviderImageCleanupObligationBuildFailed;
   record: typeof recordRigProviderImageCleanupObject;
 };
 
 const defaultDependencies: ReconcileRigProviderImageCleanupDependencies = {
   list: listRecoverableRigProviderImageCleanupObligationsForSource,
   recover: recoverModalImmutableProviderImageBuild,
+  markFailed: markRigProviderImageCleanupObligationBuildFailed,
   record: recordRigProviderImageCleanupObject,
 };
 
@@ -48,12 +54,34 @@ export async function reconcileRigProviderImageCleanupObligationsForSource(
     if (remainingMs <= 0) {
       throw new Error("Rig provider image cleanup reconciliation deadline was reached");
     }
-    const result = await dependencies.recover(input.settings, {
-      sandboxId: input.sourceInstanceId,
-      requestId: obligation.buildRequestId,
-      timeoutMs: remainingMs,
-      expectedProviderBindingKey: obligation.providerBindingKey,
-    });
+    let result: Awaited<ReturnType<typeof recoverModalImmutableProviderImageBuild>>;
+    try {
+      result = await dependencies.recover(input.settings, {
+        sandboxId: input.sourceInstanceId,
+        requestId: obligation.buildRequestId,
+        timeoutMs: remainingMs,
+        expectedProviderBindingKey: obligation.providerBindingKey,
+      });
+    } catch (error) {
+      if (classifyModalImmutableProviderImageBuildFailure(error) !== "definitive_rejection") {
+        throw error;
+      }
+      const persisted = await dependencies.markFailed(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        obligationId: obligation.id,
+        buildRequestId: obligation.buildRequestId,
+        providerBindingKey: obligation.providerBindingKey,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!persisted) {
+        throw new Error(
+          "Modal Rig provider image recovery could not persist the definitive rejection",
+          { cause: error },
+        );
+      }
+      continue;
+    }
     if (
       result.backend !== "modal" ||
       !result.imageId ||

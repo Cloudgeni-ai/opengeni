@@ -50649,6 +50649,38 @@ export async function markRigProviderImageCleanupObligationOutcomeUnknown(
   );
 }
 
+export async function markRigProviderImageCleanupObligationBuildFailed(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    obligationId: string;
+    buildRequestId: string;
+    providerBindingKey: string;
+    error?: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update rig_provider_image_cleanup_obligations set
+          state = 'build_failed',
+          last_delete_error = ${input.error?.slice(0, 4000) ?? null},
+          updated_at = now()
+        where id = ${input.obligationId}
+          and build_request_id = ${input.buildRequestId}
+          and provider_binding_key = ${input.providerBindingKey}
+          and state in ('building', 'outcome_unknown', 'build_failed')
+          and object_id is null
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
 export async function recordRigProviderImageCleanupObject(
   db: Database,
   input: {
