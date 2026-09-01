@@ -22,4 +22,21 @@ test("classifies only the exact Firefox xterm runner-policy WebGL warning", () =
       firefoxRunnerWarning.replace("console.warning:", "console.error:"),
     ),
   ).toBe(false);
+  expect(isExpectedFirefoxWebGLUnavailableWarning(`${firefoxRunnerWarning}\nproduct failed`)).toBe(
+    false,
+  );
+  expect(isExpectedFirefoxWebGLUnavailableWarning(`${firefoxRunnerWarning} suffix`)).toBe(false);
+  expect(
+    isExpectedFirefoxWebGLUnavailableWarning(
+      firefoxRunnerWarning.replace(
+        "/@xterm_addon-webgl.js?v=1ec97786",
+        "/host-@xterm_addon-webgl.js?v=1ec97786",
+      ),
+    ),
+  ).toBe(false);
+  expect(
+    isExpectedFirefoxWebGLUnavailableWarning(
+      firefoxRunnerWarning.replace("?v=1ec97786", "?v=1ec97786&source=product"),
+    ),
+  ).toBe(false);
 });

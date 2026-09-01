@@ -48,7 +48,15 @@ it does not duplicate session state.
 `createContextSessionControllers(sessionId)` composes the ordinary session
 resource, event, composer, attachment, queue, and control controllers plus
 optional goal, human-input, and lineage controllers supported by the supplied
-client. Call its `destroy()` method when the host owns that composition.
+client. The shared event feed reconciles every authoritative controller when a
+live connection opens or reconnects. Call the composition's `destroy()` method
+from `onDestroy` when the host owns it.
+
+`OpenGeniProvider` treats each client and workspace field as authority. Replacing
+one remounts the provided subtree so old reads, streams, and controllers retire;
+recreating an otherwise identical context wrapper does not. Descendants that
+own controller compositions must still close them in their normal `onDestroy`
+lifecycle.
 
 ## Styled session surface
 

@@ -6,6 +6,7 @@
     type TimelineRendererRegistry,
   } from "../renderers";
   import {
+    authNeededPresentation,
     boundedTimelineValue,
     timelineItemLabel,
     timelineItemOutcome,
@@ -46,18 +47,6 @@
     if (value.goalStatus === "paused") return "Worker paused";
     if (value.goalStatus === "completed") return "Worker completed";
     return "Worker reported back";
-  }
-
-  function authActionable(value: AuthNeededItem): boolean {
-    return ![
-      "personal_authority_unavailable",
-      "unsupported_auth",
-      "resource_scope_unavailable",
-    ].includes(value.reason ?? "");
-  }
-
-  function authActionLabel(value: AuthNeededItem): "Connect" | "Reconnect" {
-    return value.reason === "missing_connection" ? "Connect" : "Reconnect";
   }
 
   async function reconnect(value: AuthNeededItem) {
@@ -203,17 +192,23 @@
     {:else if item.kind === "machine-input-batch"}
       <ul>{#each item.members as member (member.id)}<li>{member.summary}</li>{/each}</ul>
     {:else if item.kind === "auth-needed"}
+      {@const auth = authNeededPresentation(item)}
       <div class="og-timeline-row__headline">
-        <strong>{item.providerDomain || "Provider"} needs to be connected again</strong>
+        <strong>{auth.title}</strong>
         <span class="og-timeline-row__pill">Action required</span>
       </div>
-      <p class="og-timeline-row__summary">The failed tool call was not replayed.</p>
-      {#if item.toolName}<p>Requested by <code>{item.toolName}</code></p>{/if}
-      {#if authActionable(item) && onReconnect}
-        <button class="og-button" type="button" disabled={reconnecting} onclick={() => void reconnect(item)}>{reconnecting ? "Opening…" : authActionLabel(item)}</button>
-      {:else if authActionable(item) && item.authorizationUrl}
-        <a class="og-button" href={item.authorizationUrl} rel="noreferrer" target="_blank">{authActionLabel(item)}</a>
+      <p class="og-timeline-row__summary">{auth.reasonLine}</p>
+      {#if auth.capability}<p>Provider: <code>{item.providerDomain}</code></p>{/if}
+      {#if auth.requiredVariables.length > 0}
+        <p>Needs variables: <code>{auth.requiredVariables.join(", ")}</code></p>
       {/if}
+      {#if item.toolName}<p>Requested by <code>{item.toolName}</code></p>{/if}
+      {#if auth.actionable && onReconnect}
+        <button class="og-button" type="button" disabled={reconnecting} onclick={() => void reconnect(item)}>{reconnecting ? "Opening…" : auth.actionLabel}</button>
+      {:else if auth.actionable && item.authorizationUrl}
+        <a class="og-button" href={item.authorizationUrl} rel="noreferrer" target="_blank">{auth.actionLabel}</a>
+      {/if}
+      {#if auth.followUpLine}<p class="og-timeline-row__summary">{auth.followUpLine}</p>{/if}
       {#if reconnectFailed}<p class="og-timeline-row__failure" role="alert">Could not start connection setup. Try again.</p>{/if}
     {:else if item.kind === "turn-end"}
       <div class="og-timeline-row__status" role="status">

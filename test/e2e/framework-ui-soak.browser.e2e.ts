@@ -9,6 +9,7 @@ import {
   FRAMEWORK_UI_SOAK_DEFAULT_DURATION_MILLISECONDS,
   FRAMEWORK_UI_SOAK_TEST_HEADROOM_MILLISECONDS,
 } from "../../scripts/framework-ui-soak-contract";
+import { startFrameworkUiDemos } from "../../scripts/framework-ui-demo-processes";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const durationMilliseconds = Number(
@@ -53,10 +54,10 @@ describe("framework UI deterministic browser soak", () => {
       },
     });
     const [reactPort, sveltePort] = await Promise.all([freePort(), freePort()]);
-    [reactDemo, svelteDemo] = await Promise.all([
-      startDemo("react", reactPort),
-      startDemo("svelte", sveltePort),
-    ]);
+    [reactDemo, svelteDemo] = await startFrameworkUiDemos(
+      async () => await startDemo("react", reactPort),
+      async () => await startDemo("svelte", sveltePort),
+    );
     const executablePath =
       process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ??
       process.env.OPENGENI_BROWSER_BIN ??

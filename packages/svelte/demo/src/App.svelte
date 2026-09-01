@@ -39,7 +39,13 @@
     sessionId,
     events: sharedEvents,
   });
-  const eventController = createSessionEvents({ client: client as never, workspaceId, sessionId });
+  let reconcileControllers: (() => Promise<void>) | undefined;
+  const eventController = createSessionEvents({
+    client: client as never,
+    workspaceId,
+    sessionId,
+    reconcile: async () => await reconcileControllers?.(),
+  });
   const composer = createComposer({
     client: client as never,
     workspaceId,
@@ -71,6 +77,15 @@
       sessionId,
       events: sharedEvents,
     }),
+  };
+  reconcileControllers = async () => {
+    await Promise.all([
+      managed.session.controller.refresh(),
+      managed.composer.controller.refresh(),
+      managed.queue.controller.refresh(),
+      managed.goal.controller.refresh(),
+      managed.humanInput.controller.refresh(),
+    ]);
   };
   const applySharedEvents = () => {
     const retained = [...eventController.controller.getSnapshot().events];

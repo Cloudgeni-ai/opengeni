@@ -16,6 +16,7 @@ import {
 } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { isExpectedFirefoxWebGLUnavailableWarning } from "../../scripts/framework-ui-browser-diagnostics";
+import { startFrameworkUiDemos } from "../../scripts/framework-ui-demo-processes";
 
 type EngineId = "chromium" | "firefox" | "webkit";
 type Engine = readonly [
@@ -59,10 +60,10 @@ describe(`framework UI parity in ${engineName}`, () => {
       headless: true,
       ...(executablePath ? { executablePath } : {}),
     });
-    [reactDemo, svelteDemo] = await Promise.all([
-      startDemo("react", reactPort, reactBaseUrl),
-      startDemo("svelte", sveltePort, svelteBaseUrl),
-    ]);
+    [reactDemo, svelteDemo] = await startFrameworkUiDemos(
+      async () => await startDemo("react", reactPort, reactBaseUrl),
+      async () => await startDemo("svelte", sveltePort, svelteBaseUrl),
+    );
     await writeFile(
       join(evidenceRoot, "environment.json"),
       `${JSON.stringify(

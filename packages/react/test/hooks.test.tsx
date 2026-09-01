@@ -4336,30 +4336,111 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
-  test("retryable draft hydrate failures stay bounded across client identity churn", async () => {
+  test("retryable draft hydrate failures stay bounded across same-client callback churn", async () => {
     let reads = 0;
-    const failingClient = () =>
-      fakeClient({
-        getComposerDraft: async () => {
-          reads += 1;
-          throw gatewayError(503);
-        },
-      });
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        throw gatewayError(503);
+      },
+    });
     const hook = await renderHook(
-      (client: ReturnType<typeof failingClient>) =>
-        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
-      failingClient(),
+      (onSubmitted: (text: string, input: SendMessageInput) => void) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, onSubmitted }),
+      () => undefined,
     );
     await flush();
     expect(reads).toBe(1);
 
     for (let index = 0; index < 10; index += 1) {
-      await hook.rerender(failingClient());
+      await hook.rerender(() => undefined);
     }
     await flush();
 
     expect(reads).toBe(1);
     expect(hook.result.current.error).toMatchObject({ status: 503, retryable: true });
+    await hook.unmount();
+  });
+
+  test("client replacement fences an old-authority draft hydrate", async () => {
+    let resolveOldRead!: (draft: ComposerDraft) => void;
+    let oldSignal: AbortSignal | undefined;
+    const oldRead = new Promise<ComposerDraft>((resolve) => {
+      resolveOldRead = resolve;
+    });
+    const oldClient = fakeClient({
+      getComposerDraft: async (_workspaceId, _sessionId, options) => {
+        oldSignal = options?.signal;
+        return await oldRead;
+      },
+    });
+    const newDraft: ComposerDraft = {
+      revision: 8,
+      text: "new authority",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const newClient = fakeClient({ getComposerDraft: async () => newDraft });
+    const hook = await renderHook(
+      (client: typeof oldClient) => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      oldClient,
+    );
+    await flush();
+    expect(oldSignal?.aborted).toBe(false);
+
+    await hook.rerender(newClient);
+    await flush();
+
+    expect(oldSignal?.aborted).toBe(true);
+    expect(hook.result.current.value).toBe("new authority");
+
+    resolveOldRead({ ...newDraft, revision: 99, text: "stale old authority" });
+    await flush();
+    expect(hook.result.current.value).toBe("new authority");
+    await hook.unmount();
+  });
+
+  test("client replacement closes the old-authority composer stream", async () => {
+    function streamingClient() {
+      const observations = { streams: 0, signal: undefined as AbortSignal | undefined };
+      const client = fakeClient({
+        getSession: async () => ({ lastSequence: 0 }) as never,
+        streamEvents: (_workspaceId, _sessionId, options) => {
+          observations.streams += 1;
+          observations.signal = options?.signal;
+          return (async function* () {
+            if (!options?.signal?.aborted) {
+              await new Promise<void>((resolve) => {
+                options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+              });
+            }
+            yield* [] as SessionEvent[];
+          })();
+        },
+      });
+      return { client, observations };
+    }
+
+    const oldAuthority = streamingClient();
+    const nextAuthority = streamingClient();
+    const hook = await renderHook(
+      (client: typeof oldAuthority.client) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      oldAuthority.client,
+    );
+    await flush();
+    expect(oldAuthority.observations.streams).toBe(1);
+
+    await hook.rerender(nextAuthority.client);
+    await flush();
+
+    expect(oldAuthority.observations.signal?.aborted).toBe(true);
+    expect(nextAuthority.observations.streams).toBe(1);
     await hook.unmount();
   });
 

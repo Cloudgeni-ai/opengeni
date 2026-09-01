@@ -43,17 +43,26 @@ test("native composer submission and owning examples close their lifecycle", () 
 
 test("composed native session surfaces fan one retained event feed into every controller", () => {
   const packageRoot = resolve(import.meta.dir, "..");
-  const controllers = readFileSync(join(packageRoot, "src/controllers.ts"), "utf8");
+  const controllers = readFileSync(
+    join(packageRoot, "src/session-controller-composition.ts"),
+    "utf8",
+  );
   const demo = readFileSync(join(packageRoot, "demo/src/App.svelte"), "utf8");
 
   expect(controllers.match(/events: sharedEvents/g)).toHaveLength(6);
   for (const target of ["session", "composer", "queue", "goal?", "humanInput?", "lineage?"]) {
     expect(controllers).toContain(`controllers.${target}.controller.applyEvents(retained)`);
   }
+  expect(controllers).toContain("reconcile: async () => {");
+  for (const target of ["session", "composer", "queue", "goal", "humanInput", "lineage"]) {
+    expect(controllers).toContain(`controllers.${target}`);
+  }
   expect(demo.match(/events: sharedEvents/g)).toHaveLength(5);
   for (const target of ["session", "composer", "queue", "goal", "humanInput"]) {
     expect(demo).toContain(`managed.${target}.controller.applyEvents(retained)`);
+    expect(demo).toContain(`managed.${target}.controller.refresh()`);
   }
+  expect(demo).toContain("reconcile: async () => await reconcileControllers?.()");
 });
 
 test("composed control and demo tool-policy failures remain visible and authoritative", () => {
@@ -88,8 +97,10 @@ test("native auth-needed recovery stays host-owned and works without a pre-minte
   expect(sessionSurface).toContain(
     "<MessageTimeline controller={controllers.events.controller} {onReconnect} />",
   );
-  expect(row).toContain("authActionable(item) && onReconnect");
+  expect(row).toContain("auth.actionable && onReconnect");
   expect(row).toContain("await onReconnect(value)");
+  expect(row).toContain("auth.requiredVariables.join");
+  expect(row).toContain("auth.reasonLine");
   expect(demo).toContain("onReconnect={requestReconnect}");
   expect(fixture).not.toContain('authorizationUrl: "https://github.com/login/oauth/authorize"');
 });

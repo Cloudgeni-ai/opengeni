@@ -130,6 +130,13 @@ their first browser subscriber and retire after the final subscriber. Pass
 Imports and deterministic rendering remain SSR-safe; browser transports begin
 only after subscription/mount.
 
+`OpenGeniProvider` keys its descendant context boundary on every supplied client
+and the workspace identity. Replacing any authority-bearing field remounts that
+subtree and retires host-owned controllers through their ordinary `onDestroy`
+cleanup. `createContextSessionControllers` also refreshes every authoritative
+projection whenever its single shared event stream opens or reconnects, closing
+the initial-read/SSE handoff gap.
+
 Actionable `auth-needed` rows accept a host-owned `onReconnect` callback on
 `MessageTimeline` and `SessionSurface`. The callback receives the projected
 auth item so the host can route to OAuth or credential setup. A pre-minted

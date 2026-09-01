@@ -23,7 +23,13 @@ import {
 } from "@opengeni/sdk/session";
 import { derived, type Readable } from "svelte/store";
 import { getOpenGeniContext } from "./context";
-import { controllerStore, type OpenGeniControllerStore } from "./store";
+import {
+  createSessionControllerComposition,
+  type SessionSurfaceControllers,
+} from "./session-controller-composition";
+import { controllerStore } from "./store";
+
+export type { SessionSurfaceControllers } from "./session-controller-composition";
 
 export function createSessionEvents(options: Parameters<typeof createSessionEventStore>[0]) {
   return controllerStore<SessionEventStore>(createSessionEventStore(options));
@@ -60,102 +66,8 @@ export function createLineage(options: Parameters<typeof createSessionLineageSto
   return controllerStore<SessionLineageStore>(createSessionLineageStore(options));
 }
 
-export type SessionSurfaceControllers = Readonly<{
-  session: OpenGeniControllerStore<SessionResourceStore>;
-  events: OpenGeniControllerStore<SessionEventStore>;
-  composer: OpenGeniControllerStore<SessionComposerRuntimeStore>;
-  attachments: OpenGeniControllerStore<FileAttachmentStore>;
-  queue: OpenGeniControllerStore<TurnQueueStore>;
-  control: OpenGeniControllerStore<SessionControlStore>;
-  goal?: OpenGeniControllerStore<GoalStore> | undefined;
-  humanInput?: OpenGeniControllerStore<HumanInputStore> | undefined;
-  lineage?: OpenGeniControllerStore<SessionLineageStore> | undefined;
-  destroy(): void;
-}>;
-
 export function createContextSessionControllers(sessionId: string): SessionSurfaceControllers {
-  const context = getOpenGeniContext();
-  const common = { workspaceId: context.workspaceId, sessionId };
-  const sharedEvents = [] as const;
-  const session = createSessionResource({
-    client: context.sessionClient ?? context.client,
-    ...common,
-    events: sharedEvents,
-  });
-  const events = createSessionEvents({ client: context.client, ...common });
-  const composer = createComposer({ client: context.client, ...common, events: sharedEvents });
-  const attachments = createAttachments({
-    client: context.fileAttachmentClient ?? context.client,
-    workspaceId: context.workspaceId,
-  });
-  const queue = createTurnQueue({ client: context.client, ...common, events: sharedEvents });
-  const control = createSessionControl({ client: context.client, ...common });
-  const controllers = {
-    session,
-    events,
-    composer,
-    attachments,
-    queue,
-    control,
-    ...(context.goalClient || "getGoal" in context.client
-      ? {
-          goal: createGoal({
-            client: context.goalClient ?? (context.client as never),
-            ...common,
-            events: sharedEvents,
-          }),
-        }
-      : {}),
-    ...(context.humanInputClient || "listHumanInputRequests" in context.client
-      ? {
-          humanInput: createHumanInput({
-            client: context.humanInputClient ?? (context.client as never),
-            ...common,
-            events: sharedEvents,
-          }),
-        }
-      : {}),
-    ...(context.lineageClient || "getSessionLineage" in context.client
-      ? {
-          lineage: createLineage({
-            client: context.lineageClient ?? (context.client as never),
-            ...common,
-            events: sharedEvents,
-          }),
-        }
-      : {}),
-  };
-  const applySharedEvents = () => {
-    const retained = [...events.controller.getSnapshot().events];
-    controllers.session.controller.applyEvents(retained);
-    controllers.composer.controller.applyEvents(retained);
-    controllers.queue.controller.applyEvents(retained);
-    controllers.goal?.controller.applyEvents(retained);
-    controllers.humanInput?.controller.applyEvents(retained);
-    controllers.lineage?.controller.applyEvents(retained);
-  };
-  const unsubscribeEvents = events.controller.subscribe(applySharedEvents);
-  const unsubscribeQueue = queue.controller.subscribe(() => {
-    composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
-  });
-  applySharedEvents();
-  composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
-  return Object.freeze({
-    ...controllers,
-    destroy() {
-      unsubscribeEvents();
-      unsubscribeQueue();
-      controllers.session.destroy();
-      controllers.events.destroy();
-      controllers.composer.destroy();
-      controllers.attachments.destroy();
-      controllers.queue.destroy();
-      controllers.control.destroy();
-      controllers.goal?.destroy();
-      controllers.humanInput?.destroy();
-      controllers.lineage?.destroy();
-    },
-  });
+  return createSessionControllerComposition(getOpenGeniContext(), sessionId);
 }
 
 export function approvalsFromEventStore(

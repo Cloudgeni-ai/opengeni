@@ -201,11 +201,11 @@ export function useComposer(
       options: runtimeOptions,
       store: createSessionComposerRuntimeStore(runtimeOptions),
     };
-    // The client and host callbacks are committed into this target-local cell
-    // below. Excluding them here prevents harmless identity churn from
-    // replacing a session controller or restarting its bounded read retries.
+    // Host callbacks are committed into this target-local cell below. Client
+    // identity is deliberately an authority boundary: replacing it must retire
+    // in-flight reads and streams before the new client can serve this target.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetKey]);
+  }, [client, targetKey]);
   const snapshot = useSyncExternalStore(
     owned.store.subscribe,
     owned.store.getSnapshot,
@@ -213,7 +213,6 @@ export function useComposer(
   );
 
   useLayoutEffect(() => {
-    owned.options.client = client;
     owned.options.sendExtras = options.sendExtras;
     owned.options.sendBlocked = options.sendBlocked;
     owned.options.sendDestination = options.sendDestination;
@@ -222,7 +221,6 @@ export function useComposer(
     owned.options.onDeliveryError = options.onDeliveryError;
     owned.store.syncExternalInputs();
   }, [
-    client,
     options.onDeliveryError,
     options.onSent,
     options.onSubmitted,
