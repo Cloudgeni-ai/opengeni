@@ -867,22 +867,24 @@ spec:
             description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
         # ── Context / compaction ─────────────────────────────────────────────
         - alert: OpenGeniCompactionNotFiring
-          # Contexts running hot (p90 observed input tokens high) while NO
-          # compaction has fired in 30m — sessions are drifting toward overflow.
-          # The 150k token threshold assumes a ~200k-window model; tune to yours.
-          # `or vector(0)` is load-bearing: on a fresh cluster the compaction
-          # counter has NEVER been created, so a bare `sum(increase(...)) == 0`
-          # is an EMPTY vector, not 0 — the conjunction would silently never fire
-          # exactly when compaction has never fired. The fallback forces a real 0.
+          # A durable automatic start means the exact model-specific threshold
+          # was reached and the attempt fence committed. Compare the latest
+          # start and completion on one scrape target instead of guessing from a
+          # static token histogram threshold. Both bounded event/trigger series
+          # initialize at zero, so a first failure before the first scrape still
+          # leaves a positive start-minus-completion timestamp.
           expr: |
-            histogram_quantile(0.9, sum by (le) (rate(opengeni_model_input_tokens_bucket[30m]))) > 150000
-            and on()
-            (sum(increase(opengeni_context_compactions_total[30m])) or vector(0)) == 0
+            max(
+              opengeni_context_compaction_last_event_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn",event="started",trigger="auto"}
+              - on(namespace, release, environment, component, instance)
+              opengeni_context_compaction_last_event_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn",event="completed",trigger="auto"}
+            ) > 0
           for: 15m
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni contexts are running hot but compaction has not fired in 30m
+            summary: OpenGeni automatic compaction started but did not complete
+            description: A model-aware automatic context compaction durably started on a turn worker, but that worker has not recorded a later automatic compaction completion. Inspect compaction failures and attempt fencing.
         - alert: OpenGeniCodexPromptCacheHitRatioLow
           # The codex-subscription prompt cache is doing little work: median per-call
           # cache-hit ratio below 40% over 30m while codex calls are actually flowing.

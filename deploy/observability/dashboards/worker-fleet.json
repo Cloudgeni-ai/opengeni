@@ -864,8 +864,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Compaction firing rate by trigger (per 15m)",
-      "description": "Flat zero while input tokens climb = compaction not firing (see the alert).",
+      "title": "Compaction starts and completions by trigger (per 15m)",
+      "description": "Durable starts follow each resolved model's compaction threshold; a start without a completion is the alert signal.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -897,7 +897,18 @@
         {
           "refId": "A",
           "expr": "sum by (trigger) (increase(opengeni_context_compactions_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[15m]))",
-          "legendFormat": "{{trigger}}",
+          "legendFormat": "{{trigger}} completed",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (trigger) (increase(opengeni_context_compaction_starts_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[15m]))",
+          "legendFormat": "{{trigger}} started",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

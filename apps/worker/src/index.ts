@@ -56,6 +56,7 @@ import {
   type WorkerLifecycleState,
 } from "./http";
 import {
+  initializeContextCompactionMetrics,
   initializeWorkerOutcomeMetrics,
   normalizeTurnTaskQueueStats,
   observabilityEventLogger,
@@ -225,6 +226,9 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
     options.activityDependencies?.observability ??
     createObservability(settings, { component: `worker-${options.role}` });
   initializeWorkerOutcomeMetrics(observability);
+  if (options.role === "turn") {
+    initializeContextCompactionMetrics(observability);
+  }
   if (options.role === "turn" && options.workflowBundle) {
     throw new Error("workflowBundle is valid only for the control worker role");
   }

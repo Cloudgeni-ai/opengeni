@@ -212,6 +212,25 @@ describe("turn-capacity Prometheus alerts", () => {
     }
   });
 
+  test("alerts from durable model-aware compaction lifecycle instead of a static token guess", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expression = alertExpression(template, "OpenGeniCompactionNotFiring");
+
+    expect(expression).toContain("opengeni_context_compaction_last_event_timestamp_seconds");
+    expect(expression).toContain('event="started",trigger="auto"');
+    expect(expression).toContain('event="completed",trigger="auto"');
+    expect(expression).toContain("on(namespace, release, environment, component, instance)");
+    expect(expression).not.toContain("opengeni_model_input_tokens_bucket");
+    expect(expression).not.toContain("150000");
+    for (const selector of metricSelectors(expression)) {
+      expect(selector).toContain(DEPLOYMENT_SCOPE);
+      expect(selector).toContain('component="worker-turn"');
+    }
+  });
+
   test("correlates backlog and freshness before fleet aggregation", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
