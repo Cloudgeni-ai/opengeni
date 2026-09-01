@@ -199,6 +199,7 @@ import {
   boundSessionEventHttpPage,
   coalesceSessionEventDeltas,
   publishDurableSessionEvents,
+  sessionEventResumeSequence,
 } from "@opengeni/events";
 import {
   createGatewayRealtimeConnectionSecret,
@@ -2638,7 +2639,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     c.header("X-OpenGeni-Payload-Mode", payloadMode);
     c.header("X-OpenGeni-Forensic-Exact", String(forensicExact));
     const coveredFirst = page.events[0]?.sequence;
-    const coveredLast = page.events.at(-1)?.sequence;
+    const coveredLastEvent = page.events.at(-1);
+    const coveredLast =
+      coveredLastEvent === undefined ? undefined : sessionEventResumeSequence(coveredLastEvent);
     if (coveredFirst !== undefined) c.header("X-OpenGeni-Covered-First", String(coveredFirst));
     if (coveredLast !== undefined) c.header("X-OpenGeni-Covered-Last", String(coveredLast));
     const truncatedBy = page.truncated ? "http_bytes" : dbPage.truncatedBy;

@@ -1,4 +1,8 @@
-import { boundSessionEventPayload, type SessionEvent } from "@opengeni/contracts";
+import {
+  boundSessionEventPayload,
+  sessionEventPayloadTruncation,
+  type SessionEvent,
+} from "@opengeni/contracts";
 
 const COALESCIBLE_DELTA_TYPES = new Set([
   "agent.message.delta",
@@ -104,7 +108,9 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
 }
 
 function isCoalescibleDelta(event: SessionEvent): boolean {
-  return COALESCIBLE_DELTA_TYPES.has(event.type);
+  return (
+    COALESCIBLE_DELTA_TYPES.has(event.type) && sessionEventPayloadTruncation(event.payload) === null
+  );
 }
 
 function sameDeltaRun(

@@ -323,7 +323,7 @@ describe("session event byte-bounded HTTP pages", () => {
         account_id, workspace_id, session_id, sequence, type, payload
       ) values (
         ${session!.accountId}, ${workspaceId}, ${sessionId}, 1,
-        'agent.toolCall.output',
+        'agent.message.delta',
         ${admin.json({
           id: "legacy-page-stranding-output",
           output: `HEAD-${"p".repeat(3 * 1024 * 1024)}-TAIL`,
@@ -331,7 +331,7 @@ describe("session event byte-bounded HTTP pages", () => {
       )`;
 
     const response = await app.request(
-      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=forensic&payloadMode=full&before=2&limit=1`,
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=forensic&payloadMode=full&before=2&limit=1&compact=true`,
       { headers: { authorization } },
     );
     expect(response.status).toBe(200);
@@ -385,6 +385,7 @@ describe("session event byte-bounded HTTP pages", () => {
     );
     expect(first.headers.get("X-OpenGeni-Page-Truncated")).toBe("true");
     expect(first.headers.get("X-OpenGeni-Next-After")).toBe("49");
+    expect(first.headers.get("X-OpenGeni-Covered-Last")).toBe("49");
     expect(first.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
 
     const second = await app.request(

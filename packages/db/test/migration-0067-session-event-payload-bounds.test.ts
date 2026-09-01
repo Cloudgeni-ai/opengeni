@@ -113,6 +113,21 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         name: "exec_command",
         output: `HEAD-${"p".repeat(3 * 1024 * 1024)}-TAIL`,
       };
+      const projectionMarkerPayload = {
+        message: "ordinary retained payload with producer-controlled metadata",
+        truncation: {
+          truncated: true,
+          surface: "database_read_projection",
+          reason: "payload_bytes_exceeded",
+          originalBytes: 12_345,
+          deliveredBytes: 7,
+          omittedBytes: 12_338,
+          estimatedOriginalTokens: 3_087,
+          estimatedDeliveredTokens: 2,
+          fullEvidence: { available: false, reason: "not_retained" },
+          details: [],
+        },
+      };
       const insertPayload = {
         id: "insert-guard",
         name: "sessions_list",
@@ -149,6 +164,9 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         ), (
           ${account!.id}, ${workspace!.id}, ${sessionId}, 2,
           'agent.tool_call.completed', ${admin.json({ id: "update-target", output: "small" })}
+        ), (
+          ${account!.id}, ${workspace!.id}, ${sessionId}, 10,
+          'agent.message.completed', ${admin.json(projectionMarkerPayload)}
         )`;
       await admin`
         insert into session_events (
@@ -259,6 +277,15 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         expect(projectedPayloadPage.fullPayloadsExact).toBeTrue();
         expect(JSON.stringify(projectedPayloadPage.events)).toContain("HEAD-");
         expect(JSON.stringify(projectedPayloadPage.events)).toContain("-TAIL");
+
+        const exactMarkerPage = await listSessionEventPage(
+          projectionClient.db,
+          workspace!.id,
+          sessionId,
+          { after: 9, limit: 1 },
+        );
+        expect(exactMarkerPage.fullPayloadsExact).toBeTrue();
+        expect(exactMarkerPage.events[0]?.payload).toEqual(projectionMarkerPayload);
 
         const projectedCursorStrandingPage = await listSessionEventPage(
           projectionClient.db,

@@ -35332,6 +35332,7 @@ export async function listSessionEventPage(
           : asc(schema.sessionEvents.sequence);
       let rows: SessionEventProjectionRow[];
       let sourceRowCount: number;
+      let databaseReadProjected = false;
       if (payloadMode === "full") {
         // Plan the page from bounded metadata before selecting any canonical
         // payload. row_to_json includes private storage columns omitted by the
@@ -35378,6 +35379,7 @@ export async function listSessionEventPage(
             .orderBy(ordering)
             .limit(1);
           fullPayloadsExact = false;
+          databaseReadProjected = true;
         } else if (exactIds.length > 0) {
           rows = await scopedDb
             .select(sessionEventProjectionSelect("full"))
@@ -35399,6 +35401,12 @@ export async function listSessionEventPage(
         if (rows.length === 0) break;
       }
 
+      if (databaseReadProjected) {
+        for (const row of rows) {
+          settleDatabaseReadProjectionPayload(row.payload);
+        }
+      }
+
       for (const row of rows) {
         if (events.length >= requestedLimit) {
           hasMore = true;
@@ -35406,7 +35414,6 @@ export async function listSessionEventPage(
           break;
         }
         let event = mapProjectedEvent(row);
-        settleDatabaseReadProjectionPayload(event.payload);
         let eventBytes = utf8JsonBytes(event);
         const separatorBytes = events.length === 0 ? 0 : 1;
         if (bytes + separatorBytes + eventBytes > maxBytes) {
