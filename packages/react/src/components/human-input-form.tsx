@@ -644,62 +644,64 @@ function QuestionControls({
               </label>
             );
           })}
-          <div
-            className={cn(
-              "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
-              draft.otherSelected
-                ? "bg-og-status-waiting/12 text-og-fg"
-                : "text-og-fg hover:bg-og-surface-1/80",
-            )}
-          >
-            <input
-              id={otherChoiceId}
-              type={question.kind === "single_select" ? "radio" : "checkbox"}
-              name={question.kind === "single_select" ? fieldId : undefined}
-              aria-labelledby={otherLabelId}
-              checked={draft.otherSelected}
-              autoFocus={autoFocus && firstOption && question.options.length === 0}
-              onChange={(event) =>
-                onUpdate((current) => ({
-                  ...current,
-                  otherSelected: event.target.checked,
-                  ...(question.kind === "single_select" && event.target.checked
-                    ? { values: [] }
-                    : {}),
-                }))
-              }
-              className="mt-2 accent-og-accent"
-            />
-            <span className="min-w-0 flex-1">
-              <label
-                id={otherLabelId}
-                htmlFor={otherChoiceId}
-                className="block text-og-sm font-medium"
-              >
-                {messages.other}
-              </label>
-              <label htmlFor={otherTextId} className="sr-only">
-                {messages.other} answer for {visibleLabel}
-              </label>
+          {question.allowOther ? (
+            <div
+              className={cn(
+                "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",
+                draft.otherSelected
+                  ? "bg-og-status-waiting/12 text-og-fg"
+                  : "text-og-fg hover:bg-og-surface-1/80",
+              )}
+            >
               <input
-                id={otherTextId}
-                type="text"
-                value={draft.other}
-                disabled={busy}
-                placeholder="Type a value…"
-                onClick={() => onUpdate(selectOtherDraft)}
-                onFocus={() => onUpdate(selectOtherDraft)}
-                onChange={(event) => {
-                  const other = event.target.value;
+                id={otherChoiceId}
+                type={question.kind === "single_select" ? "radio" : "checkbox"}
+                name={question.kind === "single_select" ? fieldId : undefined}
+                aria-labelledby={otherLabelId}
+                checked={draft.otherSelected}
+                autoFocus={autoFocus && firstOption && question.options.length === 0}
+                onChange={(event) =>
                   onUpdate((current) => ({
-                    ...selectOtherDraft(current),
-                    other,
-                  }));
-                }}
-                className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
+                    ...current,
+                    otherSelected: event.target.checked,
+                    ...(question.kind === "single_select" && event.target.checked
+                      ? { values: [] }
+                      : {}),
+                  }))
+                }
+                className="mt-2 accent-og-accent"
               />
-            </span>
-          </div>
+              <span className="min-w-0 flex-1">
+                <label
+                  id={otherLabelId}
+                  htmlFor={otherChoiceId}
+                  className="block text-og-sm font-medium"
+                >
+                  {messages.other}
+                </label>
+                <label htmlFor={otherTextId} className="sr-only">
+                  {messages.other} answer for {visibleLabel}
+                </label>
+                <input
+                  id={otherTextId}
+                  type="text"
+                  value={draft.other}
+                  disabled={busy}
+                  placeholder="Type a value…"
+                  onClick={() => onUpdate(selectOtherDraft)}
+                  onFocus={() => onUpdate(selectOtherDraft)}
+                  onChange={(event) => {
+                    const other = event.target.value;
+                    onUpdate((current) => ({
+                      ...selectOtherDraft(current),
+                      other,
+                    }));
+                  }}
+                  className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
+                />
+              </span>
+            </div>
+          ) : null}
         </div>
       )}
       {error ? (

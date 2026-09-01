@@ -83,7 +83,7 @@ describe(`framework UI parity in ${engineName}`, () => {
     await Promise.allSettled([reactDemo?.stop(), svelteDemo?.stop(), browser?.close()]);
   }, 45_000);
 
-  test("React preserves mobile composer, timeline, vertical tabs, focus, and Axe semantics", async () => {
+  test("React SDK showcase preserves the shared mobile session contract", async () => {
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
       hasTouch: true,
@@ -95,11 +95,17 @@ describe(`framework UI parity in ${engineName}`, () => {
       const page = await context.newPage();
       const diagnostics = captureDiagnostics(page);
       await page.goto(reactBaseUrl, { waitUntil: "networkidle" });
-      await page.getByRole("heading", { name: "Staging operations" }).waitFor();
+      await page.getByRole("heading", { name: "Session SDK showcase" }).waitFor();
+      expect(await page.getByText("React", { exact: true }).count()).toBe(1);
+      expect(await page.getByText(/Fleet|Scheduled tasks|Workspace/, { exact: true }).count()).toBe(
+        0,
+      );
       expect(await page.locator('[id^="og-user-message-"]').count()).toBeGreaterThan(0);
+      await page.getByRole("heading", { name: "Choose the next environment" }).waitFor();
+      expect(await page.getByRole("radio", { name: /Other/ }).count()).toBe(0);
 
       const textbox = page.getByRole("textbox", { name: "Message the agent" });
-      const prompt = `${engineName} verifies the shared React composer.`;
+      const prompt = `${engineName} verifies the shared composer.`;
       await textbox.fill(prompt);
       await textbox.press("Enter");
       await page
@@ -108,27 +114,20 @@ describe(`framework UI parity in ${engineName}`, () => {
         .waitFor({ timeout: 15_000 });
       expect(await textbox.inputValue()).toBe("");
 
-      const navigation = page.getByRole("navigation", { name: "Demo views" });
-      const workspaceTrigger = navigation.getByRole("button", {
-        name: "Workspace",
-        exact: true,
+      await page.getByRole("radio", { name: /Staging/ }).check();
+      await page.getByRole("button", { name: "Send answers", exact: true }).click();
+      await page.getByRole("heading", { name: "Choose the next environment" }).waitFor({
+        state: "detached",
       });
-      await workspaceTrigger.click();
-      const workspace = page.locator('[role="dialog"][aria-label="Workspace"]:not([hidden])');
-      await workspace.waitFor();
-      expect(await page.evaluate(() => document.activeElement?.getAttribute("role"))).toBe("tab");
-      expect(
-        await page.getByRole("tab", { name: "Files", exact: true }).getAttribute("aria-selected"),
-      ).toBe("true");
-      await page.keyboard.press("ArrowDown");
-      expect(
-        await page
-          .getByRole("tab", { name: "Terminal", exact: true })
-          .getAttribute("aria-selected"),
-      ).toBe("true");
-      await page.keyboard.press("Escape");
-      await workspace.waitFor({ state: "hidden" });
-      await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "Workspace");
+      await page.getByRole("button", { name: "Approve", exact: true }).click();
+      await page.getByRole("button", { name: "Approve", exact: true }).waitFor({
+        state: "detached",
+      });
+      await expectRecordedActions(page, [
+        "composer.submit",
+        "human-input.respond",
+        "approval.respond",
+      ]);
 
       const geometry = await page.evaluate(() => {
         const input = document.querySelector<HTMLElement>(
@@ -145,7 +144,7 @@ describe(`framework UI parity in ${engineName}`, () => {
       expect(geometry.inputHeight).toBeGreaterThanOrEqual(44);
       await assertReactTurnSummaryNames(page);
       await assertAxeClean(page);
-      assertExpectedDiagnostics(diagnostics, { reducedMotionWarning: true });
+      assertExpectedDiagnostics(diagnostics, { reducedMotionWarning: false });
       await page.screenshot({
         path: join(evidenceRoot, "react-phone-dark.png"),
         fullPage: true,
@@ -156,7 +155,7 @@ describe(`framework UI parity in ${engineName}`, () => {
     }
   }, 60_000);
 
-  test("Svelte preserves native timeline, composer, drawers, validation, and Axe semantics", async () => {
+  test("Svelte SDK showcase preserves the shared mobile session contract", async () => {
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
       hasTouch: true,
@@ -168,59 +167,61 @@ describe(`framework UI parity in ${engineName}`, () => {
       const page = await context.newPage();
       const diagnostics = captureDiagnostics(page);
       await page.goto(svelteBaseUrl, { waitUntil: "networkidle" });
-      await page.getByRole("heading", { name: /Mission Control/ }).waitFor();
-      await page.getByRole("region", { name: "Session timeline" }).waitFor();
-      expect(await page.locator('[data-og-component="timeline-row"]').count()).toBeGreaterThan(12);
+      await page.getByRole("heading", { name: "Session SDK showcase" }).waitFor();
+      expect(await page.getByText("Svelte", { exact: true }).count()).toBe(1);
       expect(
-        await page.getByText("No React runtime crossed the native Svelte boundary.").count(),
-      ).toBe(1);
+        await page
+          .getByText(/Mission Control|Fleet|Scheduled tasks|Workspace/, { exact: true })
+          .count(),
+      ).toBe(0);
+      await page.getByRole("region", { name: "Session timeline" }).waitFor();
+      expect(
+        await page.locator('[data-og-component="timeline-row"]').count(),
+      ).toBeGreaterThanOrEqual(7);
+      expect(await page.getByText("14 tests passed", { exact: false }).count()).toBe(1);
+      expect(await page.getByRole("radio", { name: /Other/ }).count()).toBe(0);
 
       const textbox = page.getByRole("textbox", { name: "Message" });
-      await textbox.fill(`${engineName} verifies the native Svelte composer.`);
+      const prompt = `${engineName} verifies the shared composer.`;
+      await textbox.fill(prompt);
       await textbox.press("Enter");
-      await page.waitForFunction(
-        () =>
-          (document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.value ??
-            "pending") === "",
-      );
+      await page.getByText(prompt, { exact: true }).waitFor({ timeout: 15_000 });
       expect(await textbox.inputValue()).toBe("");
-
-      const sessions = page.getByRole("button", { name: "Sessions" });
-      await sessions.click();
-      expect(await sessions.getAttribute("aria-expanded")).toBe("true");
-      await page.keyboard.press("Escape");
-      expect(await sessions.getAttribute("aria-expanded")).toBe("false");
-      expect(await sessions.evaluate((element) => document.activeElement === element)).toBe(true);
 
       await page.getByRole("button", { name: "Send answers", exact: true }).click();
       expect(await page.getByRole("alert").allTextContents()).toContain(
         "This question is required.",
       );
-
-      const configure = page.getByRole("button", { name: "Configure" });
-      await configure.click();
-      expect(await configure.getAttribute("aria-expanded")).toBe("true");
-      await page.keyboard.press("Escape");
-      expect(await configure.getAttribute("aria-expanded")).toBe("false");
+      await page.getByRole("radio", { name: /Staging/ }).check();
+      await page.getByRole("button", { name: "Send answers", exact: true }).click();
+      await page.getByRole("heading", { name: "Choose the next environment" }).waitFor({
+        state: "detached",
+      });
+      await page.getByRole("button", { name: "Approve", exact: true }).click();
+      await page.getByRole("button", { name: "Approve", exact: true }).waitFor({
+        state: "detached",
+      });
+      await expectRecordedActions(page, [
+        "composer.submit",
+        "human-input.respond",
+        "approval.respond",
+      ]);
 
       const geometry = await page.evaluate(() => {
         const input = document.querySelector<HTMLElement>('textarea[aria-label="Message"]')!;
-        const actions = [...document.querySelectorAll<HTMLElement>(".mission-mobile-action")];
         return {
           overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
           composerOverflow:
             document.querySelector<HTMLElement>(".og-composer")!.scrollWidth -
             document.querySelector<HTMLElement>(".og-composer")!.clientWidth,
           inputFontSize: getComputedStyle(input).fontSize,
-          actionHeight: Math.min(
-            ...actions.map((element) => element.getBoundingClientRect().height),
-          ),
+          inputHeight: input.getBoundingClientRect().height,
         };
       });
       expect(geometry.overflow).toBeLessThanOrEqual(1);
       expect(geometry.composerOverflow).toBeLessThanOrEqual(1);
       expect(geometry.inputFontSize).toBe("16px");
-      expect(geometry.actionHeight).toBeGreaterThanOrEqual(44);
+      expect(geometry.inputHeight).toBeGreaterThanOrEqual(44);
       await assertAxeClean(page);
       await page.reload({ waitUntil: "networkidle" });
       await page.getByRole("region", { name: "Session timeline" }).waitFor();
@@ -235,6 +236,58 @@ describe(`framework UI parity in ${engineName}`, () => {
         fullPage: true,
         animations: "disabled",
       });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("React and Svelte expose the same desktop showcase frame", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      reducedMotion: "reduce",
+      colorScheme: "dark",
+    });
+    try {
+      const [reactPage, sveltePage] = await Promise.all([context.newPage(), context.newPage()]);
+      await Promise.all([
+        reactPage.goto(reactBaseUrl, { waitUntil: "networkidle" }),
+        sveltePage.goto(svelteBaseUrl, { waitUntil: "networkidle" }),
+      ]);
+      const measure = async (page: Page) =>
+        await page.evaluate(() => {
+          const header = document
+            .querySelector<HTMLElement>(".sdk-demo__header")!
+            .getBoundingClientRect();
+          const surface = document
+            .querySelector<HTMLElement>('[data-demo-surface="session"]')!
+            .getBoundingClientRect();
+          return {
+            headerHeight: header.height,
+            surfaceX: surface.x,
+            surfaceY: surface.y,
+            surfaceWidth: surface.width,
+            surfaceHeight: surface.height,
+          };
+        });
+      const [reactFrame, svelteFrame] = await Promise.all([
+        measure(reactPage),
+        measure(sveltePage),
+      ]);
+      for (const key of Object.keys(reactFrame) as Array<keyof typeof reactFrame>) {
+        expect(Math.abs(reactFrame[key] - svelteFrame[key])).toBeLessThanOrEqual(2);
+      }
+      await Promise.all([
+        reactPage.screenshot({
+          path: join(evidenceRoot, "react-desktop-dark.png"),
+          fullPage: true,
+          animations: "disabled",
+        }),
+        sveltePage.screenshot({
+          path: join(evidenceRoot, "svelte-desktop-dark.png"),
+          fullPage: true,
+          animations: "disabled",
+        }),
+      ]);
     } finally {
       await context.close();
     }
@@ -278,6 +331,17 @@ async function assertAxeClean(page: Page): Promise<void> {
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
   expect(axe.violations).toEqual([]);
+}
+
+async function expectRecordedActions(page: Page, expected: readonly string[]): Promise<void> {
+  const actions = await page.evaluate(() =>
+    (
+      window as typeof window & {
+        __OPENGENI_DEMO_REQUESTS__?: Array<{ action: string }>;
+      }
+    ).__OPENGENI_DEMO_REQUESTS__?.map(({ action }) => action),
+  );
+  expect(actions).toEqual(expected);
 }
 
 async function assertReactTurnSummaryNames(page: Page): Promise<void> {

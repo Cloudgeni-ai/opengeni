@@ -11,11 +11,14 @@ import {
   createTurnQueueStore,
   projectPendingApprovals,
   type FileAttachmentStore,
+  type GoalClientLike,
   type GoalStore,
+  type HumanInputSessionClientLike,
   type HumanInputStore,
   type SessionControlStore,
   type SessionEventStore,
   type SessionLineageStore,
+  type SessionLineageClientLike,
   type SessionMcpApprovalPolicyStore,
   type SessionResourceStore,
   type SessionComposerRuntimeStore,
@@ -73,7 +76,16 @@ export type SessionSurfaceControllers = Readonly<{
   destroy(): void;
 }>;
 
-export function createContextSessionControllers(sessionId: string): SessionSurfaceControllers {
+export type ContextSessionControllerFeatures = Readonly<{
+  goal?: boolean;
+  humanInput?: boolean;
+  lineage?: boolean;
+}>;
+
+export function createContextSessionControllers(
+  sessionId: string,
+  features: ContextSessionControllerFeatures = {},
+): SessionSurfaceControllers {
   const context = getOpenGeniContext();
   const common = { workspaceId: context.workspaceId, sessionId };
   const session = createSessionResource({
@@ -103,21 +115,28 @@ export function createContextSessionControllers(sessionId: string): SessionSurfa
     attachments,
     queue,
     control,
-    ...(context.goalClient || "getGoal" in context.client
-      ? { goal: createGoal({ client: context.goalClient ?? (context.client as never), ...common }) }
-      : {}),
-    ...(context.humanInputClient || "listHumanInputRequests" in context.client
+    ...(features.goal !== false && (context.goalClient || "getGoal" in context.client)
       ? {
-          humanInput: createHumanInput({
-            client: context.humanInputClient ?? (context.client as never),
+          goal: createGoal({
+            client: context.goalClient || (context.client as GoalClientLike),
             ...common,
           }),
         }
       : {}),
-    ...(context.lineageClient || "getSessionLineage" in context.client
+    ...(features.humanInput !== false &&
+    (context.humanInputClient || "listHumanInputRequests" in context.client)
+      ? {
+          humanInput: createHumanInput({
+            client: context.humanInputClient ?? (context.client as HumanInputSessionClientLike),
+            ...common,
+          }),
+        }
+      : {}),
+    ...(features.lineage !== false &&
+    (context.lineageClient || "getSessionLineage" in context.client)
       ? {
           lineage: createLineage({
-            client: context.lineageClient ?? (context.client as never),
+            client: context.lineageClient ?? (context.client as SessionLineageClientLike),
             ...common,
           }),
         }

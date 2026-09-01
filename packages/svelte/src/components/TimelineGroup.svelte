@@ -18,10 +18,14 @@
 {#if group.kind === "item"}
   <TimelineRow item={group.item} {renderers} />
 {:else if group.kind === "activity"}
-  <section class="og-timeline-group" data-og-component="fold" data-og-kind="activity" data-og-outcome={group.outcome}>
-    {#each group.items as item (item.id)}<TimelineRow {item} {renderers} />{/each}
-    {#if group.failureText}<div class="og-error" role="alert">{group.failureText}</div>{/if}
-  </section>
+  <div class="og-timeline-activity">
+    <Fold label={`${group.items.length} step${group.items.length === 1 ? "" : "s"}`} open={true}>
+      <section class="og-timeline-group" data-og-kind="activity" data-og-outcome={group.outcome}>
+        {#each group.items as item (item.id)}<TimelineRow {item} {renderers} />{/each}
+        {#if group.failureText}<div class="og-error" role="alert">{group.failureText}</div>{/if}
+      </section>
+    </Fold>
+  </div>
 {:else}
   <Fold label={`Turn · ${group.outcome}`} open={false}>
     <div class="og-timeline-group" data-og-kind="turn" data-og-outcome={group.outcome}>

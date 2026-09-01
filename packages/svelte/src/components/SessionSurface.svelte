@@ -14,16 +14,12 @@
     controllers,
     title = "OpenGeni session",
     models = [],
-    tools = [],
-    selectedTools = [],
-    onToolsChange,
+    showChrome = true,
   }: {
     controllers: SessionSurfaceControllers;
     title?: string;
     models?: readonly string[];
-    tools?: readonly { id: string; label: string }[];
-    selectedTools?: readonly string[];
-    onToolsChange?: ((ids: string[]) => void) | undefined;
+    showChrome?: boolean;
   } = $props();
   let session = $derived(readableFromController(controllers.session.controller, { owned: false }));
   let events = $derived(readableFromController(controllers.events.controller, { owned: false }));
@@ -36,18 +32,20 @@
 </script>
 
 <section class="og-root og-session" data-og-component="session" data-og-state={status}>
-  <SessionChrome
-    title={$session.value?.title ?? title}
-    {status}
-    paused={$queue.effectiveControl?.state === "paused"}
-    controlling={$control.controlling}
-    queueCount={$queue.queue.length}
-    approvalCount={approvals.length}
-    inputCount={humanInput ? ($humanInput?.requests.length ?? 0) : 0}
-    goalLabel={goal ? $goal?.value?.status : undefined}
-    onPause={() => controllers.control.controller.pause()}
-    onResume={() => controllers.control.controller.resume()}
-  />
+  {#if showChrome}
+    <SessionChrome
+      title={$session.value?.title ?? title}
+      {status}
+      paused={$queue.effectiveControl?.state === "paused"}
+      controlling={$control.controlling}
+      queueCount={$queue.queue.length}
+      approvalCount={approvals.length}
+      inputCount={humanInput ? ($humanInput?.requests.length ?? 0) : 0}
+      goalLabel={goal ? $goal?.value?.status : undefined}
+      onPause={() => controllers.control.controller.pause()}
+      onResume={() => controllers.control.controller.resume()}
+    />
+  {/if}
   <MessageTimeline controller={controllers.events.controller} />
   <div data-og-part="controls">
     {#if approvals.length > 0}<ApprovalSurface {approvals} controller={controllers.control.controller} />{/if}
@@ -59,8 +57,5 @@
     controller={controllers.composer.controller}
     attachments={controllers.attachments.controller}
     {models}
-    {tools}
-    {selectedTools}
-    {onToolsChange}
   />
 </section>

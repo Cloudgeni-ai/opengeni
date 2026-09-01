@@ -38,3 +38,19 @@ test("native composer submission and owning examples close their lifecycle", () 
   expect(readme).toContain("onDestroy(() => events.destroy())");
   expect(frameworkGuide).toContain("onDestroy(() => events.destroy())");
 });
+
+test("the demo consumes public exports without type escape hatches or fake controls", () => {
+  const demoRoot = resolve(import.meta.dir, "../demo/src");
+  const app = readFileSync(join(demoRoot, "App.svelte"), "utf8");
+  const client = readFileSync(join(demoRoot, "mock-client.ts"), "utf8");
+  const composer = readFileSync(
+    resolve(import.meta.dir, "../src/components/ChatComposer.svelte"),
+    "utf8",
+  );
+
+  expect(app).toContain('from "@opengeni/svelte/session"');
+  expect(app).toContain('from "@opengeni/svelte/session-ui"');
+  expect(`${app}\n${client}`).not.toContain("../../src");
+  expect(`${app}\n${client}`).not.toContain("as never");
+  expect(composer).not.toMatch(/selectedTools|onToolsChange/u);
+});

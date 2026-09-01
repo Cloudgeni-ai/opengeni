@@ -314,7 +314,7 @@ describe("HumanInputForm async host boundary", () => {
     expect(document.activeElement).toBe(firstField);
   });
 
-  test("always renders an accessible inline Other field for a choice question", async () => {
+  test("omits Other when the request does not allow a custom choice", async () => {
     mounted = await renderComponent(
       createElement(HumanInputForm, {
         request: {
@@ -337,20 +337,14 @@ describe("HumanInputForm async host boundary", () => {
       }),
     );
     const group = mounted.container.querySelector('[data-human-input-question="environment"]');
-    expect(group?.textContent).toContain("Other");
+    expect(group?.textContent).not.toContain("Other");
     const choiceGroup = group?.querySelector('[role="radiogroup"]');
     const choiceGroupLabelId = choiceGroup?.getAttribute("aria-labelledby");
     expect(choiceGroupLabelId).toBeTruthy();
     expect(document.getElementById(choiceGroupLabelId!)?.textContent).toContain(
       "Where should this run?",
     );
-    const otherInput = group?.querySelector<HTMLInputElement>('input[type="text"]');
-    expect(otherInput).not.toBeNull();
-    expect(otherInput?.disabled).toBe(false);
-    expect(otherInput?.labels).toHaveLength(1);
-    expect(otherInput?.labels?.[0]?.textContent).toContain(
-      "Other answer for Where should this run?",
-    );
+    expect(group?.querySelector<HTMLInputElement>('input[type="text"]')).toBeNull();
   });
 
   test("clicking or typing Other selects it and submits its exact text", async () => {
@@ -386,6 +380,10 @@ describe("HumanInputForm async host boundary", () => {
       'input[type="radio"][aria-labelledby]',
     );
     const otherInput = mounted.container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(otherInput?.labels).toHaveLength(1);
+    expect(otherInput?.labels?.[0]?.textContent).toContain(
+      "Other answer for Where should this run?",
+    );
     expect(staging).not.toBeNull();
     expect(otherChoice).not.toBeNull();
     expect(otherInput).not.toBeNull();

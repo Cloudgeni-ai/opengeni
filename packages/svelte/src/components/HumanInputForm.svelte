@@ -32,6 +32,7 @@
   let submittingInternally = $state(false);
   let autofocusedRequestId = $state<string | null>(null);
   let submissionInFlight = false;
+  let collapsed = $state(false);
   let messages = $derived({ ...DEFAULT_HUMAN_INPUT_FORM_MESSAGES, ...messageOverrides });
   let busy = $derived(submitting || submittingInternally);
 
@@ -140,6 +141,13 @@
   }
 </script>
 
+{#if collapsed}
+<div class="og-human-input og-human-input--collapsed" data-og-component="human-input" data-og-state="collapsed">
+  <span class="og-human-input__icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M7.8 7.3a2.5 2.5 0 1 1 3.3 2.4c-.7.3-1.1.8-1.1 1.5M10 14.5h.01" /></svg></span>
+  <h2>{request.questions.length === 1 ? (request.questions[0]?.label ?? request.questions[0]?.prompt) : messages.title}</h2>
+  <button class="og-button" type="button" onclick={() => (collapsed = false)}>{messages.expand}</button>
+</div>
+{:else}
 <form
   bind:this={form}
   class="og-human-input"
@@ -147,11 +155,17 @@
   data-og-state={busy ? "submitting" : "waiting"}
   data-human-input-request={request.id}
   aria-busy={busy}
+  aria-labelledby={fieldId(request.id, "title")}
   onsubmit={submit}
 >
   <header class="og-human-input__header" data-og-part="header">
-    <strong>{request.questions.length === 1 ? (request.questions[0]?.label ?? request.questions[0]?.prompt) : messages.title}</strong>
-    <span>{request.questions.length} question{request.questions.length === 1 ? "" : "s"}</span>
+    <span class="og-human-input__icon" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M7.8 7.3a2.5 2.5 0 1 1 3.3 2.4c-.7.3-1.1.8-1.1 1.5M10 14.5h.01" /></svg></span>
+    <div>
+      <h2 id={fieldId(request.id, "title")}>{request.questions.length === 1 ? (request.questions[0]?.label ?? request.questions[0]?.prompt) : messages.title}{#if request.questions.length === 1 && request.questions[0]?.required && !request.allowSkip}<span aria-hidden="true"> *</span>{/if}</h2>
+      {#if request.questions.length === 1 && request.questions[0]?.label}<p>{request.questions[0].prompt}</p>{/if}
+    </div>
+    {#if request.questions.length > 1}<span>{request.questions.length} questions</span>{/if}
+    <button class="og-icon-button" type="button" aria-label={messages.collapse} title={messages.collapse} onclick={() => (collapsed = true)}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m6 12 4-4 4 4" /></svg></button>
   </header>
   <fieldset disabled={busy} class="og-human-input__questions" data-og-part="content">
     {#each request.questions as question, index (question.id)}
@@ -167,11 +181,11 @@
       {@const hint = question.kind === "multi_select" ? messages.selectionHint(question.validation?.minSelections, question.validation?.maxSelections) : null}
       {@const describedBy = [question.helpText ? helpId : null, hint ? hintId : null, questionError ? errorId : null].filter(Boolean).join(" ") || undefined}
       <div class="og-human-input__question" data-og-part="item" data-human-input-question={question.id}>
-        <label id={labelId} for={question.kind === "text" ? controlId : undefined}>
+        <label class={request.questions.length === 1 ? "og-visually-hidden" : undefined} id={labelId} for={question.kind === "text" ? controlId : undefined}>
           {request.questions.length > 1 ? `${index + 1}. ` : ""}{question.label ?? question.prompt}
           {#if question.required && !request.allowSkip}<span aria-hidden="true"> *</span>{:else if !question.required}<small> {messages.optional}</small>{/if}
         </label>
-        {#if question.label && question.prompt !== question.label}<p>{question.prompt}</p>{/if}
+        {#if request.questions.length > 1 && question.label && question.prompt !== question.label}<p>{question.prompt}</p>{/if}
         {#if question.helpText}<small id={helpId}>{question.helpText}</small>{/if}
         {#if hint}<small id={hintId}>{hint}</small>{/if}
 
@@ -250,3 +264,4 @@
     <button class="og-button" data-og-variant="primary" type="submit" disabled={busy}>{busy ? messages.submitting : messages.submit}</button>
   </div>
 </form>
+{/if}

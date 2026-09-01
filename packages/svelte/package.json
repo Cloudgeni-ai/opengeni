@@ -68,6 +68,8 @@
     "@opengeni/ui": "workspace:*"
   },
   "devDependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@sveltejs/package": "2.5.8",
     "@sveltejs/vite-plugin-svelte": "7.3.0",
     "@typescript/native": "npm:typescript@7.0.2",

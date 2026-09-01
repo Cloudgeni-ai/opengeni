@@ -160,10 +160,17 @@ custom properties.
 ## Demos and release-shaped consumers
 
 The production web build serves the stock product plus `/react-demo/` and
-`/svelte-demo/`. Demo API traffic stays behind the existing same-origin
-`/demo-api` allowlist and credential boundary. The Svelte demo defaults to
-deterministic fixtures; live mode uses explicit workspace/session identifiers
-through that proxy.
+`/svelte-demo/`. These are small SDK acceptance playgrounds, not product-shell
+mockups. Both consume the same deterministic session scenario and expose the
+same normalized request recorder for composer, human-input, approval, and file
+actions. Fleet, schedules, workspace navigation, and other unrelated product
+concepts do not belong in either default demo.
+
+Run the React demo on port 3100 and the Svelte demo on port 3200. Browser
+qualification executes the same workflow in Chromium, Firefox, and WebKit,
+checks accessibility and responsive overflow, and compares the shared frame
+within each engine. Qualification is event- and assertion-driven; there is no
+arbitrary-duration framework UI soak.
 
 Release qualification installs packed SDK/UI/React/Svelte tarballs into clean
 React, session-only, realtime-only, and native Svelte consumers. The native

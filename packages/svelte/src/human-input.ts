@@ -16,6 +16,8 @@ export type HumanInputFormMessages = HumanInputValidationMessages &
     skip: string;
     other: string;
     optional: string;
+    expand: string;
+    collapse: string;
     selectionHint(min: number | null | undefined, max: number | null | undefined): string | null;
   }>;
 
@@ -26,6 +28,8 @@ export const DEFAULT_HUMAN_INPUT_FORM_MESSAGES: HumanInputFormMessages = Object.
   skip: "Skip",
   other: "Other",
   optional: "Optional",
+  expand: "Expand",
+  collapse: "Collapse",
   required: "This question is required.",
   otherRequired: "Enter a value for Other.",
   minSelections: (count: number) => `Choose at least ${count} option${count === 1 ? "" : "s"}.`,

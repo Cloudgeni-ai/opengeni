@@ -3280,7 +3280,7 @@ const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
 const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   set: {
     label: "Goal set",
-    pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
+    pill: "border-og-accent/30 bg-og-accent/10 text-og-accent-strong",
     icon: TargetIcon,
   },
   updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },

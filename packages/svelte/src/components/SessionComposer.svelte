@@ -1,27 +1,19 @@
 <script lang="ts">
-  import type {
-    FileAttachmentStore,
-    SessionComposerRuntimeStore,
-  } from "@opengeni/sdk/session";
+  import type { FileAttachmentStore, SessionComposerRuntimeStore } from "@opengeni/sdk/session";
   import { canSubmitSessionComposer, submitSessionComposer } from "../composer-submit";
   import { readableFromController } from "../store";
   import AttachmentList from "./AttachmentList.svelte";
+  import ModelPicker from "./ModelPicker.svelte";
 
   let {
     controller,
     attachments,
     models = [],
-    tools = [],
-    selectedTools = [],
-    onToolsChange,
     placeholder = "Message OpenGeni…",
   }: {
     controller: SessionComposerRuntimeStore;
     attachments?: FileAttachmentStore | undefined;
     models?: readonly string[];
-    tools?: readonly { id: string; label: string }[];
-    selectedTools?: readonly string[];
-    onToolsChange?: ((ids: string[]) => void) | undefined;
     placeholder?: string;
   } = $props();
   let snapshot = $derived(readableFromController(controller, { owned: false }));
@@ -41,15 +33,9 @@
   function addFiles(files: FileList | null) {
     if (files && attachments) attachments.addFiles(files);
   }
-  function toggleTool(id: string) {
-    const next = selectedTools.includes(id)
-      ? selectedTools.filter((candidate) => candidate !== id)
-      : [...selectedTools, id];
-    onToolsChange?.(next);
-  }
 </script>
 
-<section class="og-composer" data-og-component="composer" data-og-state={$snapshot.submitting ? "submitting" : $snapshot.loading ? "loading" : "ready"}>
+<section class="og-composer" data-og-component="composer" data-og-state={$snapshot.submitting ? "submitting" : $snapshot.loading ? "loading" : "ready"} role="group" aria-label="Message composer">
   {#if attachments}<AttachmentList controller={attachments} />{/if}
   <textarea
     class="og-composer__input og-composer-input"
@@ -57,6 +43,7 @@
     value={$snapshot.text}
     {placeholder}
     aria-label="Message"
+    rows="1"
     oninput={(event) => controller.setText(event.currentTarget.value)}
     onkeydown={onKeydown}
   ></textarea>
@@ -64,26 +51,21 @@
     <div class="og-composer__controls og-composer-controls" data-og-part="controls">
       {#if attachments}
         <input class="og-visually-hidden" bind:this={fileInput} type="file" multiple aria-label="Attach files" onchange={(event) => addFiles(event.currentTarget.files)} />
-        <button class="og-icon-button" type="button" aria-label="Attach files" onclick={() => fileInput?.click()}>＋</button>
+        <button class="og-icon-button" type="button" aria-label="Attach files" onclick={() => fileInput?.click()}>
+          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7.5 10.5 4.9-4.9a2.1 2.1 0 0 1 3 3l-6.3 6.3a4 4 0 0 1-5.7-5.7l6.2-6.2" /></svg>
+        </button>
       {/if}
       {#if models.length > 0}
-        <select aria-label="Model" value={$snapshot.model} onchange={(event) => controller.setModel(event.currentTarget.value)}>
-          {#each models as model}<option value={model}>{model}</option>{/each}
-        </select>
+        <ModelPicker
+          value={$snapshot.model}
+          options={models.map((model) => ({ id: model, label: model }))}
+          onChange={(model) => controller.setModel(model)}
+        />
       {/if}
-      <select aria-label="Reasoning effort" value={$snapshot.reasoningEffort} onchange={(event) => controller.setReasoningEffort(event.currentTarget.value as never)}>
-        {#each ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as effort}<option value={effort}>{effort}</option>{/each}
-      </select>
-      <select aria-label="Latency" value={$snapshot.latencyMode} onchange={(event) => controller.setLatencyMode(event.currentTarget.value as never)}>
-        <option value="standard">Standard</option><option value="priority">Priority</option><option value="fast">Fast</option>
-      </select>
-      {#each tools as tool}
-        <label><input type="checkbox" checked={selectedTools.includes(tool.id)} onchange={() => toggleTool(tool.id)} /> {tool.label}</label>
-      {/each}
     </div>
     <div class="og-composer__actions og-composer-actions" data-og-part="actions">
-      <button class="og-button" data-og-variant="primary" type="button" disabled={!canSubmit} onclick={() => void submit("send")}>
-        Send
+      <button class="og-button og-composer__send" data-og-variant="primary" type="button" disabled={!canSubmit} onclick={() => void submit("send")} aria-label="Send">
+        <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 10 5-5 5 5M10 5v10" /></svg><span class="og-visually-hidden">Send</span>
       </button>
     </div>
   </footer>

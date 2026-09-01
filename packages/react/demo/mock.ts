@@ -175,11 +175,19 @@ import type {
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import type { SessionClientLike } from "@opengeni/react";
 import type { MachinesResponse } from "@opengeni/react/machines";
+import {
+  FRAMEWORK_DEMO_EVENT_SPECS,
+  FRAMEWORK_DEMO_HUMAN_INPUT_ID,
+  FRAMEWORK_DEMO_SESSION_ID,
+  FRAMEWORK_DEMO_TITLE,
+  FRAMEWORK_DEMO_WORKSPACE_ID,
+  createFrameworkDemoHumanInputRequest,
+} from "../../../test/fixtures/framework-session/demo-scenario";
 
-const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
-export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
+const WORKSPACE_ID = FRAMEWORK_DEMO_WORKSPACE_ID;
+export const MANAGER_SESSION_ID = FRAMEWORK_DEMO_SESSION_ID;
 const WORKER_SESSION_ID = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
-export const DEMO_HUMAN_INPUT_REQUEST_ID = "71000000-0000-4000-8000-000000000001";
+export const DEMO_HUMAN_INPUT_REQUEST_ID = FRAMEWORK_DEMO_HUMAN_INPUT_ID;
 export const DEMO_BROWSER_SESSION_ID = "81000000-0000-4000-8000-000000000001";
 export const DEMO_BROWSER_TARGET_ID = "82000000-0000-4000-8000-000000000001";
 export const DEMO_BROWSER_DOWNLOAD_ID = "82000000-0000-4000-8000-000000000002";
@@ -198,39 +206,7 @@ function demoUuid(): string {
 }
 
 function fabricateHumanInputRequest(): SessionHumanInputRequest {
-  const createdAt = "2026-08-13T12:00:00.000Z";
-  return {
-    id: DEMO_HUMAN_INPUT_REQUEST_ID,
-    workspaceId: WORKSPACE_ID,
-    sessionId: MANAGER_SESSION_ID,
-    turnId: "71000000-0000-4000-8000-000000000002",
-    turnGeneration: 1,
-    creationAttemptId: "71000000-0000-4000-8000-000000000003",
-    toolCallId: "demo-request-human-input",
-    status: "pending",
-    questions: [
-      {
-        id: "environment",
-        kind: "single_select",
-        label: "Choose the next environment",
-        prompt: "Which deployment should the manager inspect next?",
-        helpText: "The same structured question remains available while realtime voice is active.",
-        options: [
-          { id: "staging", label: "Staging", description: "Inspect the current candidate." },
-          { id: "production", label: "Production", description: "Check live drift first." },
-        ],
-        required: true,
-        allowOther: false,
-      },
-    ],
-    allowSkip: true,
-    response: null,
-    respondedBy: null,
-    respondedAt: null,
-    expiresAt: null,
-    createdAt,
-    updatedAt: createdAt,
-  };
+  return createFrameworkDemoHumanInputRequest();
 }
 
 function sleep(ms: number): Promise<void> {
@@ -298,6 +274,7 @@ class SessionBus {
 }
 
 export class MockOpenGeniClient implements SessionClientLike {
+  readonly requests: Array<{ action: string; payload: unknown }> = [];
   private buses = new Map<string, SessionBus>();
   private queueVersions = new Map<string, number>();
   private pausedSessions = new Set<string>();
@@ -441,11 +418,7 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
-    return this.fabricateSession(
-      sessionId,
-      this.bus(sessionId).status,
-      "Ops channel — manager session",
-    );
+    return this.fabricateSession(sessionId, this.bus(sessionId).status, FRAMEWORK_DEMO_TITLE);
   }
 
   async getSessionLineage(
@@ -472,7 +445,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     const session = this.fabricateSession(
       sessionId,
       this.bus(sessionId).status,
-      "Ops channel — manager session",
+      FRAMEWORK_DEMO_TITLE,
     );
     return { ...session, title: request.title, titleSource: "user" };
   }
@@ -505,7 +478,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     const session = this.fabricateSession(
       sessionId,
       this.bus(sessionId).status,
-      "Ops channel — manager session",
+      FRAMEWORK_DEMO_TITLE,
     );
     return {
       ...session,
@@ -603,16 +576,13 @@ export class MockOpenGeniClient implements SessionClientLike {
     const bus = this.bus(sessionId);
     if (sessionId === MANAGER_SESSION_ID && !this.scripted) {
       this.scripted = true;
-      const script = runOpsChannelScript(bus);
-      this.managerScript = script;
-      void script.then(
-        () => {
+      queueMicrotask(() => {
+        const script = runOpsChannelScript(bus);
+        this.managerScript = script;
+        void script.finally(() => {
           if (this.managerScript === script) this.managerScript = null;
-        },
-        () => {
-          if (this.managerScript === script) this.managerScript = null;
-        },
-      );
+        });
+      });
     }
     options.onStateChange?.("live");
     return bus.stream(options.after ?? 0, options.signal);
@@ -754,6 +724,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     sessionId: string,
     request: SubmitComposerDraftRequest,
   ): Promise<SubmitComposerDraftResponse> {
+    this.requests.push({ action: "composer.submit", payload: request });
     const current = await this.getComposerDraft(workspaceId, sessionId);
     if (current.revision !== request.expectedDraftRevision) {
       throw new Error("Composer draft changed");
@@ -1008,6 +979,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       message?: string;
     },
   ): Promise<SessionEvent> {
+    this.requests.push({ action: "approval.respond", payload: decision });
     return this.bus(sessionId).append("user.approvalDecision", decision);
   }
 
@@ -1048,6 +1020,10 @@ export class MockOpenGeniClient implements SessionClientLike {
       respondedBy: "demo:user",
       respondedAt: now,
       updatedAt: now,
+    });
+    this.requests.push({
+      action: "human-input.respond",
+      payload: { requestId, response },
     });
     return this.bus(sessionId).append("user.humanInputResponse", { requestId, response });
   }
@@ -1712,11 +1688,13 @@ export class MockOpenGeniClient implements SessionClientLike {
           : input.data instanceof Uint8Array
             ? input.data.byteLength
             : (input.data as ArrayBuffer).byteLength;
-    return this.fileAsset(workspaceId, {
+    const asset = this.fileAsset(workspaceId, {
       filename: input.filename,
       contentType: input.contentType,
       sizeBytes,
     });
+    this.requests.push({ action: "file.upload", payload: asset });
+    return asset;
   }
 
   async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {
@@ -3888,230 +3866,13 @@ async function streamText(
   bus.append("agent.message.completed", { text }, turnId);
 }
 
-/** The hero narrative: a manager session orchestrating a worker. */
+/** Shared deterministic session scenario used by both framework demos. */
 async function runOpsChannelScript(bus: SessionBus): Promise<void> {
-  bus.setStatus("idle");
-  // Seed the Terminal surface up-front (an interactive PTY + a populated
-  // transcript) so the tab is live the moment the dock opens, instead of an
-  // empty read-only void until the narrative reaches the worker.
-  bus.append("terminal.pty.started", {
-    ptyId: "00000000-0000-4000-8000-0000000000bb",
-  });
-  bus.append("terminal.pty.output.delta", {
-    ptyId: "00000000-0000-4000-8000-0000000000bb",
-    stream: "stdout",
-    chunk: TERMINAL_TRANSCRIPT,
-  });
-  bus.append("user.message", {
-    text: "Set up a staging environment for the api service, then run a drift check on prod.",
-  });
-  await sleep(500);
-  bus.setStatus("running");
-  const turn = "turn-script-1";
-
-  bus.append(
-    "agent.reasoning.delta",
-    {
-      text: "Two asks: a staging environment (substantial — needs a worker with cloud access) and a prod drift check (the drift scheduled task can be triggered, or a read-only worker). Check what's already running first.",
-    },
-    turn,
-  );
-  await sleep(900);
-
-  bus.append(
-    "agent.toolCall.created",
-    { id: "call-1", name: "sessions_list", arguments: { limit: 10 } },
-    turn,
-  );
-  await sleep(700);
-  bus.append(
-    "agent.toolCall.output",
-    {
-      id: "call-1",
-      output: {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify([{ id: WORKER_SESSION_ID, status: "idle" }]),
-          },
-        ],
-      },
-    },
-    turn,
-  );
-  await sleep(400);
-
-  await streamText(
-    bus,
-    turn,
-    "Nothing conflicting is running. I'll spawn a worker to stand up staging for the api service — it gets the workspace environment with your cloud credentials; I'll keep narrating its progress here.",
-  );
-  await sleep(500);
-
-  bus.append(
-    "agent.toolCall.created",
-    {
-      id: "call-2",
-      name: "session_create",
-      arguments: {
-        initialMessage:
-          "Stand up the staging environment for the api service: cluster namespace, managed Postgres, deploy pipeline wired to the repo.",
-        sandboxBackend: "modal",
-      },
-    },
-    turn,
-  );
-  await sleep(1300);
-  bus.append(
-    "agent.toolCall.output",
-    {
-      id: "call-2",
-      output: {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              id: WORKER_SESSION_ID,
-              workspaceId: WORKSPACE_ID,
-              status: "queued",
-            }),
-          },
-        ],
-      },
-    },
-    turn,
-  );
-  await sleep(400);
-
-  bus.append(
-    "sandbox.operation.started",
-    { name: "prepare", command: "git clone github.com/acme/api" },
-    turn,
-  );
-  await sleep(900);
-  bus.append("sandbox.operation.completed", { name: "prepare" }, turn);
-
-  bus.append(
-    "sandbox.command.output.delta",
-    {
-      stream: "stdout",
-      chunk: `kubectl rollout status deploy/api -n api-staging\r\ndeployment "api" successfully rolled out\r\n${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ ${GREEN}Deploy reachable at https://api-staging.acme.dev${RESET}\r\n`,
-    },
-    turn,
-  );
-
-  await streamText(
-    bus,
-    turn,
-    "Worker is up and cloning the repo. For the drift check I'm triggering the existing scheduled drift task against prod rather than spawning a second worker — it already has the read-only credentials.",
-  );
-  await sleep(400);
-
-  bus.append(
-    "goal.set",
-    { goal: { text: "Staging live for api + prod drift report delivered" } },
-    turn,
-  );
-  await sleep(700);
-
-  await streamText(
-    bus,
-    turn,
-    "I'll report back when the worker has staging reachable. If the drift check finds anything that needs a decision (destructive changes, spend), I'll ask you here first.",
-  );
-  await sleep(600);
-
-  // A rich, formatted status report — exercises the full markdown surface
-  // (headings, emphasis, lists incl. nested + task lists, inline + fenced
-  // code, a blockquote, a table, a link, and a rule) so the timeline's
-  // default renderer can be judged end-to-end.
-  await streamText(bus, turn, MARKDOWN_REPORT, 6);
-
-  bus.append("turn.completed", {}, turn);
-  bus.setStatus("idle");
+  for (const spec of FRAMEWORK_DEMO_EVENT_SPECS) {
+    bus.append(spec.type, spec.payload, spec.turnId ?? null);
+  }
+  await Promise.resolve();
 }
-
-/**
- * A realistic interactive-PTY transcript for the Terminal tab: a couple of
- * prompts, colorized output, and a trailing prompt with a block cursor so the
- * surface reads as a live shell (not a dead black void) the instant it mounts.
- * `[…m` are ANSI SGR codes; xterm renders them.
- */
-const GREEN = "[32m";
-const CYAN = "[36m";
-const BOLD = "[1m";
-const DIM = "[2m";
-const RESET = "[0m";
-const TERMINAL_TRANSCRIPT = [
-  `${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ kubectl get pods -n api-staging`,
-  "NAME                   READY   STATUS    RESTARTS   AGE",
-  `api-7c9d4f8b6-2xk4q    1/1     ${GREEN}Running${RESET}   0          42s`,
-  `api-7c9d4f8b6-9mlz7    1/1     ${GREEN}Running${RESET}   0          42s`,
-  "",
-  `${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ curl -s https://api-staging.acme.dev/healthz`,
-  `${GREEN}{"status":"ok","db":"reachable","version":"a049964"}${RESET}`,
-  "",
-  `${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ ${BOLD}git status -sb${RESET}`,
-  `${CYAN}## feat/sandbox-dock...origin/feat/sandbox-dock [ahead 2, behind 1]${RESET}`,
-  ` ${GREEN}M${RESET} src/server.ts`,
-  ` ${GREEN}M${RESET} infra/main.tf`,
-  `${GREEN}A${RESET}  src/config.ts`,
-  "",
-  `${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ `,
-].join("\r\n");
-
-/** A formatted "staging is live" report covering every common markdown element. */
-const MARKDOWN_REPORT = `## Staging is live
-
-Staging for the **api** service is reachable and the prod drift check finished. Here's the rundown.
-
-### What landed
-
-- Namespace \`api-staging\` created on the cluster
-  - Ingress wired with a *temporary* TLS cert (auto-renews)
-  - HPA set to **2–6** replicas
-- Managed Postgres provisioned and migrated
-- Deploy pipeline connected to [the api repo](https://example.com/acme/api)
-
-### Drift check
-
-Prod is mostly clean. Outstanding items:
-
-1. One untracked security group rule (port 6379, Redis)
-2. A manually-bumped instance size on \`api-prod-2\`
-3. Two stale DNS records
-
-> **Heads up:** the Redis rule looks like a hotfix from last week — I'd confirm before reverting, since removing it could drop cache connectivity.
-
-### Cost delta
-
-| Resource | Before | After | Δ |
-| --- | ---: | ---: | ---: |
-| Compute | $420 | $510 | +$90 |
-| Postgres | $0 | $85 | +$85 |
-| Egress | $30 | $34 | +$4 |
-
-### Next steps
-
-- [x] Stand up staging namespace
-- [x] Run prod drift check
-- [ ] Decide on the Redis rule (needs you)
-- [ ] Schedule the DNS cleanup
-
-You can reach staging with:
-
-\`\`\`ts
-const res = await fetch("https://api-staging.acme.dev/healthz", {
-  headers: { authorization: \`Bearer \${process.env.STAGING_TOKEN}\` },
-});
-console.log(res.status); // 200
-\`\`\`
-
-Run \`og sessions tail\` to follow the worker, or reply here and I'll fold it into the plan.
-
----
-
-Everything above is staged behind the \`staging\` flag — nothing prod-facing changed.`;
 
 /* --- fixtures ------------------------------------------------------------------ */
 

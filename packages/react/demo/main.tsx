@@ -1,557 +1,132 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { CalendarClockIcon, MessagesSquareIcon, NetworkIcon, PanelRightIcon } from "lucide-react";
-import type { EffectiveSessionControl } from "@opengeni/sdk";
 import {
   ChatComposer,
-  FleetTile,
+  ApprovalSurface,
   HumanInputSurface,
   MessageTimeline,
   OpenGeniProvider,
-  SandboxWorkspace,
   SessionStatus,
+  projectPendingApprovals,
   useAvailableModels,
   useComposer,
+  useFileAttachments,
   useHumanInputRequests,
   useOpenGeni,
-  useScheduledTasks,
   useSession,
   useSessionEvents,
-  useWorkspaceSessions,
+  useSessionControl,
 } from "@opengeni/react";
-import { SessionRealtimeControl } from "@opengeni/react/realtime";
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
-import { createDemoBrowserWebSocketFactory } from "./fake-browser";
-import { createDemoComputerWebSocketFactory } from "./fake-computer";
-import { createDeterministicRealtimeHarness } from "./realtime-controller";
+import { FRAMEWORK_DEMO_DESCRIPTION } from "../../../test/fixtures/framework-session/demo-scenario";
 import "./styles.css";
 
-type DemoView = "session" | "fleet" | "schedules";
-
-type DemoHistoryState = {
-  view: DemoView;
-  workspaceOpen: boolean;
-};
-
-const DEMO_HISTORY_KEY = "ogReactDemo";
-const COMPACT_BREAKPOINT = 1024;
-const ACTIVE_CONTROL: EffectiveSessionControl = {
-  state: "active",
-  controlVersion: 0,
-  controlEtag: "react-demo-active",
-  directState: "active",
-  primaryBlocker: null,
-  additionalBlockerCount: 0,
-  blockers: [],
-  resumeOptions: [],
-  override: null,
-  settlement: null,
-};
-
-function isDemoView(value: string): value is DemoView {
-  return value === "session" || value === "fleet" || value === "schedules";
-}
-
-function viewFromLocation(): DemoView {
-  const candidate = window.location.hash.replace(/^#/, "");
-  return isDemoView(candidate) ? candidate : "session";
-}
-
-function demoHistoryState(): DemoHistoryState | null {
-  const state = window.history.state;
-  if (!state || typeof state !== "object") return null;
-  const candidate = (state as Record<string, unknown>)[DEMO_HISTORY_KEY];
-  if (!candidate || typeof candidate !== "object") return null;
-  const view = (candidate as Record<string, unknown>).view;
-  const workspaceOpen = (candidate as Record<string, unknown>).workspaceOpen;
-  if (typeof view !== "string" || !isDemoView(view) || typeof workspaceOpen !== "boolean") {
-    return null;
-  }
-  return { view, workspaceOpen };
-}
-
-function nextHistoryState(view: DemoView, workspaceOpen: boolean): Record<string, unknown> {
-  const current = window.history.state;
-  const state = current && typeof current === "object" ? { ...current } : {};
-  return {
-    ...state,
-    [DEMO_HISTORY_KEY]: { view, workspaceOpen } satisfies DemoHistoryState,
-  };
-}
-
-function urlForView(view: DemoView): string {
-  const url = new URL(window.location.href);
-  url.hash = view === "session" ? "" : view;
-  return url.toString();
-}
-
-function useCompactViewport(): boolean {
-  const [compact, setCompact] = useState(
-    () => window.matchMedia(`(max-width: ${COMPACT_BREAKPOINT - 1}px)`).matches,
-  );
-
-  useEffect(() => {
-    const query = window.matchMedia(`(max-width: ${COMPACT_BREAKPOINT - 1}px)`);
-    const update = () => setCompact(query.matches);
-    update();
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, []);
-
-  return compact;
-}
-
-function Harness() {
+const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
+function Demo() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
-  const compact = useCompactViewport();
-  const [initialRoute] = useState(() => {
-    const history = demoHistoryState();
-    return {
-      view: history?.view ?? viewFromLocation(),
-      workspaceOpen: history?.workspaceOpen ?? false,
-    };
-  });
-  const [view, setView] = useState<DemoView>(initialRoute.view);
-  const [workspaceOpen, setWorkspaceOpen] = useState(initialRoute.workspaceOpen);
-  const workspaceTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const previousWorkspaceOpenRef = useRef(workspaceOpen);
-  // Mount the whole workbench through its public `<SandboxWorkspace>` surface —
-  // the exact integration an external embedder uses. The deterministic client
-  // supplies realistic data without pretending this public demo is a customer workspace.
-  const { events } = useSessionEvents(MANAGER_SESSION_ID);
-
-  useEffect(() => {
-    const syncFromHistory = () => {
-      const state = demoHistoryState();
-      setView(state?.view ?? viewFromLocation());
-      setWorkspaceOpen(state?.workspaceOpen ?? false);
-    };
-
-    window.history.replaceState(
-      nextHistoryState(initialRoute.view, initialRoute.workspaceOpen),
-      "",
-      urlForView(initialRoute.view),
-    );
-    window.addEventListener("popstate", syncFromHistory);
-    window.addEventListener("hashchange", syncFromHistory);
-    return () => {
-      window.removeEventListener("popstate", syncFromHistory);
-      window.removeEventListener("hashchange", syncFromHistory);
-    };
-  }, [initialRoute]);
-
-  const selectView = useCallback((next: DemoView) => {
-    const current = demoHistoryState();
-    if (current?.view === next && !current.workspaceOpen) return;
-    window.history.pushState(nextHistoryState(next, false), "", urlForView(next));
-    setView(next);
-    setWorkspaceOpen(false);
-  }, []);
-
-  const openWorkspace = useCallback(() => {
-    if (workspaceOpen) return;
-    window.history.pushState(nextHistoryState(view, true), "", window.location.href);
-    setWorkspaceOpen(true);
-  }, [view, workspaceOpen]);
-
-  const closeWorkspace = useCallback(() => {
-    if (demoHistoryState()?.workspaceOpen) {
-      window.history.back();
-      return;
-    }
-    setWorkspaceOpen(false);
-  }, []);
-
-  const onWorkspaceCollapsedChange = useCallback(
-    (collapsed: boolean) => {
-      if (!compact) return;
-      if (collapsed) closeWorkspace();
-      else openWorkspace();
-    },
-    [closeWorkspace, compact, openWorkspace],
-  );
-
-  // A controlled Workspace can mount already open after reload, so the shared
-  // dock has no live opener element to remember. Restore focus to this host's
-  // stable trigger after any compact close; a second frame runs after the
-  // dock's own modal cleanup without competing with its normal opener path.
-  useEffect(() => {
-    const wasOpen = previousWorkspaceOpenRef.current;
-    previousWorkspaceOpenRef.current = workspaceOpen;
-    if (!compact || !wasOpen || workspaceOpen) return;
-
-    let focusFrame = 0;
-    const settleFrame = requestAnimationFrame(() => {
-      focusFrame = requestAnimationFrame(() => workspaceTriggerRef.current?.focus());
-    });
-    return () => {
-      cancelAnimationFrame(settleFrame);
-      if (focusFrame) cancelAnimationFrame(focusFrame);
-    };
-  }, [compact, workspaceOpen]);
-
   return (
-    <div
-      className="og-root box-border h-dvh overflow-hidden bg-og-bg pt-[env(safe-area-inset-top)]"
-      data-og-theme={theme === "light" ? "light" : undefined}
-    >
-      <div className="mx-auto flex h-full max-w-7xl flex-col pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:pl-[max(1.25rem,env(safe-area-inset-left))] sm:pr-[max(1.25rem,env(safe-area-inset-right))] lg:pl-[max(1.5rem,env(safe-area-inset-left))] lg:pr-[max(1.5rem,env(safe-area-inset-right))]">
-        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-og-border py-2.5 sm:py-3.5">
-          <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold text-og-fg">OpenGeni React demo</h1>
-            <p className="truncate text-[11px] text-og-fg-subtle sm:text-xs">
-              Public React UI · scripted data
-            </p>
-          </div>
+    <div className="sdk-demo" data-og-theme={theme === "light" ? "light" : undefined}>
+      <header className="sdk-demo__header">
+        <div>
+          <p className="sdk-demo__eyebrow">OpenGeni frontend SDK</p>
+          <h1>Session SDK showcase</h1>
+          <p>Deterministic fixture · native React components</p>
+        </div>
+        <div className="sdk-demo__actions">
+          <span className="sdk-demo__framework">React</span>
           <button
             type="button"
             onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            className="inline-flex min-h-11 shrink-0 items-center justify-center rounded-og-md border border-og-border px-3 text-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:bg-og-surface-1 hover:text-og-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent"
             aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}
           >
             {theme === "dark" ? "Light" : "Dark"}
           </button>
-        </header>
-
-        <main className="flex min-h-0 flex-1 flex-col pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] sm:py-4 lg:py-5">
-          {compact ? (
-            <DemoNavigation
-              activeView={view}
-              onSelectView={selectView}
-              onOpenWorkspace={openWorkspace}
-              workspaceOpen={workspaceOpen}
-              workspaceTriggerRef={workspaceTriggerRef}
-            />
-          ) : null}
-          <div className="min-h-0 flex-1">
-            <SandboxWorkspace
-              sessionId={MANAGER_SESSION_ID}
-              events={events}
-              autoSaveId="og.demo.dock"
-              browserWebSocketFactory={browserWebSocketFactory}
-              computerWebSocketFactory={computerWebSocketFactory}
-              {...(compact
-                ? {
-                    collapsed: !workspaceOpen,
-                    onCollapsedChange: onWorkspaceCollapsedChange,
-                  }
-                : {})}
-              primary={<DemoPrimary compact={compact} view={view} />}
-            />
-          </div>
-        </main>
-      </div>
+        </div>
+      </header>
+      <main className="sdk-demo__main">
+        <SessionShowcase />
+      </main>
     </div>
   );
 }
 
-function DemoNavigation({
-  activeView,
-  onSelectView,
-  onOpenWorkspace,
-  workspaceOpen,
-  workspaceTriggerRef,
-}: {
-  activeView: DemoView;
-  onSelectView: (view: DemoView) => void;
-  onOpenWorkspace: () => void;
-  workspaceOpen: boolean;
-  workspaceTriggerRef: RefObject<HTMLButtonElement | null>;
-}) {
-  const itemClass =
-    "flex min-h-11 min-w-0 flex-col items-center justify-center gap-0.5 rounded-og-sm px-1 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent";
-  const selectedClass = "bg-og-surface-3 text-og-fg";
-  const idleClass = "text-og-fg-subtle hover:bg-og-surface-2 hover:text-og-fg";
-
-  return (
-    <nav
-      aria-label="Demo views"
-      className="mb-2 grid shrink-0 grid-cols-4 gap-1 rounded-og-md border border-og-border bg-og-surface-1 p-1"
-    >
-      <button
-        type="button"
-        onClick={() => onSelectView("session")}
-        aria-current={activeView === "session" && !workspaceOpen ? "page" : undefined}
-        className={`${itemClass} ${activeView === "session" && !workspaceOpen ? selectedClass : idleClass}`}
-      >
-        <MessagesSquareIcon className="size-4" aria-hidden />
-        <span className="truncate">Session</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => onSelectView("fleet")}
-        aria-current={activeView === "fleet" && !workspaceOpen ? "page" : undefined}
-        className={`${itemClass} ${activeView === "fleet" && !workspaceOpen ? selectedClass : idleClass}`}
-      >
-        <NetworkIcon className="size-4" aria-hidden />
-        <span className="truncate">Fleet</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => onSelectView("schedules")}
-        aria-current={activeView === "schedules" && !workspaceOpen ? "page" : undefined}
-        className={`${itemClass} ${activeView === "schedules" && !workspaceOpen ? selectedClass : idleClass}`}
-      >
-        <CalendarClockIcon className="size-4" aria-hidden />
-        <span className="truncate">Schedules</span>
-      </button>
-      <button
-        ref={workspaceTriggerRef}
-        type="button"
-        onClick={onOpenWorkspace}
-        aria-haspopup="dialog"
-        aria-expanded={workspaceOpen}
-        className={`${itemClass} ${workspaceOpen ? selectedClass : idleClass}`}
-      >
-        <PanelRightIcon className="size-4" aria-hidden />
-        <span className="truncate">Workspace</span>
-      </button>
-    </nav>
-  );
-}
-
-function DemoPrimary({ compact, view }: { compact: boolean; view: DemoView }) {
-  return (
-    <div
-      className={
-        compact
-          ? "h-full min-h-0"
-          : "grid h-full min-h-0 gap-6 overflow-hidden lg:grid-cols-[minmax(0,1fr)_minmax(0,300px)]"
-      }
-    >
-      <div className={compact && view !== "session" ? "hidden" : "h-full min-h-0"}>
-        <OpsChannel autoFocus={!compact} />
-      </div>
-      <div
-        role={!compact ? "complementary" : undefined}
-        aria-label={!compact ? "Fleet and scheduled tasks" : undefined}
-        tabIndex={!compact ? 0 : undefined}
-        className={
-          compact
-            ? view === "session"
-              ? "hidden"
-              : "h-full min-h-0"
-            : "flex min-h-0 flex-col gap-6 overflow-y-auto pb-4"
-        }
-      >
-        <div className={compact && view !== "fleet" ? "hidden" : compact ? "h-full" : ""}>
-          <Fleet standalone={compact} />
-        </div>
-        <div className={compact && view !== "schedules" ? "hidden" : compact ? "h-full" : ""}>
-          <Schedules standalone={compact} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** The hero surface: manager session timeline + composer. */
-function OpsChannel({ autoFocus }: { autoFocus: boolean }) {
+function SessionShowcase() {
   const { client, workspaceId } = useOpenGeni();
   const { session } = useSession(MANAGER_SESSION_ID, { pollIntervalMs: 5000 });
   const sessionEvents = useSessionEvents(MANAGER_SESSION_ID);
   const { timeline, events, sessionStatus, connectionState } = sessionEvents;
-  // Host-exposed models for the composer's <ModelPicker>; preselect the
-  // deployment default once it loads, then let the operator switch.
   const { models } = useAvailableModels();
   const composer = useComposer(MANAGER_SESSION_ID, {
     effectiveControl: session?.effectiveControl,
   });
-  const model = composer.policy?.model;
   const status = sessionStatus ?? session?.status ?? null;
-  const realtimeStatus = status ?? "idle";
-  const effectiveControl = session?.effectiveControl ?? ACTIVE_CONTROL;
   const humanInput = useHumanInputRequests(MANAGER_SESSION_ID, { events });
-  // Surface the slash-command palette (type "/"): operator controls on this
-  // session. The demo operator holds full control.
-  const commandContext = {
-    client,
-    workspaceId,
-    sessionId: MANAGER_SESSION_ID,
-    status,
-    permissions: ["sessions:control"],
-  };
+  const approvals = projectPendingApprovals(events);
+  const control = useSessionControl(MANAGER_SESSION_ID);
+  const attachments = useFileAttachments();
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-og-xl border border-og-border bg-og-surface-1/50">
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-og-border px-3.5 py-3 sm:px-4">
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-medium text-og-fg">Staging operations</h2>
-          <p className="truncate text-[11px] text-og-fg-subtle">
-            Manager · API staging + production drift
-          </p>
+    <section className="sdk-session" data-demo-surface="session">
+      <header className="sdk-session__header">
+        <div>
+          <h2>Deterministic session</h2>
+          <p>{FRAMEWORK_DEMO_DESCRIPTION}</p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <span className="hidden text-[11px] capitalize text-og-fg-subtle min-[360px]:inline">
-            {connectionState === "live" ? "stream live" : connectionState}
-          </span>
+        <div className="sdk-session__status">
+          <span>{connectionState === "live" ? "stream live" : connectionState}</span>
           {status ? <SessionStatus status={status} /> : null}
         </div>
-      </div>
+      </header>
       <MessageTimeline items={timeline} status={status} className="min-h-0 flex-1" />
-      <HumanInputSurface
-        requests={humanInput.requests}
-        respondingRequestId={humanInput.respondingRequestId}
-        error={humanInput.mutationError?.message ?? humanInput.error?.message ?? null}
-        onSubmit={async (requestId, response) => {
-          await humanInput.respond(requestId, response);
-        }}
-        className="shrink-0 border-t border-og-border px-3.5 py-3 sm:px-4"
-      />
-      <div className="shrink-0 px-3.5 pb-3 pt-1 sm:px-4 sm:pb-4">
+      <div className="sdk-session__decisions" data-og-part="controls">
+        <ApprovalSurface
+          approvals={approvals}
+          responding={control.responding}
+          error={control.error}
+          onApprove={async (approval) => {
+            await control.approve(approval.id);
+          }}
+          onReject={async (approval) => {
+            await control.reject(approval.id);
+          }}
+        />
+        <HumanInputSurface
+          requests={humanInput.requests}
+          respondingRequestId={humanInput.respondingRequestId}
+          error={humanInput.mutationError?.message ?? humanInput.error?.message ?? null}
+          onSubmit={async (requestId, response) => {
+            await humanInput.respond(requestId, response);
+          }}
+          className="sdk-session__input"
+        />
+      </div>
+      <div className="sdk-session__composer">
         <ChatComposer
           composer={composer}
-          effectiveControl={effectiveControl}
-          placeholder="Ask the manager to adjust the plan…"
-          autoFocus={autoFocus}
-          commandContext={commandContext}
+          placeholder="Message OpenGeni…"
+          autoFocus
+          commandContext={{
+            client,
+            workspaceId,
+            sessionId: MANAGER_SESSION_ID,
+            status,
+            permissions: ["sessions:control"],
+          }}
           models={models}
-          selectedModel={model}
+          selectedModel={composer.policy?.model}
           onSelectModel={composer.setModel}
-          actionsStart={
-            <SessionRealtimeControl
-              sessionId={MANAGER_SESSION_ID}
-              sessionStatus={realtimeStatus}
-              effectiveControl={effectiveControl}
-              events={events}
-              eventsReady={!sessionEvents.initialLoading}
-              codexConnected
-              controllerFactory={deterministicRealtime.factory}
-            />
-          }
+          attachments={attachments}
         />
       </div>
     </section>
   );
 }
 
-function Fleet({ standalone }: { standalone: boolean }) {
-  const { sessions, loading } = useWorkspaceSessions({ pollIntervalMs: 10000 });
-  return (
-    <section
-      className={
-        standalone
-          ? "flex h-full min-h-0 flex-col overflow-hidden rounded-og-xl border border-og-border bg-og-surface-1/50"
-          : ""
-      }
-    >
-      <div className={standalone ? "shrink-0 border-b border-og-border px-4 py-3" : ""}>
-        <h2
-          className={
-            standalone
-              ? "text-sm font-medium text-og-fg"
-              : "mb-3 text-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle"
-          }
-        >
-          Fleet
-        </h2>
-        {standalone ? (
-          <p className="mt-0.5 text-[11px] text-og-fg-subtle">
-            Durable manager and worker sessions in this scripted workspace
-          </p>
-        ) : null}
-      </div>
-      <div
-        aria-label={standalone ? "Fleet sessions" : undefined}
-        tabIndex={standalone ? 0 : undefined}
-        className={
-          standalone
-            ? "min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
-            : "grid grid-cols-1 gap-3"
-        }
-      >
-        {loading && sessions.length === 0 ? (
-          <p className="text-xs text-og-fg-subtle">Loading sessions…</p>
-        ) : null}
-        <div className={standalone ? "grid grid-cols-1 gap-3 sm:grid-cols-2" : "contents"}>
-          {sessions.map((session) => (
-            <FleetTile key={session.id} session={session} />
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function Schedules({ standalone }: { standalone: boolean }) {
-  const { tasks } = useScheduledTasks();
-  const labels = useMemo(
-    () =>
-      tasks.map((task) => ({
-        id: task.id,
-        name: task.name,
-        cadence:
-          task.schedule.type === "interval"
-            ? `every ${Math.round(task.schedule.everySeconds / 60)}m`
-            : task.schedule.type === "calendar"
-              ? `${String(task.schedule.hour).padStart(2, "0")}:${String(task.schedule.minute).padStart(2, "0")} ${task.schedule.daysOfWeek?.join(", ").toLowerCase() ?? "daily"}`
-              : "once",
-        status: task.status,
-      })),
-    [tasks],
-  );
-  return (
-    <section
-      className={
-        standalone
-          ? "flex h-full min-h-0 flex-col overflow-hidden rounded-og-xl border border-og-border bg-og-surface-1/50"
-          : ""
-      }
-    >
-      <div className={standalone ? "shrink-0 border-b border-og-border px-4 py-3" : ""}>
-        <h2
-          className={
-            standalone
-              ? "text-sm font-medium text-og-fg"
-              : "mb-3 text-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle"
-          }
-        >
-          Scheduled tasks
-        </h2>
-        {standalone ? (
-          <p className="mt-0.5 text-[11px] text-og-fg-subtle">
-            Recurring autonomous work configured for this workspace
-          </p>
-        ) : null}
-      </div>
-      <ul
-        aria-label={standalone ? "Scheduled tasks" : undefined}
-        tabIndex={standalone ? 0 : undefined}
-        className={
-          standalone
-            ? "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
-            : "flex flex-col gap-2"
-        }
-      >
-        {labels.map((task) => (
-          <li
-            key={task.id}
-            className="flex flex-col items-start gap-1.5 rounded-og-md border border-og-border bg-og-surface-1 px-3.5 py-3 min-[390px]:flex-row min-[390px]:items-center min-[390px]:justify-between min-[390px]:gap-3"
-          >
-            <span className="min-w-0 break-words text-[13px] text-og-fg">{task.name}</span>
-            <span className="flex shrink-0 items-center gap-2 text-[11px] text-og-fg-subtle">
-              <span className="font-og-mono">{task.cadence}</span>
-              <span className={task.status === "active" ? "text-og-status-idle" : ""}>
-                {task.status}
-              </span>
-            </span>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
 const client = new MockOpenGeniClient();
-const deterministicRealtime = createDeterministicRealtimeHarness();
-const browserWebSocketFactory = createDemoBrowserWebSocketFactory((browserSessionId, targetId) =>
-  client.demoBrowserFrameTarget(browserSessionId, targetId),
-);
-const computerWebSocketFactory = createDemoComputerWebSocketFactory((computerSessionId, targetId) =>
-  client.demoComputerFrameTarget(computerSessionId, targetId),
-);
+Object.assign(window, { __OPENGENI_DEMO_REQUESTS__: client.requests });
+
 createRoot(document.getElementById("root")!).render(
-  <OpenGeniProvider client={client} workspaceId="11111111-2222-4333-8444-555555555555">
-    <Harness />
+  <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+    <Demo />
   </OpenGeniProvider>,
 );

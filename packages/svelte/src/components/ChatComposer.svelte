@@ -9,9 +9,6 @@
     controller: SessionComposerRuntimeStore;
     attachments?: FileAttachmentStore;
     models?: readonly string[];
-    tools?: readonly { id: string; label: string }[];
-    selectedTools?: readonly string[];
-    onToolsChange?: (ids: string[]) => void;
     placeholder?: string;
   } = $props();
 </script>

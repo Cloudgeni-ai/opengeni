@@ -25,6 +25,11 @@
     return value.replaceAll("_", " ");
   }
 
+  function titleize(value: string): string {
+    const text = humanize(value);
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+
   function workerTitle(value: Extract<TimelineItem, { kind: "worker" }>): string {
     const noun = value.action === "spawn" ? "Worker spawn" : "Worker message";
     if (value.status === "running") return value.action === "spawn" ? "Spawning worker" : "Messaging worker";
@@ -51,9 +56,11 @@
     {:else if item.kind === "agent-message" || item.kind === "reasoning"}
       <div data-og-state={item.streaming ? "streaming" : "ready"}>{item.text}</div>
     {:else if item.kind === "tool-call"}
-      <strong>{item.name}</strong>
-      {#if item.arguments !== undefined}<pre>{boundedTimelineValue(item.arguments)}</pre>{/if}
-      {#if item.output !== undefined && item.output !== null}<pre>{boundedTimelineValue(item.output)}</pre>{/if}
+      <details class="og-timeline-row__details og-timeline-row__compact-details">
+        <summary><strong>{titleize(item.name)}</strong> <span>{item.status === "complete" ? "Done" : titleize(item.status)}</span></summary>
+        {#if item.arguments !== undefined}<pre>{boundedTimelineValue(item.arguments)}</pre>{/if}
+        {#if item.output !== undefined && item.output !== null}<pre>{boundedTimelineValue(item.output)}</pre>{/if}
+      </details>
     {:else if item.kind === "human-input"}
       <strong>{item.questions.map((question) => question.label ?? question.prompt).join(" · ")}</strong>
       {#if item.answers.length > 0}<div>{item.answers.flatMap((answer) => answer.values).join(" · ")}</div>{/if}
@@ -86,22 +93,16 @@
       {/if}
       <code class="og-timeline-row__identifier">{item.childSessionId}</code>
     {:else if item.kind === "sandbox"}
-      <div class="og-timeline-row__headline">
-        <strong>{item.name}</strong>
-        <span class="og-timeline-row__pill">{humanize(item.status)}</span>
-      </div>
-      {#if item.origin}<p class="og-timeline-row__summary">Sandbox {item.origin}</p>{/if}
-      {#if item.command}<pre>{boundedTimelineValue(item.command)}</pre>{/if}
-      {#if item.output}<pre>{boundedTimelineValue(item.output)}</pre>{/if}
+      <details class="og-timeline-row__details og-timeline-row__compact-details">
+        <summary><strong>{titleize(item.name)}</strong>{#if item.command}<span>{item.command}</span>{/if}</summary>
+        {#if item.origin}<p class="og-timeline-row__summary">Sandbox {item.origin}</p>{/if}
+        {#if item.output}<pre>{boundedTimelineValue(item.output)}</pre>{/if}
+      </details>
     {:else if item.kind === "startup-phase"}
       <div class="og-timeline-row__headline">
-        <strong>{humanize(item.phase)}</strong>
-        <span class="og-timeline-row__pill">{humanize(item.status)}</span>
+        <strong>{titleize(item.phase)} ready</strong>
+        {#if item.durationMs !== null}<span class="og-timeline-row__summary">{item.durationMs.toLocaleString("en-US")} ms</span>{/if}
       </div>
-      <p class="og-timeline-row__summary">
-        {item.durationMs === null ? "Duration pending" : `${item.durationMs.toLocaleString("en-US")} ms`}
-        {#if item.outcome} · {humanize(item.outcome)}{/if}
-      </p>
     {:else if item.kind === "memory"}
       <div class="og-timeline-row__headline">
         <strong>{item.variant === "corrected" ? "Updated memory" : "Saved to memory"}</strong>
@@ -145,11 +146,11 @@
       </div>
     {:else if item.kind === "goal"}
       <div class="og-timeline-row__landmark" role="status">
-        <strong>{humanize(item.action)}</strong>
-        {#if item.text}<span>{item.text}</span>{/if}
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="3"/></svg>
+        <span>{titleize(item.action)}{#if item.text}: {item.text}{/if}</span>
       </div>
     {:else if item.kind === "notice"}
-      <div>{item.text}</div>
+      <div class="og-timeline-row__notice"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 18 17H2L10 3Z"/><path d="M10 7v4M10 14h.01"/></svg><span>{item.text}</span></div>
       {#if item.details}<pre>{item.details.label}: {boundedTimelineValue(item.details.value)}</pre>{/if}
       {#if item.action}<a class="og-button" href={item.action.url}>{item.action.label}</a>{/if}
     {:else if item.kind === "context-compaction"}

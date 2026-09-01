@@ -16,10 +16,25 @@
   } = $props();
   let snapshot = $derived(readableFromController(controller, { owned: false }));
   let groups = $derived(groupTimeline(buildTimeline([...$snapshot.events])));
+  let timeline = $state<HTMLElement>();
+  let followLatest = true;
+
+  $effect(() => {
+    groups.length;
+    if ($snapshot.viewMode !== "live") return;
+    queueMicrotask(() => {
+      if (timeline && followLatest) timeline.scrollTop = timeline.scrollHeight;
+    });
+  });
+
+  function onScroll() {
+    if (!timeline) return;
+    followLatest = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 48;
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-<section class="og-timeline" data-og-component="timeline" data-og-state={$snapshot.initialLoading ? "loading" : $snapshot.connectionState} aria-label={label} aria-busy={$snapshot.initialLoading} tabindex="0">
+<section bind:this={timeline} class="og-timeline" data-og-component="timeline" data-og-state={$snapshot.initialLoading ? "loading" : $snapshot.connectionState} aria-label={label} aria-busy={$snapshot.initialLoading} tabindex="0" onscroll={onScroll}>
   <HistoryControls
     hasOlder={$snapshot.hasOlder}
     hasNewer={$snapshot.hasNewer}

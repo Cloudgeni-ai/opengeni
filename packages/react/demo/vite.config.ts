@@ -41,6 +41,7 @@ export default defineConfig({
   },
   build: {
     outDir: process.env.OPENGENI_REACT_DEMO_OUT_DIR ?? "../demo-dist",
+    emptyOutDir: true,
     // Production embeds this output and then runs the one canonical bundle
     // budget/precompression pass. Skip Vite's duplicate all-asset gzip work.
     reportCompressedSize: false,

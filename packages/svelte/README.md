@@ -23,7 +23,8 @@ browser hydration.
 
 Controller readables subscribe directly to `@opengeni/sdk/session` snapshots. Set `owned: false` when adapting a host-owned controller; an owned readable starts on its first browser subscriber and destroys on final teardown. Server rendering is import-safe and does not start browser transports.
 
-The deployed reference demo defaults to deterministic data. `?mode=live&workspace=<id>&session=<id>` uses the same controllers through the server-owned `/demo-api` proxy.
+The deployed reference demo is intentionally deterministic. It is an SDK
+acceptance playground, not a product-shell or live-backend simulator.
 
 ## Entry points
 
@@ -44,7 +45,13 @@ it does not duplicate session state.
 `createContextSessionControllers(sessionId)` composes the ordinary session
 resource, event, composer, attachment, queue, and control controllers plus
 optional goal, human-input, and lineage controllers supported by the supplied
-client. Call its `destroy()` method when the host owns that composition.
+client. Optional controllers can be excluded explicitly:
+
+```ts
+const controllers = createContextSessionControllers(sessionId, { goal: false });
+```
+
+Call `destroy()` when the host owns that composition.
 
 ## Styled session surface
 
@@ -54,6 +61,10 @@ approvals, structured human input, and goal presentation. Host renderers use
 Svelte snippets/slots. Shared components emit the same `.og-root`, anatomy,
 copy, state attributes, tokens, and responsive grammar as React while retaining
 native Svelte lifecycle.
+
+`SessionSurface` is the ready-to-use assembly. Set `showChrome={false}` only
+when the host supplies its own session header. Individual components and the
+controller stores remain available for customers that want different markup.
 
 Unknown timeline kinds degrade to bounded readable output. Optional React-only
 accounts, realtime, browser/computer, machines, artifact editors,
