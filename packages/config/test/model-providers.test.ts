@@ -1252,6 +1252,36 @@ describe("configuredModels", () => {
     ).toBe(false);
   });
 
+  test("a bare registry id used only by the turn resolves to its registry provider", () => {
+    const base = withEnv(
+      {
+        OPENGENI_OPENAI_PROVIDER: "azure",
+        OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
+        OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
+        OPENGENI_OPENAI_MODEL: "gpt-5.6-terra",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.6-terra",
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          {
+            id: "managed-gateway",
+            baseUrl: "https://gateway.example.test/v1",
+            apiKey: "gateway-key",
+            models: [{ id: "deepseek-v4-flash-0731", label: "DeepSeek V4 Flash 0731" }],
+          },
+        ]),
+      },
+      () => getSettings(),
+    );
+    const runSettings = { ...base, openaiModel: "deepseek-v4-flash-0731" };
+    const entries = configuredModels(runSettings).filter(
+      (model) => model.id === "deepseek-v4-flash-0731",
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.providerId).toBe("managed-gateway");
+    expect(resolveModelProvider(runSettings, "deepseek-v4-flash-0731")!.provider.builtin).toBe(
+      false,
+    );
+  });
+
   test("fails boot instead of silently shadowing a duplicate canonical product id", () => {
     expect(() =>
       withEnv(

@@ -4643,12 +4643,15 @@ export function configuredModels(
   // (opaque DeploymentNotFound 404). A `<provider>/<model>`-namespaced id (it
   // contains "/") that a registry actually owns is never a valid Azure/OpenAI
   // deployment name, and a `codex/`-prefixed id never is either — exclude both
-  // from the built-in list. A BARE id a registry merely redeclares (e.g.
-  // "gpt-5.6-sol") is left in place so the built-in still wins it via the first-wins
-  // de-dup below (preserving the documented built-in-precedence contract). When
-  // a codex/ id has NO codex provider injected (no active subscription) it then
-  // resolves to nothing and getModel fails loud with
-  // CodexSubscriptionUnavailableError instead of mis-routing to Azure.
+  // from the built-in list. A BARE registry id is also excluded when it appears
+  // only as the run-scoped `openaiModel` override and is absent from the
+  // deployment's built-in allow-list. That is an unambiguous per-turn provider
+  // selection, not a deployment ownership claim. A bare id that is present in
+  // the built-in allow-list remains a hard duplicate error so configuration can
+  // never silently change provider or billing ownership. When a codex/ id has
+  // NO codex provider injected (no active subscription) it resolves to nothing
+  // and getModel fails loud with CodexSubscriptionUnavailableError instead of
+  // mis-routing to Azure.
   const parsedRegistry = configuredRegistryProviders(settings);
   const registryOwnedIds = new Set(
     parsedRegistry.flatMap((provider) => provider.models.map((model) => model.id)),
@@ -4656,11 +4659,15 @@ export function configuredModels(
   const registryAliases = new Set(
     parsedRegistry.flatMap((provider) => provider.models.flatMap((model) => model.aliases ?? [])),
   );
-  const isRegistryNamespaced = (id: string): boolean =>
+  const builtinAllowedIds = new Set(splitCsv(settings.openaiAllowedModels));
+  const isUnambiguousRunScopedRegistryModel = (id: string): boolean =>
+    id === settings.openaiModel && registryOwnedIds.has(id) && !builtinAllowedIds.has(id);
+  const isRegistryOwnedForRun = (id: string): boolean =>
     id.startsWith(CODEX_MODEL_ID_PREFIX) ||
     id.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX) ||
     registryAliases.has(id) ||
-    (id.includes("/") && registryOwnedIds.has(id));
+    (id.includes("/") && registryOwnedIds.has(id)) ||
+    isUnambiguousRunScopedRegistryModel(id);
   const builtinProvider = providerById.get(builtinId);
   if (!builtinProvider) {
     throw new Error(`Built-in model provider ${builtinId} is not configured`);
@@ -4669,7 +4676,7 @@ export function configuredModels(
     settings.openaiModel,
     ...splitCsv(settings.openaiAllowedModels),
   ])
-    .filter((id) => !isRegistryNamespaced(id))
+    .filter((id) => !isRegistryOwnedForRun(id))
     .map((id) => {
       const capabilities = {
         ...legacyModelCapabilities(settings, {
