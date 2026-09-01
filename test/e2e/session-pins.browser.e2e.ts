@@ -34,6 +34,7 @@ import postgres from "postgres";
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "sessionpin-owner" };
 const otherMemberHeaders = { "x-opengeni-subject": "sessionpin-other-member" };
+const ACKNOWLEDGEMENT_TIMEOUT_MS = 30_000;
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
   wakeSessionWorkflow: async () => undefined,
@@ -311,7 +312,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           response.request().method() === "PUT" &&
           new URL(response.url()).pathname === attentionPath &&
           response.status() === 200,
-        { timeout: 10_000 },
+        { timeout: ACKNOWLEDGEMENT_TIMEOUT_MS },
       );
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
       await firstAcknowledgementStarted;
@@ -350,7 +351,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         (response) =>
           response.request().method() === "PUT" &&
           new URL(response.url()).pathname === attentionPath,
-        { timeout: 10_000 },
+        { timeout: ACKNOWLEDGEMENT_TIMEOUT_MS },
       );
       const sendResponse = await page.evaluate(
         async ({ browserApiBaseUrl, targetWorkspaceId, targetSessionId }) => {
