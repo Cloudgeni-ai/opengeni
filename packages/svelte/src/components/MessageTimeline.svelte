@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { buildTimeline, groupTimeline, type SessionEventStore } from "@opengeni/sdk/session";
+  import {
+    buildTimeline,
+    groupTimeline,
+    type SessionComposerRuntimeStore,
+    type SessionEventStore,
+  } from "@opengeni/sdk/session";
+  import { projectOptimisticChatMessages } from "../optimistic-messages";
   import type { TimelineRendererRegistry } from "../renderers";
   import { readableFromController } from "../store";
   import HistoryControls from "./HistoryControls.svelte";
@@ -7,15 +13,31 @@
 
   let {
     controller,
+    composer,
     label = "Session timeline",
     renderers,
   }: {
     controller: SessionEventStore;
+    composer?: SessionComposerRuntimeStore | undefined;
     label?: string;
     renderers?: TimelineRendererRegistry | undefined;
   } = $props();
   let snapshot = $derived(readableFromController(controller, { owned: false }));
-  let groups = $derived(groupTimeline(buildTimeline([...$snapshot.events])));
+  let composerSnapshot = $derived(
+    composer ? readableFromController(composer, { owned: false }) : null,
+  );
+  let groups = $derived(
+    groupTimeline(
+      projectOptimisticChatMessages(
+        buildTimeline([...$snapshot.events]),
+        composerSnapshot ? ($composerSnapshot?.optimisticMessages ?? []) : [],
+        {
+          retry: (clientEventId) => composer?.retryOptimisticMessage(clientEventId),
+          remove: (clientEventId) => composer?.removeOptimisticMessage(clientEventId),
+        },
+      ),
+    ),
+  );
   let timeline = $state<HTMLElement>();
   let followLatest = true;
 

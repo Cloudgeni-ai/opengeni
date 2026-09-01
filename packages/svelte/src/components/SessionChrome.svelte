@@ -35,7 +35,7 @@
     {#if queueCount > 0}<span class="og-status" data-og-tone="neutral">Queue {queueCount}</span>{/if}
     {#if approvalCount > 0}<span class="og-status" data-og-tone="waiting">Approvals {approvalCount}</span>{/if}
     {#if inputCount > 0}<span class="og-status" data-og-tone="waiting">Questions {inputCount}</span>{/if}
-    <span class="og-status" data-og-component="status" data-og-tone={presentation.tone} data-og-live={presentation.live}>{presentation.label}</span>
+    <span class="og-status" data-og-component="status" data-og-state={status} data-og-tone={presentation.tone} data-og-live={presentation.live} role="status" aria-live="polite" aria-atomic="true">{presentation.label}</span>
     {#if paused}
       <button class="og-button" type="button" disabled={controlling || !onResume} onclick={() => void onResume?.()}>Resume</button>
     {:else}

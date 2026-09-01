@@ -17,6 +17,7 @@ import {
   createSessionControlStore,
   createSessionEventStore,
   createSessionLineageStore,
+  createSessionResourceStore,
   createTurnQueueStore,
   mergeSessionEvents,
   sessionEventWindowBytes,
@@ -28,6 +29,7 @@ import {
 import type {
   ComposerDraft,
   FileAsset,
+  Session,
   SessionEvent,
   SessionGoal,
   SessionHumanInputRequest,
@@ -610,6 +612,59 @@ describe("framework-neutral session stores", () => {
     store.destroy();
   });
 
+  test("durable composer submission snapshots explicit attachment resources into save and submit", async () => {
+    const fileId = "33333333-3333-4333-8333-333333333334";
+    const resource = { kind: "file" as const, fileId };
+    const saved: SaveComposerDraftRequest[] = [];
+    const submitted: Array<{ resources: readonly unknown[] }> = [];
+    const submittedGate = deferred<void>();
+    const store = createSessionComposerRuntimeStore({
+      client: {
+        getComposerDraft: async () => draft(4, "send with attachment"),
+        saveComposerDraft: async (
+          _workspaceId: string,
+          _sessionId: string,
+          request: SaveComposerDraftRequest,
+        ) => {
+          saved.push(request);
+          return { ...draft(request.expectedRevision + 1, request.text), ...request };
+        },
+        submitComposerDraft: async (
+          _workspaceId: string,
+          _sessionId: string,
+          request: { clientEventId: string; resources: readonly unknown[] },
+        ) => {
+          submitted.push(request);
+          submittedGate.resolve();
+          return {
+            accepted: {
+              ...event(2, { routing: "accepted_for_execution" }),
+              type: "user.message",
+              clientEventId: request.clientEventId,
+            },
+            turn: { id: "turn-attachment", triggerEventId: "event-2" },
+            draft: draft(6, ""),
+            routing: "accepted_for_execution",
+          };
+        },
+      } as never,
+      workspaceId: WORKSPACE_ID,
+      sessionId: "22222222-2222-4222-8222-222222222233",
+      events: [],
+      environment: deterministicEnvironment(["attachment-send"]),
+    });
+    await store.start();
+
+    expect(await store.submit("send", { resources: [resource] })).toBe(true);
+    await submittedGate.promise;
+
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.resources).toEqual([resource]);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]?.resources).toEqual([resource]);
+    store.destroy();
+  });
+
   test("external stores publish synchronously and start/destroy idempotently", async () => {
     let starts = 0;
     let destroys = 0;
@@ -694,6 +749,73 @@ describe("framework-neutral session stores", () => {
     await starting;
     expect(controller.getSnapshot()).toMatchObject({ value: 2, readRevision: 1 });
     controller.destroy();
+  });
+
+  test("session title mutations remain visible across stale reads that ignore abort", async () => {
+    const staleRead = deferred<Session>();
+    const oldSession = sessionResourceFixture("Old title");
+    const committedSession = sessionResourceFixture("Committed title");
+    let reads = 0;
+    const store = createSessionResourceStore({
+      client: {
+        getSession: async () => {
+          reads += 1;
+          if (reads === 1) return oldSession;
+          if (reads === 2) return await staleRead.promise;
+          return committedSession;
+        },
+        updateSession: async () => committedSession,
+      } as never,
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      events: [],
+    });
+    await store.start();
+    expect(store.getSnapshot().value?.title).toBe("Old title");
+
+    const refreshing = store.refresh();
+    expect(await store.updateTitle("Committed title")).toEqual(committedSession);
+    expect(store.getSnapshot().value?.title).toBe("Committed title");
+
+    staleRead.resolve(oldSession);
+    await refreshing;
+    expect(store.getSnapshot().value?.title).toBe("Committed title");
+    await flushMicrotasks();
+    expect(store.getSnapshot().value?.title).toBe("Committed title");
+    expect(reads).toBe(3);
+    store.destroy();
+  });
+
+  test("session title events remain visible across stale reads that ignore abort", async () => {
+    const staleRead = deferred<Session>();
+    const oldSession = sessionResourceFixture("Old title");
+    let reads = 0;
+    const store = createSessionResourceStore({
+      client: {
+        getSession: async () => {
+          reads += 1;
+          return reads === 1 ? oldSession : await staleRead.promise;
+        },
+      } as never,
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      events: [],
+    });
+    await store.start();
+
+    const refreshing = store.refresh();
+    store.applyEvents([
+      {
+        ...event(2, { title: "Event title", source: "agent" }),
+        type: "session.title_set",
+      },
+    ]);
+    expect(store.getSnapshot().value?.title).toBe("Event title");
+
+    staleRead.resolve(oldSession);
+    await refreshing;
+    expect(store.getSnapshot().value?.title).toBe("Event title");
+    store.destroy();
   });
 
   test("event windows dedupe, order, count-bound, and project oversized legacy events", () => {
@@ -1214,6 +1336,18 @@ function draft(revision: number, text: string): ComposerDraft {
     sourceTurnVersion: null,
     updatedAt: "2026-08-29T12:00:00.000Z",
   };
+}
+
+function sessionResourceFixture(title: string): Session {
+  return {
+    id: SESSION_ID,
+    workspaceId: WORKSPACE_ID,
+    status: "idle",
+    title,
+    titleSource: "user",
+    lastSequence: 1,
+    mcpServers: [],
+  } as unknown as Session;
 }
 
 function controlResponse(state: "active" | "paused"): SessionControlResponse {

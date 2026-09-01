@@ -697,15 +697,14 @@ function policyFromDraft(draft: ComposerDraft): SessionComposerPolicy {
 function composerDraftPayload(
   base: ComposerDraft,
   text: string,
-  restoredResources: readonly ResourceRef[],
+  resources: readonly ResourceRef[],
   annotations: readonly DraftTimelineAnnotation[],
   policy: SessionComposerPolicy,
-  additionalResources: readonly ResourceRef[],
 ): SaveComposerDraftRequest {
   return {
     expectedRevision: base.revision,
     text,
-    resources: mergeResources(restoredResources, additionalResources),
+    resources: [...resources],
     annotations: cloneAnnotations(annotations),
     model: policy.model,
     reasoningEffort: policy.reasoningEffort,
@@ -856,16 +855,11 @@ export function createSessionComposerRuntimeStore(
     return override ?? resolveSendExtras(options.sendExtras);
   }
 
-  function currentDraftPayload(): SaveComposerDraftRequest | null {
+  function currentDraftPayload(
+    resolvedResources = mergeResources(restoredResources, currentExtras().resources ?? []),
+  ): SaveComposerDraftRequest | null {
     if (!durableDrafts || !draft || !policy) return null;
-    return composerDraftPayload(
-      draft,
-      value,
-      restoredResources,
-      annotations,
-      policy,
-      currentExtras().resources ?? [],
-    );
+    return composerDraftPayload(draft, value, resolvedResources, annotations, policy);
   }
 
   function isDirty(): boolean {
@@ -1025,10 +1019,9 @@ export function createSessionComposerRuntimeStore(
             composerDraftPayload(
               baseAtStart,
               value,
-              restoredResources,
+              mergeResources(restoredResources, currentExtras().resources ?? []),
               annotations,
               policyAtStart,
-              currentExtras().resources ?? [],
             ),
           )
         : null;
@@ -2029,7 +2022,7 @@ export function createSessionComposerRuntimeStore(
       resources,
       annotations: annotationsAtSend,
     });
-    const currentPayload = currentDraftPayload();
+    const currentPayload = currentDraftPayload(resources);
     const hasEarlierUnsettledSend = optimisticSends.some(
       (candidate) => candidate.state !== "failed" || candidate.outcomeUnknown === true,
     );

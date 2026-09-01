@@ -20,6 +20,7 @@
   let label = $derived(timelineItemLabel(item));
   let outcome = $derived(timelineItemOutcome(item));
   let summary = $derived(timelineItemSummary(item));
+  let deliveryFailed = $derived(item.kind === "user-message" && item.delivery?.state === "failed");
 
   function humanize(value: string): string {
     return value.replaceAll("_", " ");
@@ -54,7 +55,7 @@
     {:else if item.kind === "user-message"}
       <UserMessageBody text={item.text} />
     {:else if item.kind === "agent-message" || item.kind === "reasoning"}
-      <div data-og-state={item.streaming ? "streaming" : "ready"}>{item.text}</div>
+      <div data-og-part="message-text" data-og-state={item.streaming ? "streaming" : "ready"}>{item.text}</div>
     {:else if item.kind === "tool-call"}
       <details class="og-timeline-row__details og-timeline-row__compact-details">
         <summary><svg class="og-timeline-row__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg><strong>{titleize(item.name)}</strong> <span>{item.status === "complete" ? "Done" : titleize(item.status)}</span></summary>
@@ -188,4 +189,11 @@
       {#if item.failureText}<p class="og-timeline-row__failure">{item.failureText}</p>{/if}
     {/if}
   </div>
+  {#if item.kind === "user-message" && deliveryFailed}
+    <div class="og-message-delivery" role="status" aria-live="polite" aria-atomic="true" title={item.delivery?.error}>
+      <span>Message not sent</span>
+      {#if item.delivery?.onRetry}<button class="og-button" type="button" onclick={item.delivery.onRetry}>Retry</button>{/if}
+      {#if item.delivery?.onRemove}<button class="og-button" type="button" onclick={item.delivery.onRemove}>Remove</button>{/if}
+    </div>
+  {/if}
 </article>

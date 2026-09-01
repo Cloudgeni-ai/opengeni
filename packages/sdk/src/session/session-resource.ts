@@ -49,6 +49,7 @@ export function createSessionResourceStore(options: {
   const sharedFeed = options.events !== undefined;
   let revision = 0;
   let nextReadGeneration = 0;
+  let authoritativeGeneration = 0;
   let mutationGeneration = 0;
   let mutationInFlight = 0;
   let activityGeneration = 0;
@@ -104,6 +105,7 @@ export function createSessionResourceStore(options: {
     store,
     enabled,
     async load(signal) {
+      const ownedAuthoritativeGeneration = authoritativeGeneration;
       let readGeneration = 0;
       const value = await options.client.getSession(options.workspaceId, sessionId, {
         fresh: true,
@@ -112,11 +114,11 @@ export function createSessionResourceStore(options: {
           readGeneration = options.beginRead?.() ?? ++nextReadGeneration;
         },
       });
-      return { value, readGeneration };
+      return { value, readGeneration, ownedAuthoritativeGeneration };
     },
-    accept({ value, readGeneration }) {
+    accept({ value, readGeneration, ownedAuthoritativeGeneration }) {
       base = value;
-      override = null;
+      if (ownedAuthoritativeGeneration === authoritativeGeneration) override = null;
       publish({
         loading: false,
         error: null,
@@ -175,6 +177,7 @@ export function createSessionResourceStore(options: {
     const titleSource: "user" | "agent" | null =
       payload.source === "user" || payload.source === "agent" ? payload.source : null;
     const current = override && override.id === base.id ? override : base;
+    authoritativeGeneration += 1;
     override = { ...current, title: payload.title, titleSource };
     publish();
   };
@@ -253,8 +256,10 @@ export function createSessionResourceStore(options: {
         options.client.updateSession!(options.workspaceId, sessionId, { title }),
       );
       if (result) {
+        authoritativeGeneration += 1;
         override = result;
         publish();
+        void reads.refresh();
       }
       return result;
     },

@@ -97,6 +97,7 @@
 .og-timeline-row__body { min-width: 0; overflow-wrap: anywhere; }
 .og-timeline-row__body > :first-child { margin-block-start: 0; }
 .og-timeline-row__body > :last-child { margin-block-end: 0; }
+.og-timeline-row [data-og-part="message-text"] { white-space: pre-wrap; }
 .og-timeline-row__headline { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: var(--og-space-2); }
 .og-timeline-row__title { display: inline-flex; min-width: 0; align-items: center; gap: 0.5rem; }
 .og-timeline-row__icon { width: 0.875rem; height: 0.875rem; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
@@ -152,6 +153,8 @@
 .og-timeline-row__compact-details > summary { font-size: 0.875rem; line-height: 1.25rem; }
 .og-timeline-row__compact-details > summary strong,
 .og-timeline-row[data-og-kind="startup-phase"] .og-timeline-row__title { font-weight: 400; }
+.og-message-delivery { display: flex; align-items: center; gap: var(--og-space-2); color: var(--og-color-status-failed); font-size: var(--og-font-size-xs); }
+.og-message-delivery .og-button { min-height: 1.75rem; padding: 0.1875rem 0.5rem; }
 .og-timeline-row[data-og-kind="notice"] .og-timeline-row__body,
 .og-timeline-row[data-og-kind="auth-needed"] .og-timeline-row__body,
 .og-timeline-row[data-og-kind="worker-completion"] .og-timeline-row__body,
