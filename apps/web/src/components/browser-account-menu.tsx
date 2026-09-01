@@ -34,6 +34,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useRail } from "@/components/rail/rail-context";
+import {
+  OrganizationInvitationsDialog,
+  OrganizationInvitationsMenuItem,
+  useOrganizationInvitations,
+} from "@/components/organization-invitations";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { useAppContext } from "@/context";
 import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
@@ -74,6 +79,13 @@ export function BrowserAccountMenu() {
     context.authSession?.user.email ??
     context.accessContext.subjectId;
   const image = context.authSession?.user.image ?? undefined;
+  const organizationInvitations = useOrganizationInvitations({
+    client: context.client,
+    enabled: true,
+    activeEmail: selected?.verifiedClaim.value ?? context.authSession?.user.email ?? null,
+    onUseInvitedAccount: continueInvitation,
+    onAccepted: context.revalidatePrincipalAccess,
+  });
   const replacementSlots = useMemo(
     () =>
       projection?.slots.filter((slot) => slot.id !== logoutTarget?.id && slot.state === "active") ??
@@ -117,6 +129,17 @@ export function BrowserAccountMenu() {
         if (settled) restoreFocus();
       })
       .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
+  }
+
+  function continueInvitation(targetEmail: string) {
+    const targetSlot = projection?.slots.find(
+      (slot) => slot.verifiedClaim.value.trim().toLowerCase() === targetEmail.trim().toLowerCase(),
+    );
+    if (!targetSlot) {
+      authenticate("add");
+      return;
+    }
+    chooseSlot(targetSlot);
   }
 
   function requestLogout(slot: ManagedAuthLoginSlot) {
@@ -274,6 +297,11 @@ export function BrowserAccountMenu() {
             <UserRoundPlusIcon className="size-4" />
             Add another account
           </DropdownMenuItem>
+          <OrganizationInvitationsMenuItem
+            controller={organizationInvitations}
+            className="min-h-11 forced-colors:text-[CanvasText]!"
+            disabled={busy}
+          />
           {showAnalyticsPreferences ? (
             <DropdownMenuItem className="min-h-11" onSelect={() => openAnalyticsPreferences()}>
               <ChartColumnIcon className="size-4" />
@@ -312,6 +340,8 @@ export function BrowserAccountMenu() {
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <OrganizationInvitationsDialog controller={organizationInvitations} />
 
       <Dialog open={logoutTarget !== null} onOpenChange={(open) => !open && setLogoutTarget(null)}>
         <DialogContent className="motion-reduce:duration-0">

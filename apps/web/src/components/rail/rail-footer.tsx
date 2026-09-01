@@ -12,6 +12,11 @@ import {
 import { lazy, Suspense } from "react";
 import { toast } from "sonner";
 
+import {
+  OrganizationInvitationsDialog,
+  OrganizationInvitationsMenuItem,
+  useOrganizationInvitations,
+} from "@/components/organization-invitations";
 import { useRail } from "@/components/rail/rail-context";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -50,6 +55,17 @@ export function RailFooter() {
     context.accessContext.subjectId;
   const secondary = context.authSession?.user.email ?? context.accessContext.subjectId;
   const image = context.authSession?.user.image ?? undefined;
+  const organizationInvitations = useOrganizationInvitations({
+    client: context.client,
+    enabled: managed && !browserAccounts,
+    activeEmail: context.authSession?.user.email ?? null,
+    onUseInvitedAccount: () => {
+      void context
+        .handleManagedSignOut()
+        .catch((error) => toast.error("Sign out failed", { description: String(error) }));
+    },
+    onAccepted: context.revalidatePrincipalAccess,
+  });
 
   return (
     <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
@@ -107,6 +123,9 @@ export function RailFooter() {
                 ) : null}
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
+              {managed ? (
+                <OrganizationInvitationsMenuItem controller={organizationInvitations} />
+              ) : null}
               {showAnalyticsPreferences ? (
                 <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
                   <ChartColumnIcon className="size-4" />
@@ -166,6 +185,9 @@ export function RailFooter() {
           </Tooltip>
         ) : null}
       </div>
+      {managed && !browserAccounts ? (
+        <OrganizationInvitationsDialog controller={organizationInvitations} />
+      ) : null}
     </div>
   );
 }
