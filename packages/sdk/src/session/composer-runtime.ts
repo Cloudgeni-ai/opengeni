@@ -71,6 +71,8 @@ export type SessionComposerRuntimeSnapshot = Readonly<{
   annotationReviewTargetId: string | null;
   optimisticMessages: readonly SessionComposerOptimisticMessage[];
   steering: SessionComposerSteeringState | null;
+  /** A prior outcome-unknown delivery that submit() reconciles before current extras. */
+  pendingDelivery?: "send" | "steer" | null | undefined;
   stoppingAttempt: "current" | "previous" | null;
   sending: boolean;
   /** Svelte-compatible alias for sending. */
@@ -941,6 +943,7 @@ export function createSessionComposerRuntimeStore(
       annotationReviewTargetId,
       optimisticMessages,
       steering,
+      pendingDelivery: pendingOperation?.delivery ?? null,
       stoppingAttempt:
         steering?.phase === "accepted" && steering.stoppingPreviousAttempt === true
           ? "previous"

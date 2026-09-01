@@ -5,7 +5,10 @@ import type {
   SessionComposerRuntimeStore,
 } from "@opengeni/sdk/session";
 
-type ComposerSubmitSnapshot = Pick<SessionComposerRuntimeSnapshot, "canSend" | "submitting">;
+type ComposerSubmitSnapshot = Pick<
+  SessionComposerRuntimeSnapshot,
+  "canSend" | "pendingDelivery" | "submitting"
+>;
 
 export function canSubmitSessionComposer(
   composer: ComposerSubmitSnapshot,
@@ -28,8 +31,11 @@ export async function submitSessionComposer(
   if (!canSubmitSessionComposer(composerSnapshot, attachmentSnapshot)) return false;
 
   const resources = [...(attachmentSnapshot?.readyResources ?? [])];
-  const capturedFileIds = resources.map((resource) => resource.fileId);
+  const acceptedFileIds =
+    delivery === "send" && composerSnapshot.pendingDelivery == null
+      ? resources.map((resource) => resource.fileId)
+      : [];
   const accepted = await controller.submit(delivery, { resources });
-  if (accepted) attachments?.removeReadyFiles(capturedFileIds);
+  if (accepted && acceptedFileIds.length > 0) attachments?.removeReadyFiles(acceptedFileIds);
   return accepted;
 }
