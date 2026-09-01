@@ -10,6 +10,7 @@ import {
   normalizeAutomaticSessionTitle,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
+  TurnExecutionPolicyV1,
   type ScheduledTask,
   type ScheduledTaskRun,
 } from "@opengeni/contracts";
@@ -17,7 +18,9 @@ import {
   defaultSessionMcpServerIds,
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
+  resolveWorkspaceCatalogSettings,
   resolveSessionToolPolicy,
+  workspaceCustomModelReference,
   scheduledSlackBotConnectionId,
   swapActiveSandbox,
 } from "@opengeni/core";
@@ -49,6 +52,8 @@ import {
   getVariableSet,
   isCodexBilledModel,
   initializeSessionStartAtomically,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
+  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   materializeScheduledTaskReusableSessionFromRun,
   listEnabledMcpCapabilityServerIds,
   listInstalledApiIntegrationServerIdsForDelegations,
@@ -67,8 +72,9 @@ import {
   withSessionActivityRlsContext,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
+import { resolveFirstPartyMcpToolPolicy, resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
+import { createHash } from "node:crypto";
 import {
   assertReusableSessionRevivable,
   scheduledUserMessagePayload,
@@ -126,6 +132,14 @@ export function scheduledTaskRunProducerKey(
     namespace: info.namespace,
     workflowId: info.workflowExecution.workflowId,
   })}`;
+}
+
+export function scheduledTaskGeneratedSessionCreateIdempotencyKey(producerKey: string): string {
+  const digest = createHash("sha256")
+    .update("scheduled-task-run\0", "utf8")
+    .update(producerKey, "utf8")
+    .digest("hex");
+  return `scheduled-task-run:${digest}`;
 }
 
 /**
@@ -234,14 +248,26 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
     dispatchScheduledTaskRun: async (
       input: DispatchScheduledTaskRunInput,
     ): Promise<DispatchScheduledTaskRunResult> => {
-      const service = await services();
-      const { settings, db, bus, wakeSessionWorkflow } = service;
+      const baseService = await services();
       // Histories created before the manual-initiator workflow patch already
       // contain this activity command. Reject their incomplete wire input here
       // so replay consumes the recorded command and the retry loop settles.
       if (input.triggerType !== "scheduled" && !input.initiator) {
         return { action: "blocked", reason: "malformed_manual_trigger" };
       }
+      const { db, bus, wakeSessionWorkflow } = baseService;
+      const settingsForTask = async (task: ScheduledTask, retainedProductModelId?: string | null) =>
+        (
+          await resolveWorkspaceCatalogSettings(
+            db,
+            baseService.catalogSourceSettings ?? baseService.settings,
+            {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              ...(retainedProductModelId !== undefined ? { retainedProductModelId } : {}),
+            },
+          )
+        ).settings;
       const stableProducerKey = scheduledTaskRunProducerKey(input);
       const priorRun = await getScheduledTaskRunByProducerKey(db, {
         workspaceId: input.workspaceId,
@@ -275,6 +301,15 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           });
         }
         if (priorRun.status === "queued") {
+          const acceptedPolicy = acceptedExecution.turnExecutionPolicy
+            ? TurnExecutionPolicyV1.parse(acceptedExecution.turnExecutionPolicy)
+            : null;
+          const settings = await settingsForTask(
+            acceptedExecution.task,
+            acceptedPolicy?.productModelId ??
+              acceptedExecution.targetSessionExecution?.model ??
+              acceptedExecution.resolvedModel,
+          );
           try {
             return await recoverBoundScheduledTaskDispatch({
               db,
@@ -444,6 +479,27 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskRevisionAuthority?.subjectId ??
         taskPersonalResourceAuthoritySubjectId ??
         taskConnectionAuthoritySubjectId;
+      const acceptedTargetSessionId =
+        task.runMode === "existing_session"
+          ? task.targetSessionId
+          : task.runMode === "reusable_session"
+            ? task.reusableSessionId
+            : null;
+      // A targeted task whose exact session was deleted has no target to
+      // resolve; database admission settles that occurrence terminally
+      // (`scheduled_target_session_unavailable`) instead of retrying forever.
+      // Resolve this before the catalog so an existing session's retired
+      // custom Gateway model remains executable without becoming selectable
+      // for a new scheduled session.
+      const targetSessionExecutionBase = acceptedTargetSessionId
+        ? await getScheduledTargetSessionExecution(
+            db,
+            task.workspaceId,
+            acceptedTargetSessionId,
+            taskAuthoritySubjectId,
+          )
+        : null;
+      const settings = await settingsForTask(task, targetSessionExecutionBase?.model);
       const model = task.agentConfig.model ?? settings.openaiModel;
       const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
       let sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
@@ -514,22 +570,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                       : ("portable" as const),
                   };
           })()
-        : null;
-      const acceptedTargetSessionId = generatedTarget
-        ? null
-        : task.runMode === "existing_session"
-          ? task.targetSessionId
-          : task.reusableSessionId;
-      // A targeted task whose exact session was deleted has no target to
-      // resolve; database admission settles that occurrence terminally
-      // (`scheduled_target_session_unavailable`) instead of retrying forever.
-      const targetSessionExecutionBase = acceptedTargetSessionId
-        ? await getScheduledTargetSessionExecution(
-            db,
-            task.workspaceId,
-            acceptedTargetSessionId,
-            taskAuthoritySubjectId,
-          )
         : null;
       const targetSessionExecution = targetSessionExecutionBase
         ? await (async () => {
@@ -727,15 +767,63 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       ) {
         throw new Error("scheduled personal-resource execution has no causal human");
       }
-      const admissionDenial = await agentRunAdmissionDenial(service, {
-        accountId: task.accountId,
-        workspaceId: task.workspaceId,
-        model: targetSessionExecution?.model ?? model,
-        requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
-      });
+      const admissionDenial = await agentRunAdmissionDenial(
+        { ...baseService, settings },
+        {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          model: targetSessionExecution?.model ?? model,
+          requestedAgentRuns: input.agentRunUsageIdempotencyKey ? 0 : 1,
+        },
+      );
       if (admissionDenial) {
         return { action: "blocked", reason: admissionDenial };
       }
+      const acceptedModel = targetSessionExecution?.model ?? model;
+      const acceptedReasoningEffort = targetSessionExecution?.reasoningEffort ?? reasoningEffort;
+      const acceptedLatencyMode = targetSessionExecution?.latencyMode ?? "standard";
+      const acceptedCustomModel = generatedTarget
+        ? workspaceCustomModelReference(settings, acceptedModel)
+        : null;
+      const beforeFreshAgentRunCommit = acceptedCustomModel
+        ? async (tx: Database): Promise<void> => {
+            const active =
+              acceptedCustomModel.providerKind === "openrouter"
+                ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
+                    accountId: task.accountId,
+                    workspaceId: task.workspaceId,
+                    upstreamModelId: acceptedCustomModel.upstreamModelId,
+                  })
+                : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+                    accountId: task.accountId,
+                    workspaceId: task.workspaceId,
+                    upstreamModelId: acceptedCustomModel.upstreamModelId,
+                  });
+            if (!active) {
+              throw new ScheduledRunTerminalAuthorityError(
+                "scheduled_model_unavailable",
+                `model is not available: ${acceptedModel}`,
+              );
+            }
+          }
+        : undefined;
+      const turnExecutionPolicy: TurnExecutionPolicyV1 = resolveTurnExecutionPolicyV1(settings, {
+        modelId: acceptedModel,
+        requestedModelId: generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
+        modelSource: generatedTarget
+          ? task.agentConfig.model
+            ? "explicit"
+            : "deployment"
+          : "session",
+        reasoningEffort: acceptedReasoningEffort,
+        reasoningSource: generatedTarget
+          ? task.agentConfig.reasoningEffort
+            ? "explicit"
+            : "deployment"
+          : "session",
+        latencyMode: acceptedLatencyMode,
+        latencyModeSource: generatedTarget ? "deployment" : "session",
+      });
       const deferredEvents: Array<{
         sessionId: string;
         events: Awaited<ReturnType<typeof appendSessionEvents>>;
@@ -748,7 +836,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 alertResponderSessionCreateIdempotencyKey ??
                 (task.runMode === "reusable_session"
                   ? `scheduled-task-reusable:${task.id}:${task.authorityRevision}:${task.executionDigest}`
-                  : `scheduled-task-run:${admittedRunId}`),
+                  : scheduledTaskGeneratedSessionCreateIdempotencyKey(stableProducerKey)),
               effectiveMaxNestedAgentDepth:
                 generatedSessionDepthPolicy!.effectiveMaxNestedAgentDepth,
               nestedAgentDepthPolicySource:
@@ -762,6 +850,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           resolvedModel: model,
           resolvedReasoningEffort: reasoningEffort,
           resolvedLatencyMode: "standard",
+          turnExecutionPolicy,
           resolvedSandboxBackend: sandboxBackend,
           resolvedSandboxOs: sandboxOs,
           resolvedTools: taskTools,
@@ -832,6 +921,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           producerKey: stableProducerKey,
           scheduledAt: null,
           acceptedExecutionSnapshot: acceptedExecution,
+          ...(beforeFreshAgentRunCommit ? { beforeFreshAgentRunCommit } : {}),
         });
         await recordScheduledTaskFiredUsage(dispatchDb, acceptedExecution, run);
         if (run.status === "failed" && run.error === "scheduled_authority_exhausted") {
@@ -1570,6 +1660,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       } catch (error) {
         if (error instanceof IncidentTelemetryPreflightBlockedError) {
           return { action: "blocked", reason: error.reason };
+        }
+        const terminalError = scheduledRunRecoveryTerminalError(error);
+        if (terminalError?.code === "scheduled_model_unavailable") {
+          return scheduledRunTerminalResult(terminalError.code);
         }
         throw error;
       }

@@ -524,7 +524,9 @@ async function expectControlledVariableSetCreateRemovalRace(
       body: JSON.stringify({
         requestedSessionId,
         initialMessage: `Variable Set create ${removal} race`,
-        ...(removal === "revoke" ? { idempotencyKey: createIdempotencyKey } : {}),
+        // Keyed creates probe immutable replay under workspace control before
+        // mutable dependencies. This fixture specifically exercises the later
+        // post-validation FK race, so keep the fresh create unkeyed.
         variableSetIds:
           removal === "revoke"
             ? [variableSet.id, retainedVariableSet.id]

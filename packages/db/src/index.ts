@@ -251,9 +251,15 @@ import {
   HumanInputQuestion as HumanInputQuestionContract,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
+  OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
 import {
   environmentsEncryptionKeyBytes,
+  WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+  WORKSPACE_OPENROUTER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
@@ -343,6 +349,7 @@ import {
   lockSessionEventWriteRows,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
+  registerSessionWorkflowWakeInTransaction,
   SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS,
   assertSessionAuthoritySnapshot,
   registerSessionTurnAttemptClaim,
@@ -509,6 +516,7 @@ export {
 } from "./provision-roles";
 // Workspace Memory V1 pure domain surface (gates, render, canonical prompt text).
 export * from "./memory-domain";
+export * from "./model-catalog";
 
 import {
   dbBindingFor,
@@ -5202,6 +5210,8 @@ export type CreateScheduledTaskInput = {
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
   rigId?: string | null;
   metadata: Record<string, unknown>;
+  /** Trusted database-only admission seam. Throwing rolls the task creation back. */
+  beforeCreateCommit?: (tx: Database) => Promise<void>;
 };
 
 export type UpdateScheduledTaskInput = Partial<{
@@ -5224,6 +5234,8 @@ export type UpdateScheduledTaskInput = Partial<{
   authorityUpdatedBy: TurnInitiator;
   authorityUpdatedByContext: TurnInitiatorContext;
   authorityUpdatedByActor: AgentSessionCreationActor | null;
+  /** Trusted database-only admission seam. Throwing rolls the task update back. */
+  beforeUpdateCommit: (tx: Database) => Promise<void>;
 }>;
 
 export type CreatePackInstallationInput = {
@@ -5357,6 +5369,51 @@ export type CreateConnectionInput = {
   createdBySubjectId?: string | null;
   updatedBySubjectId?: string | null;
 };
+
+type UpsertWorkspaceProviderApiKeyConnectionInput = {
+  accountId: string;
+  workspaceId: string;
+  operationId: string;
+  requestDigest: string;
+  credentialEncrypted: string;
+  grantedScopes?: string[];
+  expiresAt?: Date | null;
+  metadata?: Record<string, unknown>;
+  updatedBySubjectId: string;
+};
+
+type RotateWorkspaceProviderApiKeyConnectionInput = {
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  expectedVersion: number;
+  operationId: string;
+  requestDigest: string;
+  credentialEncrypted: string;
+  grantedScopes?: string[];
+  expiresAt?: Date | null;
+  metadata?: Record<string, unknown>;
+  updatedBySubjectId: string;
+};
+
+type RevokeWorkspaceProviderApiKeyConnectionsInput = {
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  expectedVersion: number;
+  updatedBySubjectId: string;
+};
+
+export type UpsertWorkspaceVercelAiGatewayConnectionInput =
+  UpsertWorkspaceProviderApiKeyConnectionInput;
+export type RotateWorkspaceVercelAiGatewayConnectionInput =
+  RotateWorkspaceProviderApiKeyConnectionInput;
+export type RevokeWorkspaceVercelAiGatewayConnectionsInput =
+  RevokeWorkspaceProviderApiKeyConnectionsInput;
+export type UpsertWorkspaceOpenRouterConnectionInput = UpsertWorkspaceProviderApiKeyConnectionInput;
+export type RotateWorkspaceOpenRouterConnectionInput = RotateWorkspaceProviderApiKeyConnectionInput;
+export type RevokeWorkspaceOpenRouterConnectionsInput =
+  RevokeWorkspaceProviderApiKeyConnectionsInput;
 
 export type UpdateConnectionInput = {
   workspaceId: string;
@@ -9458,6 +9515,318 @@ export async function createConnection(
   );
 }
 
+type WorkspaceProviderApiKeyConnectionKind = "vercel_gateway" | "openrouter";
+
+type WorkspaceProviderApiKeyConnectionSpec = {
+  providerDomain: string;
+  credentialRole: string;
+  operationIdMetadataKey: string;
+  operationDigestMetadataKey: string;
+  label: string;
+};
+
+function workspaceProviderApiKeyConnectionSpec(
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): WorkspaceProviderApiKeyConnectionSpec {
+  return providerKind === "vercel_gateway"
+    ? {
+        providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+        credentialRole: VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+        operationIdMetadataKey: VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+        operationDigestMetadataKey: VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+        label: "Vercel AI Gateway",
+      }
+    : {
+        providerDomain: WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+        credentialRole: WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+        operationIdMetadataKey: OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+        operationDigestMetadataKey: OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+        label: "OpenRouter",
+      };
+}
+
+async function lockWorkspaceProviderApiKeyConnection(
+  db: Database,
+  workspaceId: string,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): Promise<void> {
+  const lockKey =
+    providerKind === "vercel_gateway"
+      ? `workspace-vercel-ai-gateway:${workspaceId}`
+      : `workspace-openrouter:${workspaceId}`;
+  await db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+}
+
+async function upsertWorkspaceProviderApiKeyConnection(
+  db: Database,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+  input: UpsertWorkspaceProviderApiKeyConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
+        const rows = await tx
+          .select(connectionMetadataColumns)
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              isNull(schema.connections.subjectId),
+              sql`lower(${schema.connections.providerDomain}) = lower(${spec.providerDomain})`,
+              eq(schema.connections.kind, "api_key"),
+              sql`${schema.connections.metadata} ->> 'credentialRole' = ${spec.credentialRole}`,
+            ),
+          )
+          .orderBy(
+            desc(sql`(${schema.connections.status} = 'active')`),
+            desc(schema.connections.updatedAt),
+            desc(schema.connections.createdAt),
+            desc(schema.connections.id),
+          )
+          .for("update");
+        const metadata = {
+          ...(input.metadata ?? {}),
+          credentialRole: spec.credentialRole,
+          [spec.operationIdMetadataKey]: input.operationId,
+          [spec.operationDigestMetadataKey]: input.requestDigest,
+        };
+        const operationRow = rows.find(
+          (row) => row.metadata[spec.operationIdMetadataKey] === input.operationId,
+        );
+        if (operationRow) {
+          return operationRow.metadata[spec.operationDigestMetadataKey] === input.requestDigest
+            ? mapConnectionMetadata(operationRow)
+            : null;
+        }
+        if (rows.some((row) => row.status !== "revoked")) return null;
+        return await createConnectionInScope(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: null,
+          providerDomain: spec.providerDomain,
+          kind: "api_key",
+          status: "active",
+          credentialEncrypted: input.credentialEncrypted,
+          grantedScopes: input.grantedScopes ?? [],
+          expiresAt: input.expiresAt ?? null,
+          metadata,
+          createdBySubjectId: input.updatedBySubjectId,
+          updatedBySubjectId: input.updatedBySubjectId,
+        });
+      }),
+  );
+}
+
+async function rotateWorkspaceProviderApiKeyConnection(
+  db: Database,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+  input: RotateWorkspaceProviderApiKeyConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
+        const rows = await tx
+          .select(connectionMetadataColumns)
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              isNull(schema.connections.subjectId),
+              sql`lower(${schema.connections.providerDomain}) = lower(${spec.providerDomain})`,
+              eq(schema.connections.kind, "api_key"),
+              sql`${schema.connections.metadata} ->> 'credentialRole' = ${spec.credentialRole}`,
+            ),
+          )
+          .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+          .for("update");
+        const operationRow = rows.find(
+          (row) => row.metadata[spec.operationIdMetadataKey] === input.operationId,
+        );
+        if (operationRow) {
+          return operationRow.status !== "revoked" &&
+            operationRow.metadata[spec.operationDigestMetadataKey] === input.requestDigest
+            ? mapConnectionMetadata(operationRow)
+            : null;
+        }
+        const targetRow = rows.find((row) => row.id === input.connectionId);
+        if (
+          !targetRow ||
+          targetRow.status === "revoked" ||
+          targetRow.version !== input.expectedVersion
+        ) {
+          return null;
+        }
+        const metadata = {
+          ...(input.metadata ?? {}),
+          credentialRole: spec.credentialRole,
+          [spec.operationIdMetadataKey]: input.operationId,
+          [spec.operationDigestMetadataKey]: input.requestDigest,
+        };
+        for (const row of rows.filter((candidate) => candidate.status !== "revoked")) {
+          const revoked = await revokeConnectionInScope(
+            tx,
+            input.workspaceId,
+            row.id,
+            input.updatedBySubjectId,
+            row.version,
+          );
+          if (!revoked) {
+            throw new Error(`${spec.label} connection changed during rotation`);
+          }
+        }
+        return await createConnectionInScope(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: null,
+          providerDomain: spec.providerDomain,
+          kind: "api_key",
+          status: "active",
+          credentialEncrypted: input.credentialEncrypted,
+          grantedScopes: input.grantedScopes ?? [],
+          expiresAt: input.expiresAt ?? null,
+          metadata,
+          createdBySubjectId: input.updatedBySubjectId,
+          updatedBySubjectId: input.updatedBySubjectId,
+        });
+      }),
+  );
+}
+
+async function revokeWorkspaceProviderApiKeyConnections(
+  db: Database,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+  input: RevokeWorkspaceProviderApiKeyConnectionsInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockWorkspaceProviderApiKeyConnection(tx, input.workspaceId, providerKind);
+        const [targetRow] = await tx
+          .select(connectionMetadataColumns)
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              eq(schema.connections.id, input.connectionId),
+              isNull(schema.connections.subjectId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          !targetRow ||
+          targetRow.providerDomain.toLowerCase() !== spec.providerDomain ||
+          targetRow.kind !== "api_key" ||
+          targetRow.metadata.credentialRole !== spec.credentialRole
+        ) {
+          return null;
+        }
+        // A replay of an already-committed DELETE is idempotent for that exact
+        // connection generation. It must not sweep a newer provider connection
+        // that was established after the original response was lost.
+        if (targetRow.status === "revoked") {
+          return mapConnectionMetadata(targetRow);
+        }
+        if (targetRow.version !== input.expectedVersion) {
+          return null;
+        }
+        const providerRows = await tx
+          .select(connectionMetadataColumns)
+          .from(schema.connections)
+          .where(
+            and(
+              eq(schema.connections.accountId, input.accountId),
+              eq(schema.connections.workspaceId, input.workspaceId),
+              isNull(schema.connections.subjectId),
+              sql`lower(${schema.connections.providerDomain}) = lower(${spec.providerDomain})`,
+              eq(schema.connections.kind, "api_key"),
+              ne(schema.connections.status, "revoked"),
+              sql`${schema.connections.metadata} ->> 'credentialRole' = ${spec.credentialRole}`,
+            ),
+          )
+          .orderBy(desc(schema.connections.updatedAt), desc(schema.connections.id))
+          .for("update");
+        let result = mapConnectionMetadata(targetRow);
+        for (const row of providerRows) {
+          const revoked = await revokeConnectionInScope(
+            tx,
+            input.workspaceId,
+            row.id,
+            input.updatedBySubjectId,
+            row.version,
+          );
+          if (!revoked) {
+            throw new Error(`${spec.label} connection changed during disconnect`);
+          }
+          if (row.id === input.connectionId) result = revoked;
+        }
+        return result;
+      }),
+  );
+}
+
+/** Compatibility wrapper for the existing Vercel AI Gateway create/replay contract. */
+export async function upsertWorkspaceVercelAiGatewayConnection(
+  db: Database,
+  input: UpsertWorkspaceVercelAiGatewayConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await upsertWorkspaceProviderApiKeyConnection(db, "vercel_gateway", input);
+}
+
+export async function upsertWorkspaceOpenRouterConnection(
+  db: Database,
+  input: UpsertWorkspaceOpenRouterConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await upsertWorkspaceProviderApiKeyConnection(db, "openrouter", input);
+}
+
+/** Compatibility wrapper for the existing Vercel AI Gateway rotation contract. */
+export async function rotateWorkspaceVercelAiGatewayConnection(
+  db: Database,
+  input: RotateWorkspaceVercelAiGatewayConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await rotateWorkspaceProviderApiKeyConnection(db, "vercel_gateway", input);
+}
+
+export async function rotateWorkspaceOpenRouterConnection(
+  db: Database,
+  input: RotateWorkspaceOpenRouterConnectionInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await rotateWorkspaceProviderApiKeyConnection(db, "openrouter", input);
+}
+
+/** Compatibility wrapper for the existing Vercel AI Gateway revoke contract. */
+export async function revokeWorkspaceVercelAiGatewayConnections(
+  db: Database,
+  input: RevokeWorkspaceVercelAiGatewayConnectionsInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await revokeWorkspaceProviderApiKeyConnections(db, "vercel_gateway", input);
+}
+
+export async function revokeWorkspaceOpenRouterConnections(
+  db: Database,
+  input: RevokeWorkspaceOpenRouterConnectionsInput,
+): Promise<ConnectionMetadataWithVerification | null> {
+  return await revokeWorkspaceProviderApiKeyConnections(db, "openrouter", input);
+}
+
 /**
  * Serialize one provider-principal/owner connection generation. Distinct OAuth
  * starts for the same principal converge on one row, while an explicit
@@ -13493,11 +13862,21 @@ export async function loadConnectionCredentialForBroker(
   );
 }
 
-export async function workspaceVercelAiGatewayConnectionActive(
+async function getWorkspaceProviderApiKeyConnectionMetadata(
   db: Database,
   workspaceId: string,
-): Promise<boolean> {
-  return (await getWorkspaceVercelAiGatewayConnectionMetadata(db, workspaceId)) !== null;
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): Promise<{ connectionId: string; version: number } | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
+  const connection = (await listConnectionsMetadata(db, workspaceId, null)).find(
+    (candidate) =>
+      candidate.subjectId === null &&
+      candidate.providerDomain.toLowerCase() === spec.providerDomain &&
+      candidate.kind === "api_key" &&
+      candidate.status === "active" &&
+      candidate.metadata.credentialRole === spec.credentialRole,
+  );
+  return connection ? { connectionId: connection.id, version: connection.version } : null;
 }
 
 /** Metadata-only capability revision input; never selects/decrypts the API key. */
@@ -13505,17 +13884,64 @@ export async function getWorkspaceVercelAiGatewayConnectionMetadata(
   db: Database,
   workspaceId: string,
 ): Promise<{ connectionId: string; version: number } | null> {
-  const gatewayConnection = (await listConnectionsMetadata(db, workspaceId, null)).find(
-    (candidate) =>
-      candidate.subjectId === null &&
-      candidate.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
-      candidate.kind === "api_key" &&
-      candidate.status === "active" &&
-      candidate.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  return await getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, "vercel_gateway");
+}
+
+export async function getWorkspaceOpenRouterConnectionMetadata(
+  db: Database,
+  workspaceId: string,
+): Promise<{ connectionId: string; version: number } | null> {
+  return await getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, "openrouter");
+}
+
+export async function workspaceVercelAiGatewayConnectionActive(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return (await getWorkspaceVercelAiGatewayConnectionMetadata(db, workspaceId)) !== null;
+}
+
+export async function workspaceOpenRouterConnectionActive(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return (await getWorkspaceOpenRouterConnectionMetadata(db, workspaceId)) !== null;
+}
+
+async function loadWorkspaceProviderApiKey(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  providerKind: WorkspaceProviderApiKeyConnectionKind,
+): Promise<string | null> {
+  const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
+  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
+    (connection) =>
+      connection.subjectId === null &&
+      connection.providerDomain.toLowerCase() === spec.providerDomain &&
+      connection.kind === "api_key" &&
+      connection.status === "active" &&
+      connection.metadata.credentialRole === spec.credentialRole,
   );
-  return gatewayConnection
-    ? { connectionId: gatewayConnection.id, version: gatewayConnection.version }
-    : null;
+  if (!metadata) {
+    return null;
+  }
+  const connection = await loadConnectionCredentialForBroker(db, settings, {
+    workspaceId,
+    connectionId: metadata.id,
+    providerDomain: spec.providerDomain,
+    kind: "api_key",
+    allowSubjectOwned: false,
+  });
+  if (
+    !connection ||
+    connection.status !== "active" ||
+    connection.metadata.credentialRole !== spec.credentialRole
+  ) {
+    return null;
+  }
+  const apiKey = connection.credential.apiKey;
+  return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
 }
 
 /** Resolve only the reviewed workspace-shared AI Gateway credential shape. */
@@ -13524,33 +13950,16 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
   settings: Settings,
   workspaceId: string,
 ): Promise<string | null> {
-  const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
-    (connection) =>
-      connection.subjectId === null &&
-      connection.providerDomain === VERCEL_AI_GATEWAY_CONNECTION_DOMAIN &&
-      connection.kind === "api_key" &&
-      connection.status === "active" &&
-      connection.metadata.credentialRole === VERCEL_AI_GATEWAY_CONNECTION_ROLE,
-  );
-  if (!metadata) {
-    return null;
-  }
-  const connection = await loadConnectionCredentialForBroker(db, settings, {
-    workspaceId,
-    connectionId: metadata.id,
-    providerDomain: VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
-    kind: "api_key",
-    allowSubjectOwned: false,
-  });
-  if (
-    !connection ||
-    connection.status !== "active" ||
-    connection.metadata.credentialRole !== VERCEL_AI_GATEWAY_CONNECTION_ROLE
-  ) {
-    return null;
-  }
-  const apiKey = connection.credential.apiKey;
-  return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
+  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "vercel_gateway");
+}
+
+/** Resolve only the reviewed workspace-shared OpenRouter credential shape. */
+export async function loadWorkspaceOpenRouterApiKey(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+): Promise<string | null> {
+  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "openrouter");
 }
 
 /**
@@ -15546,6 +15955,7 @@ export async function createScheduledTask(
     async (scopedDb) => {
       const frozenCreator = await frozenSessionCreatorForInsert(scopedDb, input);
       await setScheduledTaskAuthorityRlsContext(scopedDb, frozenCreator);
+      await input.beforeCreateCommit?.(scopedDb);
       const [row] = await scopedDb
         .insert(schema.scheduledTasks)
         .values({
@@ -15623,6 +16033,7 @@ export async function updateScheduledTask(
       });
       await setScheduledTaskAuthorityRlsContext(scopedDb, frozenUpdater);
     }
+    await input.beforeUpdateCommit?.(scopedDb);
     const [row] = await scopedDb
       .update(schema.scheduledTasks)
       .set({
@@ -16209,23 +16620,69 @@ export async function createScheduledTaskRun(
     scheduledAt?: Date | null;
     firedAt?: Date;
     acceptedExecutionSnapshot?: ScheduledTaskRunAcceptedExecutionType | null;
+    /**
+     * Trusted database-only admission seam for a fresh agent occurrence.
+     * Throwing rolls back the run insert; exact producer replay skips it.
+     */
+    beforeFreshAgentRunCommit?: (tx: Database) => Promise<void>;
   },
 ): Promise<ScheduledTaskRun> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     if ((input.taskAuthorityRevision == null) !== (input.taskExecutionDigest == null)) {
       throw new Error("scheduled task run execution binding is incomplete");
     }
-    const [taskRow] = await scopedDb
-      .select()
-      .from(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
-          eq(schema.scheduledTasks.id, input.taskId),
-          isNull(schema.scheduledTasks.deletedAt),
-        ),
-      )
-      .limit(1);
+    let guardedAcceptedExecution: ScheduledTaskRunAcceptedExecutionType | null = null;
+    let replayedProducerRow: typeof schema.scheduledTaskRuns.$inferSelect | undefined;
+    if (input.beforeFreshAgentRunCommit) {
+      if (!input.producerKey || !input.acceptedExecutionSnapshot) {
+        throw new Error(
+          "scheduled fresh agent run commit guard requires a producer-bound accepted execution",
+        );
+      }
+      guardedAcceptedExecution = ScheduledTaskRunAcceptedExecution.parse(
+        input.acceptedExecutionSnapshot,
+      );
+      const readProducerReplay = async () => {
+        const [row] = await scopedDb
+          .select()
+          .from(schema.scheduledTaskRuns)
+          .where(
+            and(
+              eq(schema.scheduledTaskRuns.workspaceId, input.workspaceId),
+              eq(schema.scheduledTaskRuns.producerKey, input.producerKey!),
+            ),
+          )
+          .limit(1);
+        return row;
+      };
+      replayedProducerRow = await readProducerReplay();
+      // Fresh custom-model admission must precede the task row lock. Material
+      // task updates take the same advisory lock before updating that row, and
+      // acquiring them in the opposite order can deadlock behind a queued
+      // exclusive custom-model mutation. An exact durable producer replay
+      // still skips the live-model check so retirement cannot invalidate work
+      // that was already accepted.
+      if (!replayedProducerRow) {
+        try {
+          await input.beforeFreshAgentRunCommit(scopedDb);
+        } catch (error) {
+          // An overlapping producer can commit after the unlocked pre-read
+          // while this retry waits behind a queued retirement. Re-read before
+          // surfacing the mutable-model denial so the committed winner remains
+          // replayable instead of becoming a false terminal rejection.
+          replayedProducerRow = await readProducerReplay();
+          if (!replayedProducerRow) throw error;
+        }
+      }
+    }
+    const taskFilter = and(
+      eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+      eq(schema.scheduledTasks.id, input.taskId),
+      isNull(schema.scheduledTasks.deletedAt),
+    );
+    const [taskRow] = input.beforeFreshAgentRunCommit
+      ? await scopedDb.select().from(schema.scheduledTasks).where(taskFilter).for("update").limit(1)
+      : await scopedDb.select().from(schema.scheduledTasks).where(taskFilter).limit(1);
     if (!taskRow) {
       throw new Error(`Scheduled task not found: ${input.taskId}`);
     }
@@ -16233,8 +16690,14 @@ export async function createScheduledTaskRun(
       "agent_turn") satisfies ScheduledTaskActionKind;
     const acceptedExecutionSnapshot =
       actionKind === "agent_turn"
-        ? ScheduledTaskRunAcceptedExecution.parse(input.acceptedExecutionSnapshot)
+        ? (guardedAcceptedExecution ??
+          ScheduledTaskRunAcceptedExecution.parse(input.acceptedExecutionSnapshot))
         : null;
+    if (input.beforeFreshAgentRunCommit && actionKind !== "agent_turn") {
+      throw new Error(
+        "scheduled fresh agent run commit guard requires a producer-bound accepted execution",
+      );
+    }
     if (
       acceptedExecutionSnapshot &&
       (acceptedExecutionSnapshot.task.id !== input.taskId ||
@@ -16244,6 +16707,27 @@ export async function createScheduledTaskRun(
         acceptedExecutionSnapshot.task.executionDigest !== input.taskExecutionDigest)
     ) {
       throw new Error("scheduled task accepted execution binding changed");
+    }
+    if (replayedProducerRow) {
+      if (
+        replayedProducerRow.actionKind !== "agent_turn" ||
+        replayedProducerRow.taskId !== input.taskId ||
+        replayedProducerRow.triggerType !== input.triggerType
+      ) {
+        throw new Error("scheduled task run producer identity changed");
+      }
+      if (
+        replayedProducerRow.taskAuthorityRevision !== input.taskAuthorityRevision ||
+        replayedProducerRow.taskExecutionDigest !== input.taskExecutionDigest
+      ) {
+        throw new Error("scheduled task run execution binding changed");
+      }
+      if (
+        stableJson(replayedProducerRow.acceptedExecutionSnapshot) !==
+        stableJson(acceptedExecutionSnapshot)
+      ) {
+        throw new Error("scheduled task run accepted execution changed");
+      }
     }
     const values = {
       ...(input.runId ? { id: input.runId } : {}),
@@ -16265,42 +16749,47 @@ export async function createScheduledTaskRun(
           )}::jsonb::text, 'UTF8'), 'sha256'), 'hex')`
         : null,
     };
-    let inserted: typeof schema.scheduledTaskRuns.$inferSelect | undefined;
-    if (actionKind === "agent_turn" && input.producerKey && acceptedExecutionSnapshot) {
-      const [created] = await rawRows<{ id: string }>(
-        scopedDb,
-        sql`select create_scheduled_agent_run_with_admission(
-          ${input.runId ?? randomUUID()}::uuid,
-          ${taskRow.accountId}::uuid,
-          ${taskRow.workspaceId}::uuid,
-          ${input.taskId}::uuid,
-          ${input.taskAuthorityRevision}::bigint,
-          ${input.taskExecutionDigest}::text,
-          ${input.triggerType}::text,
-          ${input.producerKey}::text,
-          ${input.scheduledAt?.toISOString() ?? null}::timestamptz,
-          ${(input.firedAt ?? new Date()).toISOString()}::timestamptz,
-          ${JSON.stringify(acceptedExecutionSnapshot)}::jsonb
-        ) as id`,
-      );
-      if (created) {
-        [inserted] = await scopedDb
-          .select()
-          .from(schema.scheduledTaskRuns)
-          .where(eq(schema.scheduledTaskRuns.id, created.id))
-          .limit(1);
+    let inserted = replayedProducerRow;
+    if (!inserted) {
+      if (actionKind === "agent_turn" && input.producerKey && acceptedExecutionSnapshot) {
+        const [created] = await rawRows<{ id: string }>(
+          scopedDb,
+          sql`select create_scheduled_agent_run_with_admission(
+            ${input.runId ?? randomUUID()}::uuid,
+            ${taskRow.accountId}::uuid,
+            ${taskRow.workspaceId}::uuid,
+            ${input.taskId}::uuid,
+            ${input.taskAuthorityRevision}::bigint,
+            ${input.taskExecutionDigest}::text,
+            ${input.triggerType}::text,
+            ${input.producerKey}::text,
+            ${input.scheduledAt?.toISOString() ?? null}::timestamptz,
+            ${(input.firedAt ?? new Date()).toISOString()}::timestamptz,
+            ${JSON.stringify(acceptedExecutionSnapshot)}::jsonb
+          ) as id`,
+        );
+        if (created) {
+          [inserted] = await scopedDb
+            .select()
+            .from(schema.scheduledTaskRuns)
+            .where(eq(schema.scheduledTaskRuns.id, created.id))
+            .limit(1);
+        }
+      } else {
+        [inserted] = input.producerKey
+          ? await scopedDb
+              .insert(schema.scheduledTaskRuns)
+              .values(values)
+              .onConflictDoNothing({
+                target: [
+                  schema.scheduledTaskRuns.workspaceId,
+                  schema.scheduledTaskRuns.producerKey,
+                ],
+                where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
+              })
+              .returning()
+          : await scopedDb.insert(schema.scheduledTaskRuns).values(values).returning();
       }
-    } else {
-      [inserted] = input.producerKey
-        ? await scopedDb
-            .insert(schema.scheduledTaskRuns)
-            .values(values)
-            .onConflictDoNothing({
-              target: [schema.scheduledTaskRuns.workspaceId, schema.scheduledTaskRuns.producerKey],
-              where: sql`${schema.scheduledTaskRuns.producerKey} is not null`,
-            })
-            .returning()
-        : await scopedDb.insert(schema.scheduledTaskRuns).values(values).returning();
     }
     const [row] = inserted
       ? [inserted]
@@ -29394,7 +29883,11 @@ export type SessionCreateInput = {
   /** Trusted, transaction-local linkage run after the exact session row and
    * MCP metadata exist but before either can commit. It must perform database
    * work only; throwing rolls the complete create/replay transaction back. */
-  beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
+  beforeCreateCommit?: (
+    tx: Database,
+    sessionId: string,
+    context?: { created: boolean },
+  ) => Promise<void>;
 };
 
 type SessionDepthDecision =
@@ -29658,6 +30151,34 @@ async function existingSessionForCreateKey(
   return existing;
 }
 
+type SessionCreateReplayIdentity = {
+  requestedSessionId?: string;
+  visibility?: "user_private" | "workspace_shared";
+  variableSetIds: string[];
+  initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
+};
+
+function assertSessionCreateReplayIdentity(
+  existing: typeof schema.sessions.$inferSelect,
+  input: SessionCreateReplayIdentity,
+): void {
+  if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+    throw new SessionIdConflictError(input.requestedSessionId);
+  }
+  if (
+    stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
+    stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
+  ) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  if (stableJson(existing.variableSetIds ?? []) !== stableJson(input.variableSetIds)) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  if (existing.createRequestedVisibility !== (input.visibility ?? "workspace_shared")) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+}
+
 async function lockSessionCreateIdempotencyKey(
   tx: Database,
   workspaceId: string,
@@ -29793,21 +30314,13 @@ async function createSessionInTransaction(
       // caller-provided identity agrees with the winning request. Check this
       // before any first-turn repair so a retry cannot hide a requested-ID
       // conflict behind an apparently successful replay.
-      if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
-        throw new SessionIdConflictError(input.requestedSessionId);
-      }
-      if (
-        stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
-        stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
-      ) {
-        throw new SessionCreateIdempotencyConflictError();
-      }
-      if (stableJson(existing.variableSetIds ?? []) !== stableJson(variableSetIds)) {
-        throw new SessionCreateIdempotencyConflictError();
-      }
-      if (existing.createRequestedVisibility !== createRequestedVisibility) {
-        throw new SessionCreateIdempotencyConflictError();
-      }
+      assertSessionCreateReplayIdentity(existing, {
+        ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
+        visibility: createRequestedVisibility,
+        variableSetIds,
+        initialPersonalResourceAttachmentIntent:
+          input.initialPersonalResourceAttachmentIntent ?? null,
+      });
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
       ]);
@@ -29819,7 +30332,7 @@ async function createSessionInTransaction(
       if (!canonicalExisting) {
         throw new Error(`Session event cursor missing for session ${existing.id}`);
       }
-      await input.beforeCreateCommit?.(tx, existing.id);
+      await input.beforeCreateCommit?.(tx, existing.id, { created: false });
       return {
         session: await mapSessionWithControl(tx, canonicalExisting, grouped.get(existing.id) ?? []),
         created: false,
@@ -30006,21 +30519,13 @@ async function createSessionInTransaction(
         createIdempotencyKey,
       );
       if (existing) {
-        if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
-          throw new SessionIdConflictError(input.requestedSessionId);
-        }
-        if (
-          stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
-          stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
-        ) {
-          throw new SessionCreateIdempotencyConflictError();
-        }
-        if (stableJson(existing.variableSetIds ?? []) !== stableJson(variableSetIds)) {
-          throw new SessionCreateIdempotencyConflictError();
-        }
-        if (existing.createRequestedVisibility !== createRequestedVisibility) {
-          throw new SessionCreateIdempotencyConflictError();
-        }
+        assertSessionCreateReplayIdentity(existing, {
+          ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
+          visibility: createRequestedVisibility,
+          variableSetIds,
+          initialPersonalResourceAttachmentIntent:
+            input.initialPersonalResourceAttachmentIntent ?? null,
+        });
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
         ]);
@@ -30032,7 +30537,7 @@ async function createSessionInTransaction(
         if (!canonicalExisting) {
           throw new Error(`Session event cursor missing for session ${existing.id}`);
         }
-        await input.beforeCreateCommit?.(tx, existing.id);
+        await input.beforeCreateCommit?.(tx, existing.id, { created: false });
         return {
           session: await mapSessionWithControl(
             tx,
@@ -30069,7 +30574,7 @@ async function createSessionInTransaction(
     sessionId: inserted.id,
     servers: input.mcpServers ?? [],
   });
-  await input.beforeCreateCommit?.(tx, inserted.id);
+  await input.beforeCreateCommit?.(tx, inserted.id, { created: true });
   return {
     session: await mapSessionWithControl(tx, inserted, mcpServers),
     created: true,
@@ -30172,6 +30677,167 @@ export async function getSessionByCreateIdempotencyKey(
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
   });
+}
+
+/**
+ * Recover a keyed create before mutable create dependencies (notably the
+ * current model catalog) are consulted. A fully initialized queued turn gets a
+ * fresh durable wake revision from persisted state only; an uninitialized shell
+ * returns its persisted model so the caller can reopen it strictly as retained
+ * while the canonical keyed transaction repairs initialization. The same
+ * request-identity checks as transactional create replay run before any session
+ * or committed denial is returned.
+ */
+export type InitializedSessionCreateReplay =
+  | {
+      outcome: "session";
+      session: Session & { initialTurnId: string | null };
+      temporalWorkflowId: string;
+      workflowWakeRevision: number | null;
+      changed: boolean;
+    }
+  | {
+      outcome: "pending";
+      session: Session;
+    }
+  | { outcome: "denied"; denial: SessionSpawnDenial };
+
+export async function getInitializedSessionCreateReplay(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    activeManagedHumanSubjectId?: string;
+    createIdempotencyKey: string;
+    requestedSessionId?: string;
+    visibility?: "user_private" | "workspace_shared";
+    variableSetIds: string[];
+    initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
+    deferInitialTurn?: boolean;
+  },
+): Promise<InitializedSessionCreateReplay | null> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) => {
+      if (input.visibility === "user_private") {
+        await scopedDb.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+        );
+      }
+      await lockWorkspaceForSessionCreate(scopedDb, input.workspaceId, input.accountId);
+      if (input.activeManagedHumanSubjectId) {
+        await setSubjectRlsContext(scopedDb, input.activeManagedHumanSubjectId);
+        await assertActiveManagedHumanOrganizationMembership(scopedDb, {
+          accountId: input.accountId,
+          subjectId: input.activeManagedHumanSubjectId,
+        });
+      }
+      await lockSessionCreateIdempotencyKey(
+        scopedDb,
+        input.workspaceId,
+        input.createIdempotencyKey,
+      );
+
+      const existing = await existingSessionForCreateKey(
+        scopedDb,
+        input.workspaceId,
+        input.createIdempotencyKey,
+      );
+      if (!existing) {
+        const denial = await existingSpawnDenialForKey(
+          scopedDb,
+          input.workspaceId,
+          input.createIdempotencyKey,
+        );
+        return denial ? { outcome: "denied", denial } : null;
+      }
+      assertSessionCreateReplayIdentity(existing, input);
+
+      const startEvents = await scopedDb
+        .select({ id: schema.sessionEvents.id, type: schema.sessionEvents.type })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, existing.id),
+            inArray(schema.sessionEvents.type, ["session.created", "user.message"]),
+          ),
+        )
+        .orderBy(asc(schema.sessionEvents.sequence))
+        .limit(2);
+      const createdEvent = startEvents.find((event) => event.type === "session.created");
+      const initialUserEvent = startEvents.find((event) => event.type === "user.message");
+
+      const grouped = await sessionMcpServerMetadataForSessions(scopedDb, input.workspaceId, [
+        existing.id,
+      ]);
+      const session = await mapSessionWithControl(
+        scopedDb,
+        existing,
+        grouped.get(existing.id) ?? [],
+      );
+      if (!createdEvent) {
+        return { outcome: "pending", session };
+      }
+      const [initialTurn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          status: schema.sessionTurns.status,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.sessionId, existing.id),
+            initialUserEvent
+              ? eq(schema.sessionTurns.triggerEventId, initialUserEvent.id)
+              : sql`false`,
+          ),
+        )
+        .limit(1);
+
+      const temporalWorkflowId = existing.temporalWorkflowId ?? `session-${existing.id}`;
+      if (existing.status === "cancelled") {
+        return {
+          outcome: "session",
+          session: { ...session, initialTurnId: initialTurn?.id ?? null },
+          temporalWorkflowId,
+          workflowWakeRevision: null,
+          changed: false,
+        };
+      }
+      if (input.deferInitialTurn === true) {
+        return {
+          outcome: "session",
+          session: { ...session, initialTurnId: initialTurn?.id ?? null },
+          temporalWorkflowId,
+          workflowWakeRevision: null,
+          changed: false,
+        };
+      }
+      if (!initialTurn) return null;
+      const workflowWakeRevision =
+        initialTurn.status === "queued" && session.effectiveControl.state === "active"
+          ? await registerSessionWorkflowWakeInTransaction(scopedDb, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: existing.id,
+              temporalWorkflowId,
+              reason: "initial_session",
+            })
+          : null;
+      return {
+        outcome: "session",
+        session: { ...session, initialTurnId: initialTurn.id },
+        temporalWorkflowId,
+        workflowWakeRevision,
+        changed: workflowWakeRevision !== null,
+      };
+    },
+  );
 }
 
 export async function getSession(
@@ -33691,7 +34357,10 @@ async function sessionDiscoveryClaimsForSessions(
   );
   const grouped = new Map<string, { claims: WorkClaimDiscoverySummary[]; truncated: boolean }>();
   for (const row of rows) {
-    const entry = grouped.get(row.sessionId) ?? { claims: [], truncated: false };
+    const entry = grouped.get(row.sessionId) ?? {
+      claims: [],
+      truncated: false,
+    };
     entry.claims.push(
       WorkClaimDiscoverySummarySchema.parse({
         id: row.id,
@@ -34013,7 +34682,10 @@ export async function listSessionDiscoverySummaries(
       const relatedAccess = rootRelatedIds.has(sessionId) ? "root" : "target";
       const goal = goalsBySession.get(sessionId);
       const latest = latestBySession.get(sessionId);
-      const claims = workClaims.get(sessionId) ?? { claims: [], truncated: false };
+      const claims = workClaims.get(sessionId) ?? {
+        claims: [],
+        truncated: false,
+      };
       const match =
         !includeWorkDiscovery ||
         row.matchClass === null ||
@@ -35804,7 +36476,10 @@ export async function acceptSessionHumanInputResponse(
                     turnAssociation: "current",
                     sequence: session.lastSequence + 1,
                     type: "user.humanInputResponse",
-                    payload: { requestId: request.id, response: { outcome: "cancelled" } },
+                    payload: {
+                      requestId: request.id,
+                      response: { outcome: "cancelled" },
+                    },
                     clientEventId: null,
                     occurredAt,
                   },
@@ -35840,7 +36515,10 @@ export async function acceptSessionHumanInputResponse(
             });
             await tx
               .update(schema.sessions)
-              .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
+              .set({
+                lastSequence: session.lastSequence + 1,
+                updatedAt: new Date(),
+              })
               .where(eq(schema.sessions.id, session.id));
             event = mapEvent(inserted);
             repairedEvents = [event];
@@ -39179,7 +39857,10 @@ export type ClaimSandboxSharedPreparationInput = {
 };
 
 export type ClaimSandboxSharedPreparationResult =
-  | { role: "owner" | "joined" | "reused"; preparation: SandboxSharedPreparationSnapshot }
+  | {
+      role: "owner" | "joined" | "reused";
+      preparation: SandboxSharedPreparationSnapshot;
+    }
   | { role: "fenced"; lease: LeaseSnapshot | null };
 
 function validateSandboxSharedPreparationIdentity(input: ClaimSandboxSharedPreparationInput): void {
@@ -39304,7 +39985,10 @@ export async function claimSandboxSharedPreparation(
           Number(row.lease_epoch) !== input.expectedLeaseEpoch ||
           row.instance_id !== input.expectedInstanceId
         ) {
-          return { role: "fenced" as const, lease: row ? mapLeaseRow(row) : null };
+          return {
+            role: "fenced" as const,
+            lease: row ? mapLeaseRow(row) : null,
+          };
         }
         const holderRows = await tx.execute<{ present: boolean }>(sql`
           select exists (
@@ -44727,7 +45411,10 @@ export async function countSessionRecoveryBacklog(
     quiescence_missing: 0,
     projection_stale: 0,
   };
-  const rows = await rawRows<{ state: SessionRecoveryBacklogState; count: number | string }>(
+  const rows = await rawRows<{
+    state: SessionRecoveryBacklogState;
+    count: number | string;
+  }>(
     db,
     sql`
       select state, count
@@ -57707,6 +58394,7 @@ export async function materializeGoalContinuation(
       model: string;
       reasoningEffort: ReasoningEffort;
       latencyMode: LatencyMode;
+      turnExecutionPolicy?: TurnExecutionPolicyV1;
       tools: ToolRef[];
       sandboxBackend: SandboxBackend;
     };
@@ -61418,6 +62106,9 @@ export async function claimSessionWorkForAttempt(
             typeof routingGoalUpdate.payload.policy === "object"
               ? (routingGoalUpdate.payload.policy as Record<string, unknown>)
               : null;
+          let frozenTurnExecutionPolicy = goalPolicy?.turnExecutionPolicy
+            ? TurnExecutionPolicyV1.parse(goalPolicy.turnExecutionPolicy)
+            : null;
           const [latestStarted] = await tx
             .select({
               model: schema.sessionTurns.model,
@@ -61487,6 +62178,9 @@ export async function claimSessionWorkForAttempt(
             const accepted = ScheduledTaskRunAcceptedExecution.parse(
               scheduledRun.acceptedExecutionSnapshot,
             );
+            frozenTurnExecutionPolicy = accepted.turnExecutionPolicy
+              ? TurnExecutionPolicyV1.parse(accepted.turnExecutionPolicy)
+              : null;
             const targetPolicy = accepted.targetSessionExecution;
             if (targetPolicy) {
               scheduledEffectiveMcpServerIds = targetPolicy.effectiveMcpServerIds;
@@ -61708,11 +62402,28 @@ export async function claimSessionWorkForAttempt(
                   sandboxBackend,
                   sandboxOs,
                   metadata: metadataWithTurnDispatchAttempt(
-                    {
-                      internalUpdateCount: delivered.count,
-                      ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
-                      ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
-                    },
+                    frozenTurnExecutionPolicy
+                      ? metadataWithTurnExecutionPolicyV1(
+                          {
+                            internalUpdateCount: delivered.count,
+                            ...(routingGoalUpdate
+                              ? { goalId: routingGoalUpdate.payload.goalId }
+                              : {}),
+                            ...(scheduledEffectiveMcpServerIds
+                              ? { scheduledEffectiveMcpServerIds }
+                              : {}),
+                          },
+                          frozenTurnExecutionPolicy,
+                        )
+                      : {
+                          internalUpdateCount: delivered.count,
+                          ...(routingGoalUpdate
+                            ? { goalId: routingGoalUpdate.payload.goalId }
+                            : {}),
+                          ...(scheduledEffectiveMcpServerIds
+                            ? { scheduledEffectiveMcpServerIds }
+                            : {}),
+                        },
                     { id: input.dispatchId, generation: 1, triggerEventId },
                   ),
                   ...initiatorColumns(internalInitiator),
@@ -64012,7 +64723,10 @@ export async function failSessionWorkBeforeAttemptClaim(
                 sessionId: input.sessionId,
                 sequence: ++sequence,
                 type: "user.humanInputResponse" as const,
-                payload: { requestId: request.id, response: { outcome: "cancelled" as const } },
+                payload: {
+                  requestId: request.id,
+                  response: { outcome: "cancelled" as const },
+                },
                 turnId: turn.id,
                 turnGeneration: request.turnGeneration,
                 turnAttemptId: null,
@@ -71509,6 +72223,13 @@ function mapConnectionMetadata(row: {
   createdAt: Date;
   updatedAt: Date;
 }): ConnectionMetadataWithVerification {
+  const {
+    [OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _openRouterOperationId,
+    [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
+    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
+    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    ...publicMetadata
+  } = row.metadata;
   return {
     id: row.id,
     ...(row.subjectId !== null && row.authorityId ? { authorityId: row.authorityId } : {}),
@@ -71526,7 +72247,7 @@ function mapConnectionMetadata(row: {
     version: row.version,
     verifiedInstallAt: row.verifiedInstallAt?.toISOString() ?? null,
     verifiedInstallVersion: row.verifiedInstallVersion,
-    metadata: row.metadata,
+    metadata: publicMetadata,
     createdBySubjectId: row.createdBySubjectId,
     updatedBySubjectId: row.updatedBySubjectId,
     createdAt: row.createdAt.toISOString(),

@@ -29,6 +29,7 @@ export default defineConfig({
     "src/interaction.ts",
     "src/codex-realtime-controller.ts",
     "src/gateway-realtime-transport.ts",
+    "src/model-picker-order.ts",
   ],
   format: ["esm"],
   target: "es2022",

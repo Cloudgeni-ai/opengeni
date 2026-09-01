@@ -15,6 +15,7 @@ const fakeDb = {};
 const realCore = await import("@opengeni/core");
 const realCoreFns = {
   getActorNewSessionDraft: realCore.getActorNewSessionDraft,
+  resolveWorkspaceCatalogSettings: realCore.resolveWorkspaceCatalogSettings,
   saveActorNewSessionDraft: realCore.saveActorNewSessionDraft,
 };
 let lastGetGrant: AccessGrant | null = null;
@@ -24,6 +25,21 @@ let rejectSave = false;
 
 mock.module("@opengeni/core", () => ({
   ...realCore,
+  resolveWorkspaceCatalogSettings: async (
+    db: Parameters<typeof realCore.resolveWorkspaceCatalogSettings>[0],
+    settings: Parameters<typeof realCore.resolveWorkspaceCatalogSettings>[1],
+    input: Parameters<typeof realCore.resolveWorkspaceCatalogSettings>[2],
+  ) => {
+    if (db !== fakeDb) {
+      return await realCoreFns.resolveWorkspaceCatalogSettings(db, settings, input);
+    }
+    return {
+      settings,
+      source: "code" as const,
+      version: null,
+      modelNotes: {},
+    };
+  },
   getActorNewSessionDraft: async (
     deps: Parameters<typeof realCore.getActorNewSessionDraft>[0],
     grant: AccessGrant,

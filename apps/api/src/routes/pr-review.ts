@@ -13,12 +13,14 @@ import {
   canonicalConfiguredModel,
   defaultPrReviewProviderBaseUrl,
   getCapabilityPack,
+  workspaceCustomModelReference,
   prReviewWebhookAuthKind,
   normalizePrReviewProviderBaseUrl,
   prReviewPackConnectorId,
   PR_REVIEW_AUTOMATION_TEMPLATE_ID,
   requireAccessGrant,
   requirePermission,
+  resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -32,6 +34,8 @@ import {
   getPackInstallation,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
+  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   nestedPostgresSqlState,
   recordAuditEvent,
   updatePrReviewAppRegistration,
@@ -385,10 +389,24 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw error;
       }
     }
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
     const model = payload.model
-      ? (canonicalConfiguredModel(settings, payload.model) ?? null)
+      ? (canonicalConfiguredModel(catalogSettings, payload.model) ?? null)
       : null;
-    if (model) await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
+    if (model) await assertWorkspaceModelPolicyAllows(db, catalogSettings, workspaceId, model);
+    const beforeCreateCommit = model
+      ? prReviewCustomModelCommitGuard({
+          settings: catalogSettings,
+          accountId: grant.accountId,
+          workspaceId,
+          modelId: model,
+        })
+      : undefined;
     const template = getCapabilityPack(OPENGENI_PR_REVIEW_PACK_ID)?.automationTemplates?.find(
       (candidate) => candidate.id === PR_REVIEW_AUTOMATION_TEMPLATE_ID,
     );
@@ -417,6 +435,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
         eventTypes: template.eventTypes,
         configuration: template.configuration,
         sessionTemplate: template.sessionTemplate,
+        ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       }),
       "This repository is already bound to the selected PR Review registration",
     );
@@ -441,13 +460,40 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     await requirePrReviewPackActive(db, workspaceId);
     const payload = UpdatePrReviewRepositoryBindingRequest.parse(await c.req.json());
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
     const model =
       payload.model === undefined
         ? undefined
         : payload.model === null
           ? null
-          : (canonicalConfiguredModel(settings, payload.model) ?? null);
-    if (model) await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
+          : (canonicalConfiguredModel(catalogSettings, payload.model) ?? null);
+    if (model) await assertWorkspaceModelPolicyAllows(db, catalogSettings, workspaceId, model);
+    const beforeUpdateCommit = async (
+      tx: ApiRouteDeps["db"],
+      context: {
+        currentModel: string | null;
+        currentStatus: "active" | "disabled";
+        nextModel: string | null;
+        nextStatus: "active" | "disabled";
+      },
+    ): Promise<void> => {
+      const materialExecutionChange =
+        payload.model !== undefined ||
+        payload.additionalInstructions !== undefined ||
+        (context.currentStatus === "disabled" && context.nextStatus === "active");
+      if (!materialExecutionChange || !context.nextModel) return;
+      await prReviewCustomModelCommitGuard({
+        settings: catalogSettings,
+        accountId: grant.accountId,
+        workspaceId,
+        modelId: context.nextModel,
+      })?.(tx);
+    };
     const binding = await updatePrReviewRepositoryBinding(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -458,6 +504,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
         ? { additionalInstructions: payload.additionalInstructions }
         : {}),
       ...(payload.status !== undefined ? { status: payload.status } : {}),
+      beforeUpdateCommit,
     });
     if (!binding)
       throw new HTTPException(404, {
@@ -499,6 +546,35 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     return c.body(null, 204);
   });
+}
+
+function prReviewCustomModelCommitGuard(input: {
+  settings: ApiRouteDeps["settings"];
+  accountId: string;
+  workspaceId: string;
+  modelId: string;
+}): ((tx: ApiRouteDeps["db"]) => Promise<void>) | undefined {
+  const reference = workspaceCustomModelReference(input.settings, input.modelId);
+  if (!reference) return undefined;
+  return async (tx): Promise<void> => {
+    const active =
+      reference.providerKind === "openrouter"
+        ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          })
+        : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          });
+    if (!active) {
+      throw new HTTPException(422, {
+        message: `model is not available: ${input.modelId}`,
+      });
+    }
+  };
 }
 
 function assertPrReviewSandboxBackend(deps: ApiRouteDeps): void {

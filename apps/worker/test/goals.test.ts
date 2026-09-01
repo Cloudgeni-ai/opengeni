@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { goalContinuationPrompt } from "../src/activities/goals";
+import {
+  goalContinuationFundedWithoutCredits,
+  goalContinuationModelDecision,
+  goalContinuationPrompt,
+} from "../src/activities/goals";
+import { testSettings } from "@opengeni/testing";
 
 describe("goalContinuationPrompt", () => {
   test("continues from frozen goal context without duplicating mutable goal fields", () => {
@@ -86,5 +91,68 @@ describe("goalContinuationPrompt", () => {
       "`child_requires_action` update means a worker you spawned is blocked",
     );
     expect(withoutTool).toContain("Tool approvals can only be decided by a human");
+  });
+});
+
+describe("goalContinuationModelDecision", () => {
+  test("falls back to the session model when the inherited model left the catalog", () => {
+    expect(
+      goalContinuationModelDecision({
+        settings: testSettings(),
+        workspaceModelPolicy: null,
+        inheritedModel: "removed/provider-model",
+        sessionModel: "scripted-model",
+      }),
+    ).toEqual({ model: "scripted-model", blocked: null });
+  });
+
+  test("pauses instead of materializing when neither inherited nor session model exists", () => {
+    expect(
+      goalContinuationModelDecision({
+        settings: testSettings(),
+        workspaceModelPolicy: null,
+        inheritedModel: "removed/provider-model",
+        sessionModel: "removed/session-model",
+      }),
+    ).toMatchObject({
+      model: "removed/provider-model",
+      blocked: expect.stringContaining("no longer in the deployment or workspace catalog"),
+    });
+  });
+
+  test("recognizes synthetic Codex and SuperGrok catalog membership", () => {
+    for (const [settings, model] of [
+      [testSettings({ codexSubscriptionEnabled: true }), "codex/gpt-5.6-sol"],
+      [testSettings({ supergrokSubscriptionEnabled: true }), "supergrok/grok-4.6"],
+    ] as const) {
+      expect(
+        goalContinuationModelDecision({
+          settings,
+          workspaceModelPolicy: null,
+          inheritedModel: model,
+          sessionModel: "scripted-model",
+        }),
+      ).toEqual({ model, blocked: null });
+    }
+  });
+
+  test("treats a SuperGrok continuation as subscription-funded", () => {
+    expect(
+      goalContinuationFundedWithoutCredits(
+        testSettings({ supergrokSubscriptionEnabled: true }),
+        "supergrok/grok-4.6",
+        false,
+      ),
+    ).toBe(true);
+  });
+
+  test("does not fund an unconnected Codex continuation from its namespace alone", () => {
+    expect(
+      goalContinuationFundedWithoutCredits(
+        testSettings({ codexSubscriptionEnabled: true }),
+        "codex/gpt-5.6-sol",
+        false,
+      ),
+    ).toBe(false);
   });
 });

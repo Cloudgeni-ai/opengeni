@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { scheduledTaskRunProducerKey } from "../src/activities/scheduled-tasks";
+import {
+  scheduledTaskGeneratedSessionCreateIdempotencyKey,
+  scheduledTaskRunProducerKey,
+} from "../src/activities/scheduled-tasks";
 
 describe("scheduled task legacy producer identity", () => {
   test("workflow retry, reset, and activity re-execution keep one logical producer", () => {
@@ -44,5 +47,17 @@ describe("scheduled task legacy producer identity", () => {
         activityId: "1",
       }),
     );
+  });
+
+  test("generated-session identity is deterministic, bounded, and producer-specific", () => {
+    const producer = `scheduled-temporal:${"x".repeat(700)}`;
+    const first = scheduledTaskGeneratedSessionCreateIdempotencyKey(producer);
+    const replay = scheduledTaskGeneratedSessionCreateIdempotencyKey(producer);
+    const different = scheduledTaskGeneratedSessionCreateIdempotencyKey(`${producer}-different`);
+
+    expect(replay).toBe(first);
+    expect(different).not.toBe(first);
+    expect(first).toMatch(/^scheduled-task-run:[0-9a-f]{64}$/u);
+    expect(first.length).toBeLessThanOrEqual(512);
   });
 });

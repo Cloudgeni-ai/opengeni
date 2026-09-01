@@ -2,7 +2,12 @@ import { describe, expect, mock, spyOn, test } from "bun:test";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
-import type { Settings } from "@opengeni/config";
+import {
+  withWorkspaceGatewayCredential,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  type Settings,
+} from "@opengeni/config";
 import { TurnExecutionPolicyV1, type ResourceRef } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
@@ -57,6 +62,7 @@ import {
   classifySandboxLogicalProvisionFailure,
   classifyXaiCredentialFailure,
   credentialSubjectIdForTurnInitiator,
+  xaiCatalogReadinessAuthority,
   classifyMcpTransportTimeoutError,
   clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
@@ -845,6 +851,7 @@ describe("accepted turn execution identity", () => {
     });
     expect(turnExecutionPolicyBillingIdentity(base)).toEqual({
       externallyBilled: true,
+      countsTowardTokenCap: false,
       codexSubscription: false,
       xaiSubscription: false,
     });
@@ -859,6 +866,7 @@ describe("accepted turn execution identity", () => {
       }),
     ).toEqual({
       externallyBilled: true,
+      countsTowardTokenCap: false,
       codexSubscription: true,
       xaiSubscription: false,
     });
@@ -873,6 +881,7 @@ describe("accepted turn execution identity", () => {
       }),
     ).toEqual({
       externallyBilled: true,
+      countsTowardTokenCap: false,
       codexSubscription: false,
       xaiSubscription: true,
     });
@@ -884,6 +893,7 @@ describe("accepted turn execution identity", () => {
       }),
     ).toEqual({
       externallyBilled: false,
+      countsTowardTokenCap: true,
       codexSubscription: false,
       xaiSubscription: false,
     });
@@ -922,6 +932,32 @@ describe("accepted turn execution identity", () => {
         latencyModeSource: "continuation",
       });
     }
+  });
+
+  test("uses frozen initiating-human xAI authority for service-originated catalog reads", () => {
+    const authoritySnapshot = {
+      version: 1 as const,
+      scope: "user" as const,
+      authorityGeneration: 7,
+    };
+    expect(
+      xaiCatalogReadinessAuthority(
+        {
+          initiatingHumanSubjectId: "human-subject",
+          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
+        },
+        undefined,
+      ),
+    ).toEqual({ subjectId: "human-subject", authoritySnapshot });
+    expect(
+      xaiCatalogReadinessAuthority(
+        {
+          initiatingHumanSubjectId: null,
+          xaiProviderAccountAuthoritySnapshot: authoritySnapshot,
+        },
+        "direct-subject",
+      ),
+    ).toEqual({ subjectId: "direct-subject", authoritySnapshot });
   });
 });
 
@@ -1715,6 +1751,120 @@ describe("production model-response usage callback authority", () => {
       );
     } finally {
       recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("persists unpinned workspace Gateway endpoint authority before a soft fact-write failure", async () => {
+    const upstreamModelId = "anthropic/claude-sonnet-4.6";
+    const model = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${upstreamModelId}`;
+    const settings = withWorkspaceGatewayCredential(
+      testSettings({ billingMode: "stripe", usageLimitsMode: "managed" }),
+      "vck_workspace_test",
+      [{ upstreamModelId }],
+    );
+    const event = new RunRawModelStreamEvent({
+      type: "response_done",
+      response: {
+        id: "resp-workspace-gateway",
+        output: [],
+        providerMetadata: {
+          gateway: {
+            routing: { finalProvider: "anthropic" },
+            inferenceCost: "0.00000325",
+          },
+        },
+        usage: { inputTokens: 9, outputTokens: 8, totalTokens: 17 },
+      },
+    } as any);
+    const usageRows: Array<Record<string, unknown>> = [];
+    const eventPayloads: Array<Record<string, unknown>> = [];
+    const facts: Array<Record<string, unknown>> = [];
+    const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        usageRows.push(input as unknown as Record<string, unknown>);
+      },
+    );
+    const factSpy = spyOn(opengeniDb, "recordModelCallFact").mockImplementation(
+      async (_db, input) => {
+        facts.push(input as unknown as Record<string, unknown>);
+        throw new Error("fact writer unavailable");
+      },
+    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("workspace Gateway usage must not debit OpenGeni credits");
+      },
+    );
+    try {
+      const result = await processModelResponseTerminalEvent({
+        event,
+        state: createModelResponseEventState(),
+        dispatchId: "activity-workspace-gateway",
+        settings,
+        db: {} as any,
+        observability: createObservability(settings, { component: "worker" }),
+        publish: (async (batch: any[]) => ({
+          accepted: true,
+          events: batch.map((entry) => {
+            eventPayloads.push(entry.payload as Record<string, unknown>);
+            return {
+              ...entry,
+              id: crypto.randomUUID(),
+              turnAssociation: "current" as const,
+            };
+          }),
+        })) as any,
+        accountId: "acct-1",
+        workspaceId: "ws-1",
+        sessionId: "sess-workspace-gateway",
+        turnId: "turn-workspace-gateway",
+        turnAttemptId: "attempt-workspace-gateway",
+        provider: WORKSPACE_GATEWAY_PROVIDER_ID,
+        providerApi: "responses",
+        model,
+        metricProvider: WORKSPACE_GATEWAY_PROVIDER_ID,
+        externallyBilled: true,
+        chargesOpenGeniCredits: false,
+        countsTowardTokenCap: false,
+        servingCredentialId: null,
+        priorSessionCredentialId: null,
+        emittedSourceKeys: new Set<string>(),
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async () => undefined,
+      });
+
+      expect(result).toMatchObject({
+        status: "processed",
+        authoritative: true,
+        sourceKey: "resp-workspace-gateway",
+      });
+      expect(usageRows).toEqual([
+        expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
+      ]);
+      expect(eventPayloads).toEqual([
+        expect.objectContaining({
+          provider: WORKSPACE_GATEWAY_PROVIDER_ID,
+          upstreamProvider: "anthropic",
+          billingPath: "external",
+        }),
+      ]);
+      expect(facts).toEqual([
+        expect.objectContaining({
+          provider: "anthropic",
+          model,
+          billingPath: "external",
+          pricedCostMicros: 0,
+          estimatedProviderCostMicros: 4,
+          pricingSource: "gateway_reported",
+        }),
+      ]);
+      expect(debitSpy).not.toHaveBeenCalled();
+    } finally {
+      usageSpy.mockRestore();
+      factSpy.mockRestore();
+      debitSpy.mockRestore();
     }
   });
 

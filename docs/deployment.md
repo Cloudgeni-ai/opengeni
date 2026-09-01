@@ -249,11 +249,18 @@ helm upgrade opengeni deploy/helm/opengeni \
   --wait --timeout 15m
 ```
 
-Future versions use the same second command with a new official chart/image
-version or digest. Postgres and Garage PVCs remain attached. Database migrations
-are forward-only: if the migration gate fails, the old application stays in
-place; after a migration succeeds, roll the application forward unless the
-older image is explicitly proven compatible with the new schema.
+Generated Kubernetes deployment plans default to one rolling `helm upgrade
+--install`. Profiles whose durable dependencies live inside the OpenGeni chart
+add the disabled-application revision only when the Helm release does not yet
+exist, so bootstrap can create Postgres/Temporal/NATS/object storage before the
+migration hook without turning every later release into an outage. A reviewed
+maintenance migration must be selected explicitly; migration 0389 uses
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models`
+plus `OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true` after the
+operator completes the documented database-role, image-digest, and application
+drain preflight. Postgres and Garage PVCs remain attached. Database migrations
+are forward-only: after a maintenance migration succeeds, remain on the new
+image/schema and fix forward.
 
 Failure behavior is intentionally uneven:
 
@@ -1782,6 +1789,10 @@ The runtime secret must provide values such as:
 - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` when dependencies need longer startup windows
 - optional `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS` (positive integer milliseconds, default `20000`): how long one HTTP-originated session/workspace mutation may wait to enter the workspace control prefix before the API answers the retryable 503 `WORKSPACE_CONTROL_BUSY`; the API validates it at boot and worker settlement never uses it. `generateRuntimeArtifacts` carries it into `runtime.env` only when set
 - `OPENGENI_OPENAI_API_KEY` or Azure OpenAI equivalents
+- optional `OPENGENI_OPENROUTER_API_KEY` for the deployment-managed reviewed
+  OpenRouter rail; keep it in the runtime Secret, never catalog JSON
+- optional `OPENGENI_MODEL_CATALOG_SOURCE=code|database` (default `code`),
+  `OPENGENI_MODEL_COST_POLICY_JSON`, and `OPENGENI_MODEL_NOTES_JSON`
 - `OPENGENI_OBJECT_STORAGE_BACKEND=s3-compatible` plus endpoint/access-key settings for local/self-contained modes
 - `OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob` plus Azure Blob connection string/account-key settings
 - `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORAGE_REGION`; prefer IRSA/EKS Pod Identity over static keys
@@ -1792,10 +1803,173 @@ The runtime secret must provide values such as:
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
 - optional paired `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET` and `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID` / `OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET` for managed social sign-in
 - `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
-- `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`
+- Workspace-owned Vercel AI Gateway and OpenRouter keys are entered by workspace
+  admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
+  those keys in Helm values, catalog JSON, or the deployment runtime Secret.
+- `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+### Deployment database model catalog cutover
+
+The default source remains the reviewed code/env catalog. Database mode is an
+operator-owned singleton, not a boot-time reconciliation loop. Migration 0389
+changes the exact runtime-posture table/grant contract, so this is a drained
+maintenance cutover rather than a rolling migration. A mixed pre/post-0389
+fleet is unsupported even while every process still uses `code`:
+
+1. Bind and verify the exact database, schema, new application image, and every
+   API/worker database login. Set
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` to that complete comma-separated
+   login list (normally `opengeni_app`). This list is only the maintenance-drain
+   detector; it is not a runtime grant allow-list. During role rotation it may
+   contain both old and new logins, while the exact
+   `OPENGENI_APP_DATABASE_USER` and password identify the sole target role that
+   `db:provision-roles` grants after migration.
+2. Stop every API, control worker, and turn worker, then prove no configured
+   application login remains in `pg_stat_activity`. Do not rely on the normal
+   Helm pre-upgrade hook while old pods still serve traffic: after 0387 commits,
+   their repeated runtime-posture readiness check fails.
+
+   For the bundled Helm chart, perform the drain as a migrations-disabled Helm
+   revision using the same new chart, exact `sha256:` API/worker/web/migrations
+   image digests, and values that the final upgrade will use. Mutable tags and
+   registry cache state are not acceptable evidence across this drain boundary.
+   The generated `local-kubernetes` plan is the sole tag-based exception: before
+   draining, it builds all three images, derives one content identity from their
+   Docker image IDs, loads those exact tags into kind, and persists the tag for
+   both the drain and final Helm revisions.
+
+   The generated deployment plan emits this drain only when both of these
+   operator acknowledgements are present:
+
+   ```bash
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true
+   ```
+
+   Do not set the confirmation until the exact release/database/login binding,
+   accepted-turn handling, and no-live-application-session checks above are
+   complete. Ordinary plans omit the drain and retain rolling availability.
+
+   ```bash
+   helm upgrade --install "$RELEASE" deploy/helm/opengeni \
+     --namespace "$NAMESPACE" --values "$VALUES" \
+     --set api.enabled=false \
+     --set worker.enabled=false \
+     --set web.enabled=false \
+     --set relay.enabled=false \
+     --set artifactMaterializer.enabled=false \
+     --set artifactOutboxDispatcher.enabled=false \
+     --set terraformMcp.enabled=false \
+     --set migrations.enabled=false \
+     --wait --timeout 15m
+
+   if kubectl -n "$NAMESPACE" get pods \
+     -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component in (api,worker-control,worker-turns,artifact-materializer,artifact-outbox-dispatcher,relay,web,terraform-mcp)" \
+     -o name | grep -q .; then
+     kubectl -n "$NAMESPACE" wait --for=delete pod \
+       -l "app.kubernetes.io/instance=$RELEASE,app.kubernetes.io/component in (api,worker-control,worker-turns,artifact-materializer,artifact-outbox-dispatcher,relay,web,terraform-mcp)" \
+       --timeout=10m
+   fi
+   ```
+
+   Verify the application Deployments are absent and the configured database
+   login has zero sessions. Then run the ordinary upgrade with those disable
+   overrides removed; its pre-upgrade Job applies pending migrations through
+   0387 before Helm recreates the application. If the second upgrade fails,
+   remain drained and fix forward.
+
+3. Apply `0389_model_catalog_and_gateway_custom_models.sql`, provision roles,
+   and assert runtime posture using the catalog-aware release artifacts. The
+   migration repeats the configured-login drain check before and after schema
+   installation and aborts with SQLSTATE `55000` if a listed session is live.
+   The migration strips inherited non-owner ACLs from the new tables and grants
+   none of the listed drain identities; the following `db:provision-roles` step
+   grants only the exact current application role.
+   After commit, never restart a pre-0389 image or use it as an application
+   rollback target; remain on the new schema and fix forward.
+4. Start the catalog-aware API and workers with
+   `OPENGENI_MODEL_CATALOG_SOURCE=code`, then verify startup and readiness.
+5. Prepare a strict, secret-free schema-v1 JSON document that is semantically
+   equivalent to the active code/env catalog. Set `defaultModel` explicitly to
+   the product ID that new sessions should use; omission retains the schema-v1
+   compatibility behavior of choosing the first `builtInModels` entry.
+   Membership and optional one-line notes belong in the document; keys, enabled
+   flags, billing, cost policy, and pricing do not.
+6. Validate and upsert it with a migration/admin database credential. Run the
+   command from the catalog-aware release environment with the exact runtime
+   model provider, credential, cost-policy, and pricing variables present; the
+   database variables shown below are additions, not a complete environment:
+
+   ```bash
+   OPENGENI_MIGRATIONS_DATABASE_URL='postgres://...' \
+     OPENGENI_DB_SCHEMA='opengeni' \
+     bun run model-catalog:upsert -- --file ./model-catalog.json --expected-version 0
+   ```
+
+   Omit `OPENGENI_DB_SCHEMA` for the default `public` schema. Set it to the
+   same dedicated schema used by migration and runtime connections for embedded
+   deployments; the command validates it and uses the canonical
+   `<schema>,opengeni_private,public` search path.
+
+   `--expected-version` is mandatory compare-and-swap protection. Use `0` only
+   when the singleton must not exist yet; for later changes, pass the exact
+   version reported by the previous successful command. A mismatch makes no
+   database change. The command uses transaction-local lock and statement
+   timeouts so a competing operator cannot block it indefinitely. Before the
+   write transaction, it applies the candidate to the same database-mode
+   deployment settings and secret bindings used by runtime and validates the
+   fully resolved executable catalog. Provider transport/credential, default
+   model, and cost/pricing failures therefore leave the live singleton intact.
+
+7. Confirm the command reports the expected version, then roll every API,
+   control worker, and turn worker with
+   `OPENGENI_MODEL_CATALOG_SOURCE=database` while the document remains
+   equivalent to code mode.
+8. Verify `/v1/config/client`, one authenticated workspace model catalog, a
+   model picker, and the `list_models` tool after the whole fleet converges.
+9. Only then add database-only membership. Before removing membership, changing
+   an executable model definition, or changing a product's `free`/`credits`
+   classification, drain or fence queued and active accepted turns that still
+   name the affected product. Executable-definition drift fails closed rather
+   than switching providers; workspace-facing cost is a separate live
+   deployment policy and therefore must not change underneath accepted turns.
+   A full maintenance window that stops catalog consumers is the simpler
+   alternative.
+
+Database mode fails closed when the singleton is missing or invalid and never
+falls back to code. After the maintenance cutover, rollback is limited to the
+catalog-aware binary with the source flag restored to `code`; that makes the
+singleton inert but leaves it available for inspection or correction. Catalog
+cost remains separately controlled by `OPENGENI_MODEL_COST_POLICY_JSON`; a
+model marked `credits` needs `OPENGENI_MODEL_PRICING_JSON` under managed
+billing/limits when no built-in price exists. Database mode allows cost-policy
+and pricing entries to be staged before the corresponding product ID is added
+to the singleton; code mode continues to reject unknown cost-policy IDs.
+
+An authenticated database `registryProviders` entry must name a provider that
+is also declared in host `OPENGENI_MODEL_PROVIDERS_JSON`. Its provider kind,
+base URL, and wire API/profile must exactly match the host declaration. Default
+headers/query and their public-name classifications are forbidden in the
+database document and inherited only from the host declaration, alongside the
+credential. The database document controls model membership and labels. Any
+transport mismatch fails closed instead of forwarding a host credential to a
+database-selected endpoint.
+
+Workspace custom Vercel AI Gateway and OpenRouter slugs are not part of this
+singleton. They are provider-qualified admin-managed rows protected by FORCE
+RLS, overlaid only for that workspace, and become selectable only when the
+matching encrypted workspace provider connection and workspace policy are
+ready. The table is bounded to 100 active rows and 1,000 retained generations
+per provider and workspace. If a deployment catalog later claims the same
+provider/upstream slug, the reviewed deployment entry wins and the colliding
+custom row is omitted from executable membership. Removing a custom slug
+retires its row: it disappears from new selection, while already accepted turns
+and existing-session continuations may still resolve the frozen definition.
+Re-adding the same slug creates a fresh generation without rewriting the
+retired execution authority.
 
 ### Optional OpenSandbox Kubernetes provider
 

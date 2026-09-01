@@ -169,6 +169,14 @@ import type {
   ClientConfig,
   WorkspaceModelAccessPolicy,
   WorkspaceModelCatalogResponse,
+  WorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse,
+  CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
+  WorkspaceOpenRouterCustomModel,
+  WorkspaceOpenRouterCustomModelsResponse,
+  CreateWorkspaceOpenRouterCustomModelRequest,
+  DeleteWorkspaceOpenRouterCustomModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -4042,6 +4050,90 @@ export class OpenGeniClient {
       undefined,
       {},
       options,
+    );
+  }
+
+  /** List workspace-owned unpinned Vercel AI Gateway model slugs. */
+  async listWorkspaceGatewayCustomModels(
+    workspaceId: string,
+  ): Promise<WorkspaceGatewayCustomModelsResponse> {
+    return await this.requestJson<WorkspaceGatewayCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/gateway-custom-models`,
+    );
+  }
+
+  /** Add one exact upstream Vercel AI Gateway slug. */
+  async createWorkspaceGatewayCustomModel(
+    workspaceId: string,
+    request: CreateWorkspaceGatewayCustomModelRequest,
+  ): Promise<WorkspaceGatewayCustomModel> {
+    return await this.requestJson<WorkspaceGatewayCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/gateway-custom-models`,
+      request,
+    );
+  }
+
+  /** Remove one workspace custom Gateway model by its stable row id. */
+  async deleteWorkspaceGatewayCustomModel(
+    workspaceId: string,
+    customModelId: string,
+    request: DeleteWorkspaceGatewayCustomModelRequest,
+  ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new TypeError("customModelId must be a UUID");
+    }
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/gateway-custom-models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
+  /** List workspace-owned unpinned OpenRouter model slugs. */
+  async listWorkspaceOpenRouterCustomModels(
+    workspaceId: string,
+  ): Promise<WorkspaceOpenRouterCustomModelsResponse> {
+    return await this.requestJson<WorkspaceOpenRouterCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/openrouter-custom-models`,
+    );
+  }
+
+  /** Add one exact upstream OpenRouter slug. */
+  async createWorkspaceOpenRouterCustomModel(
+    workspaceId: string,
+    request: CreateWorkspaceOpenRouterCustomModelRequest,
+  ): Promise<WorkspaceOpenRouterCustomModel> {
+    return await this.requestJson<WorkspaceOpenRouterCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/openrouter-custom-models`,
+      request,
+    );
+  }
+
+  /** Remove one workspace custom OpenRouter model by its stable row id. */
+  async deleteWorkspaceOpenRouterCustomModel(
+    workspaceId: string,
+    customModelId: string,
+    request: DeleteWorkspaceOpenRouterCustomModelRequest,
+  ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new TypeError("customModelId must be a UUID");
+    }
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/openrouter-custom-models/${encodeURIComponent(customModelId)}`,
+      request,
     );
   }
 

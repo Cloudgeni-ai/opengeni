@@ -6,7 +6,7 @@ import {
 import { listScheduledTaskRuns, listScheduledTasks } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import { requireAccessGrant, resolveWorkspaceCatalogSettings } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -30,7 +30,7 @@ import { boundedLimit } from "../http/common";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
-  const { settings, db, workflowClient, objectStorage } = deps;
+  const { db, workflowClient, objectStorage } = deps;
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -43,6 +43,12 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       });
     }
     const payload = parsedPayload.data;
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
     await requireLimit(deps, {
       accountId: grant.accountId,
       workspaceId,
@@ -50,7 +56,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       quantity: 1,
     });
     const task = await createValidatedScheduledTask({
-      settings,
+      settings: catalogSettings,
       db,
       objectStorage,
       grant,
@@ -91,8 +97,14 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       });
     }
     const payload = parsedPayload.data;
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
     const update = await validatedScheduledTaskUpdate({
-      settings,
+      settings: catalogSettings,
       db,
       objectStorage,
       grant,
@@ -124,8 +136,14 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
     const previous = await captureScheduledTaskRestoreState(db, existing);
+    const catalogSettings = (
+      await resolveWorkspaceCatalogSettings(db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      })
+    ).settings;
     const update = await validatedScheduledTaskUpdate({
-      settings,
+      settings: catalogSettings,
       db,
       objectStorage,
       grant,
@@ -146,6 +164,12 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     // recognised as codex-billed and skip the credit/cost gates at the edge.
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
     if (task.action.kind === "agent_turn") {
+      const catalogSettings = (
+        await resolveWorkspaceCatalogSettings(db, deps.settings, {
+          accountId: grant.accountId,
+          workspaceId,
+        })
+      ).settings;
       await validateScheduledTaskTarget({
         db,
         sessionAuthorization: deps.sessionAuthorization,
@@ -159,20 +183,23 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         missingTargetStatus: 404,
       });
       await validateScheduledTaskMachineTarget({
-        settings,
+        settings: catalogSettings,
         db,
         grant,
         runMode: task.runMode,
         agentConfig: task.agentConfig,
         requireOnline: true,
       });
-      await requireLimit(deps, {
-        accountId: grant.accountId,
-        workspaceId,
-        action: "agent_run:create",
-        quantity: 1,
-        model: task.agentConfig.model ?? deps.settings.openaiModel,
-      });
+      await requireLimit(
+        { ...deps, settings: catalogSettings },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          action: "agent_run:create",
+          quantity: 1,
+          model: task.agentConfig.model ?? catalogSettings.openaiModel,
+        },
+      );
     }
     // Body is optional (a bare POST is still a valid trigger); only a present,
     // non-empty body must parse against the contract.

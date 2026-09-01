@@ -12,6 +12,7 @@ export default defineConfig({
     "src/connector-destinations.ts",
     "src/google-drive.ts",
     "src/managed-auth-session-sets.ts",
+    "src/model-picker-order.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",
     "src/session-titles.ts",

@@ -177,6 +177,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/testing",
   ],
+  "test/e2e/ai-gateway-connection.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/code-editor.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/composer-responsive.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/connected-machine-removal.browser.e2e.ts": [

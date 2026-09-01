@@ -1,4 +1,4 @@
-import type { ResolvedModelProvider } from "@opengeni/config";
+import type { ConfiguredModel, ResolvedModelProvider } from "@opengeni/config";
 import { OPENGENI_GATEWAY_MODELS, gatewayRequestPolicyForUpstreamModel } from "@opengeni/config";
 import {
   CODEX_REQUEST_BODY_NORMALIZED_HEADER,
@@ -37,6 +37,8 @@ import type { ModelJsonRequestPolicy } from "./replayable-json-body";
  * stay untouched and fail closed upstream.
  */
 export const GATEWAY_REQUEST_BODY_NORMALIZED_HEADER = "x-opengeni-gateway-request-body-normalized";
+
+export type GatewayRequestPolicyLookup = ReadonlyMap<string, ConfiguredModel["requestPolicy"]>;
 
 function pairKimiParallelFunctionCallResults(body: Record<string, unknown>): void {
   const input = body.input;
@@ -108,11 +110,17 @@ function pairKimiParallelFunctionCallResults(body: Record<string, unknown>): voi
   }
 }
 
-/** Apply the complete reviewed Gateway request policy to an SDK-owned object. */
-export function normalizeVercelGatewayRequestBody(body: Record<string, unknown>): void {
+/** Apply the complete configured Gateway request policy to an SDK-owned object. */
+export function normalizeVercelGatewayRequestBody(
+  body: Record<string, unknown>,
+  configuredPolicies?: GatewayRequestPolicyLookup,
+): void {
   const model = typeof body.model === "string" ? body.model : "";
-  const policy = gatewayRequestPolicyForUpstreamModel(model);
-  if (!policy) {
+  const configured = configuredPolicies?.has(model) ?? false;
+  const policy = configuredPolicies
+    ? configuredPolicies.get(model)
+    : gatewayRequestPolicyForUpstreamModel(model);
+  if (!policy && !configured) {
     throw new Error("Model request is not in the approved catalogue");
   }
   const providerOptions =
@@ -121,6 +129,18 @@ export function normalizeVercelGatewayRequestBody(body: Record<string, unknown>)
     !Array.isArray(body.providerOptions)
       ? { ...(body.providerOptions as Record<string, unknown>) }
       : {};
+  if (!policy) {
+    // A stored workspace custom model deliberately uses Gateway's own default
+    // routing. Strip any caller-supplied pin or fallback list so "unpinned"
+    // cannot become an alternate, user-controlled routing policy.
+    delete providerOptions.gateway;
+    if (Object.keys(providerOptions).length > 0) {
+      body.providerOptions = providerOptions;
+    } else {
+      delete body.providerOptions;
+    }
+    return;
+  }
   providerOptions.gateway = {
     only: [...policy.gateway.only],
     order: [...policy.gateway.only],
@@ -174,6 +194,7 @@ export function azureModelRequestPolicy({
  */
 export function modelRequestPolicyForProvider(
   provider: ResolvedModelProvider,
+  gatewayPolicies?: GatewayRequestPolicyLookup,
 ): ModelJsonRequestPolicy {
   return ({ path, body }) => {
     if (provider.wireProfile === "azure-openai") {
@@ -238,7 +259,7 @@ export function modelRequestPolicyForProvider(
           ? { input: [...body.input] }
           : {}),
       };
-      normalizeVercelGatewayRequestBody(projectedBody);
+      normalizeVercelGatewayRequestBody(projectedBody, gatewayPolicies);
       return {
         body: projectedBody,
         headers: { [GATEWAY_REQUEST_BODY_NORMALIZED_HEADER]: "1" },

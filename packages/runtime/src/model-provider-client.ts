@@ -1,5 +1,6 @@
-import type { ResolvedModelProvider, Settings } from "@opengeni/config";
+import { configuredModels, type ResolvedModelProvider, type Settings } from "@opengeni/config";
 import OpenAI from "openai";
+import { createHash } from "node:crypto";
 import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
@@ -13,7 +14,10 @@ import type {
   McpToolCallOutcome,
   RuntimeMetricsHooks,
 } from "./metrics";
-import { WorkspaceGatewayUnavailableError } from "./model-provider-errors";
+import {
+  WorkspaceGatewayUnavailableError,
+  WorkspaceOpenRouterUnavailableError,
+} from "./model-provider-errors";
 import {
   azureModelRequestPolicy,
   modelRequestPolicyForProvider,
@@ -92,16 +96,96 @@ export function buildOpenAIClientFromSettings(
 }
 
 /**
- * One OpenAI client per resolved provider id, built lazily and cached for the
- * process. The built-in openai/azure provider reuses
+ * One OpenAI client per deployment-scoped provider configuration, built lazily
+ * and cached for the process. Workspace-connection providers are deliberately
+ * rebuilt per immutable turn settings snapshot so a workspace key never enters
+ * a cross-workspace cache. The built-in openai/azure provider reuses
  * buildOpenAIClientFromSettings verbatim (so its Azure AD/api-version/base-URL
  * construction stays byte-for-byte identical to configureOpenAI); a registry
  * provider gets a plain client pointed at its base URL with its resolved key,
  * the shared maxRetries budget, and its declared defaultQuery/defaultHeaders.
- * Caching by provider.id keeps concurrent multi-provider turns sharing one
- * connection pool per provider rather than reconstructing a client per turn.
+ * The cache key includes credential/configuration and Gateway request-policy
+ * digests so a live database-catalog update cannot reuse a stale client while
+ * unchanged concurrent turns still share one connection pool.
  */
 const providerClientCache = new Map<string, OpenAI>();
+
+function canonicalCacheJson(value: unknown): string {
+  const normalize = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(normalize);
+    if (input && typeof input === "object") {
+      return Object.fromEntries(
+        Object.entries(input)
+          .filter(([, child]) => child !== undefined)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, child]) => [key, normalize(child)]),
+      );
+    }
+    return input;
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function providerClientCacheKey(
+  provider: ResolvedModelProvider,
+  settings: Settings,
+  gatewayPolicies: ReadonlyMap<string, unknown> | undefined,
+): string {
+  const sortedRecord = (value: Record<string, string> | undefined) =>
+    value
+      ? Object.fromEntries(
+          Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
+        )
+      : null;
+  const apiKeyDigest = provider.apiKey
+    ? createHash("sha256").update(provider.apiKey, "utf8").digest("hex")
+    : null;
+  const digest = createHash("sha256")
+    .update(
+      canonicalCacheJson({
+        provider: {
+          id: provider.id,
+          kind: provider.kind,
+          api: provider.api,
+          wireProfile: provider.wireProfile,
+          builtin: provider.builtin,
+          baseUrl: provider.baseUrl ?? null,
+          apiKeyDigest,
+          defaultQuery: sortedRecord(provider.defaultQuery),
+          defaultHeaders: sortedRecord(provider.defaultHeaders),
+          publicDefaultQueryNames: [...(provider.publicDefaultQueryNames ?? [])].sort(),
+          publicDefaultHeaderNames: [...(provider.publicDefaultHeaderNames ?? [])].sort(),
+        },
+        gatewayPolicies: gatewayPolicies
+          ? [...gatewayPolicies.entries()].sort(([left], [right]) => left.localeCompare(right))
+          : null,
+        openaiMaxRetries: settings.openaiMaxRetries,
+        builtin:
+          provider.builtin && settings.openaiProvider === "azure"
+            ? {
+                azureOpenaiBaseUrl: settings.azureOpenaiBaseUrl ?? null,
+                azureOpenaiEndpoint: settings.azureOpenaiEndpoint ?? null,
+                azureOpenaiDeployment: settings.azureOpenaiDeployment ?? null,
+                azureOpenaiApiVersion: settings.azureOpenaiApiVersion ?? null,
+                usesAdToken: Boolean(settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey),
+              }
+            : null,
+      }),
+      "utf8",
+    )
+    .digest("hex");
+  return `${provider.id}:${digest}`;
+}
+
+function cacheProviderClient(cacheKey: string, providerId: string, client: OpenAI): void {
+  const prefix = `${providerId}:`;
+  for (const existingKey of providerClientCache.keys()) {
+    if (existingKey !== cacheKey && existingKey.startsWith(prefix)) {
+      providerClientCache.delete(existingKey);
+    }
+  }
+  providerClientCache.set(cacheKey, client);
+}
 
 const ANONYMOUS_PROVIDER_AUTHENTICATION_HEADERS = new Set([
   "api-key",
@@ -159,12 +243,26 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
+  const workspaceCredentialProvider = provider.credentialSource?.kind === "workspace_connection";
   const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
-  const cached = workspaceGateway ? undefined : providerClientCache.get(provider.id);
+  const openRouterProvider =
+    provider.kind === "openrouter-managed" || provider.kind === "openrouter-workspace";
+  const gatewayPolicies = gatewayProvider
+    ? new Map(
+        configuredModels(settings)
+          .filter((model) => model.providerId === provider.id)
+          .map((model) => [model.upstreamModelId, model.requestPolicy] as const),
+      )
+    : undefined;
+  const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies);
+  const cached = workspaceCredentialProvider ? undefined : providerClientCache.get(cacheKey);
   if (cached) {
     return cached;
   }
-  if (workspaceGateway && !provider.apiKey) {
+  if (workspaceCredentialProvider && !provider.apiKey) {
+    if (provider.kind === "openrouter-workspace") {
+      throw new WorkspaceOpenRouterUnavailableError();
+    }
     throw new WorkspaceGatewayUnavailableError();
   }
   const anonymousProvider = provider.kind === "anonymous";
@@ -190,7 +288,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
             fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
           },
-          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
         )
       : provider.kind === "xai-subscription"
         ? // SuperGrok subscription uses one workspace-scoped request context.
@@ -208,7 +306,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
               fetch: xaiSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
           )
         : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
           // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
@@ -228,9 +326,11 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   ? { apiKey: provider.apiKey }
                   : {}),
               ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-              // Gateway routing is deliberately fail-closed. Avoid SDK replay after
-              // a request may have reached the one pinned endpoint.
-              maxRetries: gatewayProvider ? 0 : settings.openaiMaxRetries,
+              // Gateway and OpenRouter requests can incur upstream work or charges
+              // before a retryable response failure reaches this process. Neither
+              // transport has a provider idempotency key tied to our durable call,
+              // so never let the SDK replay them blindly.
+              maxRetries: gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries,
               ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
               ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
               fetch: anonymousProvider
@@ -241,13 +341,14 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   ? vercelGatewayRoutingFetch(
                       provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
                       instrumentedModelFetch(provider.id, globalThis.fetch),
+                      gatewayPolicies,
                     )
                   : instrumentedModelFetch(provider.id, globalThis.fetch),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
           );
-  if (!workspaceGateway) {
-    providerClientCache.set(provider.id, client);
+  if (!workspaceCredentialProvider) {
+    cacheProviderClient(cacheKey, provider.id, client);
   }
   return client;
 }

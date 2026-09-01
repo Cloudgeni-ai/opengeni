@@ -1,9 +1,15 @@
-import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import {
+  resolveTurnExecutionPolicyV1,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+} from "@opengeni/config";
 import {
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   createAndStartSessionWithOutcome,
   recordWorkspaceUsage,
+  resolveCatalogSettings,
+  resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
 import {
   AutomationAuthorityRevokedError,
@@ -40,10 +46,23 @@ export function createAutomationActivities(
   const assertModelPolicy = options.assertModelPolicy ?? assertWorkspaceModelPolicyAllows;
   const recordUsage = options.recordUsage ?? recordWorkspaceUsage;
   return {
+    settleAutomationRunFailure: async (input: DispatchAutomationRunInput): Promise<void> => {
+      const service = await services();
+      await settle(service.db, {
+        workspaceId: input.workspaceId,
+        runId: input.runId,
+        status: "failed",
+        errorCode: "dispatch_failed",
+      });
+    },
     dispatchAutomationRun: async (
       input: DispatchAutomationRunInput,
     ): Promise<DispatchAutomationRunResult> => {
       const service = await services();
+      const catalogSourceSettings = service.catalogSourceSettings ?? service.settings;
+      const deploymentCatalogSettings = (
+        await resolveCatalogSettings(service.db, catalogSourceSettings)
+      ).settings;
       const run = await claim(service.db, input);
       if (!run) return { action: "not_found" };
       if (run.status === "dispatched") {
@@ -51,71 +70,102 @@ export function createAutomationActivities(
         return { action: "already_dispatched", sessionId: run.sessionId };
       }
       if (run.status === "skipped") {
-        return { action: "skipped", reason: run.errorCode ?? "authority_revoked" };
+        return {
+          action: "skipped",
+          reason: run.errorCode ?? "authority_revoked",
+        };
       }
-
-      const accepted = run.acceptedExecution;
-      if (
-        accepted.accountId !== input.accountId ||
-        accepted.workspaceId !== input.workspaceId ||
-        accepted.sourceId !== run.sourceId ||
-        accepted.triggerId !== run.triggerId ||
-        accepted.triggerRevision !== run.triggerRevision ||
-        accepted.eventId !== run.eventId
-      ) {
-        await settle(service.db, {
-          workspaceId: input.workspaceId,
-          runId: run.id,
-          status: "skipped",
-          errorCode: "accepted_execution_mismatch",
-        });
-        return { action: "skipped", reason: "accepted_execution_mismatch" };
+      if (run.status === "failed") {
+        return { action: "failed", reason: run.errorCode ?? "dispatch_failed" };
       }
-
-      const template = accepted.sessionTemplate;
-      const model = canonicalConfiguredModel(
-        service.settings,
-        template.model ?? service.settings.openaiModel,
-      );
-      if (!model) throw new Error("automation has no configured model");
-      await assertModelPolicy(service.db, service.settings, input.workspaceId, model);
-      const denial = await admit(service, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        model,
-        requestedAgentRuns: 1,
-      });
-      if (denial) {
-        await settle(service.db, {
-          workspaceId: input.workspaceId,
-          runId: run.id,
-          status: "failed",
-          errorCode: denial,
-        });
-        throw new Error(`automation admission denied: ${denial}`);
-      }
-      const reasoningEffort = template.reasoningEffort ?? service.settings.openaiReasoningEffort;
-      const sandboxBackend = template.sandboxBackend ?? service.settings.sandboxBackend;
-      if (sandboxBackend === "selfhosted") {
-        await settle(service.db, {
-          workspaceId: input.workspaceId,
-          runId: run.id,
-          status: "skipped",
-          errorCode: "interactive_compute_not_allowed",
-        });
-        return { action: "skipped", reason: "interactive_compute_not_allowed" };
-      }
-      const turnExecutionPolicy = resolveTurnExecutionPolicyV1(service.settings, {
-        modelId: model,
-        requestedModelId: template.model,
-        modelSource: template.model ? "explicit" : "deployment",
-        reasoningEffort,
-        reasoningSource: template.reasoningEffort ? "explicit" : "deployment",
-        latencyMode: "standard",
-        latencyModeSource: "deployment",
-      });
 
       try {
+        const accepted = run.acceptedExecution;
+        if (
+          accepted.accountId !== input.accountId ||
+          accepted.workspaceId !== input.workspaceId ||
+          accepted.sourceId !== run.sourceId ||
+          accepted.triggerId !== run.triggerId ||
+          accepted.triggerRevision !== run.triggerRevision ||
+          accepted.eventId !== run.eventId
+        ) {
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "skipped",
+            errorCode: "accepted_execution_mismatch",
+          });
+          return { action: "skipped", reason: "accepted_execution_mismatch" };
+        }
+
+        const template = accepted.sessionTemplate;
+        const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
+        const catalogSettings =
+          requestedModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
+          requestedModel.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)
+            ? (
+                await resolveWorkspaceCatalogSettings(service.db, catalogSourceSettings, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  retainedProductModelId: requestedModel,
+                })
+              ).settings
+            : deploymentCatalogSettings;
+        const catalogService = { ...service, settings: catalogSettings };
+        let model: string;
+        try {
+          const configuredModel = canonicalConfiguredModel(catalogSettings, requestedModel);
+          if (!configuredModel) throw new Error("automation has no configured model");
+          await assertModelPolicy(service.db, catalogSettings, input.workspaceId, configuredModel);
+          model = configuredModel;
+        } catch (error) {
+          if (!isUnprocessableEntity(error)) throw error;
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "failed",
+            errorCode: "dispatch_failed",
+          });
+          return { action: "failed", reason: "dispatch_failed" };
+        }
+        const denial = await admit(catalogService, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          model,
+          requestedAgentRuns: 1,
+        });
+        if (denial) {
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "failed",
+            errorCode: denial,
+          });
+          return { action: "failed", reason: denial };
+        }
+        const reasoningEffort = template.reasoningEffort ?? catalogSettings.openaiReasoningEffort;
+        const sandboxBackend = template.sandboxBackend ?? catalogSettings.sandboxBackend;
+        if (sandboxBackend === "selfhosted") {
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "skipped",
+            errorCode: "interactive_compute_not_allowed",
+          });
+          return {
+            action: "skipped",
+            reason: "interactive_compute_not_allowed",
+          };
+        }
+        const turnExecutionPolicy = resolveTurnExecutionPolicyV1(catalogSettings, {
+          modelId: model,
+          requestedModelId: template.model,
+          modelSource: template.model ? "explicit" : "deployment",
+          reasoningEffort,
+          reasoningSource: template.reasoningEffort ? "explicit" : "deployment",
+          latencyMode: "standard",
+          latencyModeSource: "deployment",
+        });
         const created = await createSession({
           db: service.db,
           bus: service.bus,
@@ -163,11 +213,14 @@ export function createAutomationActivities(
           policyRole: template.policyRole,
           firstPartyMcpPermissions: template.firstPartyMcpPermissions,
           firstPartyMcpTools: template.firstPartyMcpTools,
+          retainWorkspaceCustomModel:
+            model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
+            model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX),
           createIdempotencyKey: `automation-run:${run.id}`,
           subjectId: accepted.serviceSubjectId,
         });
         await recordUsage(
-          { db: service.db, settings: service.settings },
+          { db: service.db, settings: catalogSettings },
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -201,14 +254,16 @@ export function createAutomationActivities(
           });
           return { action: "skipped", reason: "authority_revoked" };
         }
-        await settle(service.db, {
-          workspaceId: input.workspaceId,
-          runId: run.id,
-          status: "failed",
-          errorCode: "dispatch_failed",
-        });
         throw error;
       }
     },
   };
+}
+
+function isUnprocessableEntity(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "status" in error &&
+    (error as Error & { status?: unknown }).status === 422
+  );
 }

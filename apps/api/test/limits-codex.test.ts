@@ -98,6 +98,32 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
+  test("a SuperGrok subscription model bypasses OpenGeni credits through its synthetic catalog", async () => {
+    const restoreBal = mockZeroBalance();
+    const restoreCred = mockCodexBilled(false);
+    try {
+      const settings = billedSettings({ supergrokSubscriptionEnabled: true });
+      const decision = await checkLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "agent_run:create",
+        quantity: 1,
+        model: "supergrok/grok-4.6",
+      });
+      expect(decision.allowed).toBe(true);
+      await requireLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "agent_run:create",
+        quantity: 1,
+        model: "supergrok/grok-4.6",
+      });
+    } finally {
+      restoreCred();
+      restoreBal();
+    }
+  });
+
   test("(c) a normal model with 0 credits is still gated exactly as before (402)", async () => {
     const restoreBal = mockZeroBalance();
     // No credential spy: a normal model never triggers a credential read.
@@ -146,9 +172,10 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
-  test("an anonymous external provider bypasses the 0-credit gate without a connection", async () => {
+  test("an external provider bypasses credits only when deployment cost marks it free", async () => {
     const restoreBal = mockZeroBalance();
     const settings = billedSettings({
+      modelCostPolicyJson: JSON.stringify({ "opencode/x-preview-f-free": "free" }),
       modelProvidersJson: JSON.stringify([
         {
           kind: "anonymous",
@@ -184,6 +211,94 @@ describe("API edge credit gate — codex bypass", () => {
       });
     } finally {
       restoreBal();
+    }
+  });
+
+  test("external upstream settlement alone does not bypass deployment credit pricing", async () => {
+    const restoreBal = mockZeroBalance();
+    const settings = billedSettings({
+      modelProvidersJson: JSON.stringify([
+        {
+          kind: "anonymous",
+          id: "opencode-zen",
+          label: "OpenCode Zen",
+          api: "chat",
+          baseUrl: "https://opencode.ai/zen/v1",
+          models: [
+            {
+              id: "opencode/x-preview-f-free",
+              upstreamModelId: "x-preview-f-free",
+              label: "OpenCode Ox Alpha",
+            },
+          ],
+        },
+      ]),
+    });
+    try {
+      const decision = await checkLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "agent_run:create",
+        quantity: 1,
+        model: "opencode/x-preview-f-free",
+      });
+      expect(decision).toMatchObject({ allowed: false, code: "insufficient_credits" });
+    } finally {
+      restoreBal();
+    }
+  });
+
+  test("deployment cost free bypasses credits without bypassing the workspace token cap", async () => {
+    const restoreBal = mockZeroBalance();
+    const usageSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(100);
+    const settings = billedSettings({
+      staticUsageLimitsJson: JSON.stringify({ maxMonthlyTokensPerWorkspace: 100 }),
+      modelCostPolicyJson: JSON.stringify({ "scripted-model": "free" }),
+    });
+    try {
+      const decision = await checkLimit(deps(settings), {
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        action: "tokens:consume",
+        quantity: 1,
+        model: "scripted-model",
+      });
+      expect(decision).toMatchObject({
+        allowed: false,
+        code: "max_monthly_tokens_per_workspace",
+      });
+    } finally {
+      usageSpy.mockRestore();
+      restoreBal();
+    }
+  });
+
+  test("deployment-funded external models still count toward the workspace token cap", async () => {
+    const usageSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(100);
+    const settings = billedSettings({
+      staticUsageLimitsJson: JSON.stringify({ maxMonthlyTokensPerWorkspace: 100 }),
+      modelCostPolicyJson: JSON.stringify({ "opencode/free": "free" }),
+      modelProvidersJson: JSON.stringify([
+        {
+          kind: "anonymous",
+          id: "opencode",
+          baseUrl: "https://opencode.example.test/v1",
+          models: [{ id: "opencode/free" }],
+        },
+      ]),
+    });
+    try {
+      expect(
+        await checkLimit(deps(settings), {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          action: "tokens:consume",
+          quantity: 1,
+          model: "opencode/free",
+        }),
+      ).toMatchObject({ allowed: false, code: "max_monthly_tokens_per_workspace" });
+    } finally {
+      usageSpy.mockRestore();
     }
   });
 
