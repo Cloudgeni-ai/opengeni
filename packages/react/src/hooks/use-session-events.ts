@@ -177,6 +177,7 @@ export function useSessionEvents(
   const loadingLatestRef = useRef(false);
   const viewModeRef = useRef<"live" | "history">("live");
   const initialWindowLoadedRef = useRef(false);
+  const reloadLatestAfterPageResumeRef = useRef(false);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamKeyRef = useRef<string | null>(null);
   const generationRef = useRef(0);
@@ -223,6 +224,7 @@ export function useSessionEvents(
       viewModeRef.current = "live";
       setViewMode("live");
       initialWindowLoadedRef.current = false;
+      reloadLatestAfterPageResumeRef.current = false;
     }
     // AbortController is advisory: custom SDK clients and async iterators may
     // ignore it and resolve/yield after cleanup. Fence every effect instance so
@@ -234,15 +236,52 @@ export function useSessionEvents(
       setLoadingOlder(false);
     }
     if (!sessionId || !streamEnabled) {
+      // A page that stayed hidden beyond the live-activity grace deliberately
+      // closed its SSE connection. Replaying from the old cursor on return can
+      // drip a large background backlog through React in many fast batches and
+      // leave the pinned camera catching up long after the user is foregrounded.
+      // Remember that suspension so the next live effect replaces the browser
+      // window with one compact durable tail instead.
+      if (
+        sessionId &&
+        enabled &&
+        !pageLive &&
+        !fullReplay &&
+        viewModeRef.current === "live" &&
+        initialWindowLoadedRef.current
+      ) {
+        reloadLatestAfterPageResumeRef.current = true;
+      }
       setConnectionState("idle");
       return;
     }
     // History view owns a non-tip window; do not open SSE (it would replay the
     // entire gap into the browser). jumpToLatest / catching loadNewer resume live.
     if (viewMode === "history") {
+      reloadLatestAfterPageResumeRef.current = false;
       setConnectionState("idle");
       setInitialLoading(false);
       return;
+    }
+    if (reloadLatestAfterPageResumeRef.current && !fullReplay) {
+      reloadLatestAfterPageResumeRef.current = false;
+      // This is an intentional refresh, not forward replay. Clear the rendered
+      // window so MessageTimeline re-arms its bottom-anchored bulk-load path;
+      // the latest compact tail then lands in one paint and SSE resumes from
+      // that fresh durable head. Full-replay/nonzero-after consumers retain
+      // their exact cursor semantics above.
+      eventWindowRef.current = EMPTY_EVENT_WINDOW;
+      oldestSequenceRef.current = null;
+      newestSequenceRef.current = null;
+      hasOlderRef.current = false;
+      hasNewerRef.current = false;
+      initialWindowLoadedRef.current = false;
+      streamResumeSequenceRef.current = after;
+      setEventWindow(EMPTY_EVENT_WINDOW);
+      setHasOlder(false);
+      setHasNewer(false);
+      setInitialLoading(true);
+      setError(null);
     }
     const controller = new AbortController();
     const isCurrent = () => generationRef.current === generation && !controller.signal.aborted;
@@ -430,6 +469,8 @@ export function useSessionEvents(
     workspaceId,
     sessionId,
     after,
+    enabled,
+    pageLive,
     streamEnabled,
     fullReplay,
     streamKey,

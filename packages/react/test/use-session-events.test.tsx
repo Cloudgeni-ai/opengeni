@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import type { SessionEvent, SessionEventPayloadMode } from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -138,6 +138,78 @@ describe("useSessionEvents", () => {
     expect(lengths.filter((length) => length === 1000)).toHaveLength(1);
 
     await hook.unmount();
+  });
+
+  test("foregrounding after a hidden suspension refreshes the latest tail instead of replaying the backlog", async () => {
+    let visibility: DocumentVisibilityState = "visible";
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    let store = [event(1), event(2)];
+    const listCalls: ListOptions[] = [];
+    const streamCalls: number[] = [];
+    const client = fakeClient({
+      listEvents: async (_workspaceId, _sessionId, options = {}) => {
+        listCalls.push(options);
+        return listPage(store, options);
+      },
+      streamEvents: (_workspaceId, _sessionId, options = {}) => {
+        streamCalls.push(options.after ?? 0);
+        return (async function* () {
+          options.onOpen?.();
+          await new Promise<void>((resolve) => {
+            if (options.signal?.aborted) {
+              resolve();
+              return;
+            }
+            options.signal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          yield* [] as SessionEvent[];
+        })();
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    try {
+      await flush(20);
+      expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2]);
+      expect(streamCalls).toEqual([2]);
+
+      jest.useFakeTimers();
+      visibility = "hidden";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await actRun(() => jest.advanceTimersByTime(2_000));
+      expect(hook.result.current.connectionState).toBe("idle");
+
+      store = Array.from({ length: 2_000 }, (_, index) => event(index + 1));
+      visibility = "visible";
+      await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+      await actRun(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(listCalls).toEqual([
+        { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+        { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      ]);
+      expect(streamCalls).toEqual([2, 2_000]);
+      expect(hook.result.current.events).toHaveLength(1_000);
+      expect(hook.result.current.events[0]?.sequence).toBe(1_001);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(2_000);
+    } finally {
+      await hook.unmount();
+      jest.useRealTimers();
+      if (visibilityDescriptor) {
+        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+      }
+    }
   });
 
   test("a session switch never exposes the previous session's event log during render", async () => {
