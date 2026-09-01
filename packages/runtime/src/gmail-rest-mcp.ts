@@ -33,6 +33,7 @@ type ResolveCredentialResult =
       status: "ok";
       headers: Record<string, string>;
       connectionId: string;
+      authoritySource?: "host";
       authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
     }

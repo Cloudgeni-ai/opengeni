@@ -393,6 +393,10 @@ describe("subject-owned capability connection references", () => {
   test("round-trips opaque and UUID-shaped host capability bindings without native lookup", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    const activatedSettings = {
+      ...settings,
+      hostMcpAuthoritySourceAdmissionEnabled: true,
+    };
     const cases = [
       {
         suffix: "opaque-workspace",
@@ -402,12 +406,6 @@ describe("subject-owned capability connection references", () => {
           providerDomain: "cloudgeni.example",
           kind: "delegated" as const,
           subjectScope: "workspace" as const,
-        },
-        projected: {
-          authoritySource: "host",
-          connectionId: "cloudgeni-capability",
-          providerDomain: "cloudgeni.example",
-          kind: "delegated",
         },
       },
       {
@@ -419,13 +417,6 @@ describe("subject-owned capability connection references", () => {
           kind: "delegated" as const,
           subjectScope: "subject" as const,
         },
-        projected: {
-          authoritySource: "host",
-          connectionId: "11111111-1111-4111-8111-111111111111",
-          providerDomain: "cloudgeni.example",
-          kind: "delegated",
-          subjectScope: "subject",
-        },
       },
     ];
 
@@ -434,11 +425,26 @@ describe("subject-owned capability connection references", () => {
       await createMcpCapability(workspace, capabilityId, {
         endpointUrl: `https://${testCase.suffix}.example.test/mcp`,
       });
+      await expect(
+        enableCapability({
+          db,
+          grant: grant(workspace, "subject-alice"),
+          ...workspace,
+          settings,
+          capabilityId,
+          payload: {
+            config: {},
+            metadata: {},
+            headers: {},
+            connectionRef: testCase.connectionRef,
+          },
+        }),
+      ).rejects.toThrow(/OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true/);
       await enableCapability({
         db,
         grant: grant(workspace, "subject-alice"),
         ...workspace,
-        settings,
+        settings: activatedSettings,
         capabilityId,
         payload: {
           config: {},
@@ -457,11 +463,9 @@ describe("subject-owned capability connection references", () => {
       const catalog = await buildCapabilityCatalog({
         db,
         workspaceId: workspace.workspaceId,
-        settings,
+        settings: activatedSettings,
       });
-      expect(catalog.items.find((item) => item.id === capabilityId)?.connectionRef).toEqual(
-        testCase.projected,
-      );
+      expect(catalog.items.find((item) => item.id === capabilityId)?.connectionRef).toBeNull();
     }
   });
 

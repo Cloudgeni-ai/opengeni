@@ -1993,6 +1993,15 @@ export type ToolAuthNeededPayload = {
     | "personal_authority_unavailable"
     | "unsupported_auth"
     | "resource_scope_unavailable";
+  hostReason?:
+    | "missing_connection"
+    | "expired"
+    | "insufficient_scope"
+    | "refresh_failed"
+    | "personal_authority_unavailable"
+    | "unsupported_auth"
+    | "resource_scope_unavailable"
+    | undefined;
   scopes?: string[] | undefined;
   resource?: string | undefined;
   selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;

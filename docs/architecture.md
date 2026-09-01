@@ -419,6 +419,14 @@ Official server builds expose `serverVersion` through health and client-config
 responses. There is no runtime negotiation protocol: tolerant reading and a
 shared major version are the compatibility mechanism.
 
+An optional field that changes execution authority is not an ordinary additive
+response field. Its readers must ship first, new external writes stay behind a
+default-off admission switch until every shared-queue consumer is compatible,
+and public projections must remain safe for indefinitely open old browser
+bundles. Once admitted, upgraded readers preserve and execute the durable field
+regardless of the local admission-switch value; activation switches gate
+producers, not consumers.
+
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, and `packages/sdk/test/contract-parity.test.ts`.
 

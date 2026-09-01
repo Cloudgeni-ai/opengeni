@@ -221,6 +221,7 @@ describe("connectionTokenResolverForTurn", () => {
     expect(result).toEqual({
       status: "ok",
       headers: { Authorization: "Bearer host-owned" },
+      authoritySource: "host",
       connectionId: SUBJECT_CONNECTION_ID,
       authorizeProviderRequest: expect.any(Function),
     });
@@ -234,6 +235,58 @@ describe("connectionTokenResolverForTurn", () => {
       "provider_request",
     ]);
     expect(authorizationUses[0]?.requestId).not.toBe(authorizationUses[1]?.requestId);
+  });
+
+  test("reads already-stored explicit host authority independently of admission posture", async () => {
+    let hostCalls = 0;
+    const resolver = connectionTokenResolverForTurn({
+      db: {} as Database,
+      settings: testSettings(),
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      rootSessionId: "session-root",
+      attemptId: "attempt-1",
+      turn: {
+        id: "turn-1",
+        executionGeneration: 1,
+        personalConnectionDelegations: [],
+        initiator: { kind: "service", subjectId: "embedding-service" },
+        initiatorContext: {},
+      } as SessionTurn,
+      connectionCredentials: {
+        mcpCredentials: async (request) => {
+          hostCalls += 1;
+          return {
+            status: "ok",
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { Authorization: "Bearer already-stored" },
+            connectionId: "opaque-host-binding",
+            providerDomain: "host.example.test",
+          };
+        },
+      },
+    });
+
+    await expect(
+      resolver({
+        workspaceId: "workspace-1",
+        serverId: "host-tools",
+        destinationUrl: "https://host.example.test/mcp",
+        connectionRef: {
+          authoritySource: "host",
+          connectionId: "opaque-host-binding",
+          providerDomain: "host.example.test",
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: "ok",
+      authoritySource: "host",
+      connectionId: "opaque-host-binding",
+    });
+    expect(hostCalls).toBe(1);
   });
 
   test("denies a stale accepted attempt before invoking the host", async () => {

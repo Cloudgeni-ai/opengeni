@@ -57,6 +57,7 @@ import { hasPermission } from "../access";
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
+import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -403,7 +404,7 @@ function normalizedMcpCredentialHeaders(
 }
 
 async function validateMcpCapabilityConnectionRef(
-  input: { db: Database; grant: AccessGrant; workspaceId: string },
+  input: { db: Database; grant: AccessGrant; workspaceId: string; settings: Settings },
   item: CapabilityCatalogItem,
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
@@ -451,6 +452,7 @@ async function validateMcpCapabilityConnectionRef(
     });
   }
   if (normalized.authoritySource === "host") {
+    assertHostMcpAuthoritySourceAdmissionEnabled(input.settings, normalized);
     return normalized;
   }
 
@@ -1692,16 +1694,11 @@ function installationConnectionRef(
     return null;
   }
   if (authoritySource === "host") {
-    if (typeof connectionId !== "string") {
-      return null;
-    }
-    return {
-      authoritySource: "host",
-      connectionId,
-      providerDomain,
-      kind,
-      ...(subjectScope === "subject" ? { subjectScope: "subject" } : {}),
-    };
+    // The internal installation/runtime ref retains the exact host binding.
+    // Public capability catalogs use the existing null representation for an
+    // enabled capability without a native OpenGeni connection, so indefinitely
+    // open old browser bundles cannot treat a host UUID as native OAuth state.
+    return null;
   }
   if (subjectScope === "subject") {
     // Never project a native personal connection UUID through workspace-visible

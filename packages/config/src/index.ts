@@ -510,6 +510,13 @@ const SettingsSchema = z.object({
   // into @opengeni/db once at boot.
   // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
   childLifecycleNoticesEnabled: EnvBoolean.default(false),
+  // Explicit host-owned MCP connection authority is a rolling protocol
+  // activation. Keep it off while any API, worker, or browser bundle predates
+  // the authority discriminator; enable it only after the whole fleet runs an
+  // image that understands host refs. Legacy markerless non-UUID refs remain a
+  // separate compatibility lane for already-persisted embedding integrations.
+  // Env: OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED.
+  hostMcpAuthoritySourceAdmissionEnabled: EnvBoolean.default(false),
   // Per-channel and per-DM Slack workspace routing. Default ON. A channel does
   // not count a personal workspace as a candidate, so an organization with one
   // shared workspace resolves it as the sole candidate and never asks; the
@@ -2403,6 +2410,9 @@ export function getSettings(): Settings {
     goalIdleBackoffMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MS"),
     goalIdleBackoffMaxMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS"),
     childLifecycleNoticesEnabled: optional("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED"),
+    hostMcpAuthoritySourceAdmissionEnabled: optional(
+      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
+    ),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
@@ -5827,6 +5837,14 @@ function validateSettings(settings: Settings): void {
       throw new Error(`OPENGENI_MCP_SERVERS contains duplicate id ${server.id}`);
     }
     serverIds.add(server.id);
+    if (
+      server.connectionRef?.authoritySource === "host" &&
+      !settings.hostMcpAuthoritySourceAdmissionEnabled
+    ) {
+      throw new Error(
+        "OPENGENI_MCP_SERVERS host-owned connection refs require OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true after the whole API/worker fleet is upgraded",
+      );
+    }
   }
   // --- sandbox lease cadence invariant (fail fast at boot) ---
   // Holder TTLs are provider-neutral. Modal's finite hard/idle clocks and

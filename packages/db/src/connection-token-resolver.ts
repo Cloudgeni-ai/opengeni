@@ -114,6 +114,8 @@ export type ResolveConnectionCredentialResult =
   | {
       status: "ok";
       headers: Record<string, string>;
+      /** Credential authority is owned by the embedding host, not the native connection store. */
+      authoritySource?: "host";
       /** Present when the credential bundle or embedding host supplied explicit placements. */
       placements?: ConnectionCredentialPlacement[];
       connectionId: string;
@@ -345,6 +347,7 @@ export function buildHostConnectionTokenResolver(
     return {
       status: "ok",
       headers,
+      authoritySource: "host",
       ...(explicitPlacements ? { placements: explicitPlacements } : {}),
       connectionId: result.connectionId,
       ...(expiresAt !== undefined ? { expiresAt } : {}),

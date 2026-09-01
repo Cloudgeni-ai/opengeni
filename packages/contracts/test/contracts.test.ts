@@ -645,6 +645,7 @@ describe("contracts", () => {
         authoritySource: "host",
         provider: "gitlab",
         reason: "unsupported_auth",
+        hostReason: "resource_scope_unavailable",
         selectedResources: [{ kind: "repository", id: "project-42" }],
       }).connectionId,
     ).toBe("host:connection:42");
@@ -655,8 +656,18 @@ describe("contracts", () => {
         connectionId: "host:connection:42",
         authoritySource: "host",
         reason: "unsupported_auth",
+        hostReason: "refresh_failed",
       }).authoritySource,
     ).toBe("host");
+    expect(
+      ToolAuthNeededPayload.safeParse({
+        serverId: "provider-tools",
+        providerDomain: "provider.example",
+        connectionId: "host:connection:42",
+        authoritySource: "host",
+        reason: "refresh_failed",
+      }).success,
+    ).toBe(false);
     expect(
       CredentialAuthNeededPayload.parse({
         credentialClass: "run",
