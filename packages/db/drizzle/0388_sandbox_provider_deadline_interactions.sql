@@ -309,15 +309,99 @@ $deadline_interaction_reaper$;
 DO $interaction_backlog_metric$
 DECLARE data_schema text := current_schema();
 BEGIN
+  IF pg_catalog.to_regprocedure(
+    'opengeni_private.sandbox_rotation_backlog()'
+  ) IS NULL THEN
+    RAISE EXCEPTION '0388 sandbox rotation backlog prerequisite missing'
+      USING ERRCODE = '55000';
+  END IF;
+
   EXECUTE pg_catalog.format($create$
-    CREATE OR REPLACE FUNCTION
-      opengeni_private.sandbox_rotation_interaction_blocked()
-    RETURNS bigint
-    LANGUAGE sql
+    CREATE OR REPLACE FUNCTION opengeni_private.sandbox_rotation_backlog()
+    RETURNS TABLE (
+      requested bigint,
+      overdue bigint,
+      turn_blocked bigint,
+      direct_blocked bigint,
+      process_blocked bigint
+    )
+    LANGUAGE plpgsql
     SECURITY DEFINER
     SET search_path = pg_catalog
     AS $function$
+    DECLARE inventory_capability_id uuid;
+    BEGIN
+      inventory_capability_id :=
+        opengeni_private.open_session_tenancy_fence_inventory(
+          %1$I.session_tenancy_fence_target_schema()
+        );
+      RETURN QUERY
+      SELECT
+        pg_catalog.count(*) FILTER (
+          WHERE lease.rotation_requested_at IS NOT NULL
+        )::bigint,
+        pg_catalog.count(*) FILTER (
+          WHERE lease.rotation_requested_at IS NOT NULL
+            AND lease.provider_deadline_at <= pg_catalog.now()
+        )::bigint,
+        pg_catalog.count(*) FILTER (
+          WHERE lease.rotation_requested_at IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM %1$I.sandbox_lease_holders holder
+              WHERE holder.lease_id = lease.id
+                AND holder.kind = 'turn'
+            )
+        )::bigint,
+        pg_catalog.count(*) FILTER (
+          WHERE lease.rotation_requested_at IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM %1$I.sandbox_lease_holders holder
+              WHERE holder.lease_id = lease.id
+                AND holder.kind = 'direct'
+            )
+        )::bigint,
+        pg_catalog.count(*) FILTER (
+          WHERE lease.rotation_requested_at IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM %1$I.sandbox_lease_holders holder
+              WHERE holder.lease_id = lease.id
+                AND holder.kind = 'process'
+            )
+        )::bigint
+      FROM %1$I.sandbox_leases lease
+      WHERE lease.backend = 'modal'
+        AND lease.liveness IN ('warming', 'warm', 'draining');
+      PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+        inventory_capability_id
+      );
+    EXCEPTION WHEN OTHERS THEN
+      PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+        inventory_capability_id
+      );
+      RAISE;
+    END
+    $function$;
+
+    CREATE OR REPLACE FUNCTION
+      opengeni_private.sandbox_rotation_interaction_blocked()
+    RETURNS bigint
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    DECLARE
+      inventory_capability_id uuid;
+      blocked_count bigint;
+    BEGIN
+      inventory_capability_id :=
+        opengeni_private.open_session_tenancy_fence_inventory(
+          %1$I.session_tenancy_fence_target_schema()
+        );
       SELECT pg_catalog.count(*)::bigint
+      INTO blocked_count
       FROM %1$I.sandbox_leases lease
       WHERE lease.backend = 'modal'
         AND lease.liveness IN ('warming', 'warm', 'draining')
@@ -328,11 +412,24 @@ BEGIN
           WHERE holder.lease_id = lease.id
             AND holder.kind = 'interaction'
         );
+      PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+        inventory_capability_id
+      );
+      RETURN blocked_count;
+    EXCEPTION WHEN OTHERS THEN
+      PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+        inventory_capability_id
+      );
+      RAISE;
+    END
     $function$;
   $create$, data_schema);
 END
 $interaction_backlog_metric$;
 
+REVOKE ALL ON FUNCTION
+  opengeni_private.sandbox_rotation_backlog()
+  FROM PUBLIC;
 REVOKE ALL ON FUNCTION
   opengeni_private.sandbox_rotation_interaction_blocked()
   FROM PUBLIC;
@@ -340,6 +437,9 @@ REVOKE ALL ON FUNCTION
 DO $interaction_backlog_grant$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.sandbox_rotation_backlog()
+      TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
       opengeni_private.sandbox_rotation_interaction_blocked()
       TO opengeni_app;

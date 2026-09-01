@@ -44,6 +44,16 @@ describe("migration 0388 sandbox provider-deadline interactions", () => {
     expect(source).toContain("failure_code = 'provider_deadline_rotation'");
     expect(source).toContain("sandbox_rotation_interaction_blocked");
     expect(source).not.toMatch(/last_heartbeat_at\s*</u);
+
+    const metricBlock = source.slice(
+      source.indexOf("DO $interaction_backlog_metric$"),
+      source.indexOf("$interaction_backlog_metric$;") + "$interaction_backlog_metric$;".length,
+    );
+    expect(metricBlock).toContain(
+      "CREATE OR REPLACE FUNCTION opengeni_private.sandbox_rotation_backlog()",
+    );
+    expect(metricBlock.match(/open_session_tenancy_fence_inventory/gu)).toHaveLength(2);
+    expect(metricBlock.match(/close_session_tenancy_fence_inventory/gu)).toHaveLength(4);
   });
 
   test("keeps active controllers before the deadline, then terminalizes exact holders at it", async () => {
