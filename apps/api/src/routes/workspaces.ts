@@ -69,6 +69,8 @@ import {
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
   workspaceOpenRouterConnectionActive,
+  organizationModelProviderConnectionActiveForWorkspace,
+  listOrganizationModelProviderCustomModelsForWorkspace,
   WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceOpenRouterCustomModelHistoryLimitError,
   WorkspaceExternalIdentityConflictError,
@@ -398,6 +400,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceGatewayCustomModels,
       openRouterConnectionActive,
       workspaceOpenRouterCustomModels,
+      organizationGatewayConnectionActive,
+      organizationOpenRouterConnectionActive,
+      organizationGatewayCustomModels,
+      organizationOpenRouterCustomModels,
     ] = await Promise.all([
       deps.resolveCatalogSettings(),
       getWorkspaceModelPolicy(deps.db, workspaceId),
@@ -413,6 +419,26 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
       }),
+      organizationModelProviderConnectionActiveForWorkspace(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        providerKind: "vercel_gateway",
+      }),
+      organizationModelProviderConnectionActiveForWorkspace(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        providerKind: "openrouter",
+      }),
+      listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        providerKind: "vercel_gateway",
+      }),
+      listOrganizationModelProviderCustomModelsForWorkspace(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        providerKind: "openrouter",
+      }),
     ]);
     c.header("cache-control", "private, no-store");
     return c.json(
@@ -426,6 +452,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceGatewayCustomModels,
           workspaceOpenRouterConnectionActive: openRouterConnectionActive,
           workspaceOpenRouterCustomModels,
+          organizationGatewayConnectionActive,
+          organizationOpenRouterConnectionActive,
+          organizationGatewayCustomModels,
+          organizationOpenRouterCustomModels,
         }),
       ),
     );

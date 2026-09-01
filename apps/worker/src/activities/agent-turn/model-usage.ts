@@ -125,6 +125,8 @@ export function createCompactionModelUsageEventState(
   return { usageCount: 0, claimedSourceKeys };
 }
 
+export const createSessionTitleModelUsageEventState = createCompactionModelUsageEventState;
+
 export function modelResponseContextSignal(
   state: ModelResponseEventState,
 ): { revision: number; totalTokens: number } | null {
@@ -342,6 +344,7 @@ export async function processModelResponseTerminalEvent(input: {
 export async function processCompactionModelUsageEvent(input: {
   usage: ModelResponseUsage;
   state: CompactionModelUsageEventState;
+  sourceKind?: "compaction" | "session-title";
   dispatchId: string | null;
   settings: Settings;
   db: ActivityServices["db"];
@@ -373,7 +376,7 @@ export async function processCompactionModelUsageEvent(input: {
   const sourceKey = modelUsageSourceKey({
     responseId: input.usage.responseId,
     dispatchId: input.dispatchId,
-    positionalKey: `compaction-${usageOrdinal}`,
+    positionalKey: `${input.sourceKind ?? "compaction"}-${usageOrdinal}`,
   });
   if (input.state.claimedSourceKeys.has(sourceKey)) {
     return { status: "duplicate", sourceKey };
@@ -454,6 +457,15 @@ export async function processCompactionModelUsageEvent(input: {
     },
   });
   return { status: "processed", sourceKey, authoritative };
+}
+
+export async function processSessionTitleModelUsageEvent(
+  input: Omit<Parameters<typeof processCompactionModelUsageEvent>[0], "sourceKind">,
+): ReturnType<typeof processCompactionModelUsageEvent> {
+  return await processCompactionModelUsageEvent({
+    ...input,
+    sourceKind: "session-title",
+  });
 }
 
 export async function emitModelCallUsage(input: {

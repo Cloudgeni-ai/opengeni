@@ -36,6 +36,10 @@ import {
   withWorkspaceGatewayCredential,
   withWorkspaceOpenRouterCatalogProvider,
   withWorkspaceOpenRouterCredential,
+  withOrganizationGatewayCatalogProvider,
+  withOrganizationGatewayCredential,
+  withOrganizationOpenRouterCatalogProvider,
+  withOrganizationOpenRouterCredential,
   configuredOpenRouterWorkspaceProductModelIds,
   OPENGENI_GATEWAY_MODELS,
   OPENGENI_GATEWAY_PROVIDER_ID,
@@ -53,6 +57,50 @@ describe("direct OpenAI API identity", () => {
     expect(isDirectOpenAiApiBaseUrl("https://api.openai.com/v1/")).toBe(true);
     expect(isDirectOpenAiApiBaseUrl("https://api.openai.com/v1?proxy=1")).toBe(false);
     expect(isDirectOpenAiApiBaseUrl("https://proxy.example/v1")).toBe(false);
+  });
+});
+
+describe("organization provider rails", () => {
+  test("keeps Vercel and OpenRouter organization identity, payer, and credentials separate", () => {
+    const base = getSettings({ OPENGENI_ENV: "test" });
+    const gateway = withOrganizationGatewayCredential(
+      withOrganizationGatewayCatalogProvider(base, [
+        { upstreamModelId: "anthropic/claude-org", label: "Org Claude" },
+      ]),
+      "org-gateway-secret",
+      [{ upstreamModelId: "anthropic/claude-org", label: "Org Claude" }],
+    );
+    const settings = withOrganizationOpenRouterCredential(
+      withOrganizationOpenRouterCatalogProvider(gateway, [
+        { upstreamModelId: "openai/gpt-org", label: "Org GPT" },
+      ]),
+      "org-openrouter-secret",
+      [{ upstreamModelId: "openai/gpt-org", label: "Org GPT" }],
+    );
+    const models = configuredModels(settings).filter((model) =>
+      model.id.startsWith("organization-"),
+    );
+    expect(models.map((model) => model.id)).toEqual([
+      "organization-gateway/anthropic/claude-org",
+      "organization-openrouter/openai/gpt-org",
+    ]);
+    for (const model of models) {
+      expect(model.credentialSource).toEqual({
+        kind: "organization_connection",
+        mechanism: "api_key",
+      });
+      expect(model.billing).toEqual({ upstreamPayer: "organization", metering: "external" });
+      expect(model.cost).toBe("organization");
+    }
+    expect(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: models[0]!.id,
+        requestedModelId: models[0]!.id,
+        modelSource: "explicit",
+        reasoningEffort: "medium",
+        reasoningSource: "explicit",
+      }).billing.upstreamPayer,
+    ).toBe("organization");
   });
 });
 

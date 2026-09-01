@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { encodeNativeSnapshotRef } from "@opengeni/contracts";
+import {
+  canonicalModalCheckpointProviderBinding,
+  encodeNativeSnapshotRef,
+} from "@opengeni/contracts";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import { createDb } from "../src/database";
@@ -19,20 +22,24 @@ import {
 import { rigProviderImageCleanupObligationStateValues } from "../src/schema";
 
 const migrationUrl = new URL(
-  "../drizzle/0391_durable_rig_provider_image_cleanup.sql",
+  "../drizzle/0392_durable_rig_provider_image_cleanup.sql",
   import.meta.url,
 );
 const schemaUrl = new URL("../src/schema.ts", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const providerBinding = {
+const providerIdentity = canonicalModalCheckpointProviderBinding({
   version: 1,
   serverUrl: "https://api.modal.com",
   workspaceName: "workspace-a",
   environment: "main",
-};
-const providerBindingKey = JSON.stringify(providerBinding);
+});
+if (!providerIdentity) {
+  throw new Error("migration 0392 fixture has an invalid Modal provider binding");
+}
+const providerBinding = providerIdentity.binding;
+const providerBindingKey = providerIdentity.key;
 
-describe("migration 0391 durable Rig provider image cleanup", () => {
+describe("migration 0392 durable Rig provider image cleanup", () => {
   test("persists pre-creation identity and protects registered artifacts from cleanup", async () => {
     const source = await Bun.file(migrationUrl).text();
     const schemaSource = (await Bun.file(schemaUrl).text()).replace(/\s+/gu, " ");
@@ -41,6 +48,14 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
     expect(source).toContain(
       "provider_backend, provider_binding_key, build_request_id, source_instance_id",
     );
+    expect(source).toContain("CONSTRAINT rig_provider_image_cleanup_backend_check");
+    expect(source).toContain("CONSTRAINT rig_provider_image_cleanup_binding_shape_check");
+    expect(source).toContain("CONSTRAINT rig_provider_image_cleanup_binding_key_check");
+    expect(source).toContain("CONSTRAINT rig_provider_image_cleanup_object_check");
+    expect(schemaSource).toContain('"rig_provider_image_cleanup_backend_check"');
+    expect(schemaSource).toContain('"rig_provider_image_cleanup_binding_shape_check"');
+    expect(schemaSource).toContain('"rig_provider_image_cleanup_binding_key_check"');
+    expect(schemaSource).toContain('"rig_provider_image_cleanup_object_check"');
     expect(source).toContain(
       "state IN ('building', 'outcome_unknown', 'build_failed') AND object_id IS NULL",
     );
@@ -67,11 +82,11 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
     expect(FORCE_RLS_TABLES).toContain("rig_provider_image_cleanup_obligations");
     expect(RUNTIME_FULL_DML_TABLES).toContain("rig_provider_image_cleanup_obligations");
 
-    const blank = await acquireBlankTestDatabase("migration-0391-rig-provider-image-cleanup");
+    const blank = await acquireBlankTestDatabase("migration-0392-rig-provider-image-cleanup");
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0391 PostgreSQL harness is unavailable",
+          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0392 PostgreSQL harness is unavailable",
         );
       }
       return;
@@ -82,7 +97,7 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
     try {
       await migrate(blank.databaseUrl);
       if (!blank.appPassword) {
-        throw new Error("migration 0391 test database has no shared app-role password");
+        throw new Error("migration 0392 test database has no shared app-role password");
       }
       await provisionRoles(blank.databaseUrl, {
         rlsStrategy: "force",
@@ -124,7 +139,7 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
           ) values (
             ${appObligationId}, ${appAccountId}, ${appWorkspaceId}, ${crypto.randomUUID()},
             ${crypto.randomUUID()}, 1, 'sb-app-role', 1, 'modal', ${providerBindingKey},
-            ${JSON.stringify(providerBinding)}::jsonb, 'app-role-crud'
+            ${tx.json(providerBinding)}::jsonb, 'app-role-crud'
           )
         `;
         const selected = await tx<Array<{ id: string }>>`
@@ -165,7 +180,7 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
         ) values (
           ${obligationId}, ${cleanupAccountId}, ${cleanupWorkspaceId},
           ${crypto.randomUUID()}, ${crypto.randomUUID()}, 4, 'sb-source', 2,
-          'modal', ${providerBindingKey}, ${JSON.stringify(providerBinding)}::jsonb,
+          'modal', ${providerBindingKey}, ${sql.json(providerBinding)}::jsonb,
           'rig-provider-image-request'
         )
       `;
@@ -292,7 +307,7 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
         ) values (
           ${protectedObligationId}, ${accountId}, ${workspaceId}, ${sandboxGroupId},
           ${sourceLeaseId}, 5, 'sb-protected', 3, 'modal', ${providerBindingKey},
-          ${JSON.stringify(providerBinding)}::jsonb, 'registered-request',
+          ${sql.json(providerBinding)}::jsonb, 'registered-request',
           ${protectedObjectId}, 'delete_pending', now()
         )
       `;
@@ -306,9 +321,9 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
         ) values (
           ${accountId}, ${workspaceId}, ${sandboxGroupId}, ${sourceLeaseId}, 5,
           'sb-protected', 3, 'native_capture', 'modal', ${providerBindingKey},
-          ${JSON.stringify(providerBinding)}::jsonb, 'modal_filesystem_snapshot',
+          ${sql.json(providerBinding)}::jsonb, 'modal_filesystem_snapshot',
           ${protectedObjectId}, ${Buffer.from(archive).toString("base64")},
-          ${archiveSha256}, ${archive.byteLength}, ${JSON.stringify(descriptor)}::jsonb,
+          ${archiveSha256}, ${archive.byteLength}, ${sql.json(descriptor)}::jsonb,
           ${descriptor.revision}, 'candidate'
         )
       `;

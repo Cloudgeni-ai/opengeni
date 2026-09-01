@@ -594,6 +594,15 @@ A new attempt does not imply a new prompt. A new prompt does imply a new turn.
 This distinction is the basis for safe worker-death recovery and protection
 against duplicate external effects.
 
+Automatic semantic naming is an attempt-owned auxiliary branch, not part of the
+main model/tool loop. When the durable title is still pending and exact session
+tool policy permits naming, the production runtime starts one bounded tool-less
+title request in parallel with the ordinary stream, meters it independently,
+and aborts/joins it before atomic turn settlement. The title write uses the
+generic session-title lifecycle and still loses to a human rename. Custom
+runtimes without the optional auxiliary seam retain the serialized
+`set_session_title` compatibility path.
+
 ### 5.2 Lifecycle overview
 
 ```mermaid
@@ -816,6 +825,11 @@ boundaries. Provider subscription pools such as Codex or SuperGrok add their
 own credential and capacity authority without changing the logical-turn model.
 Codex may resolve to a workspace pool or an organization pool inherited by a
 shared workspace; the resolved pool remains one complete allocator boundary.
+Vercel AI Gateway and OpenRouter expose separate workspace- and
+organization-owned BYOK products. Organization products use dedicated encrypted
+FORCE-RLS storage, inherit only into same-organization shared workspaces, and
+retain organization payer identity through admission and execution; no rail
+implicitly falls back to another key.
 Provider-refusal cooldowns carry separate provenance and revision authority so
 fresh usage repairs only an older quota refusal, never generic backpressure or
 a concurrently newer refusal. All-capped admission and durable capacity waits
@@ -1283,7 +1297,7 @@ This index intentionally routes at subsystem granularity. Use
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
-| Model registry, routing, pricing, or provider identity | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts` | [`model-providers.md`](model-providers.md) |
+| Model registry, routing, pricing, provider identity, or OpenAI-compatible inference routes | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |

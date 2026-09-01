@@ -15,6 +15,8 @@ import type {
   RuntimeMetricsHooks,
 } from "./metrics";
 import {
+  OrganizationGatewayUnavailableError,
+  OrganizationOpenRouterUnavailableError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
 } from "./model-provider-errors";
@@ -243,10 +245,17 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
-  const workspaceCredentialProvider = provider.credentialSource?.kind === "workspace_connection";
-  const gatewayProvider = workspaceGateway || provider.kind === "vercel-gateway-managed";
+  const scopedCredentialProvider =
+    provider.credentialSource?.kind === "workspace_connection" ||
+    provider.credentialSource?.kind === "organization_connection";
+  const gatewayProvider =
+    workspaceGateway ||
+    provider.kind === "vercel-gateway-organization" ||
+    provider.kind === "vercel-gateway-managed";
   const openRouterProvider =
-    provider.kind === "openrouter-managed" || provider.kind === "openrouter-workspace";
+    provider.kind === "openrouter-managed" ||
+    provider.kind === "openrouter-workspace" ||
+    provider.kind === "openrouter-organization";
   const gatewayPolicies = gatewayProvider
     ? new Map(
         configuredModels(settings)
@@ -255,11 +264,17 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
       )
     : undefined;
   const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies);
-  const cached = workspaceCredentialProvider ? undefined : providerClientCache.get(cacheKey);
+  const cached = scopedCredentialProvider ? undefined : providerClientCache.get(cacheKey);
   if (cached) {
     return cached;
   }
-  if (workspaceCredentialProvider && !provider.apiKey) {
+  if (scopedCredentialProvider && !provider.apiKey) {
+    if (provider.kind === "openrouter-organization") {
+      throw new OrganizationOpenRouterUnavailableError();
+    }
+    if (provider.kind === "vercel-gateway-organization") {
+      throw new OrganizationGatewayUnavailableError();
+    }
     if (provider.kind === "openrouter-workspace") {
       throw new WorkspaceOpenRouterUnavailableError();
     }
@@ -347,7 +362,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             },
             { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
           );
-  if (!workspaceCredentialProvider) {
+  if (!scopedCredentialProvider) {
     cacheProviderClient(cacheKey, provider.id, client);
   }
   return client;

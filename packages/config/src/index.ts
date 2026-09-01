@@ -1810,10 +1810,11 @@ export type ModelExecutionLimitsV1 = {
 export type CredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" }
-  | { kind: "workspace_connection"; mechanism: "api_key" };
+  | { kind: "workspace_connection"; mechanism: "api_key" }
+  | { kind: "organization_connection"; mechanism: "api_key" };
 
 export type BillingAttributionV1 = {
-  upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+  upstreamPayer: "deployment" | "workspace" | "organization" | "connected_subscription";
   metering: "opengeni_credits" | "external";
 };
 
@@ -1848,7 +1849,9 @@ export const RegistryProviderKind = z.enum([
   "xai-subscription",
   "vercel-gateway-managed",
   "vercel-gateway-workspace",
+  "vercel-gateway-organization",
   "openrouter-workspace",
+  "openrouter-organization",
 ]);
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
@@ -1974,10 +1977,14 @@ export type RegistryProvider = z.infer<typeof RegistryProviderSchema>;
 export const OPENGENI_GATEWAY_PROVIDER_ID = "opengeni-gateway" as const;
 export const WORKSPACE_GATEWAY_PROVIDER_ID = "workspace-gateway" as const;
 export const WORKSPACE_GATEWAY_MODEL_ID_PREFIX = "workspace-gateway/" as const;
+export const ORGANIZATION_GATEWAY_PROVIDER_ID = "organization-gateway" as const;
+export const ORGANIZATION_GATEWAY_MODEL_ID_PREFIX = "organization-gateway/" as const;
 export const OPENROUTER_PROVIDER_ID = "openrouter" as const;
 export const OPENROUTER_MODEL_ID_PREFIX = "openrouter/" as const;
 export const WORKSPACE_OPENROUTER_PROVIDER_ID = "workspace-openrouter" as const;
 export const WORKSPACE_OPENROUTER_MODEL_ID_PREFIX = "workspace-openrouter/" as const;
+export const ORGANIZATION_OPENROUTER_PROVIDER_ID = "organization-openrouter" as const;
+export const ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX = "organization-openrouter/" as const;
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1" as const;
 
 const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
@@ -1987,14 +1994,22 @@ const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
   XAI_SUBSCRIPTION_PROVIDER_ID,
   OPENGENI_GATEWAY_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
+  ORGANIZATION_GATEWAY_PROVIDER_ID,
   OPENROUTER_PROVIDER_ID,
   WORKSPACE_OPENROUTER_PROVIDER_ID,
+  ORGANIZATION_OPENROUTER_PROVIDER_ID,
 ]);
 
 export const ModelCostClass = z.enum(["free", "credits"]);
 export type ModelCostClass = z.infer<typeof ModelCostClass>;
 
-export const ConfiguredModelCostClass = z.enum(["free", "credits", "subscription", "workspace"]);
+export const ConfiguredModelCostClass = z.enum([
+  "free",
+  "credits",
+  "subscription",
+  "workspace",
+  "organization",
+]);
 export type ConfiguredModelCostClass = z.infer<typeof ConfiguredModelCostClass>;
 
 const ModelNote = z
@@ -2527,6 +2542,11 @@ export function configuredGatewayWorkspaceProductModelIds(settings: Settings): s
   return configuredGatewayCatalogModels(settings).map((model) => model.workspaceProductId);
 }
 
+export function configuredGatewayOrganizationProductModelIds(settings: Settings): string[] {
+  void settings;
+  return [];
+}
+
 export function configuredModelInputIdentities(settings: Settings): string[] {
   return configuredModels(settings).flatMap((model) => [model.id, ...model.aliases]);
 }
@@ -2554,6 +2574,11 @@ export function configuredOpenRouterWorkspaceProductModelIds(settings: Settings)
   return configuredOpenRouterCatalogModels(settings).flatMap((model) =>
     [model.upstreamModelId, ...model.aliases].map(workspaceOpenRouterProductId),
   );
+}
+
+export function configuredOpenRouterOrganizationProductModelIds(settings: Settings): string[] {
+  void settings;
+  return [];
 }
 
 /**
@@ -3702,7 +3727,7 @@ function gatewayRegistryProvider(
   input:
     | { kind: "vercel-gateway-managed"; apiKey: string }
     | {
-        kind: "vercel-gateway-workspace";
+        kind: "vercel-gateway-workspace" | "vercel-gateway-organization";
         apiKey?: string;
         customModels?: readonly {
           upstreamModelId: string;
@@ -3711,19 +3736,30 @@ function gatewayRegistryProvider(
       },
 ): InternalRegistryProvider {
   const workspace = input.kind === "vercel-gateway-workspace";
-  const curated = configuredGatewayCatalogModels(settings);
+  const organization = input.kind === "vercel-gateway-organization";
+  const scoped = workspace || organization;
+  const curated = organization ? [] : configuredGatewayCatalogModels(settings);
   const upstreamIds = new Set(curated.map((model) => model.upstreamModelId));
   const productIds = new Set(
     parseModelProvidersJson(settings.modelProvidersJson)
-      .filter((provider) => provider.id !== WORKSPACE_GATEWAY_PROVIDER_ID)
+      .filter(
+        (provider) =>
+          provider.id !== WORKSPACE_GATEWAY_PROVIDER_ID &&
+          provider.id !== ORGANIZATION_GATEWAY_PROVIDER_ID,
+      )
       .flatMap((provider) =>
         provider.models.flatMap((model) => [model.id, ...(model.aliases ?? [])]),
       ),
   );
   const models = curated.map((model) => {
-    productIds.add(workspace ? model.workspaceProductId : model.productId);
+    const id = workspace
+      ? model.workspaceProductId
+      : organization
+        ? `${ORGANIZATION_GATEWAY_MODEL_ID_PREFIX}${model.upstreamModelId}`
+        : model.productId;
+    productIds.add(id);
     return {
-      id: workspace ? model.workspaceProductId : model.productId,
+      id,
       upstreamModelId: model.upstreamModelId,
       label: model.label,
       ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
@@ -3739,9 +3775,9 @@ function gatewayRegistryProvider(
       ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
     };
   });
-  if (workspace) {
+  if (scoped) {
     for (const custom of input.customModels ?? []) {
-      const productId = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
+      const productId = `${workspace ? WORKSPACE_GATEWAY_MODEL_ID_PREFIX : ORGANIZATION_GATEWAY_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
       // Deployment membership wins over an older or concurrently-created
       // workspace row with the same upstream identity or generated product id.
       // This keeps runtime routing deterministic and prevents a legacy/admin
@@ -3767,8 +3803,12 @@ function gatewayRegistryProvider(
   }
   return {
     kind: input.kind,
-    id: workspace ? WORKSPACE_GATEWAY_PROVIDER_ID : OPENGENI_GATEWAY_PROVIDER_ID,
-    label: workspace ? "Your Gateway" : "OpenGeni",
+    id: workspace
+      ? WORKSPACE_GATEWAY_PROVIDER_ID
+      : organization
+        ? ORGANIZATION_GATEWAY_PROVIDER_ID
+        : OPENGENI_GATEWAY_PROVIDER_ID,
+    label: workspace ? "Your Gateway" : organization ? "Organization Gateway" : "OpenGeni",
     // Responses preserves vision, reasoning items, and provider-native usage.
     // Model-specific compatibility stays at the reviewed request fence rather
     // than downgrading the whole provider wire.
@@ -3785,7 +3825,7 @@ function openRouterRegistryProvider(
   input:
     | { kind: "openrouter-managed"; apiKey: string }
     | {
-        kind: "openrouter-workspace";
+        kind: "openrouter-workspace" | "openrouter-organization";
         apiKey?: string;
         customModels?: readonly {
           upstreamModelId: string;
@@ -3794,11 +3834,17 @@ function openRouterRegistryProvider(
       },
 ): InternalRegistryProvider | null {
   const workspace = input.kind === "openrouter-workspace";
-  const curated = configuredOpenRouterCatalogModels(settings);
+  const organization = input.kind === "openrouter-organization";
+  const scoped = workspace || organization;
+  const curated = organization ? [] : configuredOpenRouterCatalogModels(settings);
   const upstreamIds = new Set(curated.map((model) => model.upstreamModelId));
   const productIds = new Set(
     parseModelProvidersJson(settings.modelProvidersJson)
-      .filter((provider) => provider.id !== WORKSPACE_OPENROUTER_PROVIDER_ID)
+      .filter(
+        (provider) =>
+          provider.id !== WORKSPACE_OPENROUTER_PROVIDER_ID &&
+          provider.id !== ORGANIZATION_OPENROUTER_PROVIDER_ID,
+      )
       .flatMap((provider) =>
         provider.models.flatMap((model) => [model.id, ...(model.aliases ?? [])]),
       ),
@@ -3806,8 +3852,14 @@ function openRouterRegistryProvider(
   const models: RegistryProvider["models"] = curated.map((model) => {
     const id = workspace
       ? workspaceOpenRouterProductId(model.upstreamModelId)
-      : `${OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`;
-    const aliases = workspace ? model.aliases.map(workspaceOpenRouterProductId) : model.aliases;
+      : organization
+        ? `${ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`
+        : `${OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`;
+    const aliases = workspace
+      ? model.aliases.map(workspaceOpenRouterProductId)
+      : organization
+        ? model.aliases.map((alias) => `${ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX}${alias}`)
+        : model.aliases;
     productIds.add(id);
     for (const alias of aliases) productIds.add(alias);
     return {
@@ -3830,9 +3882,9 @@ function openRouterRegistryProvider(
         model.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens,
     };
   });
-  if (workspace) {
+  if (scoped) {
     for (const custom of input.customModels ?? []) {
-      const productId = `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
+      const productId = `${workspace ? WORKSPACE_OPENROUTER_MODEL_ID_PREFIX : ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
       if (upstreamIds.has(custom.upstreamModelId) || productIds.has(productId)) continue;
       upstreamIds.add(custom.upstreamModelId);
       productIds.add(productId);
@@ -3853,8 +3905,12 @@ function openRouterRegistryProvider(
   };
   return {
     kind: input.kind,
-    id: workspace ? WORKSPACE_OPENROUTER_PROVIDER_ID : OPENROUTER_PROVIDER_ID,
-    label: workspace ? "Your OpenRouter" : "OpenRouter",
+    id: workspace
+      ? WORKSPACE_OPENROUTER_PROVIDER_ID
+      : organization
+        ? ORGANIZATION_OPENROUTER_PROVIDER_ID
+        : OPENROUTER_PROVIDER_ID,
+    label: workspace ? "Your OpenRouter" : organization ? "Organization OpenRouter" : "OpenRouter",
     api: "chat",
     wireProfile: "openai",
     baseUrl: OPENROUTER_BASE_URL,
@@ -3971,6 +4027,65 @@ export function withWorkspaceOpenRouterCredential(
     provider.id === WORKSPACE_OPENROUTER_PROVIDER_ID ? { ...provider, apiKey } : provider,
   );
   return { ...catalogSettings, modelProvidersJson: JSON.stringify(providers) };
+}
+
+/** Secret-free organization Vercel AI Gateway catalog overlay. */
+export function withOrganizationGatewayCatalogProvider(
+  settings: Settings,
+  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+): Settings {
+  if (customModels.length === 0) return settings;
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
+    (provider) => provider.id !== ORGANIZATION_GATEWAY_PROVIDER_ID,
+  );
+  const provider = gatewayRegistryProvider(settings, {
+    kind: "vercel-gateway-organization",
+    customModels,
+  });
+  return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
+}
+
+export function withOrganizationGatewayCredential(
+  settings: Settings,
+  apiKey: string,
+  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+): Settings {
+  if (!apiKey.trim()) throw new Error("organization AI Gateway credential is empty");
+  const catalog = withOrganizationGatewayCatalogProvider(settings, customModels);
+  const providers = parseModelProvidersJson(catalog.modelProvidersJson).map((provider) =>
+    provider.id === ORGANIZATION_GATEWAY_PROVIDER_ID ? { ...provider, apiKey } : provider,
+  );
+  return { ...catalog, modelProvidersJson: JSON.stringify(providers) };
+}
+
+/** Secret-free organization OpenRouter catalog overlay. */
+export function withOrganizationOpenRouterCatalogProvider(
+  settings: Settings,
+  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
+    (provider) => provider.id !== ORGANIZATION_OPENROUTER_PROVIDER_ID,
+  );
+  const provider = openRouterRegistryProvider(settings, {
+    kind: "openrouter-organization",
+    customModels,
+  });
+  return provider
+    ? { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) }
+    : settings;
+}
+
+export function withOrganizationOpenRouterCredential(
+  settings: Settings,
+  apiKey: string,
+  customModels: readonly { upstreamModelId: string; label?: string | null }[] = [],
+): Settings {
+  if (!apiKey.trim()) throw new Error("organization OpenRouter credential is empty");
+  const catalog = withOrganizationOpenRouterCatalogProvider(settings, customModels);
+  const providers = parseModelProvidersJson(catalog.modelProvidersJson).map((provider) =>
+    provider.id === ORGANIZATION_OPENROUTER_PROVIDER_ID ? { ...provider, apiKey } : provider,
+  );
+  return { ...catalog, modelProvidersJson: JSON.stringify(providers) };
 }
 
 /** OpenAI GPT-5.6 Fast mode is 2× Standard list rates (service_tier fast/priority). */
@@ -4183,6 +4298,9 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
     case "vercel-gateway-workspace":
     case "openrouter-workspace":
       return { kind: "workspace_connection", mechanism: "api_key" };
+    case "vercel-gateway-organization":
+    case "openrouter-organization":
+      return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
     case "vercel-gateway-managed":
     case "openrouter-managed":
@@ -4205,6 +4323,9 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
     case "vercel-gateway-workspace":
     case "openrouter-workspace":
       return { upstreamPayer: "workspace", metering: "external" };
+    case "vercel-gateway-organization":
+    case "openrouter-organization":
+      return { upstreamPayer: "organization", metering: "external" };
     case "api-key":
     case "vercel-gateway-managed":
       return { upstreamPayer: "deployment", metering: "opengeni_credits" };
@@ -4221,6 +4342,7 @@ function configuredCostForModel(
   credentialSource: CredentialSourceV1,
 ): ConfiguredModelCostClass {
   if (credentialSource.kind === "workspace_connection") return "workspace";
+  if (credentialSource.kind === "organization_connection") return "organization";
   if (credentialSource.kind === "connected_subscription") return "subscription";
   return parseModelCostPolicyJson(settings.modelCostPolicyJson)[productModelId] ?? "credits";
 }
@@ -4584,7 +4706,9 @@ function finalizeConfiguredModel(
   input: Omit<ConfiguredModel, "schemaVersion" | "definitionVersion" | "executionLimits" | "cost">,
 ): ConfiguredModel {
   const requestPolicy =
-    provider.kind === "vercel-gateway-managed" || provider.kind === "vercel-gateway-workspace"
+    provider.kind === "vercel-gateway-managed" ||
+    provider.kind === "vercel-gateway-workspace" ||
+    provider.kind === "vercel-gateway-organization"
       ? gatewayRequestPolicyForUpstreamModel(
           input.upstreamModelId,
           configuredGatewayCatalogModels(settings),
@@ -4871,6 +4995,16 @@ function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Se
       return settings;
     }
     return withWorkspaceOpenRouterCatalogProvider(settings);
+  }
+  if (modelId.startsWith(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX)) {
+    return resolveModelProvider(settings, modelId)
+      ? settings
+      : withOrganizationGatewayCatalogProvider(settings);
+  }
+  if (modelId.startsWith(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX)) {
+    return resolveModelProvider(settings, modelId)
+      ? settings
+      : withOrganizationOpenRouterCatalogProvider(settings);
   }
   return settings;
 }
@@ -6768,7 +6902,9 @@ export function validateModelCatalogSettings(
     if (
       provider.kind === "vercel-gateway-managed" ||
       provider.kind === "vercel-gateway-workspace" ||
+      provider.kind === "vercel-gateway-organization" ||
       provider.kind === "openrouter-workspace" ||
+      provider.kind === "openrouter-organization" ||
       provider.kind === "xai-subscription"
     ) {
       throw new Error(

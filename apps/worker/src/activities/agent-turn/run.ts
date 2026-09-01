@@ -22,7 +22,10 @@ import {
   withCodexRequestOverrides,
   type CodexRequestContext,
 } from "@opengeni/codex";
-import { xaiSubscriptionRequestStorage } from "@opengeni/xai-subscription";
+import {
+  xaiSubscriptionRequestStorage,
+  type XaiSubscriptionRequestContext,
+} from "@opengeni/xai-subscription";
 import { buildXaiTurnRequestAuthorization } from "../xai-auth";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { currentActivityContext } from "../streaming";
@@ -78,6 +81,51 @@ import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { buildTurnAgent } from "./agent-build";
+
+/**
+ * Retain subscription credential/account authority for the title sidecar
+ * without sharing main-stream recovery, startup, audit, or opaque-artifact
+ * callbacks. Title usage is returned by the runtime and metered separately.
+ */
+export function sessionTitleCodexRequestContext(
+  context: CodexRequestContext,
+  nextRequestId: () => string,
+): CodexRequestContext {
+  return {
+    clientVersion: context.clientVersion,
+    ...(context.sessionId !== undefined ? { sessionId: context.sessionId } : {}),
+    getToken: context.getToken,
+    refresh: context.refresh,
+    resolveModel: context.resolveModel,
+    ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
+    ...(context.responseTimeoutPolicy
+      ? { responseTimeoutPolicy: context.responseTimeoutPolicy }
+      : {}),
+    nextRequestId,
+    turnMetadata: { request_kind: "session_title" },
+  };
+}
+
+export function sessionTitleXaiRequestContext(
+  context: XaiSubscriptionRequestContext,
+  nextRequestId: () => string,
+): XaiSubscriptionRequestContext {
+  return {
+    clientVersion: context.clientVersion,
+    sessionId: context.sessionId,
+    turnId: context.turnId,
+    getToken: context.getToken,
+    refresh: context.refresh,
+    resolveModel: context.resolveModel,
+    ...(context.streamIdleTimeoutMs !== undefined
+      ? { streamIdleTimeoutMs: context.streamIdleTimeoutMs }
+      : {}),
+    ...(context.hostedToolContinuationTimeoutMs !== undefined
+      ? { hostedToolContinuationTimeoutMs: context.hostedToolContinuationTimeoutMs }
+      : {}),
+    nextRequestId,
+  };
+}
 
 /** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
@@ -780,6 +828,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         providerTurn.xaiRequestContext
           ? xaiSubscriptionRequestStorage.run(providerTurn.xaiRequestContext, fn)
           : withCodex(fn);
+      let codexSessionTitleRequestSequence = 0;
+      let xaiSessionTitleRequestSequence = 0;
+      const codexSessionTitleContext = codexContext
+        ? sessionTitleCodexRequestContext(
+            codexContext,
+            () => `${dispatchId}:title:${++codexSessionTitleRequestSequence}`,
+          )
+        : null;
+      const xaiSessionTitleContext = providerTurn.xaiRequestContext
+        ? sessionTitleXaiRequestContext(
+            providerTurn.xaiRequestContext,
+            () => `${dispatchId}:xai:title:${++xaiSessionTitleRequestSequence}`,
+          )
+        : null;
+      const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
+        xaiSessionTitleContext
+          ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
+          : codexSessionTitleContext
+            ? codexRequestStorage.run(codexSessionTitleContext, fn)
+            : fn();
       const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
         withCodex(() =>
           withCodexRequestOverrides(
@@ -1104,6 +1172,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const {
         attemptConnectorActionBindings,
         connectorActionIdentity,
+        generateSessionTitleInParallel,
         postToolPreparationStartedAt,
         preparationIndependentToolNames,
       } = toolRuntime;
@@ -1413,6 +1482,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         input,
         settings: capabilitySettings,
         db,
+        bus,
         runtime,
         objectStorage,
         observability,
@@ -1443,6 +1513,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attachCodemodeTokenRenewal,
         attachRunCredentialRenewal,
         withProviderRequestContext,
+        withSessionTitleProviderRequestContext,
         publishCompactionLiveEvents,
         publishCompactionOutcomeEvents,
         recordCompanyBrainContributionReceiptOnce,
@@ -1468,6 +1539,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         providerApi,
         runSettings,
         turnTools,
+        generateSessionTitleInParallel,
+        sessionTitlePrompt: session.initialMessage.trim() ? session.initialMessage : turn.prompt,
         compactSummarizer,
         settleDeferredSteerAfterCompaction,
         compactionModelHistoryProjector,

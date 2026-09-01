@@ -35,17 +35,11 @@ CREATE TABLE rig_provider_image_cleanup_obligations (
     AND octet_length(source_instance_id) BETWEEN 1 AND 512
     AND octet_length(build_request_id) BETWEEN 1 AND 256
   ),
-  CONSTRAINT rig_provider_image_cleanup_obligations_provider_check CHECK (
+  CONSTRAINT rig_provider_image_cleanup_backend_check CHECK (
     provider_backend = 'modal'
-    AND octet_length(provider_binding_key) BETWEEN 1 AND 1024
-    AND jsonb_typeof(provider_binding) = 'object'
-    AND provider_binding_key::jsonb = provider_binding
-    AND provider_binding_key = format(
-      '{"version":1,"serverUrl":%s,"workspaceName":%s,"environment":%s}',
-      to_jsonb(provider_binding ->> 'serverUrl')::text,
-      to_jsonb(provider_binding ->> 'workspaceName')::text,
-      to_jsonb(provider_binding ->> 'environment')::text
-    )
+  ),
+  CONSTRAINT rig_provider_image_cleanup_binding_shape_check CHECK (
+    jsonb_typeof(provider_binding) = 'object'
     AND provider_binding = jsonb_build_object(
       'version', 1,
       'serverUrl', provider_binding ->> 'serverUrl',
@@ -55,7 +49,19 @@ CREATE TABLE rig_provider_image_cleanup_obligations (
     AND coalesce(octet_length(provider_binding ->> 'serverUrl'), 0) > 0
     AND coalesce(octet_length(provider_binding ->> 'workspaceName'), 0) > 0
     AND provider_binding ->> 'environment' IS NOT NULL
-    AND (object_id IS NULL OR octet_length(object_id) BETWEEN 1 AND 1024)
+  ),
+  CONSTRAINT rig_provider_image_cleanup_binding_key_check CHECK (
+    octet_length(provider_binding_key) BETWEEN 1 AND 1024
+    AND provider_binding_key::jsonb = provider_binding
+    AND provider_binding_key = format(
+      '{"version":1,"serverUrl":%s,"workspaceName":%s,"environment":%s}',
+      to_jsonb(provider_binding ->> 'serverUrl')::text,
+      to_jsonb(provider_binding ->> 'workspaceName')::text,
+      to_jsonb(provider_binding ->> 'environment')::text
+    )
+  ),
+  CONSTRAINT rig_provider_image_cleanup_object_check CHECK (
+    object_id IS NULL OR octet_length(object_id) BETWEEN 1 AND 1024
   ),
   CONSTRAINT rig_provider_image_cleanup_obligations_state_check CHECK (
     state IN (

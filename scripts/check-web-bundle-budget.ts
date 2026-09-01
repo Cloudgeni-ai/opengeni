@@ -388,7 +388,7 @@ const budgets = {
   // bytes across the same 33 files. Advance only the raw whole-KiB envelope;
   // gzip, file count, initial, per-file, lazy, and CSS caps remain fixed.
   // Rig deferred-recovery, exact inactive-version verification, manager-only
-  // replacement controls, and current main measure 2,288,890 raw / 641,938
+  // replacement controls, and current main measure 2,290,826 raw / 642,203
   // gzip bytes across 32 files in the exact configured Linux/x64 Bun 1.4
   // production build. Advance only the policy-derived direct-session raw and
   // gzip envelopes; the existing 33-file allowance and every initial,

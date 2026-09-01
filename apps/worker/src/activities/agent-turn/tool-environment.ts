@@ -3,6 +3,8 @@ import {
   getWorkspaceModelPolicy,
   listWorkspaceGatewayCustomModels,
   listWorkspaceOpenRouterCustomModels,
+  listOrganizationModelProviderCustomModelsForWorkspace,
+  organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
@@ -507,6 +509,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       firstPartyMcpTools: selectedFirstPartyMcpTools,
       firstPartyMcpPermissions: session.firstPartyMcpPermissions,
     }),
+    parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
   });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
@@ -543,6 +546,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           workspaceGatewayCustomModels,
           openRouterConnectionActive,
           workspaceOpenRouterCustomModels,
+          organizationGatewayConnectionActive,
+          organizationGatewayCustomModels,
+          organizationOpenRouterConnectionActive,
+          organizationOpenRouterCustomModels,
         ] = await Promise.all([
           getWorkspaceModelPolicy(db, input.workspaceId),
           workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
@@ -562,6 +569,26 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
           }),
+          organizationModelProviderConnectionActiveForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "vercel_gateway",
+          }),
+          listOrganizationModelProviderCustomModelsForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "vercel_gateway",
+          }),
+          organizationModelProviderConnectionActiveForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "openrouter",
+          }),
+          listOrganizationModelProviderCustomModelsForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "openrouter",
+          }),
         ]);
         return {
           selections: resolveWorkspaceModelSelection({
@@ -573,6 +600,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             workspaceGatewayCustomModels,
             workspaceOpenRouterConnectionActive: openRouterConnectionActive,
             workspaceOpenRouterCustomModels,
+            organizationGatewayConnectionActive,
+            organizationGatewayCustomModels,
+            organizationOpenRouterConnectionActive,
+            organizationOpenRouterCustomModels,
           }),
           modelNotes: currentCatalog.modelNotes,
         };
@@ -823,17 +854,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   } else {
     activatePreparedToolEnvironment(eventing.preparedTools);
   }
-  // Genesis turn = the first user turn (no assistant history reconciled
-  // yet). Durable Postgres state (countSessionHistoryItems includes
-  // superseded rows after compaction), NOT a workflow counter (turnsThisRun
-  // resets on continueAsNew). Drives the one-shot title hint appended to the
-  // agent's instructions; later attempts and goal continuations never match.
   return {
     attemptConnectorActionBindings: [
       ...googleDriveConnectorBindings,
       ...githubRestMcp.connectorBindings,
     ],
     connectorActionIdentity,
+    generateSessionTitleInParallel: titleToolPlan.generateTitleInParallel,
     postToolPreparationStartedAt,
     preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,
   };

@@ -8,6 +8,85 @@ and per-turn execution identity.
 The point-in-time decision record and evidence are in
 [`design/model-provider-architecture-2026-07-18.md`](design/model-provider-architecture-2026-07-18.md).
 
+## Configuring inference
+
+Turn inference uses two OpenAI-shaped HTTP APIs: **Responses**
+(`POST …/responses`) and **Chat Completions** (`POST …/chat/completions`).
+Configure `.env` (from `.env.example`) and restart the API and both workers.
+OpenGeni does not scrape `GET /models`. Membership is the reviewed catalog
+(`OPENGENI_MODEL_CATALOG_SOURCE=code` by default, or the operator singleton in
+`database` mode). See [Deployment catalog source and cost policy](#deployment-catalog-source-and-cost-policy).
+
+### Built-in OpenAI or Azure — always Responses
+
+Exactly one built-in provider. `OPENGENI_OPENAI_PROVIDER` is `openai` (default)
+or `azure`. In code mode its catalog is `OPENGENI_OPENAI_MODEL` (default
+`gpt-5.6-sol`) and `OPENGENI_OPENAI_ALLOWED_MODELS` (default
+`gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna`). A custom base URL still speaks
+Responses; it does not become Chat Completions.
+
+| | OpenAI | Azure |
+| --- | --- | --- |
+| Credential | `OPENGENI_OPENAI_API_KEY` (`OPENAI_API_KEY`) | `OPENGENI_AZURE_OPENAI_API_KEY` or `OPENGENI_AZURE_OPENAI_AD_TOKEN` |
+| URL | optional `OPENGENI_OPENAI_BASE_URL` (`OPENAI_BASE_URL`); unset is `https://api.openai.com/v1` | `OPENGENI_AZURE_OPENAI_BASE_URL` (`…/openai/v1`), or `OPENGENI_AZURE_OPENAI_ENDPOINT` + `DEPLOYMENT` + `API_VERSION` |
+
+Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
+`https://api.openai.com/v1`. Built-in Responses knobs:
+`OPENGENI_OPENAI_RESPONSES_TRANSPORT` (`http` default, or `websocket`),
+`OPENGENI_OPENAI_PROVIDER_ITEM_IDS`, `OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT`,
+`OPENGENI_WEB_SEARCH_ENABLED`.
+
+### Extra OpenAI-compatible servers — `OPENGENI_MODEL_PROVIDERS_JSON`
+
+A JSON array of additional providers. The built-in stays. Each entry has one
+`baseUrl`, one `api` (`chat` default, or `responses`), and one `wireProfile`
+(`openai` default). Set `wireProfile: "azure-openai"` with `api: "responses"`
+for a second Azure resource (Azure computer-call normalization). Provider `id`
+matches `[A-Za-z0-9_-]+` and must not collide with the built-in (`openai` /
+`azure`) or another registry provider. List every model; a bare model `id`
+already on the built-in allowlist keeps the built-in route.
+
+Operator-writable `kind`:
+
+- `api-key` (default) — `apiKeyEnv` (preferred) or inline `apiKey`. Missing key
+  is a boot error.
+- `anonymous` — no credential and no `defaultHeaders` / `defaultQuery`.
+  Externally metered.
+
+JSON must not declare overlay kinds (`vercel-gateway-managed`,
+`vercel-gateway-workspace`, `openrouter-workspace`, `xai-subscription`) or
+reserved provider ids (`openai`, `azure`, `codex-subscription`,
+`xai-subscription`, `opengeni-gateway`, `workspace-gateway`, `openrouter`,
+`workspace-openrouter`). `baseUrl` is origin + path (no userinfo, query,
+fragment). Put extra query/headers in `defaultQuery` / `defaultHeaders`;
+`Authorization` is SDK-managed. `publicDefaultQueryNames` /
+`publicDefaultHeaderNames` mark which of those appear in public definition
+digests; credential-like names are refused. Model fields, billing derivation,
+and examples are in [Registry configuration](#registry-configuration). In
+database catalog mode the host JSON still owns transport and credentials; the
+singleton owns membership.
+
+### Reviewed overlays — not generic JSON
+
+| Route | Enable | Wire | Catalog |
+| --- | --- | --- | --- |
+| OpenGeni-managed AI Gateway | `OPENGENI_VERCEL_AI_GATEWAY_API_KEY` | Responses | Curated DeepSeek / Kimi, OpenGeni credits |
+| Workspace AI Gateway | member connects a Gateway key in Settings | Responses | Same curated models plus optional workspace slugs, workspace-paid |
+| Deployment OpenRouter | `OPENGENI_OPENROUTER_API_KEY` | Chat Completions | Curated `openrouter/…` (v1 ships one `:free` starter) |
+| Workspace OpenRouter | member connects an OpenRouter key in Settings | Chat Completions | `workspace-openrouter/…`, workspace-paid |
+| Codex ChatGPT subscription | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED` | Responses | `codex/…` after the workspace connection is ready |
+| SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED` | Responses | `supergrok/…` after the workspace connection is ready |
+
+Workspace BYOK for an arbitrary OpenAI-compatible server is not a registry
+switch. Voice input, image, and video use separate provider settings.
+
+### Compatibility
+
+The chosen wire API, SSE streaming, and ordinary function calling are required.
+Hosted tools, Codex Apps, and Codex `remote_v2` compaction are not implied.
+Non-Codex and Codex-portable sessions compact locally; a session frozen
+`remote_v2` admits only Codex models.
+
 ## Identity layers
 
 A configured model has four distinct identities:
@@ -45,12 +124,13 @@ interface ConfiguredModel {
   credentialSource:
     | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
     | { kind: "connected_subscription"; provider: "codex" | "xai" }
-    | { kind: "workspace_connection"; mechanism: "api_key" };
+    | { kind: "workspace_connection"; mechanism: "api_key" }
+    | { kind: "organization_connection"; mechanism: "api_key" };
   billing: {
-    upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+    upstreamPayer: "deployment" | "workspace" | "organization" | "connected_subscription";
     metering: "opengeni_credits" | "external";
   };
-  cost: "free" | "credits" | "subscription" | "workspace";
+  cost: "free" | "credits" | "subscription" | "workspace" | "organization";
   capabilities: ModelCapabilitiesV1;
   pricing?: ModelPricingScheduleV1;
   definitionVersion: `sha256:${string}`;
@@ -252,10 +332,21 @@ derives both from the provider kind:
 | Connected SuperGrok/xAI subscription | connected subscription        | connected subscription | external         |
 | Workspace Vercel AI Gateway          | workspace connection          | workspace              | external         |
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
+| Organization Vercel AI Gateway      | organization connection       | organization           | external         |
+| Organization OpenRouter             | organization connection       | organization           | external         |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
 credential broker.
+
+`organization_connection` is the peer organization-owned broker. Organization
+admins connect Vercel AI Gateway or OpenRouter once in Organization settings and
+curate explicit custom model slugs. Active products use
+`organization-gateway/` or `organization-openrouter/`, are externally billed to
+the organization provider account, and inherit into current and future shared
+workspaces only. Canonical Personal workspaces remain local. Workspace provider
+connections coexist under their existing IDs; no payer rail falls back or
+migrates implicitly.
 
 The table describes credential and upstream-settlement identity, not the
 workspace-facing price. Deployment models—including anonymous and managed

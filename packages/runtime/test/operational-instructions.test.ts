@@ -20,6 +20,25 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "[My Report.md](<sandbox:/workspace/My Project/My Report.md:3>)",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "a Connected Machine instead uses its host-native workspace root",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("`/home/u/proj` or `C:/repo`");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Both are valid inside a `sandbox:` link when they are the active workspace.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/home/u/proj/app.py:12)");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.ts](<sandbox:C:/repo/app.ts:12>)");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Never link directly to `/tmp`");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "or any file outside the current workspace",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "copy it into the current workspace before responding",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("canonical sandbox path");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("a host path");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("host-absolute paths");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");
   });
 

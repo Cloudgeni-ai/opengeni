@@ -865,8 +865,10 @@ function SessionsIndexRouteContent({
                     personalWorkspace,
                     submission.options.visibility ?? "workspace",
                   ),
-                  onFailure: ({ error, request }) =>
-                    recoverPersonalResourceAttachment(error, request),
+                  onFailure: ({ error, request }) => {
+                    newSessionDraft.captureConflict(error);
+                    recoverPersonalResourceAttachment(error, request);
+                  },
                 },
               );
               if (!created) return null;
@@ -913,8 +915,10 @@ function SessionsIndexRouteContent({
                   personalWorkspace,
                   submission.options.visibility ?? "workspace",
                 ),
-                onFailure: ({ error, request }) =>
-                  recoverPersonalResourceAttachment(error, request),
+                onFailure: ({ error, request }) => {
+                  newSessionDraft.captureConflict(error);
+                  recoverPersonalResourceAttachment(error, request);
+                },
               },
             );
             if (!created) return null;

@@ -21,6 +21,7 @@ import {
   resolveWorkspaceCatalogSettings,
   resolveSessionToolPolicy,
   workspaceCustomModelReference,
+  lockActiveCustomModelForAdmission,
   scheduledSlackBotConnectionId,
   swapActiveSandbox,
 } from "@opengeni/core";
@@ -52,8 +53,6 @@ import {
   getVariableSet,
   isCodexBilledModel,
   initializeSessionStartAtomically,
-  lockActiveWorkspaceGatewayCustomModelForAdmission,
-  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   materializeScheduledTaskReusableSessionFromRun,
   listEnabledMcpCapabilityServerIds,
   listInstalledApiIntegrationServerIdsForDelegations,
@@ -787,18 +786,11 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         : null;
       const beforeFreshAgentRunCommit = acceptedCustomModel
         ? async (tx: Database): Promise<void> => {
-            const active =
-              acceptedCustomModel.providerKind === "openrouter"
-                ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
-                    accountId: task.accountId,
-                    workspaceId: task.workspaceId,
-                    upstreamModelId: acceptedCustomModel.upstreamModelId,
-                  })
-                : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-                    accountId: task.accountId,
-                    workspaceId: task.workspaceId,
-                    upstreamModelId: acceptedCustomModel.upstreamModelId,
-                  });
+            const active = await lockActiveCustomModelForAdmission(tx, {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              reference: acceptedCustomModel,
+            });
             if (!active) {
               throw new ScheduledRunTerminalAuthorityError(
                 "scheduled_model_unavailable",

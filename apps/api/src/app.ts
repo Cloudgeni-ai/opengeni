@@ -118,6 +118,7 @@ import { allowedCorsOrigin } from "./http/cors";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
+import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
@@ -1033,6 +1034,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+  registerOrganizationModelProviderRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
@@ -1130,6 +1132,10 @@ const publicWorkspaceBrowserRoutePatterns = [
 ] as const;
 
 export function workspaceActorContextExempt(method: string, pathname: string): boolean {
+  // The account-scoped provisioning route shares the workspace collection prefix.
+  // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
+  // the route performs its own organization API-key authorization.
+  if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp$/.test(pathname)) return true;
   if (
     method === "GET" &&
