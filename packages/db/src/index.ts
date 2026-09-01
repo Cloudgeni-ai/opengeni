@@ -35332,6 +35332,7 @@ export async function listSessionEventPage(
           : asc(schema.sessionEvents.sequence);
       let rows: SessionEventProjectionRow[];
       let sourceRowCount: number;
+      let sourceRowsFullyConsumed = true;
       let databaseReadProjected = false;
       if (payloadMode === "full") {
         // Plan the page from bounded metadata before selecting any canonical
@@ -35370,6 +35371,8 @@ export async function listSessionEventPage(
           exactIds.push(metadata.id);
           estimatedBytes += separatorBytes + transferBytes;
         }
+        sourceRowsFullyConsumed =
+          exactIds.length + (projectId === null ? 0 : 1) >= metadataRows.length;
 
         if (projectId !== null) {
           rows = await scopedDb
@@ -35439,7 +35442,7 @@ export async function listSessionEventPage(
         cursor = event.sequence;
       }
       if (hasMore) break;
-      if (sourceRowCount < queryLimit) break;
+      if (sourceRowsFullyConsumed && sourceRowCount < queryLimit) break;
     }
 
     if (direction === "before") events.reverse();

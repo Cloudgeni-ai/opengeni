@@ -287,6 +287,26 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         expect(exactMarkerPage.fullPayloadsExact).toBeTrue();
         expect(exactMarkerPage.events[0]?.payload).toEqual(projectionMarkerPayload);
 
+        const forwardAcrossProjectedRow = await listSessionEventPage(
+          projectionClient.db,
+          workspace!.id,
+          sessionId,
+          { after: 8, limit: 2 },
+        );
+        expect(forwardAcrossProjectedRow.events.map((event) => event.sequence)).toEqual([9, 10]);
+        expect(forwardAcrossProjectedRow.fullPayloadsExact).toBeFalse();
+        expect(forwardAcrossProjectedRow.hasMore).toBeFalse();
+
+        const backwardAcrossProjectedRow = await listSessionEventPage(
+          projectionClient.db,
+          workspace!.id,
+          sessionId,
+          { before: 10, limit: 2 },
+        );
+        expect(backwardAcrossProjectedRow.events.map((event) => event.sequence)).toEqual([7, 9]);
+        expect(backwardAcrossProjectedRow.fullPayloadsExact).toBeFalse();
+        expect(backwardAcrossProjectedRow.hasMore).toBeTrue();
+
         const projectedCursorStrandingPage = await listSessionEventPage(
           projectionClient.db,
           workspace!.id,

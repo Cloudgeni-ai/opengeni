@@ -197,9 +197,8 @@ import {
 import {
   appendAndPublishEvents,
   boundSessionEventHttpPage,
-  coalesceSessionEventDeltas,
+  coalesceSessionEventDeltasWithCoverage,
   publishDurableSessionEvents,
-  sessionEventResumeSequence,
 } from "@opengeni/events";
 import {
   createGatewayRealtimeConnectionSecret,
@@ -2622,12 +2621,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.header("X-OpenGeni-Covered-Last", String(result.coveredSequence.last));
       return c.json(result);
     }
-    const projected = compact ? coalesceSessionEventDeltas(events) : events;
+    const compactProjection = compact ? coalesceSessionEventDeltasWithCoverage(events) : null;
+    const projected = compactProjection?.events ?? events;
     const forensicExact =
       !compact && mode === "forensic" && payloadMode === "full" && dbPage.fullPayloadsExact;
     const page = boundSessionEventHttpPage(projected, {
       direction,
       eventProjection: forensicExact ? "exact" : "bounded",
+      ...(compactProjection
+        ? { coveredThroughBySequence: compactProjection.coveredThroughBySequence }
+        : {}),
     });
     const hasMore = dbPage.hasMore || page.truncated;
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
@@ -2641,7 +2644,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const coveredFirst = page.events[0]?.sequence;
     const coveredLastEvent = page.events.at(-1);
     const coveredLast =
-      coveredLastEvent === undefined ? undefined : sessionEventResumeSequence(coveredLastEvent);
+      coveredLastEvent === undefined
+        ? undefined
+        : (compactProjection?.coveredThroughBySequence.get(coveredLastEvent.sequence) ??
+          coveredLastEvent.sequence);
     if (coveredFirst !== undefined) c.header("X-OpenGeni-Covered-First", String(coveredFirst));
     if (coveredLast !== undefined) c.header("X-OpenGeni-Covered-Last", String(coveredLast));
     const truncatedBy = page.truncated ? "http_bytes" : dbPage.truncatedBy;

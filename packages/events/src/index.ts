@@ -45,7 +45,12 @@ const silentLogger: Required<EventLogger> = {
   warn: () => {},
 };
 
-export { SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES, coalesceSessionEventDeltas } from "./coalesce";
+export {
+  SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES,
+  coalesceSessionEventDeltas,
+  coalesceSessionEventDeltasWithCoverage,
+  type CoalescedSessionEventPage,
+} from "./coalesce";
 
 /**
  * Reconnect + keepalive defaults applied to EVERY long-lived NATS connection
@@ -1006,6 +1011,8 @@ export function boundSessionEventHttpPage(
     maxBytes?: number;
     /** Exact mode is restricted to already-canonical forensic REST rows. */
     eventProjection?: "bounded" | "exact";
+    /** Out-of-band raw coverage for events synthesized by trusted coalescing. */
+    coveredThroughBySequence?: ReadonlyMap<number, number>;
   },
 ): {
   events: SessionEvent[];
@@ -1043,7 +1050,10 @@ export function boundSessionEventHttpPage(
       edge === undefined
         ? null
         : options.direction === "after"
-          ? sessionEventResumeSequence(edge)
+          ? Math.max(
+              edge.sequence,
+              options.coveredThroughBySequence?.get(edge.sequence) ?? edge.sequence,
+            )
           : edge.sequence,
     bytes,
   };
@@ -1086,14 +1096,7 @@ export function boundWorkspaceControlHttpPage(
 
 /** Raw durable cursor covered by a possibly coalesced compact event. */
 export function sessionEventResumeSequence(event: SessionEvent): number {
-  if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
-    return event.sequence;
-  }
-  const coalescedUntil = Number((event.payload as Record<string, unknown>).coalescedUntil);
-  return Math.max(
-    event.sequence,
-    Number.isFinite(coalescedUntil) ? Math.floor(coalescedUntil) : event.sequence,
-  );
+  return event.sequence;
 }
 
 function boundSessionEventForSurface(

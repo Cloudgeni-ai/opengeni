@@ -328,15 +328,18 @@ describe("session event byte-bounded HTTP pages", () => {
           id: "legacy-page-stranding-output",
           output: `HEAD-${"p".repeat(3 * 1024 * 1024)}-TAIL`,
         })}
+      ), (
+        ${session!.accountId}, ${workspaceId}, ${sessionId}, 2,
+        'turn.completed', ${admin.json({ result: "after-projected-row" })}
       )`;
 
     const response = await app.request(
-      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=forensic&payloadMode=full&before=2&limit=1&compact=true`,
+      `http://x/v1/workspaces/${workspaceId}/sessions/${sessionId}/events?mode=forensic&payloadMode=full&after=0&limit=2&compact=true`,
       { headers: { authorization } },
     );
     expect(response.status).toBe(200);
     const body = (await response.json()) as Array<{ sequence: number; payload: unknown }>;
-    expect(body).toHaveLength(1);
+    expect(body).toHaveLength(2);
     expect(body[0]?.sequence).toBe(1);
     expect(sessionEventPayloadTruncation(body[0]?.payload)?.surface).toBe(
       "database_read_projection",
@@ -344,7 +347,8 @@ describe("session event byte-bounded HTTP pages", () => {
     expect(JSON.stringify(body)).toContain("HEAD-");
     expect(JSON.stringify(body)).toContain("-TAIL");
     expect(response.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
-    expect(response.headers.get("X-OpenGeni-Next-Before")).toBe("1");
+    expect(response.headers.get("X-OpenGeni-Next-After")).toBe("2");
+    expect(response.headers.get("X-OpenGeni-Has-More")).toBe("false");
     expect(Number(response.headers.get("X-OpenGeni-Page-Bytes"))).toBeLessThanOrEqual(1024 * 1024);
   });
 

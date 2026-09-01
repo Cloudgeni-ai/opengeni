@@ -514,11 +514,23 @@ describe("session event transport envelopes", () => {
     const page = boundSessionEventHttpPage(events, {
       direction: "after",
       maxBytes: sessionEventJsonBytes([events[0]]),
+      coveredThroughBySequence: new Map([
+        [10, 49],
+        [50, 73],
+      ]),
     });
 
     expect(page.events.map((item) => item.sequence)).toEqual([10]);
     expect(page.truncated).toBeTrue();
     expect(page.nextSequence).toBe(49);
+  });
+
+  test("never trusts producer-controlled coalescedUntil as cursor provenance", () => {
+    const retained = event(10, { text: "ordinary", coalescedUntil: 1000 });
+    const page = boundSessionEventHttpPage([retained], { direction: "after" });
+
+    expect(page.events[0]?.payload).toMatchObject({ coalescedUntil: 1000 });
+    expect(page.nextSequence).toBe(10);
   });
 
   test("returns a byte-bounded backward suffix and defensively normalizes a legacy first row", () => {
