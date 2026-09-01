@@ -11,14 +11,11 @@ import {
   createTurnQueueStore,
   projectPendingApprovals,
   type FileAttachmentStore,
-  type GoalClientLike,
   type GoalStore,
-  type HumanInputSessionClientLike,
   type HumanInputStore,
   type SessionControlStore,
   type SessionEventStore,
   type SessionLineageStore,
-  type SessionLineageClientLike,
   type SessionMcpApprovalPolicyStore,
   type SessionResourceStore,
   type SessionComposerRuntimeStore,
@@ -26,7 +23,13 @@ import {
 } from "@opengeni/sdk/session";
 import { derived, type Readable } from "svelte/store";
 import { getOpenGeniContext } from "./context";
-import { controllerStore, type OpenGeniControllerStore } from "./store";
+import {
+  createSessionControllerComposition,
+  type SessionSurfaceControllers,
+} from "./session-controller-composition";
+import { controllerStore } from "./store";
+
+export type { SessionSurfaceControllers } from "./session-controller-composition";
 
 export function createSessionEvents(options: Parameters<typeof createSessionEventStore>[0]) {
   return controllerStore<SessionEventStore>(createSessionEventStore(options));
@@ -63,101 +66,8 @@ export function createLineage(options: Parameters<typeof createSessionLineageSto
   return controllerStore<SessionLineageStore>(createSessionLineageStore(options));
 }
 
-export type SessionSurfaceControllers = Readonly<{
-  session: OpenGeniControllerStore<SessionResourceStore>;
-  events: OpenGeniControllerStore<SessionEventStore>;
-  composer: OpenGeniControllerStore<SessionComposerRuntimeStore>;
-  attachments: OpenGeniControllerStore<FileAttachmentStore>;
-  queue: OpenGeniControllerStore<TurnQueueStore>;
-  control: OpenGeniControllerStore<SessionControlStore>;
-  goal?: OpenGeniControllerStore<GoalStore> | undefined;
-  humanInput?: OpenGeniControllerStore<HumanInputStore> | undefined;
-  lineage?: OpenGeniControllerStore<SessionLineageStore> | undefined;
-  destroy(): void;
-}>;
-
-export type ContextSessionControllerFeatures = Readonly<{
-  goal?: boolean;
-  humanInput?: boolean;
-  lineage?: boolean;
-}>;
-
-export function createContextSessionControllers(
-  sessionId: string,
-  features: ContextSessionControllerFeatures = {},
-): SessionSurfaceControllers {
-  const context = getOpenGeniContext();
-  const common = { workspaceId: context.workspaceId, sessionId };
-  const session = createSessionResource({
-    client: context.sessionClient ?? context.client,
-    ...common,
-  });
-  const events = createSessionEvents({ client: context.client, ...common });
-  const composer = createComposer({ client: context.client, ...common, events: [] });
-  const attachments = createAttachments({
-    client: context.fileAttachmentClient ?? context.client,
-    workspaceId: context.workspaceId,
-  });
-  const queue = createTurnQueue({ client: context.client, ...common });
-  const control = createSessionControl({ client: context.client, ...common });
-  const unsubscribeEvents = events.controller.subscribe(() => {
-    composer.controller.applyEvents([...events.controller.getSnapshot().events]);
-  });
-  const unsubscribeQueue = queue.controller.subscribe(() => {
-    composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
-  });
-  composer.controller.applyEvents([...events.controller.getSnapshot().events]);
-  composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
-  const controllers = {
-    session,
-    events,
-    composer,
-    attachments,
-    queue,
-    control,
-    ...(features.goal !== false && (context.goalClient || "getGoal" in context.client)
-      ? {
-          goal: createGoal({
-            client: context.goalClient || (context.client as GoalClientLike),
-            ...common,
-          }),
-        }
-      : {}),
-    ...(features.humanInput !== false &&
-    (context.humanInputClient || "listHumanInputRequests" in context.client)
-      ? {
-          humanInput: createHumanInput({
-            client: context.humanInputClient ?? (context.client as HumanInputSessionClientLike),
-            ...common,
-          }),
-        }
-      : {}),
-    ...(features.lineage !== false &&
-    (context.lineageClient || "getSessionLineage" in context.client)
-      ? {
-          lineage: createLineage({
-            client: context.lineageClient ?? (context.client as SessionLineageClientLike),
-            ...common,
-          }),
-        }
-      : {}),
-  };
-  return Object.freeze({
-    ...controllers,
-    destroy() {
-      unsubscribeEvents();
-      unsubscribeQueue();
-      controllers.session.destroy();
-      controllers.events.destroy();
-      controllers.composer.destroy();
-      controllers.attachments.destroy();
-      controllers.queue.destroy();
-      controllers.control.destroy();
-      controllers.goal?.destroy();
-      controllers.humanInput?.destroy();
-      controllers.lineage?.destroy();
-    },
-  });
+export function createContextSessionControllers(sessionId: string): SessionSurfaceControllers {
+  return createSessionControllerComposition(getOpenGeniContext(), sessionId);
 }
 
 export function approvalsFromEventStore(

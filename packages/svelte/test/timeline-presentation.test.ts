@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type {
+  AuthNeededItem,
   ContextCompactionItem,
   FleetDecisionItem,
   MachineInputBatchItem,
@@ -8,6 +9,7 @@ import type {
   WorkerCompletionItem,
 } from "@opengeni/sdk/session";
 import {
+  authNeededPresentation,
   boundedTimelineValue,
   TIMELINE_KIND_LABELS,
   timelineItemLabel,
@@ -129,5 +131,78 @@ describe("native Svelte timeline presentation", () => {
     expect(timelineItemSummary(machineInput)).toBe("2 machine inputs");
     expect(timelineItemSummary(fleet)).toBe("selected · lease reused");
     expect(boundedTimelineValue({ value: "abcdef" }, 8)).toBe('{\n  "val…');
+  });
+
+  test("presents capability setup rationale, action, and prerequisites", () => {
+    const item = {
+      kind: "auth-needed",
+      id: "auth-capability",
+      turnId: "turn",
+      serverId: "catalog",
+      source: "capability",
+      providerDomain: "api.datadoghq.com",
+      connectionId: null,
+      reason: "missing_connection",
+      scopes: [],
+      resource: null,
+      toolName: "query_metrics",
+      authorizationUrl: null,
+      capability: {
+        id: "datadog",
+        name: "Datadog",
+        kind: "api",
+        source: "library",
+        action: "add_credentials",
+        rationale: "Add a read-only API key to query service health.",
+        requiredVariables: ["DD_API_KEY", "DD_APP_KEY"],
+      },
+      occurredAt: "2026-09-01T00:00:00.000Z",
+    } satisfies AuthNeededItem;
+
+    expect(authNeededPresentation(item)).toEqual({
+      provider: "Datadog",
+      title: "Set up Datadog",
+      reasonLine: "Add a read-only API key to query service health.",
+      actionLabel: "Review",
+      actionable: true,
+      capability: true,
+      requiredVariables: ["DD_API_KEY", "DD_APP_KEY"],
+      followUpLine:
+        "No access has been granted. Review and confirm the provider before continuing.",
+    });
+    expect(timelineItemSummary(item)).toBe("Set up Datadog");
+  });
+
+  test("distinguishes missing connections from unavailable authority", () => {
+    const base = {
+      kind: "auth-needed",
+      id: "auth",
+      turnId: "turn",
+      serverId: "github",
+      source: "tool",
+      providerDomain: "github.com",
+      connectionId: null,
+      scopes: [],
+      resource: null,
+      toolName: "list_pull_requests",
+      authorizationUrl: null,
+      occurredAt: "2026-09-01T00:00:00.000Z",
+    } as const;
+    const missing = authNeededPresentation({ ...base, reason: "missing_connection" });
+    expect(missing).toMatchObject({
+      title: "Connect Github",
+      reasonLine: "It isn't connected yet.",
+      actionLabel: "Connect",
+      actionable: true,
+    });
+    const unavailable = authNeededPresentation({
+      ...base,
+      reason: "personal_authority_unavailable",
+    });
+    expect(unavailable).toMatchObject({
+      title: "Github tools unavailable",
+      actionable: false,
+      followUpLine: null,
+    });
   });
 });

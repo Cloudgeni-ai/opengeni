@@ -22,6 +22,7 @@ export type OpenGeniSvelteContext = Readonly<{
   fileAttachmentClient?: FileAttachmentClientLike | undefined;
 }>;
 
+/** Install one immutable authority snapshot for the current component subtree. */
 export function setOpenGeniContext(context: OpenGeniSvelteContext): OpenGeniSvelteContext {
   setContext(CONTEXT_KEY, context);
   return context;
