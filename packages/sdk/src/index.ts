@@ -134,7 +134,7 @@ export {
   TtydClientCommand,
   TtydServerCommand,
 } from "./terminal";
-export { streamSessionEvents } from "./stream";
+export { sessionEventStreamCoveredThrough, streamSessionEvents } from "./stream";
 export type {
   SessionEventStreamTransport,
   StreamConnectionState,

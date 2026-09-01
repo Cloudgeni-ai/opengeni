@@ -894,9 +894,14 @@ function subscribeAgentEvents(
   };
 }
 
-export function formatSse<T extends { sequence: number; type: string }>(event: T): string {
+export function formatSse<T extends { sequence: number; type: string }>(
+  event: T,
+  idSequence = event.sequence,
+): string {
+  const trustedId =
+    Number.isSafeInteger(idSequence) && idSequence >= event.sequence ? idSequence : event.sequence;
   return [
-    `id: ${event.sequence}`,
+    `id: ${trustedId}`,
     `event: ${event.type}`,
     `data: ${JSON.stringify(event)}`,
     "",
@@ -934,9 +939,12 @@ export function formatWorkspaceControlEventSse(event: WorkspaceControlEvent): st
 }
 
 /** Defensively bounds historical rows before they become one SSE frame. */
-export function formatSessionEventSse(event: SessionEvent): string {
+export function formatSessionEventSse(
+  event: SessionEvent,
+  coveredThrough = event.sequence,
+): string {
   const bounded = boundSessionEventForSurface(event, "sse_legacy_guard");
-  const formatted = formatSse(bounded);
+  const formatted = formatSse(bounded, coveredThrough);
   if (new TextEncoder().encode(formatted).byteLength > SESSION_EVENT_SSE_FRAME_MAX_BYTES) {
     // The payload normalizer targets 60 KiB, so this fallback is reachable only
     // for a malformed legacy event with oversized non-payload envelope fields.
@@ -954,7 +962,7 @@ export function formatSessionEventSse(event: SessionEvent): string {
         { surface: "sse_legacy_guard", maxBytes: 4096 },
       ),
     };
-    return formatSse(minimal);
+    return formatSse(minimal, coveredThrough);
   }
   return formatted;
 }
@@ -1096,7 +1104,11 @@ export function boundWorkspaceControlHttpPage(
 
 /** Raw durable cursor covered by a possibly coalesced compact event. */
 export function sessionEventResumeSequence(event: SessionEvent): number {
-  return event.sequence;
+  return typeof event.coveredThrough === "number" &&
+    Number.isSafeInteger(event.coveredThrough) &&
+    event.coveredThrough >= event.sequence
+    ? event.coveredThrough
+    : event.sequence;
 }
 
 function boundSessionEventForSurface(

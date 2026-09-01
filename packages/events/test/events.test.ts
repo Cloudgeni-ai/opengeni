@@ -86,6 +86,18 @@ describe("SSE formatting", () => {
     expect(text.endsWith("\n\n")).toBe(true);
   });
 
+  test("carries trusted compact coverage in the SSE id and event body", () => {
+    const compact = { ...event(10, { text: "compact" }), coveredThrough: 49 };
+    const text = formatSessionEventSse(compact, 49);
+    const data = text
+      .split("\n")
+      .find((line) => line.startsWith("data: "))!
+      .slice("data: ".length);
+
+    expect(text).toContain("id: 49\n");
+    expect(JSON.parse(data)).toMatchObject({ sequence: 10, coveredThrough: 49 });
+  });
+
   test("bounds legacy multi-megabyte text, image, and error payloads in one explicit frame", () => {
     const legacy = event(8, {
       id: "parallel-call",

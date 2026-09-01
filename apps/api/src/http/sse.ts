@@ -10,7 +10,6 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
-  coalesceSessionEventDeltas,
   coalesceSessionEventDeltasWithCoverage,
   formatSessionEventSse,
   formatWorkspaceControlEventSse,
@@ -295,8 +294,14 @@ export async function sseSessionStream(
       limit: SESSION_REPLAY_PAGE_SIZE,
     });
     await options.reauthorize?.();
+    const compactProjection = coalesceSessionEventDeltasWithCoverage(events);
     return finiteSseBatchResponse(
-      coalesceSessionEventDeltas(events).map(formatSessionEventSse),
+      compactProjection.events.map((event) =>
+        formatSessionEventSse(
+          event,
+          compactProjection.coveredThroughBySequence.get(event.sequence) ?? event.sequence,
+        ),
+      ),
       options,
     );
   }
@@ -380,9 +385,10 @@ export async function sseSessionStream(
       // command acknowledgements behind its own token stream.
       const compactProjection = coalesceSessionEventDeltasWithCoverage(eligible);
       for (const projected of compactProjection.events) {
-        await writeFrame(formatSessionEventSse(projected));
-        lastSent =
+        const coveredThrough =
           compactProjection.coveredThroughBySequence.get(projected.sequence) ?? projected.sequence;
+        await writeFrame(formatSessionEventSse(projected, coveredThrough));
+        lastSent = coveredThrough;
       }
       if (lastSent <= previousLastSent) {
         throw new Error(`Session event replay made no progress after sequence ${lastSent}`);

@@ -62,6 +62,7 @@ export function coalesceSessionEventDeltasWithCoverage(
           };
     coalesced.push({
       ...run.first,
+      coveredThrough: run.lastSequence,
       payload: boundSessionEventPayload(payload, {
         surface: "http_projection",
       }),

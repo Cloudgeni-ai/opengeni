@@ -1,4 +1,9 @@
-import type { SessionEvent, SessionStatus, StreamConnectionState } from "@opengeni/sdk";
+import {
+  sessionEventStreamCoveredThrough,
+  type SessionEvent,
+  type SessionStatus,
+  type StreamConnectionState,
+} from "@opengeni/sdk";
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { createOlderHistoryLoadReceipt, type OlderHistoryLoadReceipt } from "../older-history";
@@ -1378,9 +1383,13 @@ function maxResumeSequenceOrNull(events: readonly SessionEvent[]): number | null
 }
 
 function eventResumeSequence(event: SessionEvent): number {
-  const payload = asRecord(event.payload);
-  const coalescedUntil = Number(payload.coalescedUntil);
-  return Math.max(event.sequence, Number.isFinite(coalescedUntil) ? Math.floor(coalescedUntil) : 0);
+  const streamedCoverage = sessionEventStreamCoveredThrough(event);
+  if (streamedCoverage !== null) return streamedCoverage;
+  return typeof event.coveredThrough === "number" &&
+    Number.isSafeInteger(event.coveredThrough) &&
+    event.coveredThrough >= event.sequence
+    ? event.coveredThrough
+    : event.sequence;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

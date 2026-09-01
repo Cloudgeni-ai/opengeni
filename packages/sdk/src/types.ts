@@ -1853,6 +1853,8 @@ export type SessionEvent = {
   sessionId: string;
   /** Per-session sequence number: positive, contiguous, strictly increasing. */
   sequence: number;
+  /** Server-owned durable high-water mark for a synthetic compact event. */
+  coveredThrough?: number | undefined;
   type: SessionEventType;
   payload: unknown;
   occurredAt: string;
