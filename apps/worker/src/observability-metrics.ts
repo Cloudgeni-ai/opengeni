@@ -1023,6 +1023,7 @@ export function recordSandboxRotationBacklogGauges(
     turnBlocked: number;
     directBlocked: number;
     processBlocked: number;
+    interactionBlocked: number;
   },
 ): void {
   const values = {
@@ -1031,6 +1032,7 @@ export function recordSandboxRotationBacklogGauges(
     turn_blocked: backlog.turnBlocked,
     direct_blocked: backlog.directBlocked,
     process_blocked: backlog.processBlocked,
+    interaction_blocked: backlog.interactionBlocked,
   } as const;
   for (const [kind, value] of Object.entries(values)) {
     observability.setGauge({
