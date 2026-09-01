@@ -25,6 +25,7 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   settingsWithWorkspaceGatewayCredential,
   settingsWithWorkspaceOpenRouterCredential,
+  settingsWithOrganizationProviderCredentials,
   withXaiSubscriptionProvider,
 } from "../capabilities";
 import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-telemetry-authority";
@@ -242,11 +243,18 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     xaiSettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
-  const capabilitySettings = await settingsWithWorkspaceOpenRouterCredential(
+  const workspaceProviderSettings = await settingsWithWorkspaceOpenRouterCredential(
     db,
     input.accountId,
     input.workspaceId,
     gatewaySettings,
+    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
+  );
+  const capabilitySettings = await settingsWithOrganizationProviderCredentials(
+    db,
+    input.accountId,
+    input.workspaceId,
+    workspaceProviderSettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
   const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled

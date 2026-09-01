@@ -3039,14 +3039,15 @@ export type ModelCapabilitiesV1 = {
 export type ModelCredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" }
-  | { kind: "workspace_connection"; mechanism: "api_key" };
+  | { kind: "workspace_connection"; mechanism: "api_key" }
+  | { kind: "organization_connection"; mechanism: "api_key" };
 
 export type ModelBillingAttributionV1 = {
-  upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+  upstreamPayer: "deployment" | "workspace" | "organization" | "connected_subscription";
   metering: "opengeni_credits" | "external";
 };
 
-export type ModelCostClassV1 = "free" | "credits" | "subscription" | "workspace";
+export type ModelCostClassV1 = "free" | "credits" | "subscription" | "workspace" | "organization";
 
 export type ModelPricingV1 = {
   inputMicrosPerMillionTokens: number;
@@ -3178,6 +3179,34 @@ export type WorkspaceOpenRouterCustomModelsResponse = {
 export type CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
 
 export type DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+
+export type OrganizationModelProviderKind = "vercel_gateway" | "openrouter";
+
+export type OrganizationModelProviderConnection = {
+  providerKind: OrganizationModelProviderKind;
+  status: "active" | "revoked";
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type UpsertOrganizationModelProviderConnectionRequest = {
+  operationId: string;
+  expectedVersion?: number | undefined;
+  apiKey: string;
+};
+
+export type RevokeOrganizationModelProviderConnectionRequest = {
+  operationId: string;
+  expectedVersion: number;
+};
+
+export type OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
+export type OrganizationProviderCustomModelsResponse = {
+  models: OrganizationProviderCustomModel[];
+};
+export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for

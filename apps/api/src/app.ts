@@ -118,6 +118,7 @@ import { allowedCorsOrigin } from "./http/cors";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
+import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
@@ -1033,6 +1034,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+  registerOrganizationModelProviderRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);

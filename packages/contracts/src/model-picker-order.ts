@@ -3,15 +3,23 @@ export type ModelPickerBillingClass =
   | "external"
   | "codex_subscription"
   | "supergrok_subscription"
-  | "byok";
+  | "byok"
+  | "organization_byok";
 
 // Every closed billing class has a unique first character. Keeping the order
 // as initials avoids duplicating the full public labels in browser bundles.
-const MODEL_PICKER_BILLING_CLASS_INITIAL_ORDER = "oecsb";
+const MODEL_PICKER_BILLING_CLASS_ORDER: readonly ModelPickerBillingClass[] = [
+  "opengeni_credits",
+  "external",
+  "codex_subscription",
+  "supergrok_subscription",
+  "byok",
+  "organization_byok",
+];
 
 export type ModelPickerBillingCandidate = {
   source?: string | undefined;
-  cost?: "free" | "credits" | "subscription" | "workspace" | undefined;
+  cost?: "free" | "credits" | "subscription" | "workspace" | "organization" | undefined;
   billing?:
     | {
         upstreamPayer?: string | undefined;
@@ -31,6 +39,7 @@ export function modelPickerBillingClassFor(
 ): ModelPickerBillingClass {
   if (model.cost === "credits") return "opengeni_credits";
   if (model.cost === "workspace") return "byok";
+  if (model.cost === "organization") return "organization_byok";
   const source = model.source;
   const credential = model.credentialSource;
   const payer = model.billing?.upstreamPayer;
@@ -57,6 +66,9 @@ export function modelPickerBillingClassFor(
   ) {
     return "byok";
   }
+  if (credential?.kind === "organization_connection" || payer === "organization") {
+    return "organization_byok";
+  }
   return "opengeni_credits";
 }
 
@@ -65,8 +77,8 @@ export function compareModelPickerOrder(
   right: { billingClass: ModelPickerBillingClass; selectable: boolean; label: string },
 ): number {
   const classDelta =
-    MODEL_PICKER_BILLING_CLASS_INITIAL_ORDER.indexOf(left.billingClass[0]!) -
-    MODEL_PICKER_BILLING_CLASS_INITIAL_ORDER.indexOf(right.billingClass[0]!);
+    MODEL_PICKER_BILLING_CLASS_ORDER.indexOf(left.billingClass) -
+    MODEL_PICKER_BILLING_CLASS_ORDER.indexOf(right.billingClass);
   return (
     classDelta ||
     +right.selectable - +left.selectable ||

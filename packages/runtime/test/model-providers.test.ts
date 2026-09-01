@@ -40,6 +40,7 @@ import {
   HUMAN_INPUT_TOOL_NAME,
   modelRequestPolicyForProvider,
   MultiProviderModelProvider,
+  OrganizationOpenRouterUnavailableError,
   OpenGeniResponsesModel,
   resolveTurnModel,
   summarizeForCompaction,
@@ -52,7 +53,11 @@ import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-bo
 
 describe("Vercel AI Gateway request fence", () => {
   test("replaces caller routing for both Gateway billing paths", async () => {
-    for (const kind of ["vercel-gateway-managed", "vercel-gateway-workspace"] as const) {
+    for (const kind of [
+      "vercel-gateway-managed",
+      "vercel-gateway-workspace",
+      "vercel-gateway-organization",
+    ] as const) {
       let captured: Record<string, unknown> | null = null;
       const inner = (async (_input: RequestInfo | URL, init?: RequestInit) => {
         captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -1854,6 +1859,29 @@ describe("buildProviderClient", () => {
     expect(first.maxRetries).toBe(0);
     expect(() => buildProviderClient({ ...provider, apiKey: undefined }, settings)).toThrow(
       WorkspaceOpenRouterUnavailableError,
+    );
+  });
+
+  test("organization OpenRouter clients are attempt-local and require the organization key", () => {
+    const settings = multiProviderSettings();
+    const provider: ResolvedModelProvider = {
+      id: "organization-openrouter",
+      label: "Organization OpenRouter",
+      kind: "openrouter-organization",
+      api: "chat",
+      wireProfile: "openai",
+      builtin: false,
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "organization-openrouter-key",
+      credentialSource: { kind: "organization_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "organization", metering: "external" },
+    };
+
+    const first = buildProviderClient(provider, settings);
+    expect(first).not.toBe(buildProviderClient(provider, settings));
+    expect(first.maxRetries).toBe(0);
+    expect(() => buildProviderClient({ ...provider, apiKey: undefined }, settings)).toThrow(
+      OrganizationOpenRouterUnavailableError,
     );
   });
 

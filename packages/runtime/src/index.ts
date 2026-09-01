@@ -353,6 +353,8 @@ export {
 } from "./model-preparation-diagnostics";
 export {
   CodexSubscriptionUnavailableError,
+  OrganizationGatewayUnavailableError,
+  OrganizationOpenRouterUnavailableError,
   MultiProviderModelProvider,
   OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,

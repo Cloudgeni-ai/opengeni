@@ -1,18 +1,25 @@
 import {
   applyModelCatalogDocument,
   configuredGatewayWorkspaceProductModelIds,
+  configuredGatewayOrganizationProductModelIds,
   configuredModels,
   configuredModelNotes,
   configuredOpenRouterWorkspaceProductModelIds,
+  configuredOpenRouterOrganizationProductModelIds,
   configuredProviders,
   validateModelCatalogSettings,
   withCodexCatalogProvider,
+  withOrganizationGatewayCatalogProvider,
+  withOrganizationOpenRouterCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
   withWorkspaceOpenRouterCatalogProvider,
   withXaiSubscriptionCatalogProvider,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_PROVIDER_ID,
+  ORGANIZATION_OPENROUTER_PROVIDER_ID,
+  ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
+  ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
   type ConfiguredModel,
   type Settings,
 } from "@opengeni/config";
@@ -26,8 +33,13 @@ import {
   getDeploymentModelCatalog,
   getWorkspaceGatewayCustomModelForExecution,
   getWorkspaceOpenRouterCustomModelForExecution,
+  getOrganizationModelProviderCustomModelForExecution,
   listWorkspaceGatewayCustomModels,
   listWorkspaceOpenRouterCustomModels,
+  listOrganizationModelProviderCustomModelsForWorkspace,
+  lockActiveOrganizationModelProviderCustomModelForAdmission,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
+  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   type Database,
 } from "@opengeni/db";
 
@@ -58,6 +70,7 @@ export function isWorkspaceOpenRouterCustomModelId(settings: Settings, modelId: 
 }
 
 export type WorkspaceCustomModelReference = {
+  scope: "workspace" | "organization";
   providerKind: "vercel_gateway" | "openrouter";
   upstreamModelId: string;
 };
@@ -68,14 +81,36 @@ export function workspaceCustomModelReference(
 ): WorkspaceCustomModelReference | null {
   if (isWorkspaceGatewayCustomModelId(settings, modelId)) {
     return {
+      scope: "workspace",
       providerKind: "vercel_gateway",
       upstreamModelId: modelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length),
     };
   }
   if (isWorkspaceOpenRouterCustomModelId(settings, modelId)) {
     return {
+      scope: "workspace",
       providerKind: "openrouter",
       upstreamModelId: modelId.slice(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX.length),
+    };
+  }
+  if (
+    modelId.startsWith(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX) &&
+    !configuredGatewayOrganizationProductModelIds(settings).includes(modelId)
+  ) {
+    return {
+      scope: "organization",
+      providerKind: "vercel_gateway",
+      upstreamModelId: modelId.slice(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX.length),
+    };
+  }
+  if (
+    modelId.startsWith(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX) &&
+    !configuredOpenRouterOrganizationProductModelIds(settings).includes(modelId)
+  ) {
+    return {
+      scope: "organization",
+      providerKind: "openrouter",
+      upstreamModelId: modelId.slice(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX.length),
     };
   }
   return null;
@@ -83,6 +118,39 @@ export function workspaceCustomModelReference(
 
 export function isWorkspaceCustomModelId(settings: Settings, modelId: string): boolean {
   return workspaceCustomModelReference(settings, modelId) !== null;
+}
+
+export async function lockActiveCustomModelForAdmission(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    reference: WorkspaceCustomModelReference;
+  },
+): Promise<boolean> {
+  if (input.reference.scope === "organization") {
+    return Boolean(
+      await lockActiveOrganizationModelProviderCustomModelForAdmission(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        providerKind: input.reference.providerKind,
+        upstreamModelId: input.reference.upstreamModelId,
+      }),
+    );
+  }
+  return Boolean(
+    input.reference.providerKind === "openrouter"
+      ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          upstreamModelId: input.reference.upstreamModelId,
+        })
+      : await lockActiveWorkspaceGatewayCustomModelForAdmission(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          upstreamModelId: input.reference.upstreamModelId,
+        }),
+  );
 }
 
 /**
@@ -133,6 +201,11 @@ export async function resolveWorkspaceCatalogSettings(
     retainedProductModelIds?: readonly (string | null | undefined)[];
   },
 ): Promise<ResolvedCatalogSettings> {
+  // A few pure catalog tests inject the historical minimal DB port and mock the
+  // workspace model helpers directly. Real/injected runtime databases always
+  // expose transactions; keep that narrow test port compatible.
+  const supportsOrganizationProviderReads =
+    typeof (db as Database & { transaction?: unknown }).transaction === "function";
   const retainedProductModelIds = [
     ...(input.retainedProductModelIds ?? []),
     input.retainedProductModelId,
@@ -147,12 +220,28 @@ export async function resolveWorkspaceCatalogSettings(
       ? [productModelId.slice(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX.length)]
       : [],
   );
+  const retainedOrganizationGatewayUpstreamModelIds = retainedProductModelIds.flatMap(
+    (productModelId) =>
+      productModelId?.startsWith(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX)
+        ? [productModelId.slice(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX.length)]
+        : [],
+  );
+  const retainedOrganizationOpenRouterUpstreamModelIds = retainedProductModelIds.flatMap(
+    (productModelId) =>
+      productModelId?.startsWith(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX)
+        ? [productModelId.slice(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX.length)]
+        : [],
+  );
   const [
     resolved,
     activeGatewayCustomModels,
     activeOpenRouterCustomModels,
     retainedGatewayCustomModels,
     retainedOpenRouterCustomModels,
+    organizationGatewayCustomModels,
+    organizationOpenRouterCustomModels,
+    retainedOrganizationGatewayCustomModels,
+    retainedOrganizationOpenRouterCustomModels,
   ] = await Promise.all([
     resolveCatalogSettings(db, envSettings),
     listWorkspaceGatewayCustomModels(db, {
@@ -183,6 +272,46 @@ export async function resolveWorkspaceCatalogSettings(
           }),
       ),
     ),
+    supportsOrganizationProviderReads
+      ? listOrganizationModelProviderCustomModelsForWorkspace(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          providerKind: "vercel_gateway",
+        })
+      : Promise.resolve([]),
+    supportsOrganizationProviderReads
+      ? listOrganizationModelProviderCustomModelsForWorkspace(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          providerKind: "openrouter",
+        })
+      : Promise.resolve([]),
+    supportsOrganizationProviderReads
+      ? Promise.all(
+          [...new Set(retainedOrganizationGatewayUpstreamModelIds)].map(
+            async (upstreamModelId) =>
+              await getOrganizationModelProviderCustomModelForExecution(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                providerKind: "vercel_gateway",
+                upstreamModelId,
+              }),
+          ),
+        )
+      : Promise.resolve([]),
+    supportsOrganizationProviderReads
+      ? Promise.all(
+          [...new Set(retainedOrganizationOpenRouterUpstreamModelIds)].map(
+            async (upstreamModelId) =>
+              await getOrganizationModelProviderCustomModelForExecution(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                providerKind: "openrouter",
+                upstreamModelId,
+              }),
+          ),
+        )
+      : Promise.resolve([]),
   ]);
   const includeRetainedModels = <T extends { upstreamModelId: string }>(
     activeModels: readonly T[],
@@ -209,11 +338,25 @@ export async function resolveWorkspaceCatalogSettings(
     activeOpenRouterCustomModels,
     retainedOpenRouterCustomModels,
   );
+  const organizationGatewayModels = includeRetainedModels(
+    organizationGatewayCustomModels,
+    retainedOrganizationGatewayCustomModels,
+  );
+  const organizationOpenRouterModels = includeRetainedModels(
+    organizationOpenRouterCustomModels,
+    retainedOrganizationOpenRouterCustomModels,
+  );
   return {
     ...resolved,
-    settings: withWorkspaceOpenRouterCatalogProvider(
-      withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
-      openRouterCustomModels,
+    settings: withOrganizationOpenRouterCatalogProvider(
+      withOrganizationGatewayCatalogProvider(
+        withWorkspaceOpenRouterCatalogProvider(
+          withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
+          openRouterCustomModels,
+        ),
+        organizationGatewayModels,
+      ),
+      organizationOpenRouterModels,
     ),
   };
 }
@@ -242,11 +385,21 @@ export type WorkspaceModelSelectionInput = {
   xaiSubscriptionActive?: boolean;
   workspaceGatewayConnectionActive?: boolean;
   workspaceOpenRouterConnectionActive?: boolean;
+  organizationGatewayConnectionActive?: boolean;
+  organizationOpenRouterConnectionActive?: boolean;
   workspaceGatewayCustomModels?: readonly {
     upstreamModelId: string;
     label?: string | null;
   }[];
   workspaceOpenRouterCustomModels?: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[];
+  organizationGatewayCustomModels?: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[];
+  organizationOpenRouterCustomModels?: readonly {
     upstreamModelId: string;
     label?: string | null;
   }[];
@@ -332,6 +485,8 @@ function credentialReadinessFor(input: {
   xaiSubscriptionActive: boolean;
   workspaceGatewayConnectionActive: boolean;
   workspaceOpenRouterConnectionActive: boolean;
+  organizationGatewayConnectionActive: boolean;
+  organizationOpenRouterConnectionActive: boolean;
   observation: ModelCredentialReadinessObservation | undefined;
   nowMs: number;
   maxAgeMs: number;
@@ -354,6 +509,20 @@ function credentialReadinessFor(input: {
       input.model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
         ? input.workspaceOpenRouterConnectionActive
         : input.workspaceGatewayConnectionActive;
+    return connectionActive
+      ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
+      : {
+          status: "not_ready",
+          reason: "needs_reauth",
+          basis: "connection",
+          checkedAt: null,
+        };
+  }
+  if (source.kind === "organization_connection") {
+    const connectionActive =
+      input.model.providerId === ORGANIZATION_OPENROUTER_PROVIDER_ID
+        ? input.organizationOpenRouterConnectionActive
+        : input.organizationGatewayConnectionActive;
     return connectionActive
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {
@@ -512,9 +681,15 @@ export function resolveWorkspaceModelSelection(
   const xaiSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(codexSettings)
     : codexSettings;
-  const catalogSettings = withWorkspaceOpenRouterCatalogProvider(
-    withWorkspaceGatewayCatalogProvider(xaiSettings, input.workspaceGatewayCustomModels ?? []),
-    input.workspaceOpenRouterCustomModels ?? [],
+  const catalogSettings = withOrganizationOpenRouterCatalogProvider(
+    withOrganizationGatewayCatalogProvider(
+      withWorkspaceOpenRouterCatalogProvider(
+        withWorkspaceGatewayCatalogProvider(xaiSettings, input.workspaceGatewayCustomModels ?? []),
+        input.workspaceOpenRouterCustomModels ?? [],
+      ),
+      input.organizationGatewayCustomModels ?? [],
+    ),
+    input.organizationOpenRouterCustomModels ?? [],
   );
   const providers = new Map(
     configuredProviders(catalogSettings).map((provider) => [provider.id, provider]),
@@ -544,6 +719,8 @@ export function resolveWorkspaceModelSelection(
       xaiSubscriptionActive: input.xaiSubscriptionActive === true,
       workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
       workspaceOpenRouterConnectionActive: input.workspaceOpenRouterConnectionActive === true,
+      organizationGatewayConnectionActive: input.organizationGatewayConnectionActive === true,
+      organizationOpenRouterConnectionActive: input.organizationOpenRouterConnectionActive === true,
       observation: input.credentialReadinessObservations?.[model.definitionVersion],
       nowMs,
       maxAgeMs,

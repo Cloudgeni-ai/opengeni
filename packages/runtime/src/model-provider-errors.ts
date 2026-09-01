@@ -16,6 +16,24 @@ export class WorkspaceOpenRouterUnavailableError extends Error {
   }
 }
 
+export class OrganizationGatewayUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization Gateway model is unavailable: ask an organization admin to connect or reconnect Vercel AI Gateway in Organization settings, then retry.",
+    );
+    this.name = "OrganizationGatewayUnavailableError";
+  }
+}
+
+export class OrganizationOpenRouterUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization OpenRouter model is unavailable: ask an organization admin to connect or reconnect OpenRouter in Organization settings, then retry.",
+    );
+    this.name = "OrganizationOpenRouterUnavailableError";
+  }
+}
+
 export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
 
 /**
