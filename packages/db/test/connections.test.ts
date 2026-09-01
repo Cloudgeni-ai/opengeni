@@ -1000,6 +1000,7 @@ describe("buildHostConnectionTokenResolver", () => {
     expect(result).toEqual({
       status: "ok",
       headers: { Authorization: "Bearer host-token" },
+      authoritySource: "host",
       connectionId: "host-connection-7",
       expiresAt: new Date("2026-07-21T23:00:00.000Z"),
     });
@@ -1036,6 +1037,7 @@ describe("buildHostConnectionTokenResolver", () => {
     expect(result).toEqual({
       status: "ok",
       headers: { "X-Client": "client-secret" },
+      authoritySource: "host",
       placements: [
         { carrier: "header", name: "X-Client", value: "client-secret" },
         { carrier: "query", name: "api_key", value: "query-secret" },
