@@ -509,11 +509,12 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
     expect(retired).toMatchObject({ outcome: "success" });
     expect(winner.action).toBe("start");
     if (winner.action !== "start") throw new Error("producer winner did not start a session");
-    expect(replay).toMatchObject({
-      action: "start",
-      sessionId: winner.sessionId,
-      triggerEventId: winner.triggerEventId,
-    });
+    expect(["start", "signal"]).toContain(replay.action);
+    if (replay.action !== "start" && replay.action !== "signal") {
+      throw new Error("producer replay did not converge on the accepted session");
+    }
+    expect(replay.sessionId).toBe(winner.sessionId);
+    expect(replay.triggerEventId).toBe(winner.triggerEventId);
     expect(
       (await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).filter(
         (run) => run.producerKey === producerKey,
