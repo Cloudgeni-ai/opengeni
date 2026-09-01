@@ -378,10 +378,7 @@ export async function staticResponse(
   }
   const indexPath = safeStaticPath(root, "/index.html");
   if (!indexPath) return notFound();
-  return (
-    (await serveStaticFile(request, root, indexPath, REVALIDATE_CACHE_CONTROL)) ??
-    notFound()
-  );
+  return (await serveStaticFile(request, root, indexPath, REVALIDATE_CACHE_CONTROL)) ?? notFound();
 }
 
 function emit(
