@@ -7796,7 +7796,17 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
 }
 
 function assertBrowserFileUploadSecureContext(): void {
-  if (typeof window !== "undefined" && window.isSecureContext === false) {
+  const secureContext =
+    typeof window !== "undefined"
+      ? window.isSecureContext
+      : typeof globalThis.isSecureContext === "boolean"
+        ? globalThis.isSecureContext
+        : undefined;
+  // The framework-agnostic SDK also runs in Node, Bun, Deno, and edge
+  // runtimes. Preserve their existing upload behavior; this typed HTTPS error
+  // is only meaningful where the browser exposes a secure-context state.
+  if (secureContext === undefined) return;
+  if (!secureContext) {
     throw new OpenGeniSecureContextRequiredError("insecure_context");
   }
   if (

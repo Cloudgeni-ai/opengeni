@@ -632,6 +632,75 @@ describe("useFileAttachments", () => {
     await hook.unmount();
   });
 
+  test("tracks the failed attachment when insecure HTTP withholds crypto.randomUUID", async () => {
+    const randomUuidDescriptor = Object.getOwnPropertyDescriptor(globalThis.crypto, "randomUUID");
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      configurable: true,
+      value: undefined,
+    });
+    const failure = new OpenGeniSecureContextRequiredError("insecure_context");
+    let uploads = 0;
+    const client = fakeClient({
+      uploadFile: async () => {
+        uploads += 1;
+        throw failure;
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    try {
+      await flushing(() => hook.result.current.addFiles([imageFile("http.png")]));
+      await flush();
+
+      expect(uploads).toBe(1);
+      expect(hook.result.current.attachments).toHaveLength(1);
+      expect(hook.result.current.attachments[0]).toMatchObject({
+        name: "http.png",
+        status: "failed",
+        errorCode: "secure_context_required",
+        error: failure.message,
+      });
+      expect(hook.result.current.hasUnresolved).toBe(true);
+    } finally {
+      await hook.unmount();
+      if (randomUuidDescriptor) {
+        Object.defineProperty(globalThis.crypto, "randomUUID", randomUuidDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis.crypto, "randomUUID");
+      }
+    }
+  });
+
+  test("classifies the stable secure-context code from a structurally compatible client", async () => {
+    const failure = Object.assign(new Error("Use HTTPS"), {
+      code: "secure_context_required" as const,
+      retryable: false,
+    });
+    const client = fakeClient({
+      uploadFile: async () => {
+        throw failure;
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("embedded.png")]));
+    await flush();
+
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      name: "embedded.png",
+      status: "failed",
+      errorCode: "secure_context_required",
+      error: "Use HTTPS",
+    });
+    await hook.unmount();
+  });
+
   test("retry(id) re-uploads a failed attachment in place -> ready, clearing its error", async () => {
     let calls = 0;
     let resolveRetry!: (value: FileAsset) => void;

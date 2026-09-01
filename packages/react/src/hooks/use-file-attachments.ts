@@ -1,8 +1,4 @@
-import {
-  OpenGeniSecureContextRequiredError,
-  type FileAsset,
-  type FileResourceRef,
-} from "@opengeni/sdk";
+import type { FileAsset, FileResourceRef } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   useEmbeddedFileAttachments,
@@ -81,6 +77,27 @@ export type UseFileAttachmentsResult = {
 };
 
 const isImage = (file: File): boolean => file.type.startsWith("image/");
+
+let fallbackAttachmentId = 0;
+
+function createAttachmentId(): string {
+  const cryptoSource = globalThis.crypto;
+  if (typeof cryptoSource?.randomUUID === "function") return cryptoSource.randomUUID();
+  fallbackAttachmentId += 1;
+  // This id is only a browser-local React key and retry lookup, never durable
+  // authority. Keep attachment tracking usable when HTTP withholds randomUUID
+  // or Web Crypto is unavailable so the SDK's typed failure reaches the card.
+  return `attachment:${Date.now().toString(36)}:${fallbackAttachmentId.toString(36)}`;
+}
+
+function secureContextRequiredErrorCode(error: unknown): "secure_context_required" | undefined {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "secure_context_required"
+    ? error.code
+    : undefined;
+}
 
 /**
  * Upload-and-track state for files attached to the next message. Owns the
@@ -219,8 +236,7 @@ export function useFileAttachments(
                 ? {
                     ...attachment,
                     status: "failed",
-                    errorCode:
-                      error instanceof OpenGeniSecureContextRequiredError ? error.code : undefined,
+                    errorCode: secureContextRequiredErrorCode(error),
                     error: error instanceof Error ? error.message : String(error),
                   }
                 : attachment,
@@ -234,7 +250,7 @@ export function useFileAttachments(
   const addFiles = useCallback(
     (files: Iterable<File>) => {
       for (const file of files) {
-        const id = crypto.randomUUID();
+        const id = createAttachmentId();
         sources.current.set(id, file);
         const previewUrl = isImage(file) ? URL.createObjectURL(file) : undefined;
         if (previewUrl) previewUrls.current.set(id, previewUrl);
