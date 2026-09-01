@@ -44,8 +44,6 @@ export type FileAttachment = {
   previewUrl?: string | undefined;
   /** Stable SDK failure code for UI behavior that must not parse error copy. */
   errorCode?: "secure_context_required" | undefined;
-  /** Signed attachment-disposition URL for restored remote previews. */
-  downloadUrl?: string | undefined;
   /** A local or signed image URL failed to load; render the typed icon instead. */
   previewFailed?: boolean | undefined;
   error?: string | undefined;
@@ -94,6 +92,8 @@ export type UseFileAttachmentsResult = {
    * releases. Returns `undefined` when the attachment has no local preview.
    */
   retainPreview: (id: string) => (() => void) | undefined;
+  /** Mint a fresh attachment-disposition URL for one restored file. */
+  createDownloadUrl?: ((id: string) => Promise<string | undefined>) | undefined;
   /** Remove one attachment; revokes its object-URL after retained users finish. */
   remove: (id: string) => void;
   /** Drop a failed preview URL while preserving the underlying attachment. */
@@ -632,6 +632,20 @@ export function useFileAttachments(
     [revokePreview],
   );
 
+  const createDownloadUrl = useCallback(
+    async (id: string): Promise<string | undefined> => {
+      const attachment = committedAttachments.current.find((candidate) => candidate.id === id);
+      if (attachment?.restored !== true || !attachment.resource) return undefined;
+      const createFileDownloadUrl = optionalCreateFileDownloadUrl(client);
+      if (!createFileDownloadUrl) return undefined;
+      const signed = await createFileDownloadUrl(workspaceId, attachment.resource.fileId, {
+        disposition: "attachment",
+      });
+      return signed.url;
+    },
+    [client, workspaceId],
+  );
+
   const removeReadyFiles = useCallback((resources: Iterable<string | FileResourceRef>) => {
     const acceptedFileIds = new Set<string>();
     const acceptedResourceKeys = new Set<string>();
@@ -670,6 +684,7 @@ export function useFileAttachments(
     restoreResources,
     retry,
     retainPreview,
+    createDownloadUrl,
     remove,
     failPreview,
     removeReadyFiles,
@@ -780,20 +795,6 @@ function hydrateRemotePreview({
         ),
       );
     });
-  void createFileDownloadUrl(workspaceId, file.id, { disposition: "attachment" })
-    .then((signed) => {
-      if (restoreGeneration.current !== generation) return;
-      setAttachments((current) =>
-        current.map((attachment) =>
-          attachment.restored === true &&
-          attachment.resource &&
-          keys.has(fileResourceIdentity(attachment.resource))
-            ? { ...attachment, downloadUrl: signed.url }
-            : attachment,
-        ),
-      );
-    })
-    .catch(() => undefined);
 }
 
 function optionalGetFile(

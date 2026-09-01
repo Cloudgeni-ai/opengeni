@@ -1006,6 +1006,7 @@ export function Attachments() {
       onRemove={controller.removeAttachment}
       onRetry={controller.attachments.retry}
       onRetainPreview={controller.attachments.retainPreview}
+      onCreateDownloadUrl={controller.attachments.createDownloadUrl}
       onPreviewError={controller.attachments.failPreview}
     />
   );
@@ -1701,6 +1702,7 @@ function AttachmentChips({
   onRemove,
   onRetry,
   onRetainPreview,
+  onCreateDownloadUrl,
   onPreviewError,
 }: {
   attachments: UseFileAttachmentsResult["attachments"];
@@ -1708,6 +1710,7 @@ function AttachmentChips({
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
   onRetainPreview: UseFileAttachmentsResult["retainPreview"];
+  onCreateDownloadUrl?: UseFileAttachmentsResult["createDownloadUrl"];
   onPreviewError?: ((id: string) => void) | undefined;
 }) {
   const lightbox = useLightboxOptional();
@@ -1761,7 +1764,11 @@ function AttachmentChips({
                       close: messages.closeAttachmentPreview,
                     },
                     releasePreview,
-                    attachment.restored === true ? (attachment.downloadUrl ?? null) : undefined,
+                    attachment.restored === true
+                      ? onCreateDownloadUrl
+                        ? () => onCreateDownloadUrl(attachment.id)
+                        : null
+                      : undefined,
                   );
                 }}
               >

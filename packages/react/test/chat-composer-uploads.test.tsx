@@ -74,6 +74,7 @@ function makeAttachments(
     restoreReadyFiles: () => {},
     retry: () => {},
     retainPreview: () => undefined,
+    createDownloadUrl: async () => undefined,
     remove: () => {},
     removeReadyFiles: () => {},
     clear: () => {},
@@ -344,10 +345,10 @@ describe("ChatComposer attachments", () => {
     expect(retained).toEqual([attachment.id]);
   });
 
-  test("hands restored disposition URLs to the lightbox without raw signed fallback", () => {
-    expect(composerSource).toContain(
-      "attachment.restored === true ? (attachment.downloadUrl ?? null) : undefined,",
-    );
+  test("hands restored downloads a fresh URL resolver instead of a cached signed URL", () => {
+    expect(composerSource).toContain("? () => onCreateDownloadUrl(attachment.id)");
+    expect(composerSource).toContain(": null");
+    expect(composerSource).not.toContain("attachment.downloadUrl");
   });
 
   test("uses composer message overrides for all attachment preview accessible names", async () => {

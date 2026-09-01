@@ -593,13 +593,21 @@ describe("useFileAttachments", () => {
       resource: { kind: "file", fileId: asset.id },
       restored: true,
       previewUrl: "https://files.example.test/durable-image/inline",
-      downloadUrl: "https://files.example.test/durable-image/attachment",
     });
     expect(hook.result.current.attachments[0]?.metadataStatus).toBeUndefined();
     expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
     expect(getFileCalls).toEqual([asset.id]);
+    expect(downloadCalls).toEqual([{ fileId: asset.id, disposition: "inline" }]);
+
+    expect(await hook.result.current.createDownloadUrl!("restored:durable-image:default")).toBe(
+      "https://files.example.test/durable-image/attachment",
+    );
+    expect(await hook.result.current.createDownloadUrl!("restored:durable-image:default")).toBe(
+      "https://files.example.test/durable-image/attachment",
+    );
     expect(downloadCalls).toEqual([
       { fileId: asset.id, disposition: "inline" },
+      { fileId: asset.id, disposition: "attachment" },
       { fileId: asset.id, disposition: "attachment" },
     ]);
 
@@ -610,6 +618,7 @@ describe("useFileAttachments", () => {
     expect(getFileCalls).toEqual([asset.id]);
     expect(downloadCalls).toEqual([
       { fileId: asset.id, disposition: "inline" },
+      { fileId: asset.id, disposition: "attachment" },
       { fileId: asset.id, disposition: "attachment" },
     ]);
     await hook.unmount();
@@ -656,7 +665,7 @@ describe("useFileAttachments", () => {
     ]);
     expect(hook.result.current.readyResources).toEqual(resources.slice(0, 2));
     expect(getFileCalls).toBe(1);
-    expect(downloadCalls).toBe(2);
+    expect(downloadCalls).toBe(1);
     await hook.unmount();
   });
 

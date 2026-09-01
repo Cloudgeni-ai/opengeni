@@ -14,14 +14,14 @@ registerDom();
 
 function renderControls(
   controlLabels?: { download?: string; close?: string },
-  downloadUrl?: string | null,
+  resolveDownloadUrl?: (() => Promise<string | undefined>) | null,
 ) {
   return renderToStaticMarkup(
     <Dialog.Root open>
       <ScreenshotLightboxControls
         src="blob:screenshot.png"
         downloadFilename="screenshot.png"
-        downloadUrl={downloadUrl}
+        resolveDownloadUrl={resolveDownloadUrl}
         controlLabels={controlLabels}
       />
     </Dialog.Root>,
@@ -48,15 +48,11 @@ describe("ScreenshotLightboxControls", () => {
     expect(markup).not.toContain('aria-label="Close"');
   });
 
-  test("uses an explicit cross-origin download URL instead of the preview source", () => {
-    const markup = renderControls(
-      undefined,
-      "https://files.example.test/screenshot.png?response-content-disposition=attachment",
-    );
+  test("renders an on-demand download control without retaining a signed URL", () => {
+    const markup = renderControls(undefined, async () => "https://files.example.test/fresh");
 
-    expect(markup).toContain(
-      'href="https://files.example.test/screenshot.png?response-content-disposition=attachment"',
-    );
+    expect(markup).toContain('aria-label="Download screenshot.png"');
+    expect(markup).not.toContain("files.example.test");
     expect(markup).not.toContain('href="blob:screenshot.png"');
   });
 
@@ -65,6 +61,49 @@ describe("ScreenshotLightboxControls", () => {
 
     expect(markup).not.toContain('aria-label="Download screenshot.png"');
     expect(markup).toContain('aria-label="Close"');
+  });
+
+  test("starts each download with the URL freshly returned by the resolver", async () => {
+    const urls = [
+      "https://files.example.test/screenshot.png?signature=first",
+      "https://files.example.test/screenshot.png?signature=second",
+    ];
+    const clicked: Array<{ href: string; download: string; rel: string }> = [];
+    let resolveCalls = 0;
+    const originalClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function click() {
+      clicked.push({ href: this.href, download: this.download, rel: this.rel });
+    };
+    const rendered = await renderComponent(
+      <Dialog.Root open>
+        <ScreenshotLightboxControls
+          src="https://files.example.test/expired-preview"
+          downloadFilename="screenshot.png"
+          resolveDownloadUrl={async () => urls[resolveCalls++]}
+        />
+      </Dialog.Root>,
+    );
+    try {
+      const download = rendered.container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Download screenshot.png"]',
+      );
+      for (const _url of urls) {
+        await act(async () => {
+          download?.click();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      }
+    } finally {
+      await rendered.unmount();
+      HTMLAnchorElement.prototype.click = originalClick;
+    }
+
+    expect(resolveCalls).toBe(2);
+    expect(clicked).toEqual(
+      urls.map((href) => ({ href, download: "screenshot.png", rel: "noreferrer" })),
+    );
+    expect(document.querySelectorAll('a[href*="files.example.test"]')).toHaveLength(0);
   });
 });
 
