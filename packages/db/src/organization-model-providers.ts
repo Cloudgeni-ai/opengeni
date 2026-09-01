@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import { and, count, eq, isNull, sql } from "drizzle-orm";
+import { and, count, eq, exists, isNull, sql } from "drizzle-orm";
 
 import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
 import { decryptEnvironmentValue } from "./environment-crypto";
@@ -241,6 +241,9 @@ export async function revokeOrganizationModelProviderConnection(
     await scopedDb.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-model-provider:${input.organizationId}:${input.providerKind}`}, 0))`,
     );
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`organization-model-provider-models:${input.organizationId}:${input.providerKind}`}, 0))`,
+    );
     const requestHash = digest({ operation: "revoke", expectedVersion: input.expectedVersion });
     const [replay] = await scopedDb
       .select()
@@ -428,6 +431,18 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
           eq(schema.organizationModelProviderCustomModels.providerKind, input.providerKind),
           eq(schema.organizationModelProviderCustomModels.upstreamModelId, input.upstreamModelId),
           isNull(schema.organizationModelProviderCustomModels.retiredAt),
+          exists(
+            scopedDb
+              .select({ id: schema.organizationModelProviderConnections.id })
+              .from(schema.organizationModelProviderConnections)
+              .where(
+                and(
+                  eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+                  eq(schema.organizationModelProviderConnections.providerKind, input.providerKind),
+                  eq(schema.organizationModelProviderConnections.status, "active"),
+                ),
+              ),
+          ),
         ),
       )
       .limit(1);

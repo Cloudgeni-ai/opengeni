@@ -2,11 +2,13 @@ import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
-  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
+  ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
   resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
@@ -172,6 +174,15 @@ const maxSessionMcpCredentialHeaderValueLength = 4096;
 // Keep the durable snapshot below the shared event-preview array boundary so
 // the generic lossy projection cannot silently rewrite this audit fact.
 const maxToolPolicyAuditRefs = 40;
+
+function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
+  return (
+    modelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true ||
+    modelId?.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) === true ||
+    modelId?.startsWith(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX) === true ||
+    modelId?.startsWith(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX) === true
+  );
+}
 // RFC 9110 field-name token characters.
 const sessionMcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
@@ -1681,9 +1692,7 @@ async function resolveWorkspaceModelBoundarySettings(
   modelIds: readonly (string | null | undefined)[],
   retainedProductModelId?: string | null,
 ): Promise<Settings> {
-  const retainedWorkspaceModel =
-    retainedProductModelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true ||
-    retainedProductModelId?.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) === true;
+  const retainedCatalogModel = isCatalogOverlayModel(retainedProductModelId);
   if (deps.catalogSourceSettings) {
     // The adapter already resolved one exact workspace catalog snapshot for
     // this request. Preserve it for fresh selections, but an existing session
@@ -1691,16 +1700,10 @@ async function resolveWorkspaceModelBoundarySettings(
     // intentionally omitted. Re-open only the unoverlaid source for that
     // retention lookup; never feed the synthetic workspace provider back
     // through deployment validation.
-    if (!retainedWorkspaceModel) return deps.settings;
+    if (!retainedCatalogModel) return deps.settings;
   }
-  const workspaceModelIds = modelIds.filter(
-    (modelId): modelId is string =>
-      typeof modelId === "string" &&
-      (modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
-        modelId.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)),
-  );
   const needsWorkspaceResolution =
-    deps.settings.modelCatalogSource === "database" || workspaceModelIds.length > 0;
+    deps.settings.modelCatalogSource === "database" || modelIds.some(isCatalogOverlayModel);
   if (!needsWorkspaceResolution) return deps.settings;
   return (
     await resolveWorkspaceCatalogSettings(deps.db, deps.catalogSourceSettings ?? deps.settings, {
