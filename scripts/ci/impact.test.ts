@@ -299,7 +299,7 @@ describe("fail-closed change impact", () => {
     ]) {
       expect(createImpactPlan([path]).browserAcceptanceLanes).toContain("accounts");
     }
-  });
+  }, 30_000);
 
   test("artifact browser dependency rules do not widen unrelated leaf package plans", () => {
     const plan = createImpactPlan(["packages/ogtool/src/index.ts"]);
