@@ -6,6 +6,8 @@ import {
   KIB as kib,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
+  RIG_VERIFICATION_RECOVERY_CURRENT_MAIN_FILE_COUNT,
+  RIG_VERIFICATION_RECOVERY_CURRENT_MAIN_GZIP_BUDGET,
 } from "./web-bundle-budget-policy";
 
 type ManifestEntry = {
@@ -385,6 +387,12 @@ const budgets = {
   // existing Codex/settings chunks. Linux/x64 Bun 1.4 measures 2,271,792 raw
   // bytes across the same 33 files. Advance only the raw whole-KiB envelope;
   // gzip, file count, initial, per-file, lazy, and CSS caps remain fixed.
+  // Rig deferred-recovery, exact inactive-version verification, manager-only
+  // replacement controls, and current main measure 2,288,890 raw / 641,938
+  // gzip bytes across 32 files in the exact configured Linux/x64 Bun 1.4
+  // production build. Advance only the policy-derived direct-session raw and
+  // gzip envelopes; the existing 33-file allowance and every initial,
+  // per-file, lazy-chunk, and CSS cap remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
@@ -405,11 +413,13 @@ const effectiveBudgets = {
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
+    RIG_VERIFICATION_RECOVERY_CURRENT_MAIN_GZIP_BUDGET,
     625 * kib,
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
+    RIG_VERIFICATION_RECOVERY_CURRENT_MAIN_FILE_COUNT,
     33,
   ),
 } as const;
