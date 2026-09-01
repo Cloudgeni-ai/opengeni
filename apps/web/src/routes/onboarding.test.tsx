@@ -380,7 +380,9 @@ describe("organization onboarding UI", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<SetupAccountRoute token="setup-token" />));
-      expect(container.textContent).toContain("Use your existing OpenGeni account");
+      await flush();
+      expect(container.textContent).toContain("Join Test Organization");
+      expect(container.textContent).toContain("create an account to accept this invitation");
       expect(container.textContent).toContain("Organization invitations");
       expect(container.textContent).toContain("Sign in to accept invitation");
       await enter(container.querySelector("#setup-account-name")!, "Grace Hopper");

@@ -75,16 +75,19 @@ describe("managed email transport", () => {
       ],
       setupUrl: "https://opengeni.test/setup-account#token=secret-bearer",
     });
+    expect(rendered.subject).toBe("You're invited to join R&D <Labs> on OpenGeni");
     expect(rendered.text).toContain("Ada <Admin>");
     expect(rendered.text).toContain("Launch <Ops>: Viewer");
     expect(rendered.text).toContain("never shares anyone's Personal workspace");
-    expect(rendered.text).toContain("Review invitation:");
+    expect(rendered.text).toContain("Accept invitation to R&D <Labs>:");
+    expect(rendered.text).toContain("You'll sign in or create an account before joining.");
     expect(rendered.text).toContain("Organization invitations");
     expect(rendered.html).toContain("Ada &lt;Admin&gt;");
     expect(rendered.html).toContain("R&amp;D &lt;Labs&gt;");
     expect(rendered.html).toContain("Launch &lt;Ops&gt;");
-    expect(rendered.html).toContain(">Review invitation</a>");
+    expect(rendered.html).toContain(">Accept invitation to R&amp;D &lt;Labs&gt;</a>");
     expect(rendered.html).toContain("<strong>Organization invitations</strong>");
+    expect(rendered.html).toContain("<strong>Join organization</strong>");
     expect(rendered.html).not.toContain("Ada <Admin>");
     const digestInput = {
       ...rendered,
