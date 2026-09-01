@@ -240,13 +240,17 @@ export function AccountAuthRoute({
               : "This window keeps the account you choose separate until OpenGeni verifies the sign-in."}
           </p>
         </div>
-        <ManagedSocialAuthButtons
-          providers={socialProviders}
-          busyProvider={socialBusy}
-          disabled={busy}
-          onSelect={(provider) => void submitSocial(provider)}
-        />
-        {socialProviders.length > 0 ? <ManagedAuthDivider /> : null}
+        {!invitation ? (
+          <>
+            <ManagedSocialAuthButtons
+              providers={socialProviders}
+              busyProvider={socialBusy}
+              disabled={busy}
+              onSelect={(provider) => void submitSocial(provider)}
+            />
+            {socialProviders.length > 0 ? <ManagedAuthDivider /> : null}
+          </>
+        ) : null}
         <div className="mb-3">
           <Label htmlFor="account-auth-email">Email</Label>
           <Input

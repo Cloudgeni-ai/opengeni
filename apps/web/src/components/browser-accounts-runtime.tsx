@@ -5,6 +5,7 @@ import {
   type BrowserAccountTransition,
 } from "@opengeni/react/accounts";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Loader2Icon, UserRoundPlusIcon } from "lucide-react";
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -17,6 +18,7 @@ import {
 } from "@/api";
 import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import {
   browserAccountBridgeBlockersSnapshot,
@@ -278,6 +280,52 @@ export function BrowserAccountsSignedOutPanel(props: {
         </div>
       </div>
     </section>
+  );
+}
+
+export function BrowserAccountsOrganizationOnboardingPanel(props: {
+  client: OpenGeniBrowserClient;
+  activeEmail: string | null;
+  invitation: OrganizationInvitationContinuation | null;
+  onComplete: () => void;
+}) {
+  const accounts = useBrowserAccounts();
+  const popup = useBrowserAccountPopup();
+
+  function authenticate(kind: "add" | "reauth", slotId?: string) {
+    popup.open(() => (kind === "add" ? accounts.beginAdd() : accounts.beginReauth(slotId!)), {
+      onError: (error) =>
+        toast.error("Couldn't start account authentication", {
+          description: String(error),
+        }),
+    });
+  }
+
+  function useInvitedAccount(targetEmail: string) {
+    const targetSlot = accounts.projection?.slots.find(
+      (slot) => normalizeEmail(slot.verifiedClaim.value) === normalizeEmail(targetEmail),
+    );
+    if (!targetSlot) {
+      authenticate("add");
+      return;
+    }
+    if (targetSlot.state === "reauth_required") {
+      authenticate("reauth", targetSlot.id);
+      return;
+    }
+    void accounts
+      .selectSlot(targetSlot.id)
+      .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
+  }
+
+  return (
+    <OrganizationOnboardingPanel
+      client={props.client}
+      activeEmail={props.activeEmail}
+      invitation={props.invitation}
+      onUseInvitedAccount={useInvitedAccount}
+      onComplete={props.onComplete}
+    />
   );
 }
 

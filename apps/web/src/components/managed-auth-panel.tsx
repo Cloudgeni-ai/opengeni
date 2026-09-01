@@ -255,7 +255,7 @@ export function ManagedAuthPanel(props: {
             </Button>
           </div>
         ) : null}
-        {props.socialProviders?.length && props.onSocialSubmit ? (
+        {!invitation && props.socialProviders?.length && props.onSocialSubmit ? (
           <>
             <ManagedSocialAuthButtons
               providers={props.socialProviders}

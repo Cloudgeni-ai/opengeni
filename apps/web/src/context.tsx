@@ -178,6 +178,12 @@ const BrowserAccountsLoadingGate = lazy(() =>
   })),
 );
 
+const BrowserAccountsOrganizationOnboardingPanel = lazy(() =>
+  import("@/components/browser-accounts-runtime").then((module) => ({
+    default: module.BrowserAccountsOrganizationOnboardingPanel,
+  })),
+);
+
 function captureProductAnalyticsEvent(
   name: AnalyticsEventName,
   properties: AnalyticsProperties = {},
@@ -2548,8 +2554,9 @@ export function RootRouteComponent() {
     workspaces,
   ]);
 
-  const organizationInvitationContinuation =
-    managedAuthRequired && !authSession ? readOrganizationInvitationContinuation() : null;
+  const organizationInvitationContinuation = managedAuthRequired
+    ? readOrganizationInvitationContinuation()
+    : null;
 
   const applicationSurface = isPublicAuthRoute ? (
     // Self-contained public pages render before config/auth gates and outside
@@ -2616,7 +2623,26 @@ export function RootRouteComponent() {
     accessContext &&
     !defaultWorkspaceId &&
     !slackLinkContinuationWorkspaceId ? (
-    <OrganizationOnboardingPanel client={client} onComplete={revalidatePrincipalAccess} />
+    browserAccountsEnabled ? (
+      <BrowserAccountsOrganizationOnboardingPanel
+        client={client}
+        activeEmail={authSession?.user.email ?? null}
+        invitation={organizationInvitationContinuation}
+        onComplete={revalidatePrincipalAccess}
+      />
+    ) : (
+      <OrganizationOnboardingPanel
+        client={client}
+        activeEmail={authSession?.user.email ?? null}
+        invitation={organizationInvitationContinuation}
+        onUseInvitedAccount={() => {
+          void handleManagedSignOut().catch((error) =>
+            toast.error("Sign out failed", { description: String(error) }),
+          );
+        }}
+        onComplete={revalidatePrincipalAccess}
+      />
+    )
   ) : accessLoading || !appContext ? (
     <LoadingPanel label="Loading workspace access" />
   ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
