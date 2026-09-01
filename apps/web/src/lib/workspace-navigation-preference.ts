@@ -1,3 +1,7 @@
+import type { AccessContext, Workspace } from "@/types";
+
+import { authorizedWorkspaceFromList } from "./workspace-scope-context";
+
 const WORKSPACE_NAVIGATION_PREFERENCE_VERSION = 1;
 const MAX_WORKSPACE_ID_LENGTH = 256;
 
@@ -47,42 +51,44 @@ export function writeLastWorkspaceId(
 
 export function isAuthorizedWorkspaceId(
   workspaceId: string | null | undefined,
-  listedWorkspaceIds: readonly string[],
-  grantedWorkspaceIds: readonly string[],
+  workspaces: readonly Workspace[],
+  accessContext: AccessContext,
 ): workspaceId is string {
   return Boolean(
     workspaceId &&
-    (listedWorkspaceIds.includes(workspaceId) || grantedWorkspaceIds.includes(workspaceId)),
+    authorizedWorkspaceFromList({
+      workspaceId,
+      workspaces,
+      accessContext,
+    }),
   );
 }
 
 export function resolveLandingWorkspaceId(input: {
   requestedWorkspaceId?: string | null;
   rememberedWorkspaceId?: string | null;
-  defaultWorkspaceId?: string | null;
-  listedWorkspaceIds: readonly string[];
-  grantedWorkspaceIds: readonly string[];
+  workspaces: readonly Workspace[];
+  accessContext: AccessContext;
 }): string | null {
-  if (
-    isAuthorizedWorkspaceId(
-      input.requestedWorkspaceId,
-      input.listedWorkspaceIds,
-      input.grantedWorkspaceIds,
-    )
-  ) {
+  if (isAuthorizedWorkspaceId(input.requestedWorkspaceId, input.workspaces, input.accessContext)) {
     return input.requestedWorkspaceId;
   }
-  if (
-    isAuthorizedWorkspaceId(
-      input.rememberedWorkspaceId,
-      input.listedWorkspaceIds,
-      input.grantedWorkspaceIds,
-    )
-  ) {
+  if (isAuthorizedWorkspaceId(input.rememberedWorkspaceId, input.workspaces, input.accessContext)) {
     return input.rememberedWorkspaceId;
   }
+  if (
+    isAuthorizedWorkspaceId(
+      input.accessContext.defaultWorkspaceId,
+      input.workspaces,
+      input.accessContext,
+    )
+  ) {
+    return input.accessContext.defaultWorkspaceId;
+  }
   return (
-    input.defaultWorkspaceId ?? input.listedWorkspaceIds[0] ?? input.grantedWorkspaceIds[0] ?? null
+    input.workspaces.find((workspace) =>
+      isAuthorizedWorkspaceId(workspace.id, input.workspaces, input.accessContext),
+    )?.id ?? null
   );
 }
 

@@ -512,18 +512,13 @@ export function App() {
 function RootIndexRoute() {
   const context = useAppContext();
   const { workspaceId: requestedWorkspaceId } = indexRoute.useSearch();
-  const listedWorkspaceIds = context.workspaces.map((workspace) => workspace.id);
-  const grantedWorkspaceIds = context.accessContext.workspaceGrants.map(
-    (grant) => grant.workspaceId,
-  );
   const workspaceId = resolveLandingWorkspaceId({
     requestedWorkspaceId,
     rememberedWorkspaceId: readLastWorkspaceId(
       workspaceNavigationPreferenceStorageId(context.accessContext.subjectId),
     ),
-    defaultWorkspaceId: context.accessContext.defaultWorkspaceId,
-    listedWorkspaceIds,
-    grantedWorkspaceIds,
+    workspaces: context.workspaces,
+    accessContext: context.accessContext,
   });
   if (!workspaceId) {
     return (

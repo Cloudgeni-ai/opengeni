@@ -1010,9 +1010,7 @@ export function RootRouteComponent() {
   useEffect(() => {
     if (!accessContext) return;
     const workspaceId = /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? null;
-    const listedWorkspaceIds = workspaces.map((workspace) => workspace.id);
-    const grantedWorkspaceIds = accessContext.workspaceGrants.map((grant) => grant.workspaceId);
-    if (!isAuthorizedWorkspaceId(workspaceId, listedWorkspaceIds, grantedWorkspaceIds)) return;
+    if (!isAuthorizedWorkspaceId(workspaceId, workspaces, accessContext)) return;
     writeLastWorkspaceId(
       workspaceNavigationPreferenceStorageId(accessContext.subjectId),
       workspaceId,
