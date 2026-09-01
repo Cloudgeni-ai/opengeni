@@ -25,11 +25,15 @@ import { derived, type Readable } from "svelte/store";
 import { getOpenGeniContext } from "./context";
 import {
   createSessionControllerComposition,
+  type SessionControllerCompositionFeatures,
   type SessionSurfaceControllers,
 } from "./session-controller-composition";
 import { controllerStore } from "./store";
 
-export type { SessionSurfaceControllers } from "./session-controller-composition";
+export type {
+  SessionControllerCompositionFeatures,
+  SessionSurfaceControllers,
+} from "./session-controller-composition";
 
 export function createSessionEvents(options: Parameters<typeof createSessionEventStore>[0]) {
   return controllerStore<SessionEventStore>(createSessionEventStore(options));
@@ -66,8 +70,11 @@ export function createLineage(options: Parameters<typeof createSessionLineageSto
   return controllerStore<SessionLineageStore>(createSessionLineageStore(options));
 }
 
-export function createContextSessionControllers(sessionId: string): SessionSurfaceControllers {
-  return createSessionControllerComposition(getOpenGeniContext(), sessionId);
+export function createContextSessionControllers(
+  sessionId: string,
+  features: SessionControllerCompositionFeatures = {},
+): SessionSurfaceControllers {
+  return createSessionControllerComposition(getOpenGeniContext(), sessionId, features);
 }
 
 export function approvalsFromEventStore(

@@ -56,7 +56,7 @@
   <div class="og-session__composer" data-og-part="composer">
     <SessionComposer
       controller={controllers.composer.controller}
-      attachments={controllers.attachments.controller}
+      attachments={controllers.attachments?.controller}
       {models}
     />
   </div>

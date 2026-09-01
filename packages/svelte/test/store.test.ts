@@ -72,4 +72,32 @@ describe("native Svelte controller readables", () => {
     wrapped.destroy();
     expect(external.counts.destroys).toBe(0);
   });
+
+  test("acquires a linked lifecycle once and releases it after the final owner", async () => {
+    const owned = controller();
+    const linked = controller();
+    let acquisitions = 0;
+    let releases = 0;
+    const readable = readableFromController(owned, {
+      acquire: () => {
+        acquisitions += 1;
+        void linked.start();
+        return () => {
+          releases += 1;
+          linked.destroy();
+        };
+      },
+      startOnServer: true,
+    });
+    const unsubscribeFirst = readable.subscribe(() => undefined);
+    const unsubscribeSecond = readable.subscribe(() => undefined);
+    expect(owned.counts.starts).toBe(1);
+    expect(linked.counts.starts).toBe(1);
+    expect(acquisitions).toBe(1);
+    unsubscribeFirst();
+    unsubscribeSecond();
+    await Promise.resolve();
+    expect(releases).toBe(1);
+    expect(linked.counts.destroys).toBe(1);
+  });
 });

@@ -1292,11 +1292,12 @@ try {
     writeFile(
       join(minimalSvelteRoot, "surface.ts"),
       [
-        'import type { SessionSurfaceControllers } from "@opengeni/svelte/session";',
+        'import type { OpenGeniSvelteContext, SessionClientLike, SessionSurfaceControllers } from "@opengeni/svelte/session";',
         'import { createSessionEvents, readableFromController } from "@opengeni/svelte/session";',
         'import type { TimelineRendererRegistry } from "@opengeni/svelte/session-ui";',
         'import type { ModelPickerOption, ToolPolicyOption } from "@opengeni/svelte/composer";',
         "export const packedSvelteSurface = [createSessionEvents, readableFromController];",
+        'export function packedNarrowContext(client: SessionClientLike): OpenGeniSvelteContext { return { client, workspaceId: "workspace-proof" }; }',
         "export type PackedSvelteTypes = [SessionSurfaceControllers, TimelineRendererRegistry, ModelPickerOption, ToolPolicyOption];",
         "",
       ].join("\n"),

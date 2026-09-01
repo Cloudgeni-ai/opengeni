@@ -2,7 +2,7 @@ import type {
   FileAttachmentClientLike,
   GoalClientLike,
   HumanInputSessionClientLike,
-  SessionRuntimeClientLike,
+  SessionClientLike,
   SessionLineageClientLike,
   SessionMcpApprovalPolicyClientLike,
   SessionReadClientLike,
@@ -12,7 +12,7 @@ import { getContext, setContext } from "svelte";
 const CONTEXT_KEY = Symbol.for("@opengeni/svelte/context");
 
 export type OpenGeniSvelteContext = Readonly<{
-  client: SessionRuntimeClientLike;
+  client: SessionClientLike;
   workspaceId: string;
   sessionClient?: SessionReadClientLike | undefined;
   goalClient?: GoalClientLike | undefined;

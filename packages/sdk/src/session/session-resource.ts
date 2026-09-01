@@ -1,5 +1,5 @@
 import type { Session, SessionEvent } from "../types";
-import type { SessionReadClientLike } from "./client";
+import type { SessionResourceClientLike } from "./client";
 import type { SessionRuntimeEnvironment } from "./environment";
 import { defaultSessionRuntimeEnvironment } from "./environment";
 import {
@@ -33,7 +33,7 @@ export type SessionResourceStore = OpenGeniExternalStore<SessionResourceSnapshot
 };
 
 export function createSessionResourceStore(options: {
-  client: Pick<SessionReadClientLike, "getSession" | "streamEvents" | "updateSession">;
+  client: SessionResourceClientLike;
   workspaceId: string;
   sessionId: string | null | undefined;
   enabled?: boolean;
@@ -244,8 +244,13 @@ export function createSessionResourceStore(options: {
       reads.invalidate(true);
     },
     async updateTitle(title: string) {
+      if (!options.client.updateSession) {
+        mutationError = new Error("Session title updates are unavailable for this client.");
+        publish();
+        return null;
+      }
       const result = await runMutation(() =>
-        options.client.updateSession(options.workspaceId, sessionId, { title }),
+        options.client.updateSession!(options.workspaceId, sessionId, { title }),
       );
       if (result) {
         override = result;
