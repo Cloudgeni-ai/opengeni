@@ -239,6 +239,7 @@ describe("installed API Integration worker adapters", () => {
         status: "auth_needed",
         reason: "expired",
         providerDomain: item.providerDomain,
+        authoritySource: "host",
         connectionId: item.connectionRef!.connectionId,
         scopes: ["inventory.read"],
       }),
@@ -265,6 +266,7 @@ describe("installed API Integration worker adapters", () => {
           toolName: "list_items",
           reason: "expired",
           providerDomain: "127.0.0.1",
+          authoritySource: "host",
         }),
       ]);
     } finally {

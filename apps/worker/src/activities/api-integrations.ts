@@ -92,7 +92,13 @@ function integrationCredentialResolver(
         forceRefresh: request.forceRefresh === true,
       });
       if (result.status === "auth_needed") {
-        await publishAuthNeeded(input, integration.serverId, request.operationKey, result);
+        await publishAuthNeeded(
+          input,
+          integration.serverId,
+          request.operationKey,
+          result,
+          connectionRef,
+        );
         return null;
       }
       const destination = new URL(request.destinationUrl);
@@ -120,6 +126,7 @@ async function publishAuthNeeded(
   serverId: string,
   toolName: string,
   result: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
+  connectionRef: NonNullable<ApiIntegrationRuntime["connectionRef"]>,
 ): Promise<void> {
   try {
     await input.onAuthNeeded?.({
@@ -129,6 +136,9 @@ async function publishAuthNeeded(
       ...(result.provider ? { provider: result.provider } : {}),
       reason: result.reason,
       ...(result.connectionId ? { connectionId: result.connectionId } : {}),
+      ...(result.authoritySource === "host" || connectionRef.authoritySource === "host"
+        ? { authoritySource: "host" as const }
+        : {}),
       ...(result.scopes ? { scopes: result.scopes } : {}),
       ...(result.resource ? { resource: result.resource } : {}),
       ...(result.selectedResources ? { selectedResources: result.selectedResources } : {}),

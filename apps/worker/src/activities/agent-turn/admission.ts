@@ -99,6 +99,25 @@ export function shouldPublishToolAuthNeededForTurn(
   return typeof text === "string" && /\bslack\b/i.test(text);
 }
 
+/**
+ * Keep host-owned auth events inert in browsers from before authoritySource
+ * existed. Those bundles treat unsupported_auth as unavailable and therefore
+ * do not invoke native OAuth; upgraded clients read hostReason and the
+ * host-minted authorizationUrl.
+ */
+export function rollingSafeToolAuthNeededPayload(
+  payload: ToolAuthNeededPayload,
+): ToolAuthNeededPayload {
+  if (payload.authoritySource !== "host") {
+    return payload;
+  }
+  return {
+    ...payload,
+    reason: "unsupported_auth",
+    hostReason: payload.hostReason ?? payload.reason,
+  };
+}
+
 export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
   externallyBilled: boolean;
   countsTowardTokenCap: boolean;

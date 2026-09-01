@@ -94,6 +94,10 @@ config:
   # docs/organization-tenancy.md; setting it back to "false" afterwards is not a
   # rollback.
   OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: "false"
+  # Explicit host-owned MCP connection refs use rolling protocol admission.
+  # Keep false for the image rollout, then flip true only after API, worker, and
+  # web replicas all understand the host authority discriminator.
+  OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false"
   OPENGENI_BILLING_MODE: disabled
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none

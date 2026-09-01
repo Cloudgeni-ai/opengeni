@@ -1,4 +1,5 @@
 import type { SessionEvent } from "../types";
+import { sessionEventStreamCoveredThrough } from "../stream";
 
 const BROWSER_EVENT_TYPE_MAX_BYTES = 256;
 const BROWSER_EVENT_ID_MAX_BYTES = 256;
@@ -39,9 +40,9 @@ export type BrowserSessionEventWindow = Readonly<{
 }>;
 
 export function eventResumeSequence(event: SessionEvent): number {
-  const payload = asRecord(event.payload);
-  const coalescedUntil = Number(payload.coalescedUntil);
-  return Math.max(event.sequence, Number.isFinite(coalescedUntil) ? Math.floor(coalescedUntil) : 0);
+  const streamedCoverage = sessionEventStreamCoveredThrough(event);
+  if (streamedCoverage !== null) return streamedCoverage;
+  return validCoveredThrough(event.coveredThrough, event.sequence) ?? event.sequence;
 }
 
 export function mergeSessionEvents(
@@ -171,11 +172,13 @@ export function boundSessionEvent(event: SessionEvent): SessionEvent {
       : {}),
     truncation,
   };
+  const coveredThrough = validCoveredThrough(event.coveredThrough, event.sequence);
   const bounded: SessionEvent = {
     id: boundText(event.id, BROWSER_EVENT_ID_MAX_BYTES),
     workspaceId: boundText(event.workspaceId, BROWSER_EVENT_ID_MAX_BYTES),
     sessionId: boundText(event.sessionId, BROWSER_EVENT_ID_MAX_BYTES),
     sequence: event.sequence,
+    ...(coveredThrough === undefined ? {} : { coveredThrough }),
     type: typeIsSafe ? event.type : "session.event.envelope_omitted",
     payload,
     occurredAt: boundText(event.occurredAt, BROWSER_EVENT_ID_MAX_BYTES),
@@ -200,6 +203,12 @@ export function boundSessionEvent(event: SessionEvent): SessionEvent {
     settleTruncation(bounded, truncation);
   }
   return bounded;
+}
+
+function validCoveredThrough(value: unknown, sequence: number): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= sequence
+    ? value
+    : undefined;
 }
 
 export function sessionEventWindowBytes(value: unknown): number {
@@ -315,10 +324,4 @@ function utf8Bytes(value: string): number {
 
 function isUtf8Continuation(value: number): boolean {
   return (value & 0xc0) === 0x80;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
 }

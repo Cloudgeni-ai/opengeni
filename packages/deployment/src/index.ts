@@ -196,6 +196,14 @@ export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
 ];
 
+/** Explicit host-owned MCP connection authority rollout flag (API + workers).
+ * Default off in @opengeni/config; enable only in a second rollout after every
+ * API, worker, and web replica understands the discriminator and safe event
+ * projection. */
+export const HOST_MCP_AUTHORITY_SOURCE_ADMISSION_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
+];
+
 /** Per-channel and per-DM Slack workspace routing. Default ON in
  * @opengeni/config; a valueEnv passthrough emitted only when set, so an unset
  * key leaves that default alone rather than forcing it off. Turning it OFF is
@@ -2831,6 +2839,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of HOST_MCP_AUTHORITY_SOURCE_ADMISSION_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV) {

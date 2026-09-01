@@ -33,6 +33,7 @@ type ResolveCredentialResult =
       status: "ok";
       headers: Record<string, string>;
       connectionId: string;
+      authoritySource?: "host";
       authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
     }
@@ -40,6 +41,7 @@ type ResolveCredentialResult =
       status: "auth_needed";
       reason: ToolAuthNeededPayload["reason"];
       providerDomain: string;
+      authoritySource?: "host";
       provider?: string;
       connectionId?: string;
       scopes?: string[];
@@ -713,6 +715,10 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
           ...(result.provider ? { provider: result.provider } : {}),
           reason: result.reason,
           ...(result.connectionId ? { connectionId: result.connectionId } : {}),
+          ...(result.authoritySource === "host" ||
+          this.options.connectionRef.authoritySource === "host"
+            ? { authoritySource: "host" as const }
+            : {}),
           ...(result.scopes ? { scopes: result.scopes } : {}),
           ...(result.resource ? { resource: result.resource } : {}),
           ...(result.selectedResources ? { selectedResources: result.selectedResources } : {}),

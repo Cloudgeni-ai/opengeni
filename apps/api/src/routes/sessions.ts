@@ -197,7 +197,7 @@ import {
 import {
   appendAndPublishEvents,
   boundSessionEventHttpPage,
-  coalesceSessionEventDeltas,
+  coalesceSessionEventDeltasWithCoverage,
   publishDurableSessionEvents,
 } from "@opengeni/events";
 import {
@@ -2621,10 +2621,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.header("X-OpenGeni-Covered-Last", String(result.coveredSequence.last));
       return c.json(result);
     }
-    const projected = compact ? coalesceSessionEventDeltas(events) : events;
+    const compactProjection = compact ? coalesceSessionEventDeltasWithCoverage(events) : null;
+    const projected = compactProjection?.events ?? events;
+    const forensicExact =
+      !compact && mode === "forensic" && payloadMode === "full" && dbPage.fullPayloadsExact;
     const page = boundSessionEventHttpPage(projected, {
       direction,
-      eventProjection: mode === "forensic" && payloadMode === "full" ? "exact" : "bounded",
+      eventProjection: forensicExact ? "exact" : "bounded",
+      ...(compactProjection
+        ? { coveredThroughBySequence: compactProjection.coveredThroughBySequence }
+        : {}),
     });
     const hasMore = dbPage.hasMore || page.truncated;
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
@@ -2634,9 +2640,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     c.header("X-OpenGeni-Event-Mode", mode);
     c.header("X-OpenGeni-Event-Direction", direction);
     c.header("X-OpenGeni-Payload-Mode", payloadMode);
-    c.header("X-OpenGeni-Forensic-Exact", String(mode === "forensic" && payloadMode === "full"));
+    c.header("X-OpenGeni-Forensic-Exact", String(forensicExact));
     const coveredFirst = page.events[0]?.sequence;
-    const coveredLast = page.events.at(-1)?.sequence;
+    const coveredLastEvent = page.events.at(-1);
+    const coveredLast =
+      coveredLastEvent === undefined
+        ? undefined
+        : (compactProjection?.coveredThroughBySequence.get(coveredLastEvent.sequence) ??
+          coveredLastEvent.sequence);
     if (coveredFirst !== undefined) c.header("X-OpenGeni-Covered-First", String(coveredFirst));
     if (coveredLast !== undefined) c.header("X-OpenGeni-Covered-Last", String(coveredLast));
     const truncatedBy = page.truncated ? "http_bytes" : dbPage.truncatedBy;

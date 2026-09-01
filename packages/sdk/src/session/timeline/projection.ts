@@ -899,7 +899,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
               : "credential",
           providerDomain: stringValue(payload.providerDomain),
           connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
-          reason: authNeededReason(payload.reason),
+          authoritySource: payload.authoritySource === "host" ? "host" : null,
+          reason: authNeededReason(
+            payload.authoritySource === "host" && typeof payload.authorizationUrl === "string"
+              ? (payload.hostReason ?? payload.reason)
+              : payload.reason,
+          ),
           scopes: stringList(payload.scopes),
           resource: typeof payload.resource === "string" ? payload.resource : null,
           toolName: typeof payload.toolName === "string" ? payload.toolName : null,

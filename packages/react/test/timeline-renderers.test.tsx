@@ -292,7 +292,7 @@ describe("provider MCP unavailable rendering", () => {
     await r.unmount();
   });
 
-  test("does not offer a duplicate reconnect flow for unsupported host-owned auth", async () => {
+  test("does not offer a reconnect flow for unmarked unsupported auth", async () => {
     let reconnects = 0;
     const r = await renderComponent(
       <MessageTimeline
@@ -758,6 +758,7 @@ function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem
     serverId: null,
     providerDomain: "linear.app",
     connectionId: null,
+    authoritySource: null,
     reason: "missing_connection",
     scopes: [],
     resource: null,
@@ -844,6 +845,51 @@ describe("TimelineRow — connection recovery", () => {
 
     finish();
     await flush();
+    await r.unmount();
+  });
+
+  test("uses only the host recovery link for host-owned auth", async () => {
+    let reconnectCalls = 0;
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          authoritySource: "host",
+          authorizationUrl: "https://host.example/recover",
+          connectionId: "host:connection:42",
+          reason: "refresh_failed",
+        })}
+        onReconnect={() => {
+          reconnectCalls += 1;
+        }}
+      />,
+    );
+    await flush();
+
+    expect(r.container.querySelector("button")).toBeNull();
+    expect(r.container.querySelector("a")?.getAttribute("href")).toBe(
+      "https://host.example/recover",
+    );
+    expect(reconnectCalls).toBe(0);
+    await r.unmount();
+  });
+
+  test("offers no native reconnect action when a host recovery link is absent", async () => {
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({
+          authoritySource: "host",
+          connectionId: "host:connection:42",
+          reason: "refresh_failed",
+        })}
+        onReconnect={() => {
+          throw new Error("host auth must not invoke the native reconnect callback");
+        }}
+      />,
+    );
+    await flush();
+
+    expect(r.container.querySelector("button")).toBeNull();
+    expect(r.container.querySelector("a")).toBeNull();
     await r.unmount();
   });
 });

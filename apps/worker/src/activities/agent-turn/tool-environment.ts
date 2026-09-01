@@ -53,7 +53,11 @@ import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { type ToolAuthNeededPayload } from "@opengeni/contracts";
 
-import { shouldPublishToolAuthNeededForTurn, xaiCatalogReadinessAuthority } from "./admission";
+import {
+  rollingSafeToolAuthNeededPayload,
+  shouldPublishToolAuthNeededForTurn,
+  xaiCatalogReadinessAuthority,
+} from "./admission";
 import { unavailableMcpOperationalContext } from "./errors";
 import { runtimeResourcesForTurn } from "./file-resources";
 import { waitForTurnOperation } from "./sandbox-provision";
@@ -427,7 +431,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
       return;
     }
-    await eventing.publish!([{ type: "tool.auth_needed", payload }], true);
+    await eventing.publish!(
+      [{ type: "tool.auth_needed", payload: rollingSafeToolAuthNeededPayload(payload) }],
+      true,
+    );
   };
   const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
   const apiIntegrationMcpServers = buildApiIntegrationServersForTurn({
