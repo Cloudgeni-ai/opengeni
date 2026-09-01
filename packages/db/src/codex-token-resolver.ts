@@ -73,9 +73,10 @@ export type CodexAccountUsageSnapshot = {
   resetCreditAvailableCount?: number | null;
   resetCreditsCheckedAt?: Date | null;
   /**
-   * Clear only a quota cooldown with this exact revision. Set solely after a
-   * live provider response proves allowance is open; a concurrent refusal
-   * advances the revision and makes this observation stale.
+   * Clear only a quota or untyped rolling-upgrade cooldown with this exact
+   * revision. Set solely after a live provider response proves allowance is
+   * open; a concurrent refusal advances the revision and makes this observation
+   * stale. Typed rate-limit cooldowns remain authoritative.
    */
   clearQuotaCooldownRevision?: number;
 };
@@ -388,7 +389,7 @@ function errorUsagePayload(reason?: "needs_relogin"): CodexUsagePayload {
  *   2. fetch GET /wham/usage with that bearer.
  *   3. normalize (§3) into the P2/P3 contract.
  *   4. on any windows present, write the usage cache and conditionally reconcile
- *      the exact older typed quota cooldown observed before provider I/O.
+ *      the exact older quota/untyped cooldown observed before provider I/O.
  *
  * A refresh that stamps needs_relogin returns { status:"error", reason } and never
  * hits the provider; a transient refresh error returns a plain error payload.
@@ -459,7 +460,8 @@ export async function fetchCodexUsageForAccount(
             }
           : {}),
         ...(observedCredential?.exhaustedUntil &&
-        observedCredential.exhaustedKind === "quota" &&
+        (observedCredential.exhaustedKind === "quota" ||
+          observedCredential.exhaustedKind === null) &&
         codexUsageConfirmsQuotaAvailable(normalized)
           ? { clearQuotaCooldownRevision: observedCredential.exhaustedRevision }
           : {}),

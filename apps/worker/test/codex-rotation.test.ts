@@ -27,7 +27,7 @@ import {
 const NOW = new Date("2026-06-30T12:00:00.000Z");
 const HOUR = 3_600_000;
 
-test("live refresh targets quota cooldowns but not generic or legacy cooldowns", () => {
+test("live refresh targets quota and untyped cooldowns but not rate-limit cooldowns", () => {
   const until = new Date(NOW.getTime() + HOUR);
   expect(
     codexAccountNeedsLiveCapacityRefresh(
@@ -42,7 +42,7 @@ test("live refresh targets quota cooldowns but not generic or legacy cooldowns",
     ),
   ).toBe(false);
   expect(codexAccountNeedsLiveCapacityRefresh(acct("legacy", { exhaustedUntil: until }), NOW)).toBe(
-    false,
+    true,
   );
 });
 

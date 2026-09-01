@@ -406,6 +406,41 @@ describe("fetchCodexUsageForAccount under RLS", () => {
     expect(Number(after?.exhausted_revision)).toBe(Number(before?.exhausted_revision ?? 0) + 1);
   });
 
+  test("a fresh open allowance clears an exact older untyped cooldown", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const id = await connect(
+      ws,
+      "acct_untyped_recovery",
+      { access_token: "AC", refresh_token: "RF", id_token: "ID" },
+      new Date(Date.now() + 3_600_000),
+    );
+    const until = new Date(Date.now() + 5 * 24 * 60 * 60_000);
+    await admin`
+      update codex_subscription_credentials
+      set exhausted_until = ${until}
+      where id = ${id}
+    `;
+    const [before] = await admin<
+      { exhausted_revision: number; exhausted_kind: string | null }[]
+    >`select exhausted_revision, exhausted_kind from codex_subscription_credentials where id = ${id}`;
+    expect(before?.exhausted_kind).toBeNull();
+
+    mockFetch({ wham: () => json(whamBody(0, 0)) });
+    await fetchCodexUsageForAccount(db, settings, ws.workspaceId, id);
+
+    const [after] = await admin<
+      {
+        exhausted_until: Date | null;
+        exhausted_kind: string | null;
+        exhausted_revision: number;
+      }[]
+    >`select exhausted_until, exhausted_kind, exhausted_revision from codex_subscription_credentials where id = ${id}`;
+    expect(after?.exhausted_until).toBeNull();
+    expect(after?.exhausted_kind).toBeNull();
+    expect(Number(after?.exhausted_revision)).toBe(Number(before?.exhausted_revision ?? 0) + 1);
+  });
+
   test("a fresh-token account: no refresh, normalizes the 200, and writes the cache", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

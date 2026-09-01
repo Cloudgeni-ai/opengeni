@@ -74,7 +74,7 @@ describe("Codex capacity availability diagnostics", () => {
     });
   });
 
-  test("typed quota cooldowns use bounded live reconciliation", () => {
+  test("quota and untyped cooldowns use bounded live reconciliation", () => {
     const resetAt = new Date("2100-01-01T00:00:00.000Z");
     const base: CodexCapacitySelectionContext = {
       accounts: [
@@ -98,6 +98,19 @@ describe("Codex capacity availability diagnostics", () => {
     };
 
     expect(codexCapacityDecision(base, testSettings())).toMatchObject({
+      kind: "unavailable",
+      earliestResetAt: resetAt,
+      resetKind: "bounded_refresh",
+    });
+    expect(
+      codexCapacityDecision(
+        {
+          ...base,
+          accounts: [account("cooling", { exhaustedUntil: resetAt, exhaustedKind: null })],
+        },
+        testSettings(),
+      ),
+    ).toMatchObject({
       kind: "unavailable",
       earliestResetAt: resetAt,
       resetKind: "bounded_refresh",

@@ -123,7 +123,7 @@ export function codexCapacityDecision(
     (account) =>
       account.status === "active" &&
       account.allocatorEnabled &&
-      account.exhaustedKind === "quota" &&
+      (account.exhaustedKind === "quota" || account.exhaustedKind === null) &&
       account.exhaustedUntil !== null &&
       account.exhaustedUntil > now,
   );

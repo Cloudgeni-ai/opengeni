@@ -26,7 +26,7 @@ export function codexAccountNeedsLiveCapacityRefresh(
   return (
     (account.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
     (account.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
-    (account.exhaustedKind === "quota" &&
+    ((account.exhaustedKind === "quota" || account.exhaustedKind === null) &&
       account.exhaustedUntil !== null &&
       account.exhaustedUntil > now)
   );

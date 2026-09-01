@@ -27475,7 +27475,7 @@ export async function completeCodexResetRedemption(
 /** The P2 usage-cache snapshot written by the refreshing usage wrapper. */
 
 /**
- * Cache-write for P2 quota bars and revision-fenced quota cooldown repair on a
+ * Cache-write for P2 quota bars and revision-fenced quota/untyped cooldown repair on a
  * SPECIFIC credential row. NEVER touches credential_encrypted. RLS-scoped, guarded
  * by (id, workspace_id) so it can only write a row the workspace owns. Returns true
  * iff a row was updated (false ⇒ the credential was disconnected under us — the
@@ -27525,7 +27525,7 @@ export async function recordCodexAccountUsageWithWakeTargets(
         snapshot.checkedAt !== undefined &&
         Number.isSafeInteger(snapshot.clearQuotaCooldownRevision) &&
         snapshot.clearQuotaCooldownRevision === previous.exhaustedRevision &&
-        previous.exhaustedKind === "quota" &&
+        (previous.exhaustedKind === "quota" || previous.exhaustedKind === null) &&
         previous.exhaustedUntil !== null;
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
