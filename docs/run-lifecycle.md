@@ -860,6 +860,20 @@ failure surfaces as sanitized typed truth with SQLSTATE, stage, one correlation
 ID, an equally sanitized typed cause, and allowlisted catalog identifiers—never
 raw SQL text, a raw driver cause, or bound parameters.
 
+Each agent activity owns one bounded, sequence-aware live-fanout lane. A writer
+reserves before its exact-attempt append and commits the reservation with the
+database-assigned sequence, so a faster higher-sequence append cannot overtake
+a slower lower-sequence append for the same session. Only the explicit
+noncritical lifecycle/tool-output allowlist may detach after durable commit;
+one publication may be active and only the oldest detached ready batch may
+wait. An unresolved detached reservation times out and drops live delivery
+only, while unrelated sessions continue. Control, recovery, authorization,
+model, tool-call-creation, and terminal-settlement publication stays awaited in
+the same lane. The activity closes the lane on completion, failure,
+cancellation, or worker shutdown. Live publication records success, failure,
+timeout, or detached overflow without changing durable truth, durable-outbox
+confirmation, or Postgres replay recovery.
+
 An activity failure can occur before that transaction creates its attempt row.
 The turn worker exports a stable typed Temporal disposition: exhausted
 contention and operational database unavailability are retryable, while

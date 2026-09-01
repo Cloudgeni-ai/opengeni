@@ -20,7 +20,6 @@ import {
   SandboxLeaseSupersededError,
   isSessionEventPersistenceError,
 } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
 import { maxTurnsExceededRunState } from "@opengeni/runtime";
 import { CancelledFailure } from "@temporalio/activity";
 import {
@@ -207,7 +206,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         return claimedResult({ status: "cancelled" });
       }
       acknowledgeRecoveryQuiescence();
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      await eventing.publishDurable(recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
       return claimedResult({
@@ -256,7 +255,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         throw new Error("Home sandbox route transition could not recover the current turn");
       }
       acknowledgeRecoveryQuiescence();
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      await eventing.publishDurable(recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
       control.activityError = error;
@@ -294,7 +293,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         return claimedResult({ status: "cancelled" });
       }
       acknowledgeRecoveryQuiescence();
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      await eventing.publishDurable(recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
       return claimedResult({
@@ -336,7 +335,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         return claimedResult({ status: "cancelled" });
       }
       acknowledgeRecoveryQuiescence();
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      await eventing.publishDurable(recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
       return claimedResult({ status: "recovering" });
@@ -484,7 +483,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         outcome: settlement.action,
       },
     });
-    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, settlement.events);
+    await eventing.publishDurable(settlement.events);
     control.activityError = error;
     if (settlement.action === "failed") {
       control.activityStatus = "failed";
@@ -547,7 +546,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       return claimedResult({ status: "cancelled" });
     }
     acknowledgeRecoveryQuiescence();
-    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+    await eventing.publishDurable(recovery.events);
     control.activityStatus = "recovering";
     control.turnMetricOutcome = "recovering";
     return claimedResult({ status: "recovering" });
@@ -711,12 +710,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         });
         if (settlement.action === "recovering") {
           leases.codex.held = false;
-          await publishDurableSessionEvents(
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            settlement.events,
-          );
+          await eventing.publishDurable(settlement.events);
           observability.observeHistogram({
             name: "opengeni_codex_failover_recovery_seconds",
             help: "Time from credential refusal to durable same-turn recovery.",
@@ -818,7 +812,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     if (armed.action === "waiting") {
       leases.xai.held = false;
       providerTurn.xaiCredentialQuarantined = true;
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+      await eventing.publishDurable(armed.events);
       const evaluated = await reconcileXaiCapacityWait(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -828,12 +822,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         now,
       });
       if (evaluated.events.length > 0) {
-        await publishDurableSessionEvents(
-          bus,
-          input.workspaceId,
-          input.sessionId,
-          evaluated.events,
-        );
+        await eventing.publishDurable(evaluated.events);
       }
       control.activityError = error;
       if (evaluated.action === "resumed") {
@@ -876,7 +865,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       return claimedResult({ status: "cancelled" });
     }
     acknowledgeRecoveryQuiescence();
-    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+    await eventing.publishDurable(recovery.events);
     control.activityStatus = "recovering";
     control.turnMetricOutcome = "recovering";
     control.activityError = error;
@@ -1112,7 +1101,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           : {}),
       });
       if (armed.action === "waiting") {
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+        await eventing.publishDurable(armed.events);
         control.turnMetricOutcome = "recovering";
         control.activityStatus = "waiting_capacity";
         control.activityError = error;
@@ -1298,7 +1287,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     }
     if (recovery.action === "recovering") {
       acknowledgeRecoveryQuiescence();
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+      await eventing.publishDurable(recovery.events);
       control.turnMetricOutcome = "recovering";
       control.activityStatus = "recovering";
       control.activityError = error;
@@ -1371,7 +1360,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           return claimedResult({ status: "cancelled" });
         }
         acknowledgeRecoveryQuiescence();
-        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        await eventing.publishDurable(recovery.events);
         control.turnMetricOutcome = "recovering";
         control.activityStatus = "recovering";
         control.activityError = error;

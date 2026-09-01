@@ -14,7 +14,6 @@ import {
   workspaceOpenRouterConnectionActive,
   workspaceXaiSubscriptionActiveForAuthority,
 } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   type OpenGeniRuntime,
   type AttemptConnectorActionBinding,
@@ -619,12 +618,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
                 title,
                 source: "agent",
               });
-              await publishDurableSessionEvents(
-                bus,
-                input.workspaceId,
-                input.sessionId,
-                result.events,
-              );
+              await eventing.publishDurable(result.events);
               return result;
             },
           }),

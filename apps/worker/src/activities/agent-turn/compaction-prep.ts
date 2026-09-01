@@ -1,5 +1,4 @@
 import { hasPendingSteerAfterContextCompaction, isSessionCompactionRequested } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   appendSessionInstructions,
   appendWorkspaceGovernance,
@@ -132,7 +131,6 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     input,
     settings,
     db,
-    bus,
     observability,
     cancellationSignal,
     control,
@@ -274,14 +272,11 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
           })
       : undefined;
   const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
-    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+    await eventing.publishDurable(events);
   };
   const publishCompactionOutcomeEvents = async (events: SessionEvent[]) => {
     // `compaction.started` was already fanout via publishCompactionLiveEvents.
-    await publishDurableSessionEvents(
-      bus,
-      input.workspaceId,
-      input.sessionId,
+    await eventing.publishDurable(
       events.filter((event) => event.type !== "session.context.compaction.started"),
     );
   };

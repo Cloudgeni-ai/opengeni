@@ -165,6 +165,7 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   catch-up after reconnect; a publish-only embedded bus is supported only when it
   provides that recovery capability, and missing capability fails readiness/startup
   before durable outbox acknowledgement.
+- Agent activities may detach live fanout only for the explicit noncritical lifecycle/tool-output allowlist and only after the exact-attempt durable append. Reserve before append, then commit the activity-owned bounded lane with the database-assigned sequence: one live publication may be active, the oldest detached ready batch may wait, unresolved reservations block only their own session and time out by dropping live delivery only, and all control/recovery/authorization/model/tool-call-creation/terminal-settlement publications remain awaited in the same ordering lane. Close the lane on every activity exit. Never weaken durable-outbox `publishConfirmed` semantics or subscriber recovery.
 - Postgres is the durable event store and replay source.
 - Workspace-control events are compact invalidations, not evidence blobs: control reasons and
   actors have canonical UTF-8 ingress/storage bounds, legacy rows carry explicit loss facts, and

@@ -13,7 +13,7 @@ import {
   type ClaimSessionWorkForAttemptInput,
   type SessionTurnForExecution,
 } from "@opengeni/db";
-import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
 import { deliverChildRequiresActionToParent } from "../parent-wake";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -43,6 +43,7 @@ import type {
 } from "../types";
 import { makeTurnOpJournal, type TurnHeartbeatDetails } from "../../op-journal";
 import {
+  recordAgentLoopPhaseDuration,
   recordSessionEventAppendLatency,
   recordSessionEventAppendPhase,
   recordSessionEventPublishLatency,
@@ -396,6 +397,22 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
     immediate = false,
   ) => {
+    const detached = events.every(
+      (event) =>
+        event.type === "sandbox.box.created" ||
+        event.type === "sandbox.box.lost" ||
+        event.type === "sandbox.box.snapshot" ||
+        event.type === "sandbox.operation.started" ||
+        event.type === "sandbox.operation.completed" ||
+        event.type === "sandbox.operation.failed" ||
+        event.type === "sandbox.env.drift" ||
+        event.type === "rig.setup.started" ||
+        event.type === "rig.setup.completed" ||
+        event.type === "rig.setup.failed" ||
+        event.type === "rig.setup.skipped" ||
+        event.type === "agent.toolCall.output",
+    );
+    const containsToolOutput = events.some((event) => event.type === "agent.toolCall.output");
     const inputs = events.map((event) => ({
       ...event,
       payload: event.payload,
@@ -413,21 +430,33 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       input.attemptId,
       inputs,
       {
-        onAppend: ({ durationSeconds }) =>
+        onAppend: ({ durationSeconds }) => {
           recordSessionEventAppendLatency(observability, {
             durationSeconds,
-          }),
+          });
+          if (detached) {
+            recordAgentLoopPhaseDuration(observability, {
+              phase: "durable_append",
+              durationSeconds,
+            });
+          }
+        },
         onAppendPhase: (observation) => recordSessionEventAppendPhase(observability, observation),
         onPublish: ({ durationSeconds }) =>
           recordSessionEventPublishLatency(observability, {
             durationSeconds,
           }),
+        fanout: detached ? "detached" : "awaited",
+        detachedFanout: eventing.detachedFanout,
       },
     );
     if (inputs.length > 0 && !appended.accepted) {
       throw new TurnAttemptFencedError("turn execution generation was fenced");
     }
     recordCanonicalStartupMilestones(appended.canonicalStartupMilestones);
+    if (containsToolOutput && appended.events.length > 0) {
+      eventing.phaseTracker.markToolOutput();
+    }
     if (inputs.length > 0) {
       turnLifecycleMetricsFor(observability).progress(attempt.turnId!);
     }
@@ -491,7 +520,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     }
     recordCanonicalStartupMilestones(result.canonicalStartupMilestones);
     turnLifecycleMetricsFor(observability).progress(attempt.turnId!);
-    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
+    await eventing.publishDurable(result.events);
     if (inputSettlement.turnStatus === "requires_action") {
       // The settlement transaction committed the parent's child_requires_action
       // outbox row (when this session has a parent and notices are enabled).

@@ -351,6 +351,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
   const publishSandboxLifecycleEvents = async (sandbox: ResumedTurnSandbox): Promise<void> => {
     const established = sandbox.established;
     if (eventing.publish && established.origin && established.origin !== "resumed") {
+      eventing.phaseTracker.markProvisionCompleted();
       const lifecycleEvents: Array<{
         type: "sandbox.box.lost" | "sandbox.box.created";
         payload: unknown;

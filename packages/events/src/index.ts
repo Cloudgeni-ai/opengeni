@@ -26,6 +26,11 @@ import {
   type NatsConnection,
   type Subscription,
 } from "nats";
+import type {
+  DetachedSessionEventFanout,
+  DetachedSessionEventFanoutReservation,
+  SessionEventLivePublishOutcome,
+} from "./activity-fanout";
 
 const codec = JSONCodec<SessionBusMessage | SessionEvent | WorkspaceControlEvent>();
 
@@ -38,6 +43,8 @@ export type EventBusOptions = {
   logger?: EventLogger;
   /** Test/host transport seam; production defaults to the nats.js connector. */
   connect?: typeof connect;
+  /** Test/host seam for the managed session-event flush deadline. */
+  publishFlushTimeoutMs?: number;
 };
 
 const silentLogger: Required<EventLogger> = {
@@ -115,16 +122,28 @@ export const WORKSPACE_CONTROL_HTTP_PAGE_MAX_BYTES = 1024 * 1024;
  * broker returns, which can be minutes. Racing it against a timer keeps a long
  * outage from stalling an in-flight turn; the published message stays buffered
  * and is delivered on reconnect regardless. A flush rejection (connection fully
- * CLOSED) is swallowed here so the timeout race never leaks an unhandled
- * rejection — the caller's publish path is what logs the drop.
+ * CLOSED) becomes a fixed outcome here so the timeout race never leaks an
+ * unhandled rejection and the caller can record the exact live-fanout result.
  */
-async function flushWithTimeout(nc: NatsConnection, timeoutMs: number): Promise<void> {
+async function flushWithTimeout(
+  nc: NatsConnection,
+  timeoutMs: number,
+): Promise<SessionEventLivePublishOutcome> {
+  let flush: Promise<SessionEventLivePublishOutcome>;
+  try {
+    flush = nc.flush().then<SessionEventLivePublishOutcome, SessionEventLivePublishOutcome>(
+      () => "succeeded",
+      () => "failed",
+    );
+  } catch {
+    return "failed";
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, timeoutMs);
+  const timeout = new Promise<SessionEventLivePublishOutcome>((resolve) => {
+    timer = setTimeout(() => resolve("timed_out"), timeoutMs);
   });
   try {
-    await Promise.race([nc.flush().catch(() => undefined), timeout]);
+    return await Promise.race([flush, timeout]);
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -306,6 +325,12 @@ export type EventBus = {
    * best-effort because they catch failures around this contract.
    */
   publish: (workspaceId: string, sessionId: string, events: SessionEvent[]) => Promise<void>;
+  /** Outcome-aware best-effort publication for activity-owned live fanout. */
+  publishWithOutcome?: (
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+  ) => Promise<SessionEventLivePublishOutcome>;
   /**
    * Publish an already-durable batch and reject unless the transport confirms
    * acceptance with a stronger provider-specific acknowledgement. Optional for
@@ -376,6 +401,16 @@ export type EventBus = {
   isConnected?: () => boolean;
   close: () => Promise<void>;
 };
+
+export {
+  createDetachedSessionEventFanout,
+  type DetachedSessionEventFanout,
+  type DetachedSessionEventFanoutCloseReason,
+  type DetachedSessionEventFanoutOptions,
+  type DetachedSessionEventFanoutOutcome,
+  type DetachedSessionEventFanoutReservation,
+  type SessionEventLivePublishOutcome,
+} from "./activity-fanout";
 
 /**
  * Connect the event bus + control-plane request/reply over ONE managed NATS
@@ -459,6 +494,31 @@ export async function createNatsEventBus(
     }
     observeEventBoundaries(batches.flat(), options.logger);
   };
+  const publishFlushTimeoutMs = Math.max(
+    1,
+    Math.floor(options.publishFlushTimeoutMs ?? PUBLISH_FLUSH_TIMEOUT_MS),
+  );
+  const publishSessionEventsWithOutcome = async (
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+  ): Promise<SessionEventLivePublishOutcome> => {
+    if (events.length === 0) return "succeeded";
+    try {
+      publishSessionEvents(workspaceId, sessionId, events);
+    } catch (error) {
+      (options.logger?.warn ?? silentLogger.warn)(
+        "NATS live publish dropped; events are durable in the DB and reconcile on stream replay",
+        {
+          workspaceId,
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+      return "failed";
+    }
+    return await flushWithTimeout(nc, publishFlushTimeoutMs);
+  };
   return {
     sessionEventDurableFanout: {
       version: SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
@@ -468,34 +528,9 @@ export async function createNatsEventBus(
       },
     },
     publish: async (workspaceId, sessionId, events) => {
-      if (events.length === 0) {
-        return;
-      }
-      // Best-effort LIVE fan-out. These events are ALREADY durably appended to
-      // the DB before we get here (they carry a DB-assigned `sequence`), and
-      // every consumer reconciles from that durable log — the server SSE stream
-      // replays + gap-backfills via `listSessionEvents`, and the SDK client
-      // reconnects and replays from the durable events endpoint. So a publish
-      // that fails during a broker blip only delays LIVE delivery (healed by the
-      // next successful publish's gap-backfill, or a stream reconnect); it must
-      // never throw the in-flight turn to death.
-      try {
-        publishSessionEvents(workspaceId, sessionId, events);
-      } catch (error) {
-        // `publish()` throws synchronously only when the connection is fully
-        // CLOSED (with infinite reconnect, effectively never outside shutdown).
-        (options.logger?.warn ?? silentLogger.warn)(
-          "NATS live publish dropped; events are durable in the DB and reconcile on stream replay",
-          {
-            workspaceId,
-            sessionId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-        );
-        return;
-      }
-      await flushWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
+      await publishSessionEventsWithOutcome(workspaceId, sessionId, events);
     },
+    publishWithOutcome: publishSessionEventsWithOutcome,
     publishConfirmed: async (workspaceId, sessionId, events) => {
       if (events.length === 0) {
         return;
@@ -649,6 +684,13 @@ export type AppendPublishOptions = AppendPublishObserver & {
   appendSessionEvents?: typeof appendSessionEvents;
 };
 
+export type TurnEventAppendPublishOptions = AppendPublishObserver & {
+  fanout?: "awaited" | "detached";
+  detachedFanout?: DetachedSessionEventFanout;
+  /** Test/host persistence seam; production uses the database implementation. */
+  appendSessionEventsForTurnAttempt?: typeof appendSessionEventsForTurnAttempt;
+};
+
 /**
  * Invoke a phase-timing callback with the elapsed seconds since `startedAt` and the
  * event count, swallowing any throw so a metrics sink can never break the
@@ -759,24 +801,52 @@ export async function appendAndPublishTurnEventsFenced(
   executionGeneration: number,
   attemptId: string,
   events: AppendEventInput[],
-  observe?: AppendPublishObserver,
+  observe?: TurnEventAppendPublishOptions,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
   canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
 }> {
+  let fanoutReservation: DetachedSessionEventFanoutReservation | null = null;
+  if (observe?.fanout) {
+    if (!observe.detachedFanout) {
+      throw new Error("Session event fanout is not configured");
+    }
+    fanoutReservation = observe.detachedFanout.reserve(
+      observe.fanout,
+      workspaceId,
+      sessionId,
+      observe,
+    );
+  }
   const appendStartedAt = performance.now();
-  const result = await appendSessionEventsForTurnAttempt(
-    db,
-    workspaceId,
-    sessionId,
-    turnId,
-    executionGeneration,
-    attemptId,
-    events,
-    observe?.onAppendPhase ? { onPhase: observe.onAppendPhase } : undefined,
-  );
+  let result: {
+    events: SessionEvent[];
+    accepted: boolean;
+    canonicalStartupMilestones: CanonicalTurnStartupMilestoneReceipt[];
+  };
+  try {
+    result = await (
+      observe?.appendSessionEventsForTurnAttempt ?? appendSessionEventsForTurnAttempt
+    )(
+      db,
+      workspaceId,
+      sessionId,
+      turnId,
+      executionGeneration,
+      attemptId,
+      events,
+      observe?.onAppendPhase ? { onPhase: observe.onAppendPhase } : undefined,
+    );
+  } catch (error) {
+    fanoutReservation?.cancel();
+    throw error;
+  }
   observeSince(observe?.onAppend, appendStartedAt, result.events.length);
+  if (fanoutReservation) {
+    await fanoutReservation.commit(result.events);
+    return result;
+  }
   if (result.events.length === 0) return result;
   const publishStartedAt = performance.now();
   try {
