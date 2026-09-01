@@ -630,7 +630,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await setupPage.goto(firstUrl(setupEmail), {
       waitUntil: "domcontentloaded",
     });
-    await setupPage.getByRole("heading", { name: "Join an organization" }).waitFor();
+    await setupPage.getByRole("heading", { name: "Join Onboarding Greenfield Org" }).waitFor();
     let observedSetupCopy = "";
     await waitFor(
       async () => {

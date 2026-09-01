@@ -106,9 +106,15 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             <KeyRoundIcon className="size-4" />
           </span>
           <div>
-            <h1 className="text-base font-semibold">Join an organization</h1>
+            <h1 className="text-base font-semibold">
+              {preview?.state === "pending"
+                ? `Join ${preview.organizationName}`
+                : "Join an organization"}
+            </h1>
             <p className="text-sm text-fg-subtle">
-              Use your existing OpenGeni account or create a new one.
+              {preview?.state === "pending"
+                ? "Sign in or create an account to accept this invitation."
+                : "Use your existing OpenGeni account or create a new one."}
             </p>
           </div>
         </div>
