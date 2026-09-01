@@ -57,6 +57,8 @@ export type UseNewSessionDraftResult = {
     flushed: FlushedNewSessionDraft,
   ) => Promise<AcknowledgeConsumedNewSessionDraftResult | null>;
   reload: () => Promise<void>;
+  /** Surface a create-time OCC rejection through the ordinary draft recovery UI. */
+  captureConflict: (cause: unknown) => boolean;
   resolveConflict: (choice: "keep_mine" | "use_remote") => Promise<void>;
   clearError: () => void;
 };
@@ -104,6 +106,17 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     conflictRef.current = next;
     setConflict(next);
   }, []);
+
+  const captureConflict = useCallback(
+    (cause: unknown): boolean => {
+      if (!isNewSessionDraftConflict(cause)) return false;
+      const problem = asError(cause);
+      setCurrentConflict(problem);
+      setError(problem);
+      return true;
+    },
+    [setCurrentConflict],
+  );
 
   const abortActiveRemoteReads = useCallback(() => {
     for (const controller of activeRemoteReads.current) controller.abort();
@@ -508,6 +521,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     isCurrentSignature,
     acknowledgeConsumed,
     reload,
+    captureConflict,
     resolveConflict,
     clearError: useCallback(() => {
       setError(null);
