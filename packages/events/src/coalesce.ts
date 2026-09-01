@@ -1,4 +1,8 @@
-import { boundSessionEventPayload, type SessionEvent } from "@opengeni/contracts";
+import {
+  boundSessionEventPayload,
+  sessionEventPayloadTruncation,
+  type SessionEvent,
+} from "@opengeni/contracts";
 
 const COALESCIBLE_DELTA_TYPES = new Set([
   "agent.message.delta",
@@ -9,6 +13,12 @@ const COALESCIBLE_DELTA_TYPES = new Set([
 /** Flush long runs incrementally before concatenation can become unbounded. */
 export const SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES = 48 * 1024;
 const encoder = new TextEncoder();
+
+export type CoalescedSessionEventPage = {
+  events: SessionEvent[];
+  /** Durable raw sequence covered by each returned synthetic event sequence. */
+  coveredThroughBySequence: ReadonlyMap<number, number>;
+};
 
 type DeltaRun = {
   first: SessionEvent;
@@ -21,7 +31,14 @@ type DeltaRun = {
 };
 
 export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent[] {
+  return coalesceSessionEventDeltasWithCoverage(events).events;
+}
+
+export function coalesceSessionEventDeltasWithCoverage(
+  events: SessionEvent[],
+): CoalescedSessionEventPage {
   const coalesced: SessionEvent[] = [];
+  const coveredThroughBySequence = new Map<number, number>();
   let run: DeltaRun | null = null;
 
   const flush = () => {
@@ -45,10 +62,12 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
           };
     coalesced.push({
       ...run.first,
+      coveredThrough: run.lastSequence,
       payload: boundSessionEventPayload(payload, {
         surface: "http_projection",
       }),
     });
+    coveredThroughBySequence.set(run.first.sequence, run.lastSequence);
     run = null;
   };
 
@@ -56,6 +75,7 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
     if (!isCoalescibleDelta(event)) {
       flush();
       coalesced.push(event);
+      coveredThroughBySequence.set(event.sequence, event.sequence);
       continue;
     }
 
@@ -100,11 +120,13 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
   }
 
   flush();
-  return coalesced;
+  return { events: coalesced, coveredThroughBySequence };
 }
 
 function isCoalescibleDelta(event: SessionEvent): boolean {
-  return COALESCIBLE_DELTA_TYPES.has(event.type);
+  return (
+    COALESCIBLE_DELTA_TYPES.has(event.type) && sessionEventPayloadTruncation(event.payload) === null
+  );
 }
 
 function sameDeltaRun(

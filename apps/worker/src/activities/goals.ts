@@ -2,6 +2,12 @@ import {
   allowedFirstPartyMcpToolsForSession,
   configuredStaticUsageLimits,
   policyProviderIdForModel,
+  resolveModelProvider,
+  resolveTurnExecutionPolicyV1,
+  withCodexCatalogProvider,
+  withXaiSubscriptionCatalogProvider,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -28,6 +34,11 @@ import type {
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
 } from "./types";
+import {
+  modelFundingForAdmission,
+  resolveCatalogSettings,
+  resolveWorkspaceCatalogSettings,
+} from "@opengeni/core";
 
 export function createGoalActivities(services: () => Promise<ControlActivityServices>) {
   async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
@@ -47,12 +58,15 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
   async function maybeContinueGoal(
     input: MaybeContinueGoalInput,
   ): Promise<MaybeContinueGoalResult> {
-    const { settings, db, bus } = await services();
+    const service = await services();
+    const { db, bus } = service;
+    const catalogSourceSettings = service.catalogSourceSettings ?? service.settings;
     // Cheap pre-read: the common goal-less session skips the budget queries.
     const existingGoal = await getSessionGoal(db, input.workspaceId, input.sessionId);
     if (!existingGoal || existingGoal.status !== "active") {
       return { action: "none" };
     }
+    let settings = (await resolveCatalogSettings(db, catalogSourceSettings)).settings;
     // Loaded before the budget check so the codex-billed predicate and the
     // synthesized turn use the SAME effective policy. An explicit per-turn
     // model can differ from the persisted session default; follow-up goal work
@@ -66,34 +80,34 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       input.workspaceId,
       input.sessionId,
     );
-    let continuationModel = latestStartedTurn?.model ?? session.model;
+    const inheritedContinuationModel = latestStartedTurn?.model ?? session.model;
+    let continuationModel = inheritedContinuationModel;
     const continuationReasoningEffort =
       latestStartedTurn?.reasoningEffort ?? session.reasoningEffort;
     const continuationLatencyMode = latestStartedTurn?.latencyMode ?? session.latencyMode;
-    // Workspace model policy: a continuation inherits the last STARTED turn's
-    // model, so a single policy-violating turn would otherwise re-arm itself on
-    // every continuation (exactly how one bare-model turn kept a goal loop on
-    // the paid built-in provider all night). If the inherited model is blocked
-    // but the session's own default is allowed, recover to the default; if
-    // both are blocked, pause the goal visibly (the budget-pause channel, with
-    // a truthful rationale) instead of synthesizing a turn the worker's hard
-    // gate would fail over and over.
-    let modelPolicyBlocked: string | null = null;
     const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
-    if (workspaceModelPolicy) {
-      const policyBlocks = (modelId: string): boolean =>
-        !evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
-          providerId: policyProviderIdForModel(settings, modelId),
-          modelId,
-        }).allowed;
-      if (policyBlocks(continuationModel)) {
-        if (continuationModel !== session.model && !policyBlocks(session.model)) {
-          continuationModel = session.model;
-        } else {
-          modelPolicyBlocked = `workspace model policy blocks model "${continuationModel}"; pick an allowed model or change the workspace model policy`;
-        }
-      }
+    if (
+      inheritedContinuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
+      inheritedContinuationModel.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) ||
+      session.model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
+      session.model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)
+    ) {
+      settings = (
+        await resolveWorkspaceCatalogSettings(db, catalogSourceSettings, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          retainedProductModelIds: [inheritedContinuationModel, session.model],
+        })
+      ).settings;
     }
+    const modelDecision = goalContinuationModelDecision({
+      settings,
+      workspaceModelPolicy,
+      inheritedModel: inheritedContinuationModel,
+      sessionModel: session.model,
+    });
+    continuationModel = modelDecision.model;
+    let modelPolicyBlocked = modelDecision.blocked;
     // remote_v2 sessions may only continue on Codex models — refuse synthesis
     // that would leave the portable/non-Codex path (and mixed history shapes).
     if (
@@ -112,6 +126,11 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       workspaceId: input.workspaceId,
       model: continuationModel,
     });
+    const fundedWithoutCredits = goalContinuationFundedWithoutCredits(
+      settings,
+      continuationModel,
+      isCodexRun,
+    );
     // Budget exhaustion pauses the goal visibly instead of failing the
     // session. Computed up front and applied inside the locked decision so a
     // limits pause never consumes continuation budget.
@@ -120,8 +139,17 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       db,
       input.accountId,
       input.workspaceId,
-      isCodexRun,
+      fundedWithoutCredits,
     );
+    const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: continuationModel,
+      requestedModelId: null,
+      modelSource: "continuation",
+      reasoningEffort: continuationReasoningEffort,
+      reasoningSource: "continuation",
+      latencyMode: continuationLatencyMode,
+      latencyModeSource: "continuation",
+    });
     const decision = await materializeGoalContinuation(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -142,6 +170,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
         model: continuationModel,
         reasoningEffort: continuationReasoningEffort,
         latencyMode: continuationLatencyMode,
+        turnExecutionPolicy,
         tools: withFirstPartyTools(settings, session.tools),
         sandboxBackend: session.sandboxBackend,
       },
@@ -174,6 +203,53 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
   };
 }
 
+export function goalContinuationModelDecision(input: {
+  settings: Settings;
+  workspaceModelPolicy: Awaited<ReturnType<typeof getWorkspaceModelPolicy>>;
+  inheritedModel: string;
+  sessionModel: string;
+}): { model: string; blocked: string | null } {
+  const catalogSettings = input.settings.supergrokSubscriptionEnabled
+    ? withXaiSubscriptionCatalogProvider(
+        input.settings.codexSubscriptionEnabled
+          ? withCodexCatalogProvider(input.settings)
+          : input.settings,
+      )
+    : input.settings.codexSubscriptionEnabled
+      ? withCodexCatalogProvider(input.settings)
+      : input.settings;
+  const policyBlocks = (modelId: string): boolean =>
+    input.workspaceModelPolicy !== null &&
+    !evaluateWorkspaceModelPolicy(input.workspaceModelPolicy, {
+      providerId: policyProviderIdForModel(catalogSettings, modelId),
+      modelId,
+    }).allowed;
+  const candidates = [...new Set([input.inheritedModel, input.sessionModel])];
+  for (const model of candidates) {
+    if (resolveModelProvider(catalogSettings, model) && !policyBlocks(model)) {
+      return { model, blocked: null };
+    }
+  }
+  if (!resolveModelProvider(catalogSettings, input.inheritedModel)) {
+    return {
+      model: input.inheritedModel,
+      blocked: `model "${input.inheritedModel}" is no longer in the deployment or workspace catalog; choose an available model before resuming the goal`,
+    };
+  }
+  return {
+    model: input.inheritedModel,
+    blocked: `workspace model policy blocks model "${input.inheritedModel}"; pick an allowed model or change the workspace model policy`,
+  };
+}
+
+export function goalContinuationFundedWithoutCredits(
+  settings: Settings,
+  model: string,
+  codexBilled: boolean,
+): boolean {
+  return modelFundingForAdmission(settings, model, codexBilled).fundedWithoutCredits;
+}
+
 export function goalContinuationPrompt(
   _goal: SessionGoal,
   _autoContinuation: number,
@@ -185,6 +261,7 @@ export function goalContinuationPrompt(
         "Waiting on child sessions or external events:",
         "- When the next progress depends on child sessions you spawned or on an external event, do not sleep, loop, or poll sessions_list/session_get/session_events to wait for it.",
         "- Re-check sessions_list or session_get once; if the work is still in flight, call opengeni__goal_wait with a concrete reason and a deadline (untilSeconds), then end your turn immediately. You will be woken by a child result, a message, a human prompt, or at the deadline, and this goal stays active.",
+        "- If the immediately preceding user-facing update already reported this same unchanged wait, do not restate it or produce another equivalent final answer. Call opengeni__goal_wait and end the turn. Report only material new state or a newly discovered blocker.",
         "- A hold is for child/external progress only. If you are blocked on a human decision, use opengeni__goal_pause under the blocked audit below instead.",
         "",
       ]
@@ -269,13 +346,13 @@ async function goalRunBudgetBlocked(
   db: Database,
   accountId: string,
   workspaceId: string,
-  isCodexRun: boolean,
+  fundedWithoutCredits: boolean,
 ): Promise<string | null> {
-  // Codex-billed continuations are paid by the user's ChatGPT/Codex plan: skip
-  // the credit-balance gate and the monthly model-cost cap. The agent-run COUNT
-  // cap below is a volume quota (not a credit/cost gate) and is intentionally kept.
+  // Free, subscription, and workspace-funded continuations skip OpenGeni's
+  // credit-balance gate and monthly model-cost cap. The agent-run COUNT cap
+  // below is a volume quota (not a credit/cost gate) and remains enforced.
   if (
-    !isCodexRun &&
+    !fundedWithoutCredits &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
     const balance = await getBillingBalance(db, accountId);
@@ -285,7 +362,7 @@ async function goalRunBudgetBlocked(
   }
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
     const limits = configuredStaticUsageLimits(settings);
-    if (!isCodexRun && limits.maxMonthlyCostMicrosPerAccount) {
+    if (!fundedWithoutCredits && limits.maxMonthlyCostMicrosPerAccount) {
       const used = await sumUsageQuantity(db, {
         accountId,
         eventType: "model.cost",

@@ -12,9 +12,12 @@ import { MultiProviderModelProvider } from "./model-provider-routing";
 
 export {
   CodexSubscriptionUnavailableError,
+  OrganizationGatewayUnavailableError,
+  OrganizationOpenRouterUnavailableError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
+  WorkspaceOpenRouterUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";

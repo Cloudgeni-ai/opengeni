@@ -50,6 +50,7 @@ import {
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
+import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -57,6 +58,10 @@ import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
+import {
+  clearOrganizationInvitationContinuation,
+  readOrganizationInvitationContinuation,
+} from "@/lib/organization-invitation-continuation";
 import {
   loadCurrentManagedSelfContext,
   managedSelfContextIdentity,
@@ -78,6 +83,11 @@ import {
   reconcileFailedSessionPin,
   SessionChannelProjectionAuthority,
 } from "@/lib/session-pins";
+import {
+  isAuthorizedWorkspaceId,
+  workspaceNavigationPreferenceStorageId,
+  writeLastWorkspaceId,
+} from "@/lib/workspace-navigation-preference";
 import {
   buildResources,
   buildOpenGeniUiTools,
@@ -165,6 +175,12 @@ const BrowserAccountsSignedOutPanel = lazy(() =>
 const BrowserAccountsLoadingGate = lazy(() =>
   import("@/components/browser-accounts-runtime").then((module) => ({
     default: module.BrowserAccountsLoadingGate,
+  })),
+);
+
+const BrowserAccountsOrganizationOnboardingPanel = lazy(() =>
+  import("@/components/browser-accounts-runtime").then((module) => ({
+    default: module.BrowserAccountsOrganizationOnboardingPanel,
   })),
 );
 
@@ -997,6 +1013,20 @@ export function RootRouteComponent() {
     client,
     invalidatePrincipalWorkspaceState,
   ]);
+
+  // The workspace URL remains authoritative. This browser-local preference is
+  // only the landing target for a future visit to `/`, and is namespaced by the
+  // current subject so browser-account transitions cannot inherit each other's
+  // workspace selection.
+  useEffect(() => {
+    if (!accessContext) return;
+    const workspaceId = /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? null;
+    if (!isAuthorizedWorkspaceId(workspaceId, workspaces, accessContext)) return;
+    writeLastWorkspaceId(
+      workspaceNavigationPreferenceStorageId(accessContext.subjectId),
+      workspaceId,
+    );
+  }, [accessContext, pathname, workspaces]);
 
   // New-chat policy follows the active workspace. Explicit composer choices
   // remain local until the route moves to another workspace or its durable
@@ -2524,6 +2554,10 @@ export function RootRouteComponent() {
     workspaces,
   ]);
 
+  const organizationInvitationContinuation = managedAuthRequired
+    ? readOrganizationInvitationContinuation()
+    : null;
+
   const applicationSurface = isPublicAuthRoute ? (
     // Self-contained public pages render before config/auth gates and outside
     // AppContext. The isolated account-auth popup is intentionally included.
@@ -2545,6 +2579,7 @@ export function RootRouteComponent() {
     <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
       {browserAccountsEnabled ? (
         <BrowserAccountsSignedOutPanel
+          invitation={organizationInvitationContinuation}
           emptySetRegistrationPanel={
             clientConfig?.managedAuthSessionSetMode === "broker" ||
             clientConfig?.managedAuthSessionSetMode === "dual" ? (
@@ -2560,6 +2595,8 @@ export function RootRouteComponent() {
         />
       ) : (
         <ManagedAuthPanel
+          invitation={organizationInvitationContinuation}
+          onDismissInvitation={clearOrganizationInvitationContinuation}
           onSubmit={handleManagedAuth}
           emailVerificationRequired={managedEmailVerificationRequired}
           socialProviders={managedSocialProviders}
@@ -2586,7 +2623,26 @@ export function RootRouteComponent() {
     accessContext &&
     !defaultWorkspaceId &&
     !slackLinkContinuationWorkspaceId ? (
-    <OrganizationOnboardingPanel client={client} onComplete={revalidatePrincipalAccess} />
+    browserAccountsEnabled ? (
+      <BrowserAccountsOrganizationOnboardingPanel
+        client={client}
+        activeEmail={authSession?.user.email ?? null}
+        invitation={organizationInvitationContinuation}
+        onComplete={revalidatePrincipalAccess}
+      />
+    ) : (
+      <OrganizationOnboardingPanel
+        client={client}
+        activeEmail={authSession?.user.email ?? null}
+        invitation={organizationInvitationContinuation}
+        onUseInvitedAccount={() => {
+          void handleManagedSignOut().catch((error) =>
+            toast.error("Sign out failed", { description: String(error) }),
+          );
+        }}
+        onComplete={revalidatePrincipalAccess}
+      />
+    )
   ) : accessLoading || !appContext ? (
     <LoadingPanel label="Loading workspace access" />
   ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
@@ -2638,7 +2694,10 @@ export function RootRouteComponent() {
           />
         </Suspense>
       ) : null}
-      {actorFencedSurface}
+      {clientConfig ? (
+        <SecureContextWarning productAccessMode={clientConfig.productAccessMode} />
+      ) : null}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{actorFencedSurface}</div>
     </main>
   );
 }

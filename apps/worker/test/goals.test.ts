@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { goalContinuationPrompt } from "../src/activities/goals";
+import {
+  goalContinuationFundedWithoutCredits,
+  goalContinuationModelDecision,
+  goalContinuationPrompt,
+} from "../src/activities/goals";
+import { testSettings } from "@opengeni/testing";
 
 describe("goalContinuationPrompt", () => {
   test("continues from frozen goal context without duplicating mutable goal fields", () => {
@@ -60,10 +65,13 @@ describe("goalContinuationPrompt", () => {
     // when a human decision is the blocker.
     expect(withWait).toContain("opengeni__goal_wait");
     expect(withWait).toContain("do not sleep, loop, or poll");
+    expect(withWait).toContain("do not restate it or produce another equivalent final answer");
+    expect(withWait).toContain("Report only material new state or a newly discovered blocker");
     expect(withWait).toContain("blocked on a human decision, use opengeni__goal_pause");
     expect(withWait).toContain("Blocked audit:");
     const withoutWait = goalContinuationPrompt(goal, 1, null, { goalWaitAvailable: false });
     expect(withoutWait).not.toContain("goal_wait");
+    expect(withoutWait).not.toContain("another equivalent final answer");
     expect(withoutWait).toContain("Blocked audit:");
     expect(withWait).not.toContain("Ship the fix");
   });
@@ -86,5 +94,68 @@ describe("goalContinuationPrompt", () => {
       "`child_requires_action` update means a worker you spawned is blocked",
     );
     expect(withoutTool).toContain("Tool approvals can only be decided by a human");
+  });
+});
+
+describe("goalContinuationModelDecision", () => {
+  test("falls back to the session model when the inherited model left the catalog", () => {
+    expect(
+      goalContinuationModelDecision({
+        settings: testSettings(),
+        workspaceModelPolicy: null,
+        inheritedModel: "removed/provider-model",
+        sessionModel: "scripted-model",
+      }),
+    ).toEqual({ model: "scripted-model", blocked: null });
+  });
+
+  test("pauses instead of materializing when neither inherited nor session model exists", () => {
+    expect(
+      goalContinuationModelDecision({
+        settings: testSettings(),
+        workspaceModelPolicy: null,
+        inheritedModel: "removed/provider-model",
+        sessionModel: "removed/session-model",
+      }),
+    ).toMatchObject({
+      model: "removed/provider-model",
+      blocked: expect.stringContaining("no longer in the deployment or workspace catalog"),
+    });
+  });
+
+  test("recognizes synthetic Codex and SuperGrok catalog membership", () => {
+    for (const [settings, model] of [
+      [testSettings({ codexSubscriptionEnabled: true }), "codex/gpt-5.6-sol"],
+      [testSettings({ supergrokSubscriptionEnabled: true }), "supergrok/grok-4.6"],
+    ] as const) {
+      expect(
+        goalContinuationModelDecision({
+          settings,
+          workspaceModelPolicy: null,
+          inheritedModel: model,
+          sessionModel: "scripted-model",
+        }),
+      ).toEqual({ model, blocked: null });
+    }
+  });
+
+  test("treats a SuperGrok continuation as subscription-funded", () => {
+    expect(
+      goalContinuationFundedWithoutCredits(
+        testSettings({ supergrokSubscriptionEnabled: true }),
+        "supergrok/grok-4.6",
+        false,
+      ),
+    ).toBe(true);
+  });
+
+  test("does not fund an unconnected Codex continuation from its namespace alone", () => {
+    expect(
+      goalContinuationFundedWithoutCredits(
+        testSettings({ codexSubscriptionEnabled: true }),
+        "codex/gpt-5.6-sol",
+        false,
+      ),
+    ).toBe(false);
   });
 });

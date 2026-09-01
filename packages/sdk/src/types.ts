@@ -610,6 +610,7 @@ export type McpConnectionAuthoritySelection = {
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  authoritySource?: "host" | undefined;
   provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;
@@ -671,6 +672,7 @@ export type CreateConnectionRequest = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+  operationId?: string | undefined;
 };
 
 export type PersonalGitHubConnectionMetadata = {
@@ -1072,6 +1074,8 @@ export type UpdateConnectionRequest = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+  expectedVersion?: number | undefined;
+  operationId?: string | undefined;
 };
 
 export type ConnectionResponse = {
@@ -1850,6 +1854,8 @@ export type SessionEvent = {
   sessionId: string;
   /** Per-session sequence number: positive, contiguous, strictly increasing. */
   sequence: number;
+  /** Server-owned durable high-water mark for a synthetic compact event. */
+  coveredThrough?: number | undefined;
   type: SessionEventType;
   payload: unknown;
   occurredAt: string;
@@ -1983,6 +1989,7 @@ export type ToolAuthNeededPayload = {
   providerDomain: string;
   provider?: string | undefined;
   connectionId?: string | null | undefined;
+  authoritySource?: "host" | undefined;
   reason:
     | "missing_connection"
     | "expired"
@@ -1991,6 +1998,15 @@ export type ToolAuthNeededPayload = {
     | "personal_authority_unavailable"
     | "unsupported_auth"
     | "resource_scope_unavailable";
+  hostReason?:
+    | "missing_connection"
+    | "expired"
+    | "insufficient_scope"
+    | "refresh_failed"
+    | "personal_authority_unavailable"
+    | "unsupported_auth"
+    | "resource_scope_unavailable"
+    | undefined;
   scopes?: string[] | undefined;
   resource?: string | undefined;
   selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;
@@ -3023,12 +3039,15 @@ export type ModelCapabilitiesV1 = {
 export type ModelCredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" }
-  | { kind: "workspace_connection"; mechanism: "api_key" };
+  | { kind: "workspace_connection"; mechanism: "api_key" }
+  | { kind: "organization_connection"; mechanism: "api_key" };
 
 export type ModelBillingAttributionV1 = {
-  upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+  upstreamPayer: "deployment" | "workspace" | "organization" | "connected_subscription";
   metering: "opengeni_credits" | "external";
 };
+
+export type ModelCostClassV1 = "free" | "credits" | "subscription" | "workspace" | "organization";
 
 export type ModelPricingV1 = {
   inputMicrosPerMillionTokens: number;
@@ -3062,7 +3081,7 @@ export type ClientModel = {
   provider: string;
   providerLabel: string;
   api: "responses" | "chat";
-  source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | undefined;
+  source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | "openrouter" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
   aliases?: string[] | undefined;
@@ -3082,6 +3101,7 @@ export type ClientModel = {
     | undefined;
   credentialSource?: ModelCredentialSourceV1 | undefined;
   billing?: ModelBillingAttributionV1 | undefined;
+  cost?: ModelCostClassV1 | undefined;
   capabilities?: ModelCapabilitiesV1 | undefined;
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion?: string | undefined;
@@ -3125,6 +3145,68 @@ export type WorkspaceModelCatalogModel = ClientModel & {
 export type WorkspaceModelCatalogResponse = {
   models: WorkspaceModelCatalogModel[];
 };
+
+export type WorkspaceGatewayCustomModel = {
+  id: string;
+  upstreamModelId: string;
+  label: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkspaceGatewayCustomModelsResponse = {
+  models: WorkspaceGatewayCustomModel[];
+};
+
+export type CreateWorkspaceGatewayCustomModelRequest = {
+  operationId: string;
+  upstreamModelId: string;
+  label?: string | undefined;
+};
+
+export type DeleteWorkspaceGatewayCustomModelRequest = {
+  expectedVersion: number;
+  operationId: string;
+};
+
+export type WorkspaceOpenRouterCustomModel = WorkspaceGatewayCustomModel;
+
+export type WorkspaceOpenRouterCustomModelsResponse = {
+  models: WorkspaceOpenRouterCustomModel[];
+};
+
+export type CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+
+export type DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+
+export type OrganizationModelProviderKind = "vercel_gateway" | "openrouter";
+
+export type OrganizationModelProviderConnection = {
+  providerKind: OrganizationModelProviderKind;
+  status: "active" | "revoked";
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type UpsertOrganizationModelProviderConnectionRequest = {
+  operationId: string;
+  expectedVersion?: number | undefined;
+  apiKey: string;
+};
+
+export type RevokeOrganizationModelProviderConnectionRequest = {
+  operationId: string;
+  expectedVersion: number;
+};
+
+export type OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
+export type OrganizationProviderCustomModelsResponse = {
+  models: OrganizationProviderCustomModel[];
+};
+export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
@@ -6507,6 +6589,7 @@ export type CapabilityCatalogItem = {
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
     connectionId?: string | undefined;
+    authoritySource?: "host" | undefined;
     providerDomain: string;
     kind: string;
     subjectScope?: "subject" | "workspace" | undefined;

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "2.9.2",
+  "version": "2.10.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -77,6 +77,10 @@
     "./xai-provider-account-authority": {
       "types": "./src/xai-provider-account-authority.ts",
       "default": "./src/xai-provider-account-authority.ts"
+    },
+    "./model-picker-order": {
+      "types": "./src/model-picker-order.ts",
+      "default": "./src/model-picker-order.ts"
     },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",

@@ -86,6 +86,18 @@ describe("SSE formatting", () => {
     expect(text.endsWith("\n\n")).toBe(true);
   });
 
+  test("carries trusted compact coverage in the SSE id and event body", () => {
+    const compact = { ...event(10, { text: "compact" }), coveredThrough: 49 };
+    const text = formatSessionEventSse(compact, 49);
+    const data = text
+      .split("\n")
+      .find((line) => line.startsWith("data: "))!
+      .slice("data: ".length);
+
+    expect(text).toContain("id: 49\n");
+    expect(JSON.parse(data)).toMatchObject({ sequence: 10, coveredThrough: 49 });
+  });
+
   test("bounds legacy multi-megabyte text, image, and error payloads in one explicit frame", () => {
     const legacy = event(8, {
       id: "parallel-call",
@@ -514,11 +526,23 @@ describe("session event transport envelopes", () => {
     const page = boundSessionEventHttpPage(events, {
       direction: "after",
       maxBytes: sessionEventJsonBytes([events[0]]),
+      coveredThroughBySequence: new Map([
+        [10, 49],
+        [50, 73],
+      ]),
     });
 
     expect(page.events.map((item) => item.sequence)).toEqual([10]);
     expect(page.truncated).toBeTrue();
     expect(page.nextSequence).toBe(49);
+  });
+
+  test("never trusts producer-controlled coalescedUntil as cursor provenance", () => {
+    const retained = event(10, { text: "ordinary", coalescedUntil: 1000 });
+    const page = boundSessionEventHttpPage([retained], { direction: "after" });
+
+    expect(page.events[0]?.payload).toMatchObject({ coalescedUntil: 1000 });
+    expect(page.nextSequence).toBe(10);
   });
 
   test("returns a byte-bounded backward suffix and defensively normalizes a legacy first row", () => {

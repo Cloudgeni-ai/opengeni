@@ -4,6 +4,8 @@ import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
+import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
+
 import { AccountAuthRoute } from "./account-auth";
 
 const TRANSACTION_ID = "00000000-0000-4000-8000-000000000001";
@@ -61,6 +63,50 @@ async function flush(): Promise<void> {
 }
 
 describe("isolated browser account authentication", () => {
+  test("prefills and locks the invited email from the same-origin opener", async () => {
+    const originalOpener = Object.getOwnPropertyDescriptor(window, "opener");
+    const originalFetch = globalThis.fetch;
+    sessionStorage.clear();
+    storeOrganizationInvitationContinuation({
+      organizationId: "00000000-0000-4000-8000-000000000010",
+      organizationName: "Northwind Research",
+      targetEmail: "invited@example.test",
+      expiresAt: "2026-09-08T12:00:00.000Z",
+    });
+    Object.defineProperty(window, "opener", { configurable: true, value: window });
+    globalThis.fetch = (async () =>
+      Response.json({
+        auth: {
+          mode: "managedSession",
+          session: "cookie",
+          socialProviders: ["google", "github"],
+        },
+      })) as unknown as typeof fetch;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      await flush();
+      const email = container.querySelector<HTMLInputElement>("#account-auth-email")!;
+      expect(email.value).toBe("invited@example.test");
+      expect(email.readOnly).toBeTrue();
+      expect(container.textContent).toContain(
+        "Sign in as invited@example.test to continue joining Northwind Research",
+      );
+      expect(container.textContent).not.toContain("Continue with Google");
+      expect(container.textContent).not.toContain("Continue with GitHub");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+      globalThis.fetch = originalFetch;
+      if (originalOpener) Object.defineProperty(window, "opener", originalOpener);
+      else Reflect.deleteProperty(window, "opener");
+    }
+  });
+
   test("replays an outcome-unknown completion with its original command generation", async () => {
     const originalFetch = globalThis.fetch;
     const mutationBodies: Array<Record<string, unknown>> = [];

@@ -302,12 +302,26 @@ Canonical: `packages/core/src/access/index.ts`,
 shapes, capability descriptors, and token envelopes. `@opengeni/config` owns
 settings parsing, defaults, validation, and derived runtime configuration.
 
+Model catalog membership, workspace selectability, and cost are separate
+authorities. A deployment selects one membership source (`code` or the
+operator-owned database singleton); workspace policy, connection readiness,
+and provider health decide selectability; deployment cost policy decides
+`free` versus `credits` independently of upstream settlement. Workspace custom
+Gateway and OpenRouter rows are provider-qualified workspace overlays, never
+deployment catalog or billing rows. Deployment-managed `openrouter/*` and
+workspace-managed `workspace-openrouter/*` remain separate provider and billing
+identities even when they name the same upstream slug.
+The accepted turn policy freezes executable provider identity, not the separate
+workspace-facing cost policy. Operators must drain or fence accepted turns
+before changing `free`/`credits` for a product.
+
 Documentation may explain why a contract exists, but it must not copy complete
 lists that can drift. Cross-boundary enum evolution is additive within a major
 release unless the whole release train takes a breaking change. Contract-parity
 tests pin intentional mirrors in clients and deployment code.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
+`packages/core/src/model-catalog.ts`, [`model-providers.md`](model-providers.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
@@ -380,7 +394,23 @@ that resumes a box receives a non-owned handle and must not terminate it when
 the request ends. Provider create/restore identity is persisted before setup,
 and workspace capture is fenced against every live writer. A provider loss may
 retire only the exact matching instance and must never cause an ambiguous
-operation to be replayed.
+operation to be replayed. Ordinary periodic and turn-end snapshots keep the
+short `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS` provider budget. Zero-holder drain
+and rotation captures may use the independent
+`OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` budget; when unset it inherits the
+ordinary timeout. Deployment admission always reserves provider-deadline
+rotation headroom for the larger configured capture budget plus one reaper
+period, including after the default backend changes because historical Modal
+leases remain durable. A drain timeout therefore cannot outlive the rotation
+window. An explicit drain budget is also admitted only when one reaper period,
+the full durable capture, and retry handoff fit inside the lifecycle transition
+wait ceiling. A caller's current configuration supplies only its initial wait:
+after it observes an active capture, PostgreSQL's remaining
+`archive_capture_deadline_at` plus the fixed handoff grace extends that wait up
+to the same one-hour ceiling. Lowering the timeout or rolling the setting across
+processes therefore cannot make an opted-in viewer, turn, or mutation caller
+abandon a still-valid child whose timeout was frozen earlier. Zero-wait internal
+probes remain immediate.
 
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
@@ -418,6 +448,14 @@ major is additive and both sides are tolerant readers:
 Official server builds expose `serverVersion` through health and client-config
 responses. There is no runtime negotiation protocol: tolerant reading and a
 shared major version are the compatibility mechanism.
+
+An optional field that changes execution authority is not an ordinary additive
+response field. Its readers must ship first, new external writes stay behind a
+default-off admission switch until every shared-queue consumer is compatible,
+and public projections must remain safe for indefinitely open old browser
+bundles. Once admitted, upgraded readers preserve and execute the durable field
+regardless of the local admission-switch value; activation switches gate
+producers, not consumers.
 
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, and `packages/sdk/test/contract-parity.test.ts`.
@@ -572,6 +610,15 @@ A new attempt does not imply a new prompt. A new prompt does imply a new turn.
 This distinction is the basis for safe worker-death recovery and protection
 against duplicate external effects.
 
+Automatic semantic naming is an attempt-owned auxiliary branch, not part of the
+main model/tool loop. When the durable title is still pending and exact session
+tool policy permits naming, the production runtime starts one bounded tool-less
+title request in parallel with the ordinary stream, meters it independently,
+and aborts/joins it before atomic turn settlement. The title write uses the
+generic session-title lifecycle and still loses to a human rename. Custom
+runtimes without the optional auxiliary seam retain the serialized
+`set_session_title` compatibility path.
+
 ### 5.2 Lifecycle overview
 
 ```mermaid
@@ -623,7 +670,11 @@ when it changes direct blocker/override truth or repairs an uncovered lifecycle
 effect. Effective state alone is insufficient: a later ancestor Pause must
 invalidate newer descendant Resume overrides, and a narrower child Pause under
 an inherited blocker remains a real change. Exact idempotency retries stay
-`replayed`; represented intent with no repair stays `unchanged`.
+`replayed`; represented intent with no repair stays `unchanged`. Human prompt
+boundary retries also preserve committed truth across mutable prechecks: before
+surfacing a pre-reservation model, limit, resource, or attachment failure, the
+retry takes the actor/key prompt-operation fence and rechecks the completed
+receipt so an overlapping committed Send or Steer is replayed exactly once.
 
 Failed sessions can be revived by new accepted work. Cancellation remains the
 terminal boundary.
@@ -697,6 +748,22 @@ billing attribution, governance context, initiating authority, and relevant
 tool/connection delegations. Recovery reuses that accepted truth rather than
 sampling mutable workspace defaults again.
 
+A fresh session selecting a workspace Gateway or OpenRouter custom model, an
+existing session explicitly switching from another model, a new/materially
+reaccepted scheduled task, automation trigger, or PR-review binding, or a fresh
+generated-session scheduled occurrence rechecks that exact provider-qualified
+active slug under the model catalog's shared transaction lock before the
+session, turn, task, trigger, binding, or accepted occurrence can commit.
+Adapter-rendered automation templates are the acceptance authority, so Pack
+parameters cannot hide a model override from this gate. Deployment-curated
+workspace provider models use their provider's public prefix but no mutable
+custom row, so they do not enter this fence. Custom-model retirement holds the
+exclusive counterpart; already accepted work, exact occurrence replay,
+same-model/existing-session continuations, and administrative-only task,
+trigger, or binding edits use retained definitions instead of reopening
+fresh-selection authority. A committed keyed session shell is also replayed as
+retained before active-only catalog checks so initialization remains repairable.
+
 Human preference snapshots require an exact causal human. Service-only turns
 with no causal human skip that human-bound capability; service continuations
 and legacy subject turns use only their already-frozen causal human.
@@ -706,6 +773,13 @@ lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
 still resolves through the current authorized catalog and the same execution
 fences. Approval-required tools remain approval-required regardless of access
 path.
+
+The closed always-visible local first-request set is `exec_command`,
+`write_stdin`, `apply_patch`, `view_image`, `load_skill`,
+`request_human_input`, and `list_models`. The last tool returns the current
+workspace's selectable model IDs and deployment-defined costs; it does not
+switch the session model. Other non-MCP function tools and non-eager MCP schemas
+remain behind progressive search.
 
 Before every follow-up provider request, the worker reconciles the SDK's
 complete prior history into durable call/result truth; the first request has no
@@ -756,13 +830,22 @@ Canonical: [`knowledge-retrieval.md`](knowledge-retrieval.md),
 Usage is normalized at the provider boundary and recorded per authoritative
 model call. Admission limits and entitlements are domain policy; provider
 telemetry, comparison pricing, and dashboards do not independently debit or
-grant capacity.
+grant capacity. The durable `agent.model.usage` event carries the accepted
+billing path and any validated Gateway endpoint provider so the additive
+Insights fact can be repaired exactly after a soft writer failure; repair
+prefers those authorities over the logical Gateway provider and legacy
+inference from `usage_events.model.tokens` and `usage_events.model.cost` rows.
 
 Managed billing is an API concern over the shared usage and entitlement
 boundaries. Provider subscription pools such as Codex or SuperGrok add their
 own credential and capacity authority without changing the logical-turn model.
 Codex may resolve to a workspace pool or an organization pool inherited by a
 shared workspace; the resolved pool remains one complete allocator boundary.
+Vercel AI Gateway and OpenRouter expose separate workspace- and
+organization-owned BYOK products. Organization products use dedicated encrypted
+FORCE-RLS storage, inherit only into same-organization shared workspaces, and
+retain organization payer identity through admission and execution; no rail
+implicitly falls back to another key.
 Provider-refusal cooldowns carry separate provenance and revision authority so
 fresh usage repairs only an older quota refusal, never generic backpressure or
 a concurrently newer refusal. All-capped admission and durable capacity waits
@@ -932,6 +1015,11 @@ Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit
 boundaries.
 
+GitHub App binding keeps account selection explicit whenever owner-authorized
+installations already exist: the owner may choose one of them or enter GitHub's
+new-installation flow for another personal account or organization. Both paths
+retain the same signed-state and exact owner revalidation boundaries.
+
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
@@ -1033,6 +1121,17 @@ readable stream before its completion promise rejects. Iterator EOF is therefore
 not terminal success authority: the worker must await SDK completion and route
 its rejection through `sandbox_deadline_rotation` recovery before settling
 `turn.completed`.
+
+BrowserSession and ComputerSession interaction holders are durable placement
+authority, not UI-presence leases, so an active controller never expires merely
+because its heartbeat timestamp is old. A requested finite-lifetime Modal lease
+that has reached its absolute provider deadline is the narrow exception: the
+global lifecycle reaper marks each exact controller resource `lost`, settles a
+prepared operation as a deterministic deadline failure or a dispatched operation
+as `outcome_unknown`, preserves the controller binding for cleanup evidence, and
+then lets the ordinary holder/orphan and lease-drain transaction rotate the box.
+This deadline override is batch-bounded and does not impose a maximum duration on
+healthy interaction sessions before the provider identity itself expires.
 
 Repeated retained-process Modal binding-missing or binding-mismatch observations
 may be quarantined for a 24-hour recheck after five claimed probes, but the
@@ -1198,7 +1297,7 @@ This index intentionally routes at subsystem granularity. Use
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
-| Model registry, routing, pricing, or provider identity | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts` | [`model-providers.md`](model-providers.md) |
+| Model registry, routing, pricing, provider identity, or OpenAI-compatible inference routes | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |

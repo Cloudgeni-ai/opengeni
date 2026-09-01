@@ -1,17 +1,70 @@
-import { type LazyToolTransport } from "@opengeni/runtime";
+import {
+  desktopCapableBackend,
+  type ComputerToolMode,
+  type LazyToolTransport,
+} from "@opengeni/runtime";
 import {
   isDirectOpenAiApiBaseUrl,
   type ModelProviderApi,
-  type RegistryProviderKind,
+  type ResolvedModelProvider,
   type Settings,
 } from "@opengeni/config";
 import { type ModelAttachmentInputPolicy } from "../run-input";
 import { imageProviderBindingHash } from "../image-generation-operation";
 
+export function shouldStartOnTurnRecording(params: {
+  recordingEnabled: boolean;
+  desktopEnabled: boolean;
+  establishedBackendId: string;
+  effectiveBackend: Settings["sandboxBackend"] | undefined;
+}): boolean {
+  return (
+    params.recordingEnabled &&
+    params.desktopEnabled &&
+    desktopCapableBackend(params.establishedBackendId) &&
+    params.effectiveBackend !== "selfhosted"
+  );
+}
+
+/**
+ * Decide the EXPLICIT computer-use tool transport for THIS turn.
+ *
+ * Computer-use is ordinary `computer_*` function tools bound to the live
+ * desktop. The worker picks the mode from the resolved provider so the runtime
+ * never string-sniffs the model instance:
+ *   • catalogue `inputModalities` must include `image`, or computer-use is off
+ *   • Responses wires (Azure/OpenAI, Gateway, Codex, legacy client) →
+ *     "function-image": screenshot results are structured `{type:'image'}`
+ *   • Chat Completions → "disabled": tool results on that wire are text, so a
+ *     screenshot would become a base64 string rather than an image the model sees
+ *
+ * Pure + exported so the mapping is unit-testable without a live turn.
+ */
+export function computerToolModeForTurn(
+  resolvedModel: {
+    provider: { kind: ResolvedModelProvider["kind"]; api: ModelProviderApi };
+    configured: { capabilities: { inputModalities: string[] } };
+  } | null,
+): ComputerToolMode {
+  if (!resolvedModel) {
+    return "function-image";
+  }
+  if (!modelSupportsImageInputForTurn(resolvedModel)) {
+    return "disabled";
+  }
+  if (resolvedModel.provider.kind === "codex-subscription") {
+    return "function-image";
+  }
+  if (resolvedModel.provider.api === "chat") {
+    return "disabled";
+  }
+  return "function-image";
+}
+
 /** Chat wires and Gateway models do not advertise OpenAI's hosted sandbox tool types. */
 export function structuredToolTransportForTurn(
   resolvedModel: {
-    provider: { kind: RegistryProviderKind; api: ModelProviderApi };
+    provider: { kind: ResolvedModelProvider["kind"]; api: ModelProviderApi };
   } | null,
 ): boolean {
   if (!resolvedModel) return true;
@@ -34,7 +87,7 @@ export function lazyToolTransportForTurn(
   resolvedModel: {
     provider: {
       id: string;
-      kind: RegistryProviderKind;
+      kind: ResolvedModelProvider["kind"];
       api: ModelProviderApi;
       wireProfile: "openai" | "azure-openai";
       builtin: boolean;
@@ -108,7 +161,7 @@ export function openAiHostedImageProviderBindingForTurn(
   resolvedModel: {
     provider: {
       id: string;
-      kind: RegistryProviderKind;
+      kind: ResolvedModelProvider["kind"];
       builtin: boolean;
       baseUrl?: string | undefined;
     };

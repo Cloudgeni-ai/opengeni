@@ -1,5 +1,43 @@
 # @opengeni/api-router
 
+## 2.7.0
+
+### Minor Changes
+
+- 2d0fad4: Add deployment-defined model catalogs and cost policy, workspace-managed Gateway and OpenRouter credentials plus custom models, a separate deployment-managed OpenRouter rail, live catalog refresh, the `list_models` agent tool, and model-picker/API/SDK support for the new catalog surfaces.
+
+### Patch Changes
+
+- e0ecc8a: Keep account-scoped external workspace provisioning out of workspace UUID actor middleware so organization API keys can idempotently provision tenant workspaces.
+- 7266b42: Return existing OpenGeni users directly to the exact pending organization invitation after an invited-email-bound sign-in, explain wrong-account states with an account-switch action, and preserve the global invitation list as an email-independent fallback.
+- c0e06c3: Keep the GitHub installation account chooser available when a workspace owner
+  has exactly one existing installation, so they can install the App on another
+  personal account or organization instead of being forced into the existing one.
+- 9af1666: Keep backward session-history pagination advancing across oversized legacy events by applying the canonical bounded read projection instead of failing the page, and report when a forensic response is no longer byte-for-byte exact.
+- Updated dependencies [f5e2dfc]
+- Updated dependencies [8e2f71d]
+- Updated dependencies [6934f99]
+- Updated dependencies [aa19556]
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [9e21a09]
+- Updated dependencies [bcacd54]
+- Updated dependencies [c356468]
+- Updated dependencies [5ef0757]
+- Updated dependencies [9af1666]
+  - @opengeni/db@3.8.0
+  - @opengeni/runtime@2.1.0
+  - @opengeni/config@0.23.0
+  - @opengeni/contracts@2.10.0
+  - @opengeni/core@2.7.0
+  - @opengeni/events@0.4.13
+  - @opengeni/documents@0.8.15
+  - @opengeni/github@0.6.8
+  - @opengeni/storage@0.2.116
+  - @opengeni/artifact-tool@0.3.15
+  - @opengeni/codemode@0.4.23
+  - @opengeni/observability@0.8.15
+
 ## 2.6.4
 
 ### Patch Changes

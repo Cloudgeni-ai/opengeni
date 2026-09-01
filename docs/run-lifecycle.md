@@ -50,19 +50,25 @@ candidate is rejected as sensitive or unsuitable, the ordinary pending marker
 and first-turn self-heal path remain.
 
 While a session still has the pending marker, and its exact selected first-party
-tool and permission policy permits `set_session_title`, the worker projects only
-that exact operation through the attempt-local tool server and removes it from
-the broader remote first-party catalog for the attempt. The request-local
-one-shot instruction can therefore call `set_session_title` on the first model
-request without waiting for the remaining first-party `tools/list`; all other
-selected first-party schemas stay deferred and searchable. This does not grant
-or attach any new tool authority. The attempt-local operation uses the canonical
-title mutation, which updates the session row and appends `session.title_set`; a
-human title remains protected from later agent writes. The hint is based on
-durable title state rather than history length: turn claim persists the accepted
-user item before agent construction, so history count cannot identify a first
-turn. Historical fallback sessions therefore self-heal on their next eligible
+tool and permission policy permits `set_session_title`, the production runtime
+removes that operation from the model-visible catalog for the attempt and starts
+one bounded, tool-less title request beside the ordinary response stream. The
+sidecar uses the same resolved provider and credential authority, receives only
+a bounded conversation opener, and is metered as its own model call. The main
+agent does not wait for a title tool result or make a title follow-up model call.
+When the main stream reaches settlement, the worker aborts any still-pending
+sidecar and joins its physical completion; a completed candidate then uses the
+canonical title mutation, which updates the session row and appends
+`session.title_set`. Generation or persistence failure leaves the safe pending
+marker in place, and a human title remains protected from every later automatic
+write. Historical fallback sessions therefore self-heal on their next eligible
 model turn.
+
+`OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
+Older or custom runtimes that do not implement it retain the prior attempt-local
+`set_session_title` tool plus one-shot model instruction, so an embedding host
+does not silently lose automatic naming during an upgrade. That compatibility
+path remains serialized; the production runtime takes the parallel path.
 
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
@@ -1208,7 +1214,23 @@ their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
 new mutation generation; an already-complete generation never calls the
 provider again. The zero-holder drain/rotation capture bypasses that interval so
-the exact latest generation is durable before teardown.
+the exact latest generation is durable before teardown. It may also use the
+separate `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` provider budget so a large
+workspace can receive extended recovery headroom without lengthening ordinary
+periodic or turn-end finalization. Unset preserves the shared snapshot timeout;
+Boot validation requires the larger configured capture budget and one reaper
+period to fit strictly inside provider-deadline rotation headroom even when the
+default backend is no longer Modal, because historical Modal leases remain
+durable across that rollout. The explicit drain budget is independently
+rejected unless reaper dispatch, the full durable capture, and retry handoff fit
+inside the caller/DB transition wait ceiling. Process-local configuration is
+only the initial observational budget. Once an opted-in acquisition or mutation
+waiter sees the durable capture claim, it follows PostgreSQL's authoritative
+remaining `archive_capture_deadline_at` plus retry-handoff grace, still capped by
+the one-hour lifecycle ceiling. This keeps a timeout reduction and mixed-config
+rolling activation aligned with the older child's frozen input without turning
+the wait into capture-takeover authority or an unbounded request. Explicit
+zero-wait probes preserve their immediate fenced result.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`

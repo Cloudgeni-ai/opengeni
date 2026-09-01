@@ -2,6 +2,7 @@ import { dbSearchPath, getSettings, resolveNatsControlPlaneAuth } from "@opengen
 import { configureChildLifecycleNotices, createDb } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
+import { resolveCatalogSettings } from "@opengeni/core";
 import { createObjectStorage } from "@opengeni/storage";
 import type { ActivityDependencies, SharedActivityServices } from "./activities/types";
 import { observabilityEventLogger } from "./observability-metrics";
@@ -35,11 +36,13 @@ export function createSharedActivityServices(
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       const db = dependencies.db ?? dbClient!.db;
+      const resolvedSettings = (await resolveCatalogSettings(db, settings)).settings;
       // Child lifecycle notice producers are process-global in @opengeni/db;
       // install the boot-validated rollout flag once for this worker.
       configureChildLifecycleNotices({ enabled: settings.childLifecycleNoticesEnabled });
       return {
-        settings,
+        settings: resolvedSettings,
+        catalogSourceSettings: settings,
         db,
         bus:
           dependencies.bus ??

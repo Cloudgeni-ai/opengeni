@@ -51,6 +51,7 @@ import {
   buildManifest,
   compactMcpResultCustomDataRunState,
   composeAgentInstructions,
+  ConnectorActionBindingRejectedError,
   configureRuntimeMetricsHooks,
   connectMcpServersInBatches,
   coreInstructions,
@@ -71,9 +72,12 @@ import {
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
   elideSupersededViewImagePairs,
+  generateSessionTitle,
   materializeSandboxFileDownloads,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
+  SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
+  SESSION_TITLE_GENERATION_INSTRUCTIONS,
   mcpToolErrorOutput,
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
@@ -2366,6 +2370,130 @@ describe("runtime event normalization", () => {
       }
     });
 
+    test("attempt-local connector binding rejection becomes a tool error", async () => {
+      const executions: Record<string, unknown>[] = [];
+      const prepared = await prepareAgentTools(testSettings(), [], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "github_app", toolName: "repository_get" },
+            modelName: "github_app__repository_get",
+            inputSchema: {
+              type: "object",
+              properties: { repository: { type: "string" } },
+              required: ["repository"],
+              additionalProperties: false,
+            },
+            source: "mcp",
+            approval: "policy",
+            execute: async (args) => {
+              executions.push(args);
+              return { content: [{ type: "text", text: "repository" }] };
+            },
+          },
+        ],
+      });
+      const policyCalls: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => {
+          policyCalls.push("prepare");
+          return { managed: false, decision: "unmanaged" };
+        },
+        begin: async () => {
+          policyCalls.push("begin");
+          return { allowed: true, managed: false };
+        },
+        complete: async () => {
+          policyCalls.push("complete");
+        },
+      };
+      const agent = buildOpenGeniAgent(testSettings(), [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+        attemptConnectorActionBindings: [
+          {
+            modelName: "github_app__repository_get",
+            call: () => {
+              throw new ConnectorActionBindingRejectedError(
+                "repository is outside accepted resources",
+              );
+            },
+          },
+        ],
+      });
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "github_app__repository_get",
+        );
+        if (!tool || tool.type !== "function") throw new Error("attempt connector tool missing");
+        expect(
+          await tool.needsApproval(
+            new RunContext(),
+            { repository: "Cloudgeni-ai/not-accepted" },
+            "call-rejected",
+          ),
+        ).toBe(false);
+        expect(
+          await tool.invoke(
+            new RunContext(),
+            JSON.stringify({ repository: "Cloudgeni-ai/not-accepted" }),
+            { toolCall: { callId: "call-rejected" } } as any,
+          ),
+        ).toEqual({
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "Connector action was not executed because its arguments are outside this turn's accepted authority.",
+            },
+          ],
+        });
+        expect(executions).toEqual([]);
+        expect(policyCalls).toEqual([]);
+
+        const bugAgent = buildOpenGeniAgent(testSettings(), [], {
+          mcpServers: prepared.mcpServers,
+          connectorActionPolicy: hooks,
+          attemptConnectorActionBindings: [
+            {
+              modelName: "github_app__repository_get",
+              call: () => {
+                throw new Error("unexpected binding bug");
+              },
+            },
+          ],
+        });
+        const [bugTool] = (await bugAgent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "github_app__repository_get",
+        );
+        if (!bugTool || bugTool.type !== "function")
+          throw new Error("attempt connector tool missing");
+        await expect(
+          bugTool.needsApproval(
+            new RunContext(),
+            { repository: "Cloudgeni-ai/not-accepted" },
+            "call-bug",
+          ),
+        ).rejects.toThrow("unexpected binding bug");
+        await expect(
+          bugTool.invoke(
+            new RunContext(),
+            JSON.stringify({ repository: "Cloudgeni-ai/not-accepted" }),
+            { toolCall: { callId: "call-bug" } } as any,
+          ),
+        ).rejects.toThrow("unexpected binding bug");
+      } finally {
+        await prepared.close();
+      }
+    });
+
     test("attempt-local connector bindings preserve unmanaged read execution", async () => {
       const executions: Record<string, unknown>[] = [];
       const prepared = await prepareAgentTools(testSettings(), [], {
@@ -3477,6 +3605,53 @@ describe("runtime event normalization", () => {
     });
     expect(first.instructions?.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
     expect(followUp.instructions).toBe(agent.instructions);
+  });
+
+  test("the auxiliary title request is bounded, tool-less, and normalized", async () => {
+    const requests: any[] = [];
+    const model = {
+      getResponse: async (request: any) => {
+        requests.push(request);
+        return {
+          responseId: "resp-title-1",
+          usage: Usage.fromJSON({
+            inputTokens: 20,
+            outputTokens: 4,
+            totalTokens: 24,
+          }),
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: "Title: Parallel session titles\nThis line must be ignored",
+                },
+              ],
+            },
+          ],
+        };
+      },
+      getStreamedResponse: () => {
+        throw new Error("not used");
+      },
+    };
+    const result = await generateSessionTitle(
+      testSettings({ sandboxBackend: "none" }),
+      `  ${"x".repeat(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS + 100)}  `,
+      { model: model as any, modelName: "test-model" },
+    );
+
+    expect(result.title).toBe("Parallel session titles");
+    expect(result.usage?.responseId).toBe("resp-title-1");
+    expect(requests).toHaveLength(1);
+    expect(requests[0].systemInstructions).toBe(SESSION_TITLE_GENERATION_INSTRUCTIONS);
+    expect(requests[0].input).toHaveLength(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS);
+    expect(requests[0].tools).toEqual([]);
+    expect(requests[0].toolsExplicitlyProvided).toBe(true);
+    expect(requests[0].signal).toBeUndefined();
   });
 
   test("persistent display metadata never changes system instructions", () => {
@@ -7270,6 +7445,63 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("retains successful host provenance when a replay-safe request still 401s after refresh", async () => {
+    const connectionId = "legacy-host-binding";
+    const mcp = startTestMcpServer();
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "host-refresh-failed",
+            name: "Legacy host binding",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "host.example.test",
+              kind: "delegated",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "host-refresh-failed" }],
+      {
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
+          status: "ok",
+          authoritySource: "host",
+          connectionId,
+          headers: { authorization: "Bearer host-token" },
+        }),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+        mcpFetchImpl: async (input, init) => {
+          const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+          if (body?.method === "tools/list") {
+            return new Response("unauthorized", { status: 401 });
+          }
+          return await globalThis.fetch(input, init);
+        },
+      },
+    );
+    try {
+      expect(await prepared.mcpServers[0]!.listTools()).toEqual([]);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "host-refresh-failed",
+          providerDomain: "host.example.test",
+          connectionId,
+          authoritySource: "host",
+          reason: "expired",
+        }),
+      );
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("never replays brokered tools/call after 401 and reports an uncertain outcome", async () => {
     const connectionId = "34343434-3434-4434-8434-343434343434";
     const mcp = startTestMcpServer({
@@ -7396,6 +7628,67 @@ describe("runtime event normalization", () => {
           connectionId,
           reason: "insufficient_scope",
           scopes: ["documents:read", "documents:write"],
+        }),
+      );
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("retains successful host provenance for provider insufficient-scope auth", async () => {
+    const connectionId = "legacy-host-scoped-binding";
+    const mcp = startTestMcpServer({
+      forbiddenTools: ["search_documents"],
+      forbiddenAuthenticateHeader: 'Bearer error="insufficient_scope", scope="deploy:read"',
+    });
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "host-scoped",
+            name: "Legacy host scoped binding",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "host.example.test",
+              kind: "delegated",
+              scopes: ["deploy:read"],
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "host-scoped" }],
+      {
+        workspaceId: "66666666-6666-4666-8666-666666666666",
+        resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
+          status: "ok",
+          authoritySource: "host",
+          connectionId,
+          headers: {},
+        }),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "host-scoped__search_documents",
+        { query: "scope" },
+      );
+      expect(result).toMatchObject({ isError: true });
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "host-scoped",
+          toolName: "search_documents",
+          providerDomain: "host.example.test",
+          connectionId,
+          authoritySource: "host",
+          reason: "insufficient_scope",
+          scopes: ["deploy:read"],
         }),
       );
     } finally {
@@ -9333,6 +9626,7 @@ describe("runtime event normalization", () => {
                 status: "auth_needed",
                 reason: "expired",
                 providerDomain: "api.integrations-example.com",
+                authoritySource: "host",
                 connectionId,
                 authorizationUrl: "https://api.integrations-example.com/oauth/start",
               }
@@ -9359,6 +9653,7 @@ describe("runtime event normalization", () => {
           serverId: "cap",
           toolName: "search_documents",
           reason: "expired",
+          authoritySource: "host",
         }),
       );
       // The healthy sibling remains fully usable in the same turn.

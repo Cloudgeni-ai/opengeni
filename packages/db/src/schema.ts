@@ -524,8 +524,12 @@ export const organizationProfileEvents = pgTable(
     actorMembershipId: uuid("actor_membership_id").notNull(),
     previousName: text("previous_name").notNull(),
     requestedName: text("requested_name").notNull(),
-    expectedUpdatedAt: timestamp("expected_updated_at", { withTimezone: true }).notNull(),
-    resultUpdatedAt: timestamp("result_updated_at", { withTimezone: true }).notNull(),
+    expectedUpdatedAt: timestamp("expected_updated_at", {
+      withTimezone: true,
+    }).notNull(),
+    resultUpdatedAt: timestamp("result_updated_at", {
+      withTimezone: true,
+    }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -613,7 +617,9 @@ export const organizationPrivateSessionSettingEvents = pgTable(
     expectedVersion: bigint("expected_version", { mode: "number" }).notNull(),
     resultEnabled: boolean("result_enabled").notNull(),
     resultVersion: bigint("result_version", { mode: "number" }).notNull(),
-    resultUpdatedAt: timestamp("result_updated_at", { withTimezone: true }).notNull(),
+    resultUpdatedAt: timestamp("result_updated_at", {
+      withTimezone: true,
+    }).notNull(),
     changed: boolean("changed").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -751,7 +757,9 @@ export const organizationInvitationBindingEvents = pgTable(
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     invitationId: uuid("invitation_id").notNull(),
     targetSubjectId: text("target_subject_id").notNull(),
-    resultingRevision: bigint("resulting_revision", { mode: "number" }).notNull(),
+    resultingRevision: bigint("resulting_revision", {
+      mode: "number",
+    }).notNull(),
     boundAt: timestamp("bound_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -854,13 +862,19 @@ export const organizationUserRetentionDeletions = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     membershipId: uuid("membership_id").notNull(),
-    retentionUntil: timestamp("retention_until", { withTimezone: true }).notNull(),
+    retentionUntil: timestamp("retention_until", {
+      withTimezone: true,
+    }).notNull(),
     state: text("state").notNull().default("claimed"),
     claimOperationId: uuid("claim_operation_id").notNull(),
-    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }).notNull(),
+    claimExpiresAt: timestamp("claim_expires_at", {
+      withTimezone: true,
+    }).notNull(),
     attemptCount: integer("attempt_count").notNull().default(1),
     databaseResult: jsonb("database_result").$type<Record<string, unknown>>(),
-    databaseFinalizedAt: timestamp("database_finalized_at", { withTimezone: true }),
+    databaseFinalizedAt: timestamp("database_finalized_at", {
+      withTimezone: true,
+    }),
     result: jsonb("result").$type<Record<string, unknown>>(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1262,7 +1276,9 @@ export const codexSubscriptionCredentials = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, {
+      onDelete: "cascade",
+    }),
     organizationId: uuid("organization_id").references(() => managedAccounts.id, {
       onDelete: "cascade",
     }),
@@ -1836,7 +1852,9 @@ export const connectionUseOnceConsumptionReceipts = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     authorityId: uuid("authority_id").notNull(),
-    authorityGeneration: bigint("authority_generation", { mode: "number" }).notNull(),
+    authorityGeneration: bigint("authority_generation", {
+      mode: "number",
+    }).notNull(),
     grantGeneration: bigint("grant_generation", { mode: "number" }).notNull(),
     acceptedWorkKind: text("accepted_work_kind").notNull(),
     acceptedWorkId: uuid("accepted_work_id").notNull(),
@@ -2621,7 +2639,9 @@ export const slackInteractionInbox = pgTable(
     targetAccountId: uuid("target_account_id"),
     targetWorkspaceId: uuid("target_workspace_id"),
     routePromptId: uuid("route_prompt_id"),
-    routePromptExpiresAt: timestamp("route_prompt_expires_at", { withTimezone: true }),
+    routePromptExpiresAt: timestamp("route_prompt_expires_at", {
+      withTimezone: true,
+    }),
     processedAt: timestamp("processed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -6185,7 +6205,9 @@ export const turnPersonalResourceSnapshots = pgTable(
       mode: "number",
     }).notNull(),
     authorityId: uuid("authority_id").notNull(),
-    authorityGeneration: bigint("authority_generation", { mode: "number" }).notNull(),
+    authorityGeneration: bigint("authority_generation", {
+      mode: "number",
+    }).notNull(),
     grantId: uuid("grant_id").notNull(),
     grantGeneration: bigint("grant_generation", { mode: "number" }).notNull(),
     grantMode: text("grant_mode").notNull(),
@@ -6197,7 +6219,9 @@ export const turnPersonalResourceSnapshots = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.turnId, table.resourceKind, table.resourceId] }),
+    pk: primaryKey({
+      columns: [table.turnId, table.resourceKind, table.resourceId],
+    }),
     receipt: foreignKey({
       name: "turn_personal_resource_snapshots_receipt_fk",
       columns: [table.turnId],
@@ -6246,7 +6270,9 @@ export const turnPersonalResourceOnceReceipts = pgTable(
     turnId: uuid("turn_id").notNull(),
     accountId: uuid("account_id").notNull(),
     authorityId: uuid("authority_id").notNull(),
-    authorityGeneration: bigint("authority_generation", { mode: "number" }).notNull(),
+    authorityGeneration: bigint("authority_generation", {
+      mode: "number",
+    }).notNull(),
     grantGeneration: bigint("grant_generation", { mode: "number" }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -6541,7 +6567,9 @@ export const turnConnectionAuthoritySnapshots = pgTable(
     turnId: uuid("turn_id").notNull(),
     serverId: text("server_id").notNull(),
     connectionId: uuid("connection_id").notNull(),
-    connectionGeneration: bigint("connection_generation", { mode: "number" }).notNull(),
+    connectionGeneration: bigint("connection_generation", {
+      mode: "number",
+    }).notNull(),
     originWorkspaceId: uuid("origin_workspace_id").notNull(),
     providerDomain: text("provider_domain").notNull(),
     connectionKind: text("connection_kind").notNull(),
@@ -7080,6 +7108,15 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    promptActorOperation: index("session_command_receipts_prompt_actor_operation_idx")
+      .on(
+        table.workspaceId,
+        table.actorType,
+        table.actorSubjectId,
+        table.actorAttemptId,
+        table.operationKey,
+      )
+      .where(sql`${table.action} in ('prompt.send', 'prompt.steer')`),
     goalUpdateOperation: uniqueIndex("session_command_receipts_goal_update_operation_uq")
       .on(table.workspaceId, table.action, table.targetSessionId, table.operationKey)
       .where(sql`${table.action} = 'goal.update'`),
@@ -7575,9 +7612,13 @@ export const sessionGoals = pgTable(
     // Any newer finished turn, a passed deadline, or a goal mutation clears all
     // four columns together.
     continuationHoldTurnId: uuid("continuation_hold_turn_id"),
-    continuationHoldUntil: timestamp("continuation_hold_until", { withTimezone: true }),
+    continuationHoldUntil: timestamp("continuation_hold_until", {
+      withTimezone: true,
+    }),
     continuationHoldReason: text("continuation_hold_reason"),
-    continuationHoldSetAt: timestamp("continuation_hold_set_at", { withTimezone: true }),
+    continuationHoldSetAt: timestamp("continuation_hold_set_at", {
+      withTimezone: true,
+    }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -8852,7 +8893,9 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     // authorization revision observed at admission. The revision is audit
     // evidence: a role change is not a revocation and must not fence a writer.
     initiatorOrganizationMembershipId: uuid("initiator_organization_membership_id"),
-    initiatorAuthorizationRevision: bigint("initiator_authorization_revision", { mode: "number" }),
+    initiatorAuthorizationRevision: bigint("initiator_authorization_revision", {
+      mode: "number",
+    }),
     // Session tenancy authority observed when the operation was admitted; the
     // same triple `session_turn_attempts` freezes for a turn.
     authorityEpoch: integer("authority_epoch"),
@@ -9074,7 +9117,9 @@ export const sandboxRetainedProcesses = pgTable(
     initiatorSubjectId: text("initiator_subject_id").notNull().default("unattributed-legacy"),
     initiatingHumanSubjectId: text("initiating_human_subject_id"),
     initiatorOrganizationMembershipId: uuid("initiator_organization_membership_id"),
-    initiatorAuthorizationRevision: bigint("initiator_authorization_revision", { mode: "number" }),
+    initiatorAuthorizationRevision: bigint("initiator_authorization_revision", {
+      mode: "number",
+    }),
     authorityEpoch: integer("authority_epoch"),
     authorityVisibility: text("authority_visibility", {
       enum: ["user_private", "workspace_shared"],
@@ -9333,7 +9378,9 @@ export const sessionBackgroundCommands = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     sessionId: uuid("session_id").notNull(),
-    provider: text("provider", { enum: ["managed", "connected_machine"] }).notNull(),
+    provider: text("provider", {
+      enum: ["managed", "connected_machine"],
+    }).notNull(),
     state: text("state", { enum: ["running", "stopping", "exited", "lost"] })
       .notNull()
       .default("running"),
@@ -9351,13 +9398,19 @@ export const sessionBackgroundCommands = pgTable(
     settledAt: timestamp("settled_at", { withTimezone: true }),
     reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
     reconcileClaimId: uuid("reconcile_claim_id"),
-    reconcileClaimedAt: timestamp("reconcile_claimed_at", { withTimezone: true }),
+    reconcileClaimedAt: timestamp("reconcile_claimed_at", {
+      withTimezone: true,
+    }),
     reconcileAttempts: integer("reconcile_attempts").notNull().default(0),
     lastReconcileOutcome: text("last_reconcile_outcome"),
-    reconcileProofOutcome: text("reconcile_proof_outcome", { enum: ["exited", "lost"] }),
+    reconcileProofOutcome: text("reconcile_proof_outcome", {
+      enum: ["exited", "lost"],
+    }),
     reconcileProofExitCode: integer("reconcile_proof_exit_code"),
     reconcileProofReason: text("reconcile_proof_reason"),
-    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", { withTimezone: true }),
+    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
+      withTimezone: true,
+    }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -10597,12 +10650,18 @@ export const prReviewAppRegistrations = pgTable(
     providerAccountType: text("provider_account_type"),
     githubActorId: text("github_actor_id"),
     authorityKind: text("authority_kind"),
-    authorityCheckedAt: timestamp("authority_checked_at", { withTimezone: true }),
-    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }),
+    authorityCheckedAt: timestamp("authority_checked_at", {
+      withTimezone: true,
+    }),
+    authorityExpiresAt: timestamp("authority_expires_at", {
+      withTimezone: true,
+    }),
     authorityNonce: text("authority_nonce"),
     credentialKind: text("credential_kind").notNull(),
     credentialEncrypted: text("credential_encrypted"),
-    accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+    accessTokenExpiresAt: timestamp("access_token_expires_at", {
+      withTimezone: true,
+    }),
     webhookAuthKind: text("webhook_auth_kind").notNull(),
     webhookUsername: text("webhook_username"),
     status: text("status").notNull().default("active"),
@@ -10748,7 +10807,9 @@ export const prReviewManagedGithubAuthorityNonces = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     installationId: text("installation_id").notNull(),
-    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }).notNull(),
+    authorityExpiresAt: timestamp("authority_expires_at", {
+      withTimezone: true,
+    }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -11027,8 +11088,9 @@ export const hostExportConfig = pgTable(
 /**
  * Transactional delivery buffer. It intentionally has no tenant/source FKs:
  * a workspace deletion must not erase an already-committed, unacknowledged
- * host fact. Session-event payloads retain their exact storage bytes plus
- * explicit codec truth; usage payloads remain ordinary JSON.
+ * host fact. Session-event rows retain exact storage bytes while they fit the
+ * bounded host wire; larger canonical events carry an explicit content-free
+ * projection plus literal-JSON codec truth. Usage payloads remain ordinary JSON.
  */
 export const hostExportOutbox = pgTable(
   "host_export_outbox",
@@ -11624,7 +11686,9 @@ export const automationRuns = pgTable(
     occurrenceKey: text("occurrence_key").notNull(),
     acceptedExecution: jsonb("accepted_execution").$type<AutomationAcceptedExecution>().notNull(),
     status: text("status").notNull().default("queued"),
-    sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    sessionId: uuid("session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
     errorCode: text("error_code"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -12625,6 +12689,248 @@ export const rigChanges = pgTable(
       table.createdAt,
     ),
     workspaceStatus: index("rig_changes_workspace_status_idx").on(table.workspaceId, table.status),
+  }),
+);
+
+export const deploymentModelCatalog = pgTable(
+  "deployment_model_catalog",
+  {
+    singleton: boolean("singleton").primaryKey().notNull().default(true),
+    document: jsonb("document").$type<unknown>().notNull(),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    singletonCheck: check("deployment_model_catalog_singleton_chk", sql`${table.singleton}`),
+    documentCheck: check(
+      "deployment_model_catalog_document_chk",
+      sql`jsonb_typeof(${table.document}) = 'object'`,
+    ),
+    versionCheck: check("deployment_model_catalog_version_chk", sql`${table.version} > 0`),
+  }),
+);
+
+export const workspaceGatewayCustomModels = pgTable(
+  "workspace_gateway_custom_models",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    upstreamModelId: text("upstream_model_id").notNull(),
+    label: text("label"),
+    version: integer("version").notNull().default(1),
+    createOperationId: uuid("create_operation_id").notNull(),
+    createRequestHash: text("create_request_hash").notNull(),
+    deleteOperationId: uuid("delete_operation_id"),
+    deleteRequestHash: text("delete_request_hash"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccountFk: foreignKey({
+      name: "workspace_gateway_custom_models_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceUpstream: uniqueIndex("workspace_gateway_custom_models_workspace_upstream_uq")
+      .on(table.workspaceId, table.providerKind, table.upstreamModelId)
+      .where(sql`${table.retiredAt} is null`),
+    createOperation: uniqueIndex("workspace_gateway_custom_models_create_operation_uq").on(
+      table.workspaceId,
+      table.providerKind,
+      table.createOperationId,
+    ),
+    deleteOperation: uniqueIndex("workspace_gateway_custom_models_delete_operation_uq")
+      .on(table.workspaceId, table.providerKind, table.deleteOperationId)
+      .where(sql`${table.deleteOperationId} is not null`),
+    providerKindCheck: check(
+      "workspace_gateway_custom_models_provider_kind_chk",
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+    ),
+    upstreamCheck: check(
+      "workspace_gateway_custom_models_upstream_chk",
+      sql`octet_length(${table.upstreamModelId}) between 1 and 238 and ${table.upstreamModelId} ~ '^[!-~]+$' and ${table.upstreamModelId} !~ '[|]'`,
+    ),
+    labelCheck: check(
+      "workspace_gateway_custom_models_label_chk",
+      sql`${table.label} is null or (octet_length(${table.label}) between 1 and 128 and ${table.label} !~ '[\r\n|]')`,
+    ),
+    actorCheck: check(
+      "workspace_gateway_custom_models_actor_chk",
+      sql`octet_length(${table.createdBySubjectId}) between 1 and 1024`,
+    ),
+    versionCheck: check("workspace_gateway_custom_models_version_chk", sql`${table.version} > 0`),
+    createHashCheck: check(
+      "workspace_gateway_custom_models_create_hash_chk",
+      sql`${table.createRequestHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    deleteReceiptCheck: check(
+      "workspace_gateway_custom_models_delete_receipt_chk",
+      sql`(${table.deleteOperationId} is null and ${table.deleteRequestHash} is null) or (${table.deleteOperationId} is not null and ${table.deleteRequestHash} ~ '^[a-f0-9]{64}$' and ${table.retiredAt} is not null)`,
+    ),
+  }),
+);
+
+export const organizationModelProviderConnections = pgTable(
+  "organization_model_provider_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    status: text("status").$type<"active" | "revoked">().notNull().default("active"),
+    credentialEncrypted: text("credential_encrypted").notNull(),
+    version: integer("version").notNull().default(1),
+    operationId: uuid("operation_id").notNull(),
+    requestHash: text("request_hash").notNull(),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountProvider: uniqueIndex("organization_model_provider_connections_account_provider_uq").on(
+      table.accountId,
+      table.providerKind,
+    ),
+    operation: uniqueIndex("organization_model_provider_connections_operation_uq").on(
+      table.accountId,
+      table.providerKind,
+      table.operationId,
+    ),
+    providerKindCheck: check(
+      "organization_model_provider_connections_provider_kind_chk",
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+    ),
+    statusCheck: check(
+      "organization_model_provider_connections_status_chk",
+      sql`${table.status} in ('active', 'revoked')`,
+    ),
+    versionCheck: check(
+      "organization_model_provider_connections_version_chk",
+      sql`${table.version} > 0`,
+    ),
+    requestHashCheck: check(
+      "organization_model_provider_connections_request_hash_chk",
+      sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    actorCheck: check(
+      "organization_model_provider_connections_actor_chk",
+      sql`octet_length(${table.updatedBySubjectId}) between 1 and 1024`,
+    ),
+  }),
+);
+
+export const organizationModelProviderConnectionOperations = pgTable(
+  "organization_model_provider_connection_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    operationId: uuid("operation_id").notNull(),
+    requestHash: text("request_hash").notNull(),
+    resultStatus: text("result_status").$type<"active" | "revoked">().notNull(),
+    resultVersion: integer("result_version").notNull(),
+    resultCreatedAt: timestamp("result_created_at", {
+      withTimezone: true,
+    }).notNull(),
+    resultUpdatedAt: timestamp("result_updated_at", {
+      withTimezone: true,
+    }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operation: uniqueIndex("organization_model_provider_connection_operations_operation_uq").on(
+      table.accountId,
+      table.providerKind,
+      table.operationId,
+    ),
+    providerKindCheck: check(
+      "organization_model_provider_connection_operations_provider_kind_chk",
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+    ),
+    resultStatusCheck: check(
+      "organization_model_provider_connection_operations_result_status_chk",
+      sql`${table.resultStatus} in ('active', 'revoked')`,
+    ),
+    resultVersionCheck: check(
+      "organization_model_provider_connection_operations_result_version_chk",
+      sql`${table.resultVersion} > 0`,
+    ),
+    requestHashCheck: check(
+      "organization_model_provider_connection_operations_request_hash_chk",
+      sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+  }),
+);
+
+export const organizationModelProviderCustomModels = pgTable(
+  "organization_model_provider_custom_models",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    upstreamModelId: text("upstream_model_id").notNull(),
+    label: text("label"),
+    version: integer("version").notNull().default(1),
+    createOperationId: uuid("create_operation_id").notNull(),
+    createRequestHash: text("create_request_hash").notNull(),
+    deleteOperationId: uuid("delete_operation_id"),
+    deleteRequestHash: text("delete_request_hash"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountUpstream: uniqueIndex("organization_model_provider_custom_models_active_uq")
+      .on(table.accountId, table.providerKind, table.upstreamModelId)
+      .where(sql`${table.retiredAt} is null`),
+    createOperation: uniqueIndex(
+      "organization_model_provider_custom_models_create_operation_uq",
+    ).on(table.accountId, table.providerKind, table.createOperationId),
+    deleteOperation: uniqueIndex("organization_model_provider_custom_models_delete_operation_uq")
+      .on(table.accountId, table.providerKind, table.deleteOperationId)
+      .where(sql`${table.deleteOperationId} is not null`),
+    providerKindCheck: check(
+      "organization_model_provider_custom_models_provider_kind_chk",
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+    ),
+    upstreamCheck: check(
+      "organization_model_provider_custom_models_upstream_chk",
+      sql`octet_length(${table.upstreamModelId}) between 1 and 238 and ${table.upstreamModelId} ~ '^[!-~]+$' and ${table.upstreamModelId} !~ '[|]'`,
+    ),
+    labelCheck: check(
+      "organization_model_provider_custom_models_label_chk",
+      sql`${table.label} is null or (octet_length(${table.label}) between 1 and 128 and ${table.label} !~ '[\r\n|]')`,
+    ),
+    versionCheck: check(
+      "organization_model_provider_custom_models_version_chk",
+      sql`${table.version} > 0`,
+    ),
+    actorCheck: check(
+      "organization_model_provider_custom_models_actor_chk",
+      sql`octet_length(${table.createdBySubjectId}) between 1 and 1024`,
+    ),
+    createHashCheck: check(
+      "organization_model_provider_custom_models_create_hash_chk",
+      sql`${table.createRequestHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    deleteReceiptCheck: check(
+      "organization_model_provider_custom_models_delete_receipt_chk",
+      sql`(${table.deleteOperationId} is null and ${table.deleteRequestHash} is null) or (${table.deleteOperationId} is not null and ${table.deleteRequestHash} ~ '^[a-f0-9]{64}$' and ${table.retiredAt} is not null)`,
+    ),
   }),
 );
 

@@ -126,6 +126,45 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("host MCP connection authority defaults off and parses the rollout flag", () => {
+    expect(getSettings().hostMcpAuthoritySourceAdmissionEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true" }, () => getSettings())
+        .hostMcpAuthoritySourceAdmissionEnabled,
+    ).toBe(true);
+    expect(
+      withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false" }, () =>
+        getSettings(),
+      ).hostMcpAuthoritySourceAdmissionEnabled,
+    ).toBe(false);
+  });
+
+  test("configured host MCP refs require the completed fleet activation", () => {
+    const mcpServers = JSON.stringify([
+      {
+        id: "host-tools",
+        url: "https://host.example.test/mcp",
+        connectionRef: {
+          authoritySource: "host",
+          connectionId: "opaque-host-binding",
+          providerDomain: "host.example.test",
+        },
+      },
+    ]);
+    expect(() => withEnv({ OPENGENI_MCP_SERVERS: mcpServers }, () => getSettings())).toThrow(
+      /OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true/,
+    );
+    expect(
+      withEnv(
+        {
+          OPENGENI_MCP_SERVERS: mcpServers,
+          OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true",
+        },
+        () => getSettings(),
+      ).mcpServers.find((server) => server.id === "host-tools")?.connectionRef,
+    ).toMatchObject({ authoritySource: "host", connectionId: "opaque-host-binding" });
+  });
+
   test("Slack workspace routing defaults on and parses the rollout flag", () => {
     expect(getSettings().slackWorkspaceRoutingEnabled).toBe(true);
     expect(
@@ -2215,6 +2254,35 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         sandboxLeaseReaperPeriodMs: 30_000,
       }),
     ).toBe(60 * 60_000);
+    expect(
+      sandboxLifecycleTransitionWaitMs({
+        sandboxSnapshotTimeoutMs: 60_000,
+        sandboxDrainSnapshotTimeoutMs: 30 * 60_000,
+        sandboxLeaseReaperPeriodMs: 30_000,
+      }),
+    ).toBe(30 * 60_000 + 50_000);
+  });
+
+  test("drain snapshots can use extended recovery headroom without changing ordinary snapshots", () => {
+    const settings = withEnv(
+      { OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(30 * 60_000) },
+      () => getSettings(),
+    );
+    expect(settings.sandboxSnapshotTimeoutMs).toBe(60_000);
+    expect(settings.sandboxDrainSnapshotTimeoutMs).toBe(30 * 60_000);
+  });
+
+  test("an explicit drain budget must fit dispatch, capture, and handoff inside the wait ceiling", () => {
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(3_590_000) }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/requires a sandbox lifecycle transition wait/i);
+    const settings = withEnv(
+      { OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(3_550_000) },
+      () => getSettings(),
+    );
+    expect(sandboxLifecycleTransitionWaitMs(settings)).toBe(60 * 60_000);
   });
 
   test("snapshot configuration cannot consume the durable claim's settlement window", () => {
@@ -2232,6 +2300,11 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         () => getSettings(),
       ).sandboxSnapshotTimeoutMs,
     ).toBe(59 * 60_000 + 30_000);
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: String(60 * 60_000) }, () =>
+        getSettings(),
+      ),
+    ).toThrow();
   });
 
   test("idle timeout defaults to the hard lifetime and the default cadence passes boot", () => {
@@ -2312,7 +2385,7 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         },
         () => getSettings(),
       ),
-    ).toThrow(/must exceed the durable capture timeout/i);
+    ).toThrow(/must exceed the largest durable snapshot or drain capture timeout/i);
     expect(
       withEnv(
         {
@@ -2324,6 +2397,36 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         () => getSettings(),
       ).sandboxRotationLeadMs,
     ).toBe(100_001);
+  });
+
+  test("boot reserves Modal rotation headroom for an extended drain capture", () => {
+    const base = {
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_TOKEN_ID: "ak",
+      OPENGENI_MODAL_TOKEN_SECRET: "as",
+      OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: "120000",
+    };
+    expect(() =>
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160000" }, () => getSettings()),
+    ).toThrow(/largest durable snapshot or drain capture timeout/i);
+    expect(
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160001" }, () => getSettings())
+        .sandboxRotationLeadMs,
+    ).toBe(160_001);
+  });
+
+  test("boot preserves rotation headroom for historical Modal leases after a backend rollout", () => {
+    const base = {
+      OPENGENI_SANDBOX_BACKEND: "docker",
+      OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS: "120000",
+    };
+    expect(() =>
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160000" }, () => getSettings()),
+    ).toThrow(/persisted Modal leases after a default-backend rollout/i);
+    expect(
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "160001" }, () => getSettings())
+        .sandboxRotationLeadMs,
+    ).toBe(160_001);
   });
 
   test("the rotation batch is positive and bounded", () => {

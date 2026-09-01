@@ -2655,7 +2655,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(admission).toMatchObject({ role: "rearmed", lease: { liveness: "warm" } });
   }, 60_000);
 
-  test("(3-claim) acquisition waits behind the exact teardown claim, then re-arms without an error", async () => {
+  test("(3-claim) acquisition honors the frozen teardown claim after the caller budget is lowered", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
@@ -2714,11 +2714,14 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       holderId: "claim-successor",
       backend: "modal",
       leaseTtlMs: 45_000,
-      captureWaitMs: 1_000,
+      // Simulate an old-config process during a rolling activation: its local
+      // wait is already exhausted while the child retains the larger durable
+      // capture deadline it froze before this call began.
+      captureWaitMs: 25,
     }).finally(() => {
       settled = true;
     });
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await new Promise((resolve) => setTimeout(resolve, 75));
     expect(settled).toBe(false);
     const [holderBeforeRelease] = await admin<{ count: number }[]>`
       select count(*)::int as count from sandbox_lease_holders h

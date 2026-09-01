@@ -756,6 +756,7 @@ describe("generic lazy tool dispatch", () => {
       "request_human_input",
       "Pause this turn and request structured human input",
     );
+    const models = firstPartyTool("list_models", "List selectable workspace models");
     const browser = firstPartyTool(
       "interaction__browser_act",
       "Click, type, and interact with the current browser page",
@@ -764,7 +765,7 @@ describe("generic lazy tool dispatch", () => {
       name: "lazy-test",
       instructions: "Use tools.",
       model: "scripted",
-      tools: [exec, stdin, image, patch, skill, human, browser],
+      tools: [exec, stdin, image, patch, skill, human, models, browser],
     });
     const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
     const visible = await agent.getAllTools(undefined as never);
@@ -780,6 +781,7 @@ describe("generic lazy tool dispatch", () => {
       "apply_patch",
       "load_skill",
       "request_human_input",
+      "list_models",
       "tool_search",
       "tool_invoke",
     ]);
@@ -790,6 +792,7 @@ describe("generic lazy tool dispatch", () => {
       "apply_patch",
       "load_skill",
       "request_human_input",
+      "list_models",
     ]) {
       expect(
         runtime.search({ query: name.replaceAll("_", " ") }).map((candidate) => candidate.name),

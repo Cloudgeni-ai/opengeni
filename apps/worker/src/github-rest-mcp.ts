@@ -31,6 +31,7 @@ import {
 import { createGitHubAppInstallationTokenWithExpiry, githubAppBotIdentity } from "@opengeni/github";
 import {
   type AttemptConnectorActionBinding,
+  ConnectorActionBindingRejectedError,
   type LocalMcpServerRegistration,
   prefixedMcpToolName,
 } from "@opengeni/runtime";
@@ -624,7 +625,7 @@ function githubConnectorBindings(
         const repository =
           typeof args.repository === "string" ? byName.get(args.repository.toLowerCase()) : null;
         if (!repository) {
-          throw new GitHubRestAuthorityError(
+          throw new ConnectorActionBindingRejectedError(
             "GitHub action repository does not match an accepted resource",
           );
         }
