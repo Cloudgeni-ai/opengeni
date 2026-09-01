@@ -6,6 +6,46 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+-- The interaction reaper became an owner-only global mutator before the
+-- session-tenancy cutover, but 0345 added its exact capability/lock policy only
+-- to the lease tables. A NOSUPERUSER migration owner otherwise sees no
+-- BrowserSession/ComputerSession/operation rows under FORCE RLS and treats
+-- every interaction holder as an orphan. Admit the same already-fenced owner
+-- only on the four interaction tables the reaper reads or updates.
+DO $interaction_reaper_owner_policies$
+DECLARE
+  target_schema text := pg_catalog.current_schema();
+  target_schema_oid oid := pg_catalog.current_schema()::pg_catalog.regnamespace;
+  migration_owner text := current_user;
+  table_name text;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'browser_sessions',
+    'computer_sessions',
+    'interaction_operations',
+    'workspace_interaction_revisions'
+  ] LOOP
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY session_tenancy_fenced_owner_interaction ON %I.%I '
+        || 'FOR ALL USING ('
+        || '%I.session_tenancy_fence_owner_policy_active('
+        || 'current_user, %L, %s::oid, workspace_id, false)) '
+        || 'WITH CHECK ('
+        || '%I.session_tenancy_fence_owner_policy_active('
+        || 'current_user, %L, %s::oid, workspace_id, false))',
+      target_schema,
+      table_name,
+      target_schema,
+      migration_owner,
+      target_schema_oid,
+      target_schema,
+      migration_owner,
+      target_schema_oid
+    );
+  END LOOP;
+END
+$interaction_reaper_owner_policies$;
+
 DO $deadline_interaction_reaper$
 DECLARE
   data_schema text := current_schema();

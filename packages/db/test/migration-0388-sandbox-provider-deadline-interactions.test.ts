@@ -45,6 +45,21 @@ describe("migration 0388 sandbox provider-deadline interactions", () => {
     expect(source).toContain("sandbox_rotation_interaction_blocked");
     expect(source).not.toMatch(/last_heartbeat_at\s*</u);
 
+    const ownerPolicyBlock = source.slice(
+      source.indexOf("DO $interaction_reaper_owner_policies$"),
+      source.indexOf("$interaction_reaper_owner_policies$;") +
+        "$interaction_reaper_owner_policies$;".length,
+    );
+    expect(ownerPolicyBlock).toContain("session_tenancy_fenced_owner_interaction");
+    for (const table of [
+      "browser_sessions",
+      "computer_sessions",
+      "interaction_operations",
+      "workspace_interaction_revisions",
+    ]) {
+      expect(ownerPolicyBlock).toContain(`'${table}'`);
+    }
+
     const metricBlock = source.slice(
       source.indexOf("DO $interaction_backlog_metric$"),
       source.indexOf("$interaction_backlog_metric$;") + "$interaction_backlog_metric$;".length,
