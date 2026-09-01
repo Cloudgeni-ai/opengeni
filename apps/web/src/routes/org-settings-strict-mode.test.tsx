@@ -276,7 +276,9 @@ describe("organization billing StrictMode ownership", () => {
       );
     });
     await waitFor(
-      () => listOrganizationApiKeys.mock.calls.length >= 2,
+      () =>
+        listOrganizationApiKeys.mock.calls.length >= 2 &&
+        container.textContent?.includes("No organization API keys yet") === true,
       "organization API key reads did not settle under StrictMode",
     );
 
