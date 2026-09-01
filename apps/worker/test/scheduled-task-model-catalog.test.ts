@@ -4,7 +4,6 @@ import {
   bootstrapWorkspace,
   createDb,
   createScheduledTask,
-  createScheduledTaskRun,
   createSession,
   createWorkspaceGatewayCustomModel,
   deleteWorkspaceGatewayCustomModel,
@@ -12,7 +11,6 @@ import {
   listSessions,
   listScheduledTaskRuns,
   lockActiveWorkspaceGatewayCustomModelForAdmission,
-  type Database,
   type DbClient,
   updateScheduledTask,
 } from "@opengeni/db";
@@ -450,79 +448,33 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       },
       metadata: {},
     });
-    const seedProducerKey = `scheduled-model-overlap-seed-${crypto.randomUUID()}`;
-    const seed = await activities().dispatchScheduledTaskRun({
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey: seedProducerKey,
-    });
-    expect(seed.action).toBe("start");
-    const runs = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
-    const seedRun = runs.find((run) => run.producerKey === seedProducerKey);
-    if (!seedRun) throw new Error("seed scheduled occurrence was not persisted");
-    const seedAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
-      workspaceId: grant.workspaceId,
-      runId: seedRun.id,
-    });
-    if (!seedAccepted) throw new Error("seed scheduled occurrence has no accepted execution");
-
     const producerKey = `scheduled-model-overlap-race-${crypto.randomUUID()}`;
-    const acceptedExecution = {
-      ...seedAccepted,
-      generatedSessionBinding: seedAccepted.generatedSessionBinding
-        ? {
-            ...seedAccepted.generatedSessionBinding,
-            createIdempotencyKey: `scheduled-task-run:${producerKey}`,
-          }
-        : null,
-    };
-    const beforeFreshAgentRunCommit = async (tx: Database): Promise<void> => {
-      const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        upstreamModelId,
-      });
-      if (!active) throw new Error("custom model retired before overlapping producer admission");
-    };
-    let releaseWinner!: () => void;
-    const winnerRelease = new Promise<void>((resolve) => {
-      releaseWinner = resolve;
-    });
-    let markWinnerReady!: () => void;
-    const winnerReady = new Promise<void>((resolve) => {
-      markWinnerReady = resolve;
-    });
-    let winnerBackendPid: number | null = null;
-    const winnerRunId = crypto.randomUUID();
-    const winnerPromise = client.db.transaction(async (transaction) => {
-      const tx = transaction as unknown as Database;
-      const backendRows = await tx.execute(
-        sql<{ pid: number }>`select pg_backend_pid()::int as pid`,
-      );
-      winnerBackendPid = backendRows[0]?.pid ?? null;
-      if (!winnerBackendPid) throw new Error("producer winner has no backend pid");
-      const run = await createScheduledTaskRun(tx, {
-        runId: winnerRunId,
+    const scheduledActivities = activities();
+    let winnerPromise: ReturnType<typeof scheduledActivities.dispatchScheduledTaskRun> | null =
+      null;
+    let retirementPromise: ReturnType<typeof deleteWorkspaceGatewayCustomModel> | null = null;
+    let retryPromise: ReturnType<typeof scheduledActivities.dispatchScheduledTaskRun> | null = null;
+
+    await shared!.admin.begin(async (taskBarrier) => {
+      const [backend] = await taskBarrier<Array<{ pid: number }>>`
+        select pg_backend_pid()::int as pid
+      `;
+      if (!backend) throw new Error("task-row barrier has no backend pid");
+      await taskBarrier`
+        select 1 from scheduled_tasks where id = ${task.id}::uuid for update
+      `;
+
+      winnerPromise = scheduledActivities.dispatchScheduledTaskRun({
         workspaceId: grant.workspaceId,
         taskId: task.id,
-        taskAuthorityRevision: task.authorityRevision,
-        taskExecutionDigest: task.executionDigest,
         triggerType: "scheduled",
         producerKey,
-        acceptedExecutionSnapshot: acceptedExecution,
-        beforeFreshAgentRunCommit,
       });
-      markWinnerReady();
-      await winnerRelease;
-      return run;
-    });
-
-    try {
-      await winnerReady;
-      const blockerPid = winnerBackendPid;
-      if (!blockerPid) throw new Error("producer winner did not expose its backend pid");
-      const retirementPromise = deleteWorkspaceGatewayCustomModel(client.db, {
+      const winnerBackendPid = await waitForBackendBlockedBy(
+        backend.pid,
+        "producer winner behind the task-row barrier",
+      );
+      retirementPromise = deleteWorkspaceGatewayCustomModel(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         customModelId: customModel.id,
@@ -531,43 +483,43 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
         requestHash: "9".repeat(64),
       });
       const retirementBackendPid = await waitForBackendBlockedBy(
-        blockerPid,
+        winnerBackendPid,
         "queued custom-model retirement behind producer winner",
       );
-      const retryPromise = createScheduledTaskRun(client.db, {
-        runId: crypto.randomUUID(),
+      retryPromise = scheduledActivities.dispatchScheduledTaskRun({
         workspaceId: grant.workspaceId,
         taskId: task.id,
-        taskAuthorityRevision: task.authorityRevision,
-        taskExecutionDigest: task.executionDigest,
         triggerType: "scheduled",
         producerKey,
-        acceptedExecutionSnapshot: acceptedExecution,
-        beforeFreshAgentRunCommit,
       });
       await waitForBackendBlockedBy(
         retirementBackendPid,
         "overlapping producer retry behind queued retirement",
       );
+    });
 
-      releaseWinner();
-      const [winner, retired, replay] = await Promise.all([
-        winnerPromise,
-        retirementPromise,
-        retryPromise,
-      ]);
-      expect(retired).toMatchObject({ outcome: "success" });
-      expect(replay.id).toBe(winner.id);
-      expect(replay.id).toBe(winnerRunId);
-      expect(
-        (await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).filter(
-          (run) => run.producerKey === producerKey,
-        ),
-      ).toHaveLength(1);
-    } finally {
-      releaseWinner();
-      await winnerPromise.catch(() => undefined);
+    if (!winnerPromise || !retirementPromise || !retryPromise) {
+      throw new Error("overlapping scheduled producer race was not fully started");
     }
+    const [winner, retired, replay] = await Promise.all([
+      winnerPromise,
+      retirementPromise,
+      retryPromise,
+    ]);
+    expect(retired).toMatchObject({ outcome: "success" });
+    expect(winner.action).toBe("start");
+    if (winner.action !== "start") throw new Error("producer winner did not start a session");
+    expect(replay).toMatchObject({
+      action: "start",
+      sessionId: winner.sessionId,
+      triggerEventId: winner.triggerEventId,
+    });
+    expect(
+      (await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).filter(
+        (run) => run.producerKey === producerKey,
+      ),
+    ).toHaveLength(1);
+    expect(await listSessions(client.db, grant.workspaceId, 10)).toHaveLength(1);
   }, 60_000);
 
   test("replays an accepted generated-session occurrence after custom-model retirement", async () => {

@@ -74,6 +74,7 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { resolveFirstPartyMcpToolPolicy, resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
+import { createHash } from "node:crypto";
 import {
   assertReusableSessionRevivable,
   scheduledUserMessagePayload,
@@ -131,6 +132,14 @@ export function scheduledTaskRunProducerKey(
     namespace: info.namespace,
     workflowId: info.workflowExecution.workflowId,
   })}`;
+}
+
+export function scheduledTaskGeneratedSessionCreateIdempotencyKey(producerKey: string): string {
+  const digest = createHash("sha256")
+    .update("scheduled-task-run\0", "utf8")
+    .update(producerKey, "utf8")
+    .digest("hex");
+  return `scheduled-task-run:${digest}`;
 }
 
 /**
@@ -827,7 +836,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 alertResponderSessionCreateIdempotencyKey ??
                 (task.runMode === "reusable_session"
                   ? `scheduled-task-reusable:${task.id}:${task.authorityRevision}:${task.executionDigest}`
-                  : `scheduled-task-run:${admittedRunId}`),
+                  : scheduledTaskGeneratedSessionCreateIdempotencyKey(stableProducerKey)),
               effectiveMaxNestedAgentDepth:
                 generatedSessionDepthPolicy!.effectiveMaxNestedAgentDepth,
               nestedAgentDepthPolicySource:
