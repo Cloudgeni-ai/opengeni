@@ -66,6 +66,8 @@ import {
   requireLiveAgentAttemptAuthorization,
   requirePermission,
   releaseManagedAuthRequestActorLease,
+  resolveCatalogSettings,
+  resolveWorkspaceCatalogSettings,
   validateManagedAuthRequestActorLease,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
@@ -116,6 +118,7 @@ import { allowedCorsOrigin } from "./http/cors";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
+import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
@@ -220,6 +223,22 @@ const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
 export function createApp(deps: AppDependencies): Hono {
   return createAppComposition(deps).app;
+}
+
+export async function resolveWorkspaceMcpRouteDeps(
+  routeDeps: ApiRouteDeps,
+  grant: AccessGrant,
+): Promise<ApiRouteDeps> {
+  const catalogSourceSettings = routeDeps.catalogSourceSettings ?? routeDeps.settings;
+  const resolvedCatalog = await resolveWorkspaceCatalogSettings(
+    routeDeps.db,
+    catalogSourceSettings,
+    {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+    },
+  );
+  return { ...routeDeps, catalogSourceSettings, settings: resolvedCatalog.settings };
 }
 
 export function createAppComposition(deps: AppDependencies): {
@@ -358,6 +377,7 @@ export function createAppComposition(deps: AppDependencies): {
       : deps.transcriptionSegmenter;
   const routeDeps: ApiRouteDeps = {
     ...deps,
+    resolveCatalogSettings: () => resolveCatalogSettings(deps.db, deps.settings),
     observability,
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
@@ -403,6 +423,21 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
       "X-OpenGeni-Correlation-Id",
+      "X-OpenGeni-Covered-First",
+      "X-OpenGeni-Covered-Last",
+      "X-OpenGeni-Event-Direction",
+      "X-OpenGeni-Event-Mode",
+      "X-OpenGeni-Event-Result",
+      "X-OpenGeni-Event-Result-Mode",
+      "X-OpenGeni-Forensic-Exact",
+      "X-OpenGeni-Has-More",
+      "X-OpenGeni-Next-After",
+      "X-OpenGeni-Next-Before",
+      "X-OpenGeni-Page-Bytes",
+      "X-OpenGeni-Page-Max-Bytes",
+      "X-OpenGeni-Page-Truncated",
+      "X-OpenGeni-Payload-Mode",
+      "X-OpenGeni-Truncated-By",
     ],
   };
   const publicApiCors = cors({
@@ -766,10 +801,12 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
-    const codexCatalogSettings = deps.settings.codexSubscriptionEnabled
-      ? withCodexCatalogProvider(deps.settings)
-      : deps.settings;
-    const catalogSettings = deps.settings.supergrokSubscriptionEnabled
+    const resolvedCatalog = await resolveCatalogSettings(deps.db, deps.settings);
+    const baseCatalogSettings = resolvedCatalog.settings;
+    const codexCatalogSettings = baseCatalogSettings.codexSubscriptionEnabled
+      ? withCodexCatalogProvider(baseCatalogSettings)
+      : baseCatalogSettings;
+    const catalogSettings = baseCatalogSettings.supergrokSubscriptionEnabled
       ? withXaiSubscriptionCatalogProvider(codexCatalogSettings)
       : codexCatalogSettings;
     return c.json(
@@ -889,7 +926,8 @@ export function createAppComposition(deps: AppDependencies): {
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
-      const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
+      const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
+      const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
         requestOrigin: new URL(c.req.url).origin,
         workspaceMemoryEnabled,
         workspaceMemoryPromptMode,
@@ -996,6 +1034,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
+  registerOrganizationModelProviderRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
@@ -1093,6 +1132,10 @@ const publicWorkspaceBrowserRoutePatterns = [
 ] as const;
 
 export function workspaceActorContextExempt(method: string, pathname: string): boolean {
+  // The account-scoped provisioning route shares the workspace collection prefix.
+  // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
+  // the route performs its own organization API-key authorization.
+  if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp$/.test(pathname)) return true;
   if (
     method === "GET" &&
@@ -1379,11 +1422,14 @@ type ReadinessCheckResult = { ok: boolean; error?: string };
 function readinessChecks(deps: AppDependencies): ReadinessChecks {
   const configuredNatsCheck = deps.readinessChecks?.nats;
   return {
-    db:
-      deps.readinessChecks?.db ??
-      (async () => {
+    db: async () => {
+      if (deps.readinessChecks?.db) {
+        await deps.readinessChecks.db();
+      } else {
         await deps.db.execute(dbSql`select 1`);
-      }),
+      }
+      await resolveCatalogSettings(deps.db, deps.settings);
+    },
     nats: async () => {
       requireSessionEventDurableFanoutCapability(deps.bus);
       if (configuredNatsCheck) {

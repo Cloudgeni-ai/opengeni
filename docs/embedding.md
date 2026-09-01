@@ -581,6 +581,36 @@ accounts for one provider or different providers in the same session. The
 singular `resource` field remains the OAuth resource indicator; it is not a
 repository selector.
 
+OpenGeni-owned Connection refs omit `authoritySource` and remain subject to the
+accepted-use snapshot and per-provider-request audit fence. An embedding host
+that does not mirror its provider connection into OpenGeni sets
+`authoritySource: "host"` beside its opaque `connectionId`; the id may use any
+non-empty shape, including a UUID. With `mcpCredentials` bound, that explicit
+provenance routes directly to the host resolver with the immutable turn lineage.
+Without the host credential port, a host-owned ref fails closed as
+`unsupported_auth` rather than falling through to OpenGeni's connection store.
+For rolling upgrade compatibility, a bound host resolver also accepts legacy
+refs that omit `authoritySource` only when their connection id is unambiguously
+non-UUID. New host refs must set the marker, and UUID-shaped host ids require it.
+
+Admission of explicit host authority is also behind
+`OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED` (default `false`). Roll it out
+in two phases: first deploy the supporting API, control worker, turn worker, and
+web bundle everywhere with the flag false; after proving the old generation is
+gone, set the flag true in a second rollout and only then admit or configure
+`authoritySource: "host"` refs. The API rejects new explicit session/capability
+refs while the flag is false and configured refs fail startup validation. Every
+upgraded reader, inheritance path, and worker continues to preserve and execute
+an already-stored marked ref regardless of its local flag value; the flag is not
+an execution kill switch. The markerless non-UUID compatibility lane remains
+available for pre-existing embedded sessions during phase one.
+
+Once a marked ref has been persisted, do not restart an image from before this
+contract. Setting the flag false stops new external marked writes but does not
+rewrite, drain, or disable durable session/capability refs that already exist.
+Remove those refs through ordinary forward operations before attempting any
+pre-contract image rollback.
+
 Successful results must echo account/workspace/immediate-session plus the exact
 provider, provider domain, requested connection id, OAuth scopes/resource, and
 selected-resource set. OpenGeni rejects a mismatched echo before any returned
@@ -591,6 +621,16 @@ that cannot enforce the selected repository set returns
 `resource_scope_unavailable`. These reasons render as unavailable, not as a
 duplicate OpenGeni reconnect flow, and a connection-backed optional MCP server
 still degrades without breaking unrelated session tools.
+
+Host-owned `tool.auth_needed` events use a rolling-safe public representation:
+the legacy `reason` is pinned to `unsupported_auth`, while `hostReason`
+retains the exact host result and `authorizationUrl` remains the host-minted
+recovery target. A pre-contract browser therefore renders the notice as
+unavailable and cannot send the opaque id into OpenGeni OAuth; an upgraded
+browser reads `hostReason` and offers only the host URL. Successful host
+credential results retain `authoritySource: "host"` through later provider 401,
+403 `insufficient_scope`, and accepted-use revalidation failures so those
+synthesized notices cannot lose provenance.
 
 The standalone generic connection broker intentionally rejects a
 `selectedResources` binding with `resource_scope_unavailable`: it can refresh a

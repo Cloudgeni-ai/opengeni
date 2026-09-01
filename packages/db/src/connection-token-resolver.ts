@@ -114,6 +114,8 @@ export type ResolveConnectionCredentialResult =
   | {
       status: "ok";
       headers: Record<string, string>;
+      /** Credential authority is owned by the embedding host, not the native connection store. */
+      authoritySource?: "host";
       /** Present when the credential bundle or embedding host supplied explicit placements. */
       placements?: ConnectionCredentialPlacement[];
       connectionId: string;
@@ -133,6 +135,8 @@ export type ResolveConnectionCredentialResult =
       status: "auth_needed";
       reason: McpCredentialAuthNeededReason;
       providerDomain: string;
+      /** Credential authority is owned by the embedding host, not the native connection store. */
+      authoritySource?: "host";
       provider?: string;
       connectionId?: string;
       scopes?: string[];
@@ -270,6 +274,9 @@ export function buildHostConnectionTokenResolver(
       serverId: input.serverId,
       connectionRef: {
         providerDomain: input.connectionRef.providerDomain,
+        ...(input.connectionRef.authoritySource
+          ? { authoritySource: input.connectionRef.authoritySource }
+          : {}),
         ...(input.connectionRef.provider ? { provider: input.connectionRef.provider } : {}),
         ...(input.connectionRef.connectionId
           ? { connectionId: input.connectionRef.connectionId }
@@ -303,6 +310,7 @@ export function buildHostConnectionTokenResolver(
         status: "auth_needed",
         reason: result.reason,
         providerDomain: result.providerDomain,
+        authoritySource: "host",
         ...(result.provider ? { provider: result.provider } : {}),
         ...(result.connectionId ? { connectionId: result.connectionId } : {}),
         ...(result.scopes ? { scopes: [...result.scopes] } : {}),
@@ -339,6 +347,7 @@ export function buildHostConnectionTokenResolver(
     return {
       status: "ok",
       headers,
+      authoritySource: "host",
       ...(explicitPlacements ? { placements: explicitPlacements } : {}),
       connectionId: result.connectionId,
       ...(expiresAt !== undefined ? { expiresAt } : {}),
@@ -835,6 +844,9 @@ export function buildConnectionTokenResolver(
     let credentialWorkspaceId = input.workspaceId;
     let expectedAuthorityGeneration: number | undefined;
     let connectionUseAttribution: ConnectionUseAttribution | undefined;
+    if (ref.authoritySource === "host") {
+      return authNeeded(ref, "unsupported_auth", ref.connectionId);
+    }
     // Repository-scoped provider bindings require a broker that can prove the
     // selected-resource boundary. The generic standalone credential store has
     // no provider-specific containment adapter, so it must fail closed instead

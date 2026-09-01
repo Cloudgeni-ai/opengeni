@@ -3581,6 +3581,7 @@ function AuthNeededRow({
       ? `${provider} tools unavailable`
       : `${actionLabel} ${provider}`;
   const reasonLine = recommendation?.rationale ?? authReasonLine(item.reason);
+  const hostAuthorizationUrl = item.authoritySource === "host" ? item.authorizationUrl : null;
 
   const start = async () => {
     if (!onReconnect || busy) {
@@ -3623,7 +3624,20 @@ function AuthNeededRow({
             ) : null}
           </div>
         </div>
-        {!unavailable && onReconnect ? (
+        {hostAuthorizationUrl ? (
+          <a
+            href={hostAuthorizationUrl}
+            rel="noreferrer"
+            target="_blank"
+            className={cn(
+              PRIMARY_ACTION_CLASS,
+              "transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-9",
+            )}
+          >
+            <RefreshCwIcon className="size-3.5" aria-hidden />
+            {actionLabel}
+          </a>
+        ) : item.authoritySource !== "host" && !unavailable && onReconnect ? (
           <button
             type="button"
             onClick={() => void start()}
@@ -3636,7 +3650,7 @@ function AuthNeededRow({
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
             {busy ? "Opening…" : actionLabel}
           </button>
-        ) : !unavailable && item.authorizationUrl ? (
+        ) : item.authoritySource !== "host" && !unavailable && item.authorizationUrl ? (
           <a
             href={item.authorizationUrl}
             rel="noreferrer"

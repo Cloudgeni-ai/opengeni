@@ -14,6 +14,9 @@ const recoverySource = await Bun.file(
 const organizationCodexSource = await Bun.file(
   `${import.meta.dir}/components/organization-codex-subscriptions.tsx`,
 ).text();
+const organizationModelProviderSource = await Bun.file(
+  `${import.meta.dir}/components/organization-model-provider-connection.tsx`,
+).text();
 const workspaceCodexSource = await Bun.file(
   `${import.meta.dir}/components/codex-connection.tsx`,
 ).text();
@@ -29,6 +32,28 @@ const tenancyDocs = await Bun.file(
 ).text();
 
 describe("organization administration surface", () => {
+  test("manages Gateway and OpenRouter as peer organization BYOK providers", () => {
+    expect(routeSource).toContain("<OrganizationModelProviderConnection");
+    expect(routeSource).toContain('providerKind="vercel_gateway"');
+    expect(routeSource).toContain('providerKind="openrouter"');
+    for (const method of [
+      "getOrganizationModelProviderConnection",
+      "upsertOrganizationModelProviderConnection",
+      "revokeOrganizationModelProviderConnection",
+      "listOrganizationProviderCustomModels",
+      "createOrganizationProviderCustomModel",
+      "deleteOrganizationProviderCustomModel",
+    ]) {
+      expect(organizationModelProviderSource).toContain(`client.${method}(`);
+    }
+    expect(organizationModelProviderSource).toContain('type="password"');
+    expect(organizationModelProviderSource).not.toContain("localStorage");
+    expect(organizationModelProviderSource).toContain("current and future shared workspace");
+    expect(organizationModelProviderSource).toContain("Personal workspaces do not");
+    expect(organizationModelProviderSource).toContain("<ConfirmDialog");
+    expect(organizationModelProviderSource).toContain("OpenGeni credits are not used");
+  });
+
   test("routes accessible overview, knowledge, people, recovery, retention, developer, and billing sections", () => {
     expect(routeSource).toContain("<OrganizationSettingsShell");
     expect(shellSource).toContain('aria-label="Organization settings"');
@@ -49,12 +74,12 @@ describe("organization administration surface", () => {
     expect(routeSource).toContain("OrganizationRecoverySection");
     expect(routeSource).toContain("OrganizationKnowledgePrompt");
     expect(routeSource).toContain("OrganizationCompanyProfileAgentPolicy");
-    expect(routeSource).toContain("canManageOrganizationCodex");
+    expect(routeSource).toContain("canManageOrganizationModels");
     expect(routeSource).toContain('context.clientConfig.productAccessMode === "local"');
     expect(routeSource).toContain("organizationAdministratorSession");
     expect(routeSource).toContain("singleUser={singleUser}");
     expect(routeSource).toContain('actorRole === "owner" || actorRole === "admin"');
-    expect(routeSource).toContain("showModels={canManageOrganizationCodex}");
+    expect(routeSource).toContain("showModels={canManageOrganizationModels}");
     expect(shellSource).toContain('item.id !== "models" || showModels');
     expect(organizationCodexSource).toContain("setLoadError(message)");
     expect(organizationCodexSource).toContain('role="alert"');

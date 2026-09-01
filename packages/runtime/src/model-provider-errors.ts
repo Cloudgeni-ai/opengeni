@@ -7,6 +7,33 @@ export class WorkspaceGatewayUnavailableError extends Error {
   }
 }
 
+export class WorkspaceOpenRouterUnavailableError extends Error {
+  constructor() {
+    super(
+      "Your OpenRouter model is unavailable: connect or reconnect the workspace OpenRouter key in Settings, then retry.",
+    );
+    this.name = "WorkspaceOpenRouterUnavailableError";
+  }
+}
+
+export class OrganizationGatewayUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization Gateway model is unavailable: ask an organization admin to connect or reconnect Vercel AI Gateway in Organization settings, then retry.",
+    );
+    this.name = "OrganizationGatewayUnavailableError";
+  }
+}
+
+export class OrganizationOpenRouterUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization OpenRouter model is unavailable: ask an organization admin to connect or reconnect OpenRouter in Organization settings, then retry.",
+    );
+    this.name = "OrganizationOpenRouterUnavailableError";
+  }
+}
+
 export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
 
 /**

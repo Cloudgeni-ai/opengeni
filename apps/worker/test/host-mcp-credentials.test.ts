@@ -4,6 +4,8 @@ import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 
+const SUBJECT_CONNECTION_ID = "22222222-2222-4222-8222-222222222222";
+
 describe("connectionTokenResolverForTurn", () => {
   test("admits only the reserved personal GitHub API lane for a frozen GitHub delegation", async () => {
     let hostCalls = 0;
@@ -105,7 +107,7 @@ describe("connectionTokenResolverForTurn", () => {
       personalConnectionDelegations: [
         {
           serverId: "gitlab",
-          connectionId: "connection-1",
+          connectionId: SUBJECT_CONNECTION_ID,
           ownerSubjectId: "host:user:9",
           providerDomain: "gitlab.example",
           kind: "oauth2",
@@ -138,7 +140,7 @@ describe("connectionTokenResolverForTurn", () => {
             organizationId: authority.accountId,
             workspaceId: authority.workspaceId,
             sessionId: authority.sessionId,
-            connectionId: "connection-1",
+            connectionId: SUBJECT_CONNECTION_ID,
             connectionGeneration: 3,
             scope: "user" as const,
             ownerSubjectId: "host:user:9",
@@ -156,7 +158,7 @@ describe("connectionTokenResolverForTurn", () => {
             workspaceId: request.workspaceId,
             sessionId: request.sessionId,
             headers: { Authorization: "Bearer host-owned" },
-            connectionId: "connection-1",
+            connectionId: SUBJECT_CONNECTION_ID,
             providerDomain: request.connectionRef.providerDomain,
             ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
             ...(request.connectionRef.selectedResources
@@ -176,7 +178,7 @@ describe("connectionTokenResolverForTurn", () => {
       connectionRef: {
         provider: "gitlab",
         providerDomain: "gitlab.example",
-        connectionId: "connection-1",
+        connectionId: SUBJECT_CONNECTION_ID,
         kind: "oauth2",
         subjectScope: "subject",
         selectedResources: [{ kind: "repository", id: "44" }],
@@ -202,13 +204,13 @@ describe("connectionTokenResolverForTurn", () => {
       connectionRef: {
         provider: "gitlab",
         providerDomain: "gitlab.example",
-        connectionId: "connection-1",
+        connectionId: SUBJECT_CONNECTION_ID,
         kind: "oauth2",
         selectedResources: [{ kind: "repository", id: "44" }],
       },
       forceRefresh: false,
       connectionUseAuthority: {
-        connectionId: "connection-1",
+        connectionId: SUBJECT_CONNECTION_ID,
         connectionGeneration: 3,
         scope: "user",
       },
@@ -219,7 +221,8 @@ describe("connectionTokenResolverForTurn", () => {
     expect(result).toEqual({
       status: "ok",
       headers: { Authorization: "Bearer host-owned" },
-      connectionId: "connection-1",
+      authoritySource: "host",
+      connectionId: SUBJECT_CONNECTION_ID,
       authorizeProviderRequest: expect.any(Function),
     });
     if (result.status !== "ok" || !result.authorizeProviderRequest) {
@@ -232,6 +235,58 @@ describe("connectionTokenResolverForTurn", () => {
       "provider_request",
     ]);
     expect(authorizationUses[0]?.requestId).not.toBe(authorizationUses[1]?.requestId);
+  });
+
+  test("reads already-stored explicit host authority independently of admission posture", async () => {
+    let hostCalls = 0;
+    const resolver = connectionTokenResolverForTurn({
+      db: {} as Database,
+      settings: testSettings(),
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      rootSessionId: "session-root",
+      attemptId: "attempt-1",
+      turn: {
+        id: "turn-1",
+        executionGeneration: 1,
+        personalConnectionDelegations: [],
+        initiator: { kind: "service", subjectId: "embedding-service" },
+        initiatorContext: {},
+      } as SessionTurn,
+      connectionCredentials: {
+        mcpCredentials: async (request) => {
+          hostCalls += 1;
+          return {
+            status: "ok",
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { Authorization: "Bearer already-stored" },
+            connectionId: "opaque-host-binding",
+            providerDomain: "host.example.test",
+          };
+        },
+      },
+    });
+
+    await expect(
+      resolver({
+        workspaceId: "workspace-1",
+        serverId: "host-tools",
+        destinationUrl: "https://host.example.test/mcp",
+        connectionRef: {
+          authoritySource: "host",
+          connectionId: "opaque-host-binding",
+          providerDomain: "host.example.test",
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: "ok",
+      authoritySource: "host",
+      connectionId: "opaque-host-binding",
+    });
+    expect(hostCalls).toBe(1);
   });
 
   test("denies a stale accepted attempt before invoking the host", async () => {
@@ -250,7 +305,7 @@ describe("connectionTokenResolverForTurn", () => {
         personalConnectionDelegations: [
           {
             serverId: "gitlab",
-            connectionId: "connection-1",
+            connectionId: SUBJECT_CONNECTION_ID,
             ownerSubjectId: "host:user:9",
             providerDomain: "gitlab.example",
             kind: "oauth2",
@@ -279,7 +334,7 @@ describe("connectionTokenResolverForTurn", () => {
         destinationUrl: "https://gitlab.example/mcp",
         connectionRef: {
           providerDomain: "gitlab.example",
-          connectionId: "connection-1",
+          connectionId: SUBJECT_CONNECTION_ID,
           kind: "oauth2",
           subjectScope: "subject",
         },
@@ -306,7 +361,7 @@ describe("connectionTokenResolverForTurn", () => {
         personalConnectionDelegations: [
           {
             serverId: "gitlab",
-            connectionId: "connection-1",
+            connectionId: SUBJECT_CONNECTION_ID,
             ownerSubjectId: "host:user:9",
             providerDomain: "gitlab.example",
             kind: "oauth2",
@@ -333,7 +388,7 @@ describe("connectionTokenResolverForTurn", () => {
             organizationId: authority.accountId,
             workspaceId: authority.workspaceId,
             sessionId: authority.sessionId,
-            connectionId: "connection-1",
+            connectionId: SUBJECT_CONNECTION_ID,
             connectionGeneration: 3,
             scope: "user" as const,
             ownerSubjectId: "host:user:9",
@@ -351,7 +406,7 @@ describe("connectionTokenResolverForTurn", () => {
             workspaceId: request.workspaceId,
             sessionId: request.sessionId,
             headers: { Authorization: "Bearer must-be-discarded" },
-            connectionId: "connection-1",
+            connectionId: SUBJECT_CONNECTION_ID,
             providerDomain: request.connectionRef.providerDomain,
           };
         },
@@ -365,12 +420,12 @@ describe("connectionTokenResolverForTurn", () => {
       destinationUrl: "https://gitlab.example/mcp",
       connectionRef: {
         providerDomain: "gitlab.example",
-        connectionId: "connection-1",
+        connectionId: SUBJECT_CONNECTION_ID,
         kind: "oauth2",
         subjectScope: "subject",
       },
     });
-    expect(result).toMatchObject({ status: "ok", connectionId: "connection-1" });
+    expect(result).toMatchObject({ status: "ok", connectionId: SUBJECT_CONNECTION_ID });
     if (result.status !== "ok" || !result.authorizeProviderRequest) {
       throw new Error("provider authorization hook was not returned");
     }
@@ -400,7 +455,7 @@ describe("connectionTokenResolverForTurn", () => {
         personalConnectionDelegations: [
           {
             serverId: "gitlab",
-            connectionId: "connection-1",
+            connectionId: SUBJECT_CONNECTION_ID,
             ownerSubjectId: "host:user:9",
             providerDomain: "gitlab.example",
             kind: "oauth2",
@@ -429,7 +484,7 @@ describe("connectionTokenResolverForTurn", () => {
         destinationUrl: "https://gitlab.example/mcp",
         connectionRef: {
           providerDomain: "gitlab.example",
-          connectionId: "connection-1",
+          connectionId: SUBJECT_CONNECTION_ID,
           kind: "oauth2",
           subjectScope: "subject",
         },

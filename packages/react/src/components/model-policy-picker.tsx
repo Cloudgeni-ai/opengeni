@@ -26,6 +26,7 @@ import {
   findPickerRow,
   groupPickerRowsByBillingClass,
   labelReasoningEffort,
+  payerSummaryForModel,
   projectClientModelRows,
   runnableLatencyModesForModel,
   type PickerBillingClass,
@@ -68,7 +69,8 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
     external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
-    byok: "Billed to your AI Gateway",
+    byok: "Billed to the workspace provider account",
+    organization_byok: "Billed to the organization provider account",
   },
 };
 
@@ -158,7 +160,8 @@ export function BillingClassMark(props: {
     external: "External provider",
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
-    byok: "Bring your own key",
+    byok: "Workspace provider account",
+    organization_byok: "Organization provider account",
   };
   const label = props["aria-label"] ?? labels[props.billingClass];
   const accessibility =
@@ -195,6 +198,18 @@ function isCodexModel(model: ClientModel): boolean {
   return model.id.startsWith("codex/") || model.source === "codex";
 }
 
+function billingClassForMissingSelection(modelId: string): PickerBillingClass {
+  if (modelId.startsWith("workspace-gateway/")) return "byok";
+  if (modelId.startsWith("workspace-openrouter/")) return "byok";
+  // A deployment OpenRouter ID does not encode its workspace-facing cost.
+  // Missing rows therefore use the credits-safe rail instead of falsely
+  // claiming that an unknown former selection was externally funded.
+  if (modelId.startsWith("openrouter/")) return "opengeni_credits";
+  if (modelId.startsWith("codex/")) return "codex_subscription";
+  if (modelId.startsWith("supergrok/")) return "supergrok_subscription";
+  return "opengeni_credits";
+}
+
 function applyCodexOnly(
   rows: ClientPickerModelRow[],
   codexOnly: boolean,
@@ -227,7 +242,11 @@ function defaultNavState(rows: ClientPickerModelRow[], modelId: string): PickerN
       ? { level: "models", rail: onlyRail, modelId: null }
       : { level: "providers", rail: null, modelId: null };
   }
-  return { level: "thinking", rail: selected.billingClass, modelId: selected.id };
+  return {
+    level: "thinking",
+    rail: selected.billingClass,
+    modelId: selected.id,
+  };
 }
 
 function usePickerNavState(
@@ -352,7 +371,11 @@ export function ModelPolicyPickerMenu(
 
   const effectiveNav =
     nav.level === "providers" && groups.length === 1
-      ? { level: "models" as const, rail: groups[0]!.billingClass, modelId: null }
+      ? {
+          level: "models" as const,
+          rail: groups[0]!.billingClass,
+          modelId: null,
+        }
       : nav;
   const activeGroup =
     effectiveNav.rail === null
@@ -416,14 +439,21 @@ export function ModelPolicyPickerMenu(
             <PickerNavRow
               key={`${row.billingClass}:${row.id}`}
               label={row.label}
-              hint={row.unavailableReason ?? undefined}
+              hint={row.unavailableReason ?? payerSummaryForModel(row.catalog)}
               disabled={!row.selectable}
               title={row.unavailableReason ?? undefined}
               active={row.id === props.model}
               testId={`model-picker-choice-${row.id}`}
               onClick={() => {
                 if (row.selectable) {
-                  go({ level: "thinking", rail: row.billingClass, modelId: row.id }, 1);
+                  go(
+                    {
+                      level: "thinking",
+                      rail: row.billingClass,
+                      modelId: row.id,
+                    },
+                    1,
+                  );
                 }
               }}
             />
@@ -605,10 +635,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           )}
         >
           <BillingClassMark
-            billingClass={
-              selected?.billingClass ??
-              (props.model.startsWith("codex/") ? "codex_subscription" : "opengeni_credits")
-            }
+            billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
             className="text-og-fg"
           />
           <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden">

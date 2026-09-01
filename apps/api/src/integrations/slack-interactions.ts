@@ -123,6 +123,7 @@ import {
   requireAccessContext,
   requireAccessGrant,
   requireSessionAuthorizationListScope,
+  resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -1056,6 +1057,23 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       }),
     );
   });
+}
+
+async function withCatalogSettings(
+  deps: ApiRouteDeps,
+  grant: Pick<AccessGrant, "accountId" | "workspaceId">,
+): Promise<ApiRouteDeps> {
+  const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
+  return {
+    ...deps,
+    catalogSourceSettings,
+    settings: (
+      await resolveWorkspaceCatalogSettings(deps.db, catalogSourceSettings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+      })
+    ).settings,
+  };
 }
 
 async function publishSlackAppHome(
@@ -2152,17 +2170,22 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       preparedAttachments,
       preparedModelContext,
     );
-    session = await createSessionForRequest(deps, grant, interaction.workspaceId, {
-      requestedSessionId: interaction.sessionReservationId,
-      initialMessage: prepared.entry.text,
-      ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
-      instructions: SLACK_SESSION_INSTRUCTIONS,
-      firstPartyMcpTools: slackTaskFirstPartyMcpTools(deps.settings),
-      resources: preparedAttachments.resources,
-      ...(preferredModel ? { model: preferredModel } : {}),
-      idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
-      clientEventId: `slack:${entry.providerEventId}`,
-    });
+    session = await createSessionForRequest(
+      await withCatalogSettings(deps, grant),
+      grant,
+      interaction.workspaceId,
+      {
+        requestedSessionId: interaction.sessionReservationId,
+        initialMessage: prepared.entry.text,
+        ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
+        instructions: SLACK_SESSION_INSTRUCTIONS,
+        firstPartyMcpTools: slackTaskFirstPartyMcpTools(deps.settings),
+        resources: preparedAttachments.resources,
+        ...(preferredModel ? { model: preferredModel } : {}),
+        idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
+        clientEventId: `slack:${entry.providerEventId}`,
+      },
+    );
   } catch (error) {
     if (error instanceof HTTPException) {
       await client.postMessage({
@@ -2741,21 +2764,26 @@ async function processSlackReactionInboxEntry(
   const preparedEntry = slackReactionPreparedEntry(entry, context, preparedTask);
   let session: Awaited<ReturnType<typeof createSessionForRequest>>;
   try {
-    session = await createSessionForRequest(deps, grant, interaction.workspaceId, {
-      requestedSessionId: interaction.sessionReservationId,
-      initialMessage: preparedEntry.text,
-      instructions: SLACK_SESSION_INSTRUCTIONS,
-      // The exact reacted message and bounded containing thread are already in
-      // the prompt; do not expose general Slack history tools for this trigger.
-      firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings).default,
-      resources: preparedTask.resources,
-      ...(preferredModel ? { model: preferredModel } : {}),
-      // Every reaction entry converging on this route must use the same create
-      // key. This closes the same-owner multi-event race while the owner check
-      // above prevents a different subject from winning creation authority.
-      idempotencyKey: `slack-interaction:${interaction.id}`,
-      clientEventId: `slack:${entry.providerEventId}`,
-    });
+    session = await createSessionForRequest(
+      await withCatalogSettings(deps, grant),
+      grant,
+      interaction.workspaceId,
+      {
+        requestedSessionId: interaction.sessionReservationId,
+        initialMessage: preparedEntry.text,
+        instructions: SLACK_SESSION_INSTRUCTIONS,
+        // The exact reacted message and bounded containing thread are already in
+        // the prompt; do not expose general Slack history tools for this trigger.
+        firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings).default,
+        resources: preparedTask.resources,
+        ...(preferredModel ? { model: preferredModel } : {}),
+        // Every reaction entry converging on this route must use the same create
+        // key. This closes the same-owner multi-event race while the owner check
+        // above prevents a different subject from winning creation authority.
+        idempotencyKey: `slack-interaction:${interaction.id}`,
+        clientEventId: `slack:${entry.providerEventId}`,
+      },
+    );
     // The route-wide create key converges every replica on one reserved
     // session, but its first writer's initial message is the only event created
     // by that operation. Replay this exact Slack event through the normal
@@ -3143,11 +3171,17 @@ async function acceptSlackReactionTask(
     }
     return;
   }
-  await acceptSessionUserMessage(deps, grant, grant.workspaceId, sessionId, {
-    text: entry.text,
-    resources,
-    clientEventId,
-  });
+  await acceptSessionUserMessage(
+    await withCatalogSettings(deps, grant),
+    grant,
+    grant.workspaceId,
+    sessionId,
+    {
+      text: entry.text,
+      resources,
+      clientEventId,
+    },
+  );
 }
 
 async function continueSlackSession(
@@ -3230,12 +3264,18 @@ async function continueSlackSession(
   if (!hasPermission(grant.permissions, "sessions:control")) {
     throw new SlackInteractionPermanentError("sessions_control_denied");
   }
-  await acceptSessionUserMessage(deps, grant, interaction.workspaceId, interaction.sessionId, {
-    text: entry.text,
-    ...(options.modelContext ? { modelContext: options.modelContext } : {}),
-    resources,
-    clientEventId: `slack:${entry.providerEventId}`,
-  });
+  await acceptSessionUserMessage(
+    await withCatalogSettings(deps, grant),
+    grant,
+    interaction.workspaceId,
+    interaction.sessionId,
+    {
+      text: entry.text,
+      ...(options.modelContext ? { modelContext: options.modelContext } : {}),
+      resources,
+      clientEventId: `slack:${entry.providerEventId}`,
+    },
+  );
 }
 
 const SLACK_ACTION_ID_BY_KIND: Record<SlackInteractionActionKind, string> = {

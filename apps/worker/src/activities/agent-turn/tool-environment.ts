@@ -1,9 +1,18 @@
 import {
   getScheduledVariableSetExpectedGenerationForAttempt,
+  getWorkspaceModelPolicy,
+  listWorkspaceGatewayCustomModels,
+  listWorkspaceOpenRouterCustomModels,
+  listOrganizationModelProviderCustomModelsForWorkspace,
+  organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
+  workspaceCodexSubscriptionActive,
+  workspaceVercelAiGatewayConnectionActive,
+  workspaceOpenRouterConnectionActive,
+  workspaceXaiSubscriptionActiveForAuthority,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -31,6 +40,8 @@ import {
   defaultSessionMcpServerIds,
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
+  resolveCatalogSettings,
+  resolveWorkspaceModelSelection,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
 } from "@opengeni/core";
@@ -44,7 +55,11 @@ import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { type ToolAuthNeededPayload } from "@opengeni/contracts";
 
-import { shouldPublishToolAuthNeededForTurn } from "./admission";
+import {
+  rollingSafeToolAuthNeededPayload,
+  shouldPublishToolAuthNeededForTurn,
+  xaiCatalogReadinessAuthority,
+} from "./admission";
 import { unavailableMcpOperationalContext } from "./errors";
 import { runtimeResourcesForTurn } from "./file-resources";
 import { waitForTurnOperation } from "./sandbox-provision";
@@ -65,6 +80,7 @@ import {
   shouldRequestMissingSessionTitle,
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
+import { createListModelsAttemptToolDefinition } from "./list-models";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -82,6 +98,7 @@ export type PrepareTurnToolPolicyDeps = {
 
 export type PrepareTurnToolRuntimeDeps = {
   input: RunAgentTurnInput;
+  catalogSourceSettings: Settings;
   db: ActivityServices["db"];
   bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
@@ -296,6 +313,7 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
 export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const {
     input,
+    catalogSourceSettings,
     db,
     bus,
     runtime,
@@ -415,7 +433,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     if (!shouldPublishToolAuthNeededForTurn(payload, trigger, turn)) {
       return;
     }
-    await eventing.publish!([{ type: "tool.auth_needed", payload }], true);
+    await eventing.publish!(
+      [{ type: "tool.auth_needed", payload: rollingSafeToolAuthNeededPayload(payload) }],
+      true,
+    );
   };
   const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
   const apiIntegrationMcpServers = buildApiIntegrationServersForTurn({
@@ -488,6 +509,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       firstPartyMcpTools: selectedFirstPartyMcpTools,
       firstPartyMcpPermissions: session.firstPartyMcpPermissions,
     }),
+    parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
   });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
@@ -510,6 +532,83 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : [];
   const attemptToolDefinitions = [
+    createListModelsAttemptToolDefinition({
+      currentModelId: turnExecutionPolicy.productModelId,
+      load: async () => {
+        const currentCatalog = await resolveCatalogSettings(db, catalogSourceSettings);
+        const currentSettings = currentCatalog.settings;
+        const xaiReadinessAuthority = xaiCatalogReadinessAuthority(turn, credentialSubjectId);
+        const [
+          policy,
+          codexSubscriptionActive,
+          xaiSubscriptionActive,
+          workspaceGatewayConnectionActive,
+          workspaceGatewayCustomModels,
+          openRouterConnectionActive,
+          workspaceOpenRouterCustomModels,
+          organizationGatewayConnectionActive,
+          organizationGatewayCustomModels,
+          organizationOpenRouterConnectionActive,
+          organizationOpenRouterCustomModels,
+        ] = await Promise.all([
+          getWorkspaceModelPolicy(db, input.workspaceId),
+          workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
+          xaiReadinessAuthority && currentSettings.supergrokSubscriptionEnabled
+            ? workspaceXaiSubscriptionActiveForAuthority(db, currentSettings, {
+                workspaceId: input.workspaceId,
+                ...xaiReadinessAuthority,
+              })
+            : false,
+          workspaceVercelAiGatewayConnectionActive(db, input.workspaceId),
+          listWorkspaceGatewayCustomModels(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          }),
+          workspaceOpenRouterConnectionActive(db, input.workspaceId),
+          listWorkspaceOpenRouterCustomModels(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          }),
+          organizationModelProviderConnectionActiveForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "vercel_gateway",
+          }),
+          listOrganizationModelProviderCustomModelsForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "vercel_gateway",
+          }),
+          organizationModelProviderConnectionActiveForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "openrouter",
+          }),
+          listOrganizationModelProviderCustomModelsForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "openrouter",
+          }),
+        ]);
+        return {
+          selections: resolveWorkspaceModelSelection({
+            settings: currentSettings,
+            policy,
+            codexSubscriptionActive,
+            xaiSubscriptionActive,
+            workspaceGatewayConnectionActive,
+            workspaceGatewayCustomModels,
+            workspaceOpenRouterConnectionActive: openRouterConnectionActive,
+            workspaceOpenRouterCustomModels,
+            organizationGatewayConnectionActive,
+            organizationGatewayCustomModels,
+            organizationOpenRouterConnectionActive,
+            organizationOpenRouterCustomModels,
+          }),
+          modelNotes: currentCatalog.modelNotes,
+        };
+      },
+    }),
     ...(titleToolPlan.promoteTitleTool
       ? [
           createSessionTitleAttemptToolDefinition({
@@ -755,17 +854,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   } else {
     activatePreparedToolEnvironment(eventing.preparedTools);
   }
-  // Genesis turn = the first user turn (no assistant history reconciled
-  // yet). Durable Postgres state (countSessionHistoryItems includes
-  // superseded rows after compaction), NOT a workflow counter (turnsThisRun
-  // resets on continueAsNew). Drives the one-shot title hint appended to the
-  // agent's instructions; later attempts and goal continuations never match.
   return {
     attemptConnectorActionBindings: [
       ...googleDriveConnectorBindings,
       ...githubRestMcp.connectorBindings,
     ],
     connectorActionIdentity,
+    generateSessionTitleInParallel: titleToolPlan.generateTitleInParallel,
     postToolPreparationStartedAt,
     preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,
   };

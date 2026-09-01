@@ -24,11 +24,14 @@ import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
   settingsWithWorkspaceGatewayCredential,
+  settingsWithWorkspaceOpenRouterCredential,
+  settingsWithOrganizationProviderCredentials,
   withXaiSubscriptionProvider,
 } from "../capabilities";
 import { validateIncidentTelemetrySystemUpdateAuthority } from "../incident-telemetry-authority";
 import {
   assertSessionAllowsProductModel,
+  resolveCatalogSettings,
   resolveCodexAppsCredentialIdForRun,
 } from "@opengeni/core";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
@@ -72,6 +75,7 @@ import type {
 export type ClaimTurnDeps = {
   input: RunAgentTurnInput;
   settings: Settings;
+  catalogSourceSettings: Settings;
   db: ActivityServices["db"];
   bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
@@ -135,6 +139,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const {
     input,
     settings,
+    catalogSourceSettings,
     db,
     bus,
     runtime,
@@ -156,12 +161,15 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     acknowledgeLostAttemptOwnership,
   } = deps;
 
+  const deploymentCatalogSettings = (await resolveCatalogSettings(db, catalogSourceSettings))
+    .settings;
+
   const validatePendingSystemUpdateAuthority: NonNullable<
     ClaimSessionWorkForAttemptInput["validatePendingSystemUpdateAuthority"]
   > = async (tx, update) =>
     await validateIncidentTelemetrySystemUpdateAuthority({
       db: tx,
-      settings,
+      settings: deploymentCatalogSettings,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       update,
@@ -187,6 +195,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.redispatchesAtDispatch = Number(
     (turn.metadata as { workerDeathRedispatches?: number } | null)?.workerDeathRedispatches ?? 0,
   );
+  const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
   // Establish durable attempt ownership before any later read can fail.
   // Therefore every failure with no turnId came from the one atomic claim
   // transaction and can be classified without conflating ordinary runtime
@@ -198,7 +207,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     input.workspaceId,
-    settings,
+    deploymentCatalogSettings,
     {
       ...(credentialSubjectId
         ? { subjectId: credentialSubjectId }
@@ -227,16 +236,31 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const xaiSettings = codexSettings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionProvider(codexSettings)
     : codexSettings;
-  const capabilitySettings = await settingsWithWorkspaceGatewayCredential(
+  const gatewaySettings = await settingsWithWorkspaceGatewayCredential(
     db,
+    input.accountId,
     input.workspaceId,
     xaiSettings,
+    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
+  );
+  const workspaceProviderSettings = await settingsWithWorkspaceOpenRouterCredential(
+    db,
+    input.accountId,
+    input.workspaceId,
+    gatewaySettings,
+    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
+  );
+  const capabilitySettings = await settingsWithOrganizationProviderCredentials(
+    db,
+    input.accountId,
+    input.workspaceId,
+    workspaceProviderSettings,
+    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
   const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
     ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
     : null;
   runtime.configure(capabilitySettings);
-  const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
   const policyForAbsent =
     claimedPolicy.kind === "valid"
       ? claimedPolicy.policy
@@ -266,6 +290,8 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
+  billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
+  billingState.countsTowardTokenCap = billingIdentity.countsTowardTokenCap;
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
   const trigger = await getSessionEvent(db, input.workspaceId, attempt.triggerEventId);
@@ -305,12 +331,14 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // the local credit read). Unset port → today's local-ledger path.
   await waitForTurnOperation(
     ensureRunAllowed(
-      settings,
+      capabilitySettings,
       db,
       input.accountId,
       input.workspaceId,
       billingState.isExternallyBilledTurn,
       entitlements,
+      billingState.chargesOpenGeniCredits,
+      billingState.countsTowardTokenCap,
     ),
     cancellationSignal,
     undefined,

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -40,8 +40,13 @@ import {
   validateMcpCapabilityConnection,
 } from "@opengeni/core";
 import { CODEX_APPS_MCP_URL } from "@opengeni/codex";
-import { configuredAllowedModels, type Settings } from "@opengeni/config";
+import {
+  DEFAULT_OPENROUTER_MODEL_ID,
+  configuredAllowedModels,
+  type Settings,
+} from "@opengeni/config";
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
+import * as opengeniDb from "@opengeni/db";
 import { createSignedState } from "@opengeni/github";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
@@ -78,6 +83,8 @@ describe("API helpers", () => {
 
   test("leaves only route-specific workspace protocols outside ordinary actor middleware", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
+    expect(workspaceActorContextExempt("PUT", "/v1/workspaces/external")).toBe(true);
+    expect(workspaceActorContextExempt("GET", "/v1/workspaces/external")).toBe(false);
     expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp`)).toBe(true);
     expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/github/connect`)).toBe(
       true,
@@ -512,6 +519,16 @@ describe("API helpers", () => {
     expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
       "Content-Range",
     );
+    for (const eventHeader of [
+      "X-OpenGeni-Forensic-Exact",
+      "X-OpenGeni-Has-More",
+      "X-OpenGeni-Next-After",
+      "X-OpenGeni-Next-Before",
+      "X-OpenGeni-Page-Bytes",
+      "X-OpenGeni-Truncated-By",
+    ]) {
+      expect(externalResponse.headers.get("access-control-expose-headers")).toContain(eventHeader);
+    }
 
     const trusted = await preflight("http://localhost:5173");
     expect(trusted.status).toBe(204);
@@ -1796,6 +1813,37 @@ describe("GET /v1/config/client", () => {
     expect(defaultModel).not.toHaveProperty("credentialSource");
   });
 
+  test("fails readiness closed when database catalog mode has no singleton row", async () => {
+    const getCatalog = spyOn(opengeniDb, "getDeploymentModelCatalog").mockResolvedValue(null);
+    try {
+      const settings = testSettings({ modelCatalogSource: "database" });
+      const app = createApp({
+        settings,
+        db: {} as never,
+        bus: new MemoryEventBus(),
+        workflowClient: {} as never,
+        managedAuth: null,
+        readinessChecks: {
+          db: async () => undefined,
+          nats: async () => undefined,
+          temporal: async () => undefined,
+        },
+      } satisfies AppDependencies);
+      const response = await app.request("/readyz");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        checks: {
+          db: { ok: false, error: "dependency_unavailable" },
+          nats: { ok: true },
+          temporal: { ok: true },
+        },
+      });
+    } finally {
+      getCatalog.mockRestore();
+    }
+  });
+
   test("projects the safe dual/broker session-set rollout discriminator", async () => {
     expect(
       (await fetchClientConfig(testSettings({ managedAuthSessionSetMode: "dual" })))
@@ -1911,6 +1959,24 @@ describe("GET /v1/config/client", () => {
     expect(glm).not.toHaveProperty("deployment");
     expect(glm).not.toHaveProperty("credentialSource");
     expect(JSON.stringify(config)).not.toContain("fw_test");
+  });
+
+  test("projects managed OpenRouter as a secret-free external rail with explicit cost", async () => {
+    const settings = testSettings({ openrouterApiKey: "openrouter-client-config-secret" });
+    const config = await fetchClientConfig(settings);
+    expect(config.models.find((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID)).toMatchObject({
+      id: DEFAULT_OPENROUTER_MODEL_ID,
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      api: "chat",
+      cost: "free",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+      capabilities: { functionCalling: { runnable: true } },
+    });
+    expect(
+      config.models.find((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID),
+    ).not.toHaveProperty("source");
+    expect(JSON.stringify(config)).not.toContain("openrouter-client-config-secret");
   });
 });
 

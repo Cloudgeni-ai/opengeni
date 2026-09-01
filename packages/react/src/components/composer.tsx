@@ -1650,6 +1650,7 @@ function AttachmentChips({
     <div className="flex flex-wrap gap-2 px-3 py-2">
       {attachments.map((attachment) => {
         const failed = attachment.status === "failed";
+        const secureContextRequired = attachment.errorCode === "secure_context_required";
         const statusText =
           attachment.status === "uploading"
             ? messages.uploading
@@ -1660,10 +1661,15 @@ function AttachmentChips({
           <div
             key={attachment.id}
             className={cn(
-              "flex min-w-0 max-w-[240px] items-center gap-2 rounded-og-md border px-2 py-1.5 text-og-sm",
+              "flex min-w-0 items-center gap-2 rounded-og-md border px-2 py-1.5 text-og-sm",
               failed
-                ? "border-og-status-failed/40 bg-og-status-failed/10"
-                : "border-og-border bg-og-surface-2",
+                ? cn(
+                    "border-og-status-failed/40 bg-og-status-failed/10",
+                    secureContextRequired
+                      ? "max-w-full items-start sm:max-w-[32rem]"
+                      : "max-w-[240px]",
+                  )
+                : "max-w-[240px] border-og-border bg-og-surface-2",
             )}
           >
             {attachment.previewUrl && lightbox ? (
@@ -1706,7 +1712,11 @@ function AttachmentChips({
             )}
             <div className="min-w-0 flex-1">
               <div className="truncate font-medium text-og-fg">{attachment.name}</div>
-              {failed ? (
+              {secureContextRequired ? (
+                <div className="break-words text-og-xs leading-4 text-og-status-failed">
+                  {statusText}
+                </div>
+              ) : failed ? (
                 <ComposerTip tip={statusText}>
                   <div className="truncate text-og-xs text-og-status-failed">{statusText}</div>
                 </ComposerTip>
@@ -1717,7 +1727,7 @@ function AttachmentChips({
             {attachment.status === "uploading" ? (
               <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" />
             ) : null}
-            {failed && onRetry ? (
+            {failed && !secureContextRequired && onRetry ? (
               <ComposerTip tip={messages.retryUpload}>
                 <button
                   type="button"

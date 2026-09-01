@@ -50,19 +50,25 @@ candidate is rejected as sensitive or unsuitable, the ordinary pending marker
 and first-turn self-heal path remain.
 
 While a session still has the pending marker, and its exact selected first-party
-tool and permission policy permits `set_session_title`, the worker projects only
-that exact operation through the attempt-local tool server and removes it from
-the broader remote first-party catalog for the attempt. The request-local
-one-shot instruction can therefore call `set_session_title` on the first model
-request without waiting for the remaining first-party `tools/list`; all other
-selected first-party schemas stay deferred and searchable. This does not grant
-or attach any new tool authority. The attempt-local operation uses the canonical
-title mutation, which updates the session row and appends `session.title_set`; a
-human title remains protected from later agent writes. The hint is based on
-durable title state rather than history length: turn claim persists the accepted
-user item before agent construction, so history count cannot identify a first
-turn. Historical fallback sessions therefore self-heal on their next eligible
+tool and permission policy permits `set_session_title`, the production runtime
+removes that operation from the model-visible catalog for the attempt and starts
+one bounded, tool-less title request beside the ordinary response stream. The
+sidecar uses the same resolved provider and credential authority, receives only
+a bounded conversation opener, and is metered as its own model call. The main
+agent does not wait for a title tool result or make a title follow-up model call.
+When the main stream reaches settlement, the worker aborts any still-pending
+sidecar and joins its physical completion; a completed candidate then uses the
+canonical title mutation, which updates the session row and appends
+`session.title_set`. Generation or persistence failure leaves the safe pending
+marker in place, and a human title remains protected from every later automatic
+write. Historical fallback sessions therefore self-heal on their next eligible
 model turn.
+
+`OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
+Older or custom runtimes that do not implement it retain the prior attempt-local
+`set_session_title` tool plus one-shot model instruction, so an embedding host
+does not silently lose automatic naming during an upgrade. That compatibility
+path remains serialized; the production runtime takes the parallel path.
 
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one

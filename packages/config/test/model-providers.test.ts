@@ -8,6 +8,7 @@ import {
   assertTurnExecutionPolicyMatchesConfigV1,
   calculateGatewayReportedCostBreakdown,
   calculateGatewayReportedCostMicros,
+  calculateGatewayReportedProviderCostMicros,
   calculateModelUsageCostBreakdown,
   calculateModelUsageCostMicros,
   canonicalizeConfiguredModelId,
@@ -33,9 +34,21 @@ import {
   withXaiSubscriptionCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
   withWorkspaceGatewayCredential,
+  withWorkspaceOpenRouterCatalogProvider,
+  withWorkspaceOpenRouterCredential,
+  withOrganizationGatewayCatalogProvider,
+  withOrganizationGatewayCredential,
+  withOrganizationOpenRouterCatalogProvider,
+  withOrganizationOpenRouterCredential,
+  configuredOpenRouterWorkspaceProductModelIds,
   OPENGENI_GATEWAY_MODELS,
   OPENGENI_GATEWAY_PROVIDER_ID,
+  OPENGENI_OPENROUTER_MODELS,
+  OPENROUTER_PROVIDER_ID,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_GATEWAY_PROVIDER_ID,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_PROVIDER_ID,
 } from "../src";
 
 describe("direct OpenAI API identity", () => {
@@ -44,6 +57,50 @@ describe("direct OpenAI API identity", () => {
     expect(isDirectOpenAiApiBaseUrl("https://api.openai.com/v1/")).toBe(true);
     expect(isDirectOpenAiApiBaseUrl("https://api.openai.com/v1?proxy=1")).toBe(false);
     expect(isDirectOpenAiApiBaseUrl("https://proxy.example/v1")).toBe(false);
+  });
+});
+
+describe("organization provider rails", () => {
+  test("keeps Vercel and OpenRouter organization identity, payer, and credentials separate", () => {
+    const base = getSettings({ OPENGENI_ENV: "test" });
+    const gateway = withOrganizationGatewayCredential(
+      withOrganizationGatewayCatalogProvider(base, [
+        { upstreamModelId: "anthropic/claude-org", label: "Org Claude" },
+      ]),
+      "org-gateway-secret",
+      [{ upstreamModelId: "anthropic/claude-org", label: "Org Claude" }],
+    );
+    const settings = withOrganizationOpenRouterCredential(
+      withOrganizationOpenRouterCatalogProvider(gateway, [
+        { upstreamModelId: "openai/gpt-org", label: "Org GPT" },
+      ]),
+      "org-openrouter-secret",
+      [{ upstreamModelId: "openai/gpt-org", label: "Org GPT" }],
+    );
+    const models = configuredModels(settings).filter((model) =>
+      model.id.startsWith("organization-"),
+    );
+    expect(models.map((model) => model.id)).toEqual([
+      "organization-gateway/anthropic/claude-org",
+      "organization-openrouter/openai/gpt-org",
+    ]);
+    for (const model of models) {
+      expect(model.credentialSource).toEqual({
+        kind: "organization_connection",
+        mechanism: "api_key",
+      });
+      expect(model.billing).toEqual({ upstreamPayer: "organization", metering: "external" });
+      expect(model.cost).toBe("organization");
+    }
+    expect(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: models[0]!.id,
+        requestedModelId: models[0]!.id,
+        modelSource: "explicit",
+        reasoningEffort: "medium",
+        reasoningSource: "explicit",
+      }).billing.upstreamPayer,
+    ).toBe("organization");
   });
 });
 
@@ -176,7 +233,10 @@ describe("curated AI Gateway catalogue", () => {
       kind: "workspace_connection",
       mechanism: "api_key",
     });
-    expect(provider.billing).toEqual({ upstreamPayer: "workspace", metering: "external" });
+    expect(provider.billing).toEqual({
+      upstreamPayer: "workspace",
+      metering: "external",
+    });
 
     const runtime = withWorkspaceGatewayCredential(catalog, "vck_workspace");
     expect(
@@ -184,6 +244,162 @@ describe("curated AI Gateway catalogue", () => {
         (candidate) => candidate.id === WORKSPACE_GATEWAY_PROVIDER_ID,
       )?.apiKey,
     ).toBe("vck_workspace");
+  });
+
+  test("workspace OpenRouter overlay is visible without the deployment key and injects only its runtime key", () => {
+    const base = {
+      ...withEnv({}, () => getSettings()),
+      modelProvidersJson: "[]",
+      openrouterApiKey: undefined,
+    };
+    const customUpstreamModelId = "anthropic/claude-sonnet-4.6";
+    const catalog = withWorkspaceOpenRouterCatalogProvider(base, [
+      { upstreamModelId: customUpstreamModelId, label: "Claude Sonnet 4.6" },
+    ]);
+    const provider = configuredProviders(catalog).find(
+      (candidate) => candidate.id === WORKSPACE_OPENROUTER_PROVIDER_ID,
+    )!;
+    expect(provider).toMatchObject({
+      kind: "openrouter-workspace",
+      api: "chat",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "workspace", metering: "external" },
+    });
+    expect(provider.apiKey).toBeUndefined();
+    expect(
+      configuredProviders(catalog).some((candidate) => candidate.id === OPENROUTER_PROVIDER_ID),
+    ).toBe(false);
+    expect(
+      configuredModels(catalog).find(
+        (model) =>
+          model.id ===
+          `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${OPENGENI_OPENROUTER_MODELS[0]!.upstreamModelId}`,
+      ),
+    ).toMatchObject({
+      providerId: WORKSPACE_OPENROUTER_PROVIDER_ID,
+      upstreamModelId: OPENGENI_OPENROUTER_MODELS[0]!.upstreamModelId,
+      cost: "workspace",
+    });
+    const customModel = configuredModels(catalog).find(
+      (model) => model.id === `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${customUpstreamModelId}`,
+    );
+    expect(customModel).toMatchObject({
+      label: "Claude Sonnet 4.6",
+      upstreamModelId: customUpstreamModelId,
+      capabilities: {
+        reasoning: { upstream: "unknown", runnable: false, efforts: [] },
+        functionCalling: { upstream: "supported", runnable: true },
+        inputModalities: ["text"],
+        inputFileMediaTypes: [],
+        promptCaching: {
+          upstream: "unsupported",
+          runnable: false,
+          mode: "none",
+        },
+      },
+    });
+    expect(customModel?.contextWindowTokens).toBeUndefined();
+    expect(customModel?.effectiveContextWindowTokens).toBeUndefined();
+    expect(customModel?.autoCompactTokenLimit).toBeUndefined();
+    expect(
+      policyProviderIdForModel(
+        catalog,
+        `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${customUpstreamModelId}`,
+      ),
+    ).toBe(WORKSPACE_OPENROUTER_PROVIDER_ID);
+
+    const runtime = withWorkspaceOpenRouterCredential(catalog, "sk-or-workspace", [
+      { upstreamModelId: customUpstreamModelId, label: "Claude Sonnet 4.6" },
+    ]);
+    expect(
+      configuredProviders(runtime).find(
+        (candidate) => candidate.id === WORKSPACE_OPENROUTER_PROVIDER_ID,
+      )?.apiKey,
+    ).toBe("sk-or-workspace");
+  });
+
+  test("workspace OpenRouter aliases reserve their generated custom-model product ids", () => {
+    const aliasUpstreamModelId = "nvidia/nemotron-3-super-alias:free";
+    const base = {
+      ...withEnv({}, () => getSettings()),
+      modelProvidersJson: "[]",
+      openrouterApiKey: undefined,
+      resolvedOpenRouterModelsJson: JSON.stringify([
+        {
+          ...OPENGENI_OPENROUTER_MODELS[0]!,
+          aliases: [`${OPENROUTER_PROVIDER_ID}/${aliasUpstreamModelId}`],
+        },
+      ]),
+    };
+    const aliasProductId = `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${aliasUpstreamModelId}`;
+    expect(configuredOpenRouterWorkspaceProductModelIds(base)).toContain(aliasProductId);
+
+    const catalog = withWorkspaceOpenRouterCatalogProvider(base, [
+      { upstreamModelId: aliasUpstreamModelId },
+    ]);
+    const models = configuredModels(catalog);
+    expect(
+      models.find((model) => model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID)?.aliases,
+    ).toContain(aliasProductId);
+    expect(models.some((model) => model.upstreamModelId === aliasUpstreamModelId)).toBe(false);
+  });
+
+  test("workspace overlay ignores custom rows whose generated product id is already configured", () => {
+    const base = withEnv(
+      {
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          {
+            id: "acme",
+            api: "chat",
+            baseUrl: "https://api.acme.test/v1",
+            apiKey: "acme-test-key",
+            models: [
+              {
+                id: `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}acme`,
+                upstreamModelId: "safe",
+                aliases: [`${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}alias`],
+              },
+            ],
+          },
+        ]),
+      },
+      () => getSettings(),
+    );
+    const catalog = withWorkspaceGatewayCatalogProvider(base, [
+      { upstreamModelId: "deepseek-v4-flash-0731" },
+      { upstreamModelId: "acme" },
+      { upstreamModelId: "alias" },
+      {
+        upstreamModelId: "anthropic/claude-sonnet-4.6",
+        label: "Claude Sonnet 4.6",
+      },
+    ]);
+    const models = configuredModels(catalog);
+
+    expect(
+      models.filter(
+        (model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}deepseek-v4-flash-0731`,
+      ),
+    ).toHaveLength(1);
+    expect(
+      models.find(
+        (model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}deepseek-v4-flash-0731`,
+      )?.upstreamModelId,
+    ).toBe("deepseek/deepseek-v4-flash-0731");
+    expect(
+      models.filter((model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}acme`),
+    ).toHaveLength(1);
+    expect(
+      models.filter((model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}alias`),
+    ).toHaveLength(0);
+    expect(
+      models.find(
+        (model) => model.id === `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}anthropic/claude-sonnet-4.6`,
+      ),
+    ).toMatchObject({
+      upstreamModelId: "anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6",
+    });
   });
 
   test("managed debit fallback uses the highest approved DeepSeek route", () => {
@@ -244,6 +460,14 @@ describe("curated AI Gateway catalogue", () => {
         "NaN",
       ),
     ).toThrow("Invalid AI Gateway inference cost");
+  });
+
+  test("reads exact Gateway provider cost without requiring a product price", () => {
+    expect(calculateGatewayReportedProviderCostMicros("0.00000325")).toBe(4);
+    expect(calculateGatewayReportedProviderCostMicros("1.23456789")).toBe(1_234_568);
+    expect(() => calculateGatewayReportedProviderCostMicros("NaN")).toThrow(
+      "Invalid AI Gateway inference cost",
+    );
   });
 });
 
@@ -423,7 +647,12 @@ describe("parseModelProvidersJson", () => {
     expect(() =>
       parseModelProvidersJson(
         JSON.stringify([
-          { id: "fire works", baseUrl: "https://x.test", apiKey: "fw", models: [{ id: "m" }] },
+          {
+            id: "fire works",
+            baseUrl: "https://x.test",
+            apiKey: "fw",
+            models: [{ id: "m" }],
+          },
         ]),
       ),
     ).toThrow("provider[0] is invalid");
@@ -432,7 +661,14 @@ describe("parseModelProvidersJson", () => {
   test("rejects a provider with an empty models list", () => {
     expect(() =>
       parseModelProvidersJson(
-        JSON.stringify([{ id: "fireworks", baseUrl: "https://x.test", apiKey: "fw", models: [] }]),
+        JSON.stringify([
+          {
+            id: "fireworks",
+            baseUrl: "https://x.test",
+            apiKey: "fw",
+            models: [],
+          },
+        ]),
       ),
     ).toThrow("provider[0] is invalid");
   });
@@ -466,7 +702,14 @@ describe("parseModelProvidersJson", () => {
   ])("rejects a base URL containing %s", (_case, baseUrl, message) => {
     expect(() =>
       parseModelProvidersJson(
-        JSON.stringify([{ id: "acme", baseUrl, apiKey: "mock", models: [{ id: "acme/model" }] }]),
+        JSON.stringify([
+          {
+            id: "acme",
+            baseUrl,
+            apiKey: "mock",
+            models: [{ id: "acme/model" }],
+          },
+        ]),
       ),
     ).toThrow(message);
   });
@@ -580,7 +823,12 @@ describe("parseModelProvidersJson", () => {
 
   test("rejects generic registry attempts to enable workspace BYOK or reattribute billing", () => {
     for (const forbidden of [
-      { credentialSource: { kind: "workspace_connection", mechanism: "api_key" } },
+      {
+        credentialSource: {
+          kind: "workspace_connection",
+          mechanism: "api_key",
+        },
+      },
       { billing: { upstreamPayer: "workspace", metering: "external" } },
     ]) {
       expect(() =>
@@ -706,7 +954,10 @@ describe("configuredProviders", () => {
       () => configuredProviders(getSettings())[0]!,
     );
     expect(both.apiKey).toBe("az-key");
-    expect(both.credentialSource).toEqual({ kind: "deployment", mechanism: "api_key" });
+    expect(both.credentialSource).toEqual({
+      kind: "deployment",
+      mechanism: "api_key",
+    });
 
     const adOnly = withEnv(
       {
@@ -792,7 +1043,10 @@ describe("configuredModels", () => {
       effectiveContextWindowTokens: 475_000,
       autoCompactTokenLimit: 400_000,
       credentialSource: { kind: "connected_subscription", provider: "xai" },
-      billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      billing: {
+        upstreamPayer: "connected_subscription",
+        metering: "external",
+      },
     });
     expect(resolved.model.capabilities.hostedTools.webSearch.runnable).toBe(true);
     expect(resolved.model.capabilities.hostedTools.xSearch.runnable).toBe(true);
@@ -1032,7 +1286,10 @@ describe("configuredModels", () => {
       },
       () => getSettings(),
     );
-    const runSettings = { ...base, openaiModel: "accounts/fireworks/models/glm-5p2" };
+    const runSettings = {
+      ...base,
+      openaiModel: "accounts/fireworks/models/glm-5p2",
+    };
     const entries = configuredModels(runSettings).filter(
       (model) => model.id === "accounts/fireworks/models/glm-5p2",
     );
@@ -1322,11 +1579,17 @@ describe("turn execution policy V1", () => {
       { ...policy, wireApi: "chat" as const },
       {
         ...policy,
-        credentialSource: { kind: "workspace_connection" as const, mechanism: "api_key" as const },
+        credentialSource: {
+          kind: "workspace_connection" as const,
+          mechanism: "api_key" as const,
+        },
       },
       {
         ...policy,
-        billing: { upstreamPayer: "workspace" as const, metering: "external" as const },
+        billing: {
+          upstreamPayer: "workspace" as const,
+          metering: "external" as const,
+        },
       },
       { ...policy, definitionVersion: `sha256:${"f".repeat(64)}` },
     ];
@@ -1351,7 +1614,10 @@ describe("turn execution policy V1", () => {
               api: "responses",
               baseUrl: "https://api.acme.test/v1",
               apiKey,
-              defaultHeaders: { "x-api-key": apiKey, "x-public-version": publicVersion },
+              defaultHeaders: {
+                "x-api-key": apiKey,
+                "x-public-version": publicVersion,
+              },
               publicDefaultHeaderNames: ["x-public-version"],
               models: [{ id: "acme/model", upstreamModelId: "upstream-model" }],
             },
@@ -1430,7 +1696,10 @@ describe("turn execution policy V1", () => {
       providerId: "codex-subscription",
       upstreamModelId: "gpt-5.6-sol",
       credentialSource: { kind: "connected_subscription", provider: "codex" },
-      billing: { upstreamPayer: "connected_subscription", metering: "external" },
+      billing: {
+        upstreamPayer: "connected_subscription",
+        metering: "external",
+      },
     });
     expect(policy.reasoningEffort).toBe("max");
   });
@@ -1500,12 +1769,16 @@ describe("Grok 4.5 explicit xAI registry contract", () => {
       cachedInputMicrosPerMillionTokens: 600_000,
       outputMicrosPerMillionTokens: 12_000_000,
     });
-    expect(calculateModelUsageCostMicros(settings, "xai/grok-4.5", { inputTokens: 199_999 })).toBe(
-      399_998,
-    );
-    expect(calculateModelUsageCostMicros(settings, "xai/grok-4.5", { inputTokens: 200_000 })).toBe(
-      800_000,
-    );
+    expect(
+      calculateModelUsageCostMicros(settings, "xai/grok-4.5", {
+        inputTokens: 199_999,
+      }),
+    ).toBe(399_998);
+    expect(
+      calculateModelUsageCostMicros(settings, "xai/grok-4.5", {
+        inputTokens: 200_000,
+      }),
+    ).toBe(800_000);
   });
 
   test("rejects unordered/duplicate threshold schedules", () => {
@@ -1513,15 +1786,24 @@ describe("Grok 4.5 explicit xAI registry contract", () => {
       parseModelProvidersJson(
         grok45Registry({
           pricing: {
-            default: { inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 1 },
+            default: {
+              inputMicrosPerMillionTokens: 1,
+              outputMicrosPerMillionTokens: 1,
+            },
             inputTokenTiers: [
               {
                 minimumInputTokens: 200_000,
-                pricing: { inputMicrosPerMillionTokens: 2, outputMicrosPerMillionTokens: 2 },
+                pricing: {
+                  inputMicrosPerMillionTokens: 2,
+                  outputMicrosPerMillionTokens: 2,
+                },
               },
               {
                 minimumInputTokens: 200_000,
-                pricing: { inputMicrosPerMillionTokens: 3, outputMicrosPerMillionTokens: 3 },
+                pricing: {
+                  inputMicrosPerMillionTokens: 3,
+                  outputMicrosPerMillionTokens: 3,
+                },
               },
             ],
           },
@@ -1632,13 +1914,17 @@ describe("configuredModelPricing", () => {
 
     const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
     // 100k input @ $0.20/M = 20_000 micros, then +25% margin → 25_000
-    expect(calculateModelUsageCostMicros(settings, "gpt-5.6-luna", { inputTokens: 100_000 })).toBe(
-      25_000,
-    );
+    expect(
+      calculateModelUsageCostMicros(settings, "gpt-5.6-luna", {
+        inputTokens: 100_000,
+      }),
+    ).toBe(25_000);
     // >272K uses long-context luna ($0.40/M input): ceil(272001*400000/1e6)=108801, +25% → 136002
-    expect(calculateModelUsageCostMicros(settings, "gpt-5.6-luna", { inputTokens: 272_001 })).toBe(
-      136_002,
-    );
+    expect(
+      calculateModelUsageCostMicros(settings, "gpt-5.6-luna", {
+        inputTokens: 272_001,
+      }),
+    ).toBe(136_002);
     expect(
       calculateModelUsageCostMicros(
         settings,
@@ -1761,12 +2047,17 @@ describe("validateSettings registry checks", () => {
         {
           OPENGENI_OPENAI_API_KEY: "sk-test",
           OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
-            { id: "openai", baseUrl: "https://x.test/v1", apiKey: "k", models: [{ id: "m" }] },
+            {
+              id: "openai",
+              baseUrl: "https://x.test/v1",
+              apiKey: "k",
+              models: [{ id: "m" }],
+            },
           ]),
         },
         () => getSettings(),
       ),
-    ).toThrow("collides with the built-in provider id");
+    ).toThrow("reserved for a reviewed OpenGeni provider");
   });
 
   test("rejects duplicate registry provider ids", () => {
@@ -1775,8 +2066,18 @@ describe("validateSettings registry checks", () => {
         {
           OPENGENI_OPENAI_API_KEY: "sk-test",
           OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
-            { id: "dup", baseUrl: "https://a.test/v1", apiKey: "k", models: [{ id: "m1" }] },
-            { id: "dup", baseUrl: "https://b.test/v1", apiKey: "k", models: [{ id: "m2" }] },
+            {
+              id: "dup",
+              baseUrl: "https://a.test/v1",
+              apiKey: "k",
+              models: [{ id: "m1" }],
+            },
+            {
+              id: "dup",
+              baseUrl: "https://b.test/v1",
+              apiKey: "k",
+              models: [{ id: "m2" }],
+            },
           ]),
         },
         () => getSettings(),
@@ -1930,7 +2231,10 @@ describe("policyProviderIdForModel", () => {
 
   test("registry model attributes to its registry provider", () => {
     const settings = withEnv(
-      { OPENGENI_OPENAI_API_KEY: "sk-test", OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry },
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
+      },
       () => getSettings(),
     );
     expect(policyProviderIdForModel(settings, "accounts/fireworks/models/glm-5p2")).toBe(

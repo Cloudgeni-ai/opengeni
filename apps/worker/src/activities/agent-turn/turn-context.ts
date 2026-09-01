@@ -73,6 +73,8 @@ export type BillingState = {
   isCodexTurn: boolean;
   isXaiTurn: boolean;
   isExternallyBilledTurn: boolean;
+  chargesOpenGeniCredits: boolean;
+  countsTowardTokenCap: boolean;
 };
 
 export type SandboxRuntimeState = {
@@ -204,6 +206,8 @@ export function createTurnContext(input: {
       isCodexTurn: false,
       isXaiTurn: false,
       isExternallyBilledTurn: false,
+      chargesOpenGeniCredits: true,
+      countsTowardTokenCap: true,
     },
     sandboxState: {
       resolvedSandbox: null,
