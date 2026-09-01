@@ -1931,7 +1931,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       holderId: "viewer-waits-for-provider-pause",
       backend: "modal",
       leaseTtlMs: 60_000,
-      captureWaitMs: 1_000,
+      // The active child froze a 60s claim before this lower-config caller
+      // arrived. The persisted deadline, not this now-short local budget, owns
+      // how long an opted-in lifecycle waiter may keep observing.
+      captureWaitMs: 25,
     }).finally(() => {
       acquireWaitSettled = true;
     });
@@ -1964,11 +1967,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 14,
       expectedInstanceId: "box-capture-gate",
       operation: "waitsForExactCapture",
-      captureWaitMs: 1_000,
+      captureWaitMs: 25,
     }).finally(() => {
       waitSettled = true;
     });
-    await Bun.sleep(50);
+    await Bun.sleep(75);
     expect(waitSettled).toBe(false);
     expect(acquireWaitSettled).toBe(false);
     const mutationWaitController = new AbortController();
