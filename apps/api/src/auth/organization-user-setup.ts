@@ -108,8 +108,8 @@ export function renderOrganizationUserSetupEmail(input: OrganizationUserSetupEma
     from: input.senderEmail,
     to: input.recipientEmail,
     subject: `Join ${input.organizationName} on OpenGeni`,
-    text: `${greeting}\n\nYou have been invited to ${input.organizationName} as ${role}.\n\n${workspaceSummary}\n\nThis invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.\n\nSet up your account: ${input.setupUrl}\n\nIf you already have an OpenGeni account, sign in and accept the invitation instead.`,
-    html: `<p>${escapeHtml(greeting)}</p><p>You have been invited to <strong>${escapeHtml(input.organizationName)}</strong> as ${escapeHtml(role)}.</p>${workspaceHtml}<p>This invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.</p><p><a href="${escapeHtml(input.setupUrl)}">Set up your account</a></p><p>If you already have an OpenGeni account, sign in and accept the invitation instead.</p>`,
+    text: `${greeting}\n\nYou have been invited to ${input.organizationName} as ${role}.\n\n${workspaceSummary}\n\nThis invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.\n\nReview invitation: ${input.setupUrl}\n\nAlready use OpenGeni? Sign in, then open Organization invitations from the account menu at the bottom of the sidebar.`,
+    html: `<p>${escapeHtml(greeting)}</p><p>You have been invited to <strong>${escapeHtml(input.organizationName)}</strong> as ${escapeHtml(role)}.</p>${workspaceHtml}<p>This invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.</p><p><a href="${escapeHtml(input.setupUrl)}">Review invitation</a></p><p>Already use OpenGeni? Sign in, then open <strong>Organization invitations</strong> from the account menu at the bottom of the sidebar.</p>`,
   };
 }
 

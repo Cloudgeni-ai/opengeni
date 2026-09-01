@@ -99,16 +99,16 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
   }
 
   return (
-    <section className="flex flex-1 items-center justify-center px-4">
+    <section className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-4 py-4 sm:items-center">
       <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm">
         <div className="mb-4 flex items-center gap-3">
           <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <KeyRoundIcon className="size-4" />
           </span>
           <div>
-            <h1 className="text-base font-semibold">Set up your account</h1>
+            <h1 className="text-base font-semibold">Join an organization</h1>
             <p className="text-sm text-fg-subtle">
-              Create your login for the organization that invited you.
+              Use your existing OpenGeni account or create a new one.
             </p>
           </div>
         </div>
@@ -173,6 +173,21 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
                 This does not share anyone&apos;s Personal workspace.
               </p>
             </div>
+            <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3">
+              <p className="text-sm font-medium">Already have an OpenGeni account?</p>
+              <p className="mt-1 text-xs leading-5 text-fg-subtle">
+                Sign in, then open Organization invitations from the account menu at the bottom of
+                the sidebar.
+              </p>
+              <Button asChild variant="secondary" size="sm" className="mt-3 w-full">
+                <Link to="/">Sign in to accept invitation</Link>
+              </Button>
+            </div>
+            <div className="mb-4 flex items-center gap-3 text-xs text-fg-subtle">
+              <span className="h-px flex-1 bg-border" />
+              New to OpenGeni?
+              <span className="h-px flex-1 bg-border" />
+            </div>
             <div className="mb-3">
               <Label htmlFor="setup-account-name">Your name</Label>
               <Input
@@ -217,10 +232,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
               ) : (
                 <CheckIcon className="size-4" />
               )}
-              Create account
-            </Button>
-            <Button asChild variant="ghost" className="mt-2 w-full">
-              <Link to="/">I already have an account</Link>
+              Create account and join
             </Button>
           </form>
         )}

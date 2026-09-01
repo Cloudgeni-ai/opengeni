@@ -202,7 +202,8 @@ function isExpectedNavigationReadCancellation(problem: string): boolean {
   return (
     pathname === "/v1/config/client" ||
     pathname === "/v1/auth/get-session" ||
-    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname)
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname) ||
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:sessions|machines|new-session-draft)$/u.test(pathname)
   );
 }
 
@@ -629,7 +630,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await setupPage.goto(firstUrl(setupEmail), {
       waitUntil: "domcontentloaded",
     });
-    await setupPage.getByRole("heading", { name: "Set up your account" }).waitFor();
+    await setupPage.getByRole("heading", { name: "Join an organization" }).waitFor();
     let observedSetupCopy = "";
     await waitFor(
       async () => {
@@ -671,7 +672,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     await setupPage.getByLabel("Your name").fill("Onboarding Invited");
     await setupPage.getByLabel("Password", { exact: true }).fill(PASSWORD);
     await setupPage.getByLabel("Confirm password").fill(PASSWORD);
-    await setupPage.getByRole("button", { name: "Create account" }).click();
+    await setupPage.getByRole("button", { name: "Create account and join" }).click();
     await setupPage
       .getByText("Your email is verified and your organization access is ready.")
       .waitFor();
@@ -1045,6 +1046,34 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       organizationId: alternateOrganizationId,
       status: "pending",
     });
+    await registeredPage.setViewportSize({ width: 1024, height: 768 });
+    await registeredPage.getByRole("button", { name: "Account menu" }).click();
+    await registeredPage.getByRole("menuitem", { name: /Organization invitations/ }).click();
+    await registeredPage.getByRole("heading", { name: "Organization invitations" }).waitFor();
+    await registeredPage.getByText("Onboarding Alternate Org").waitFor();
+    await expectNoAxeViolations(registeredPage, "body");
+    await registeredPage.screenshot({
+      path: `${EVIDENCE_DIR}/onboarding-existing-account-invitations-desktop-1024.png`,
+      fullPage: true,
+    });
+    await registeredPage.getByRole("button", { name: "Join Onboarding Alternate Org" }).click();
+    await registeredPage.getByRole("button", { name: "Account menu" }).waitFor();
+    const joinedMemberships = await sdk(registeredCookie).listOrganizationMemberships();
+    expect(joinedMemberships.memberships).toHaveLength(2);
+    expect(joinedMemberships.memberships.map((membership) => membership.organizationId)).toEqual(
+      expect.arrayContaining([organizationId, alternateOrganizationId]),
+    );
+    const acceptedInvitationHistory = await sdk(registeredCookie).listOrganizationInvitations({
+      limit: 20,
+    });
+    expect(
+      acceptedInvitationHistory.invitations.find(
+        (invitation) => invitation.id === alternateInvite.id,
+      ),
+    ).toMatchObject({
+      organizationId: alternateOrganizationId,
+      status: "accepted",
+    });
     expectNoBrowserProblems(alternateProblems);
     await alternateContext.close();
 
@@ -1194,6 +1223,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
             "onboarding-owner-desktop-1440.png",
             "onboarding-setup-mobile-390.png",
             "onboarding-registered-mobile-320.png",
+            "onboarding-existing-account-invitations-desktop-1024.png",
           ],
         },
         null,

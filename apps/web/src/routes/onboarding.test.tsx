@@ -380,13 +380,15 @@ describe("organization onboarding UI", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<SetupAccountRoute token="setup-token" />));
-      expect(container.textContent).toContain("Create your login for the organization");
+      expect(container.textContent).toContain("Use your existing OpenGeni account");
+      expect(container.textContent).toContain("Organization invitations");
+      expect(container.textContent).toContain("Sign in to accept invitation");
       await enter(container.querySelector("#setup-account-name")!, "Grace Hopper");
       await enter(container.querySelector("#setup-account-password")!, "password1234");
       await enter(container.querySelector("#setup-account-confirm")!, "password1234");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
-          .find((button) => button.textContent?.trim() === "Create account")!
+          .find((button) => button.textContent?.trim() === "Create account and join")!
           .click(),
       );
       await flush();
