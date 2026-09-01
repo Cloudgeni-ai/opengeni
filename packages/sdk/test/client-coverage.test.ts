@@ -617,6 +617,122 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(result.models[0]?.credentialReadiness.status).toBe("ready");
   });
 
+  test("workspace Gateway custom models send operation-bound create/delete requests", async () => {
+    const customModelId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const createOperationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const deleteOperationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const model = {
+      id: customModelId,
+      upstreamModelId: "anthropic/claude-sonnet-4.6",
+      label: null,
+      version: 1,
+      createdAt: "2026-08-30T12:00:00.000Z",
+      updatedAt: "2026-08-30T12:00:00.000Z",
+    };
+    const responses = [{ models: [model] }, model, null];
+    const { client, requests } = makeClient(() => {
+      const response = responses.shift();
+      return response === null ? new Response(null, { status: 204 }) : jsonResponse(response);
+    });
+
+    expect(await client.listWorkspaceGatewayCustomModels(WORKSPACE_ID)).toEqual({
+      models: [model],
+    });
+    expect(
+      await client.createWorkspaceGatewayCustomModel(WORKSPACE_ID, {
+        operationId: createOperationId,
+        upstreamModelId: model.upstreamModelId,
+      }),
+    ).toEqual(model);
+    await client.deleteWorkspaceGatewayCustomModel(WORKSPACE_ID, customModelId, {
+      expectedVersion: model.version,
+      operationId: deleteOperationId,
+    });
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/gateway-custom-models`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/gateway-custom-models`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/gateway-custom-models/${customModelId}`,
+      ],
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      operationId: createOperationId,
+      upstreamModelId: model.upstreamModelId,
+    });
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
+      expectedVersion: 1,
+      operationId: deleteOperationId,
+    });
+
+    await expect(
+      client.deleteWorkspaceGatewayCustomModel(WORKSPACE_ID, "../connections", {
+        expectedVersion: 1,
+        operationId: deleteOperationId,
+      }),
+    ).rejects.toThrow("customModelId must be a UUID");
+    expect(requests).toHaveLength(3);
+  });
+
+  test("workspace OpenRouter custom models use the peer operation-bound routes", async () => {
+    const customModelId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const createOperationId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const deleteOperationId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const model = {
+      id: customModelId,
+      upstreamModelId: "anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6",
+      version: 1,
+      createdAt: "2026-08-31T12:00:00.000Z",
+      updatedAt: "2026-08-31T12:00:00.000Z",
+    };
+    const responses = [{ models: [model] }, model, null];
+    const { client, requests } = makeClient(() => {
+      const response = responses.shift();
+      return response === null ? new Response(null, { status: 204 }) : jsonResponse(response);
+    });
+
+    expect(await client.listWorkspaceOpenRouterCustomModels(WORKSPACE_ID)).toEqual({
+      models: [model],
+    });
+    expect(
+      await client.createWorkspaceOpenRouterCustomModel(WORKSPACE_ID, {
+        operationId: createOperationId,
+        upstreamModelId: model.upstreamModelId,
+        label: model.label,
+      }),
+    ).toEqual(model);
+    await client.deleteWorkspaceOpenRouterCustomModel(WORKSPACE_ID, customModelId, {
+      expectedVersion: model.version,
+      operationId: deleteOperationId,
+    });
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/openrouter-custom-models`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/openrouter-custom-models`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/openrouter-custom-models/${customModelId}`,
+      ],
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      operationId: createOperationId,
+      upstreamModelId: model.upstreamModelId,
+      label: model.label,
+    });
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
+      expectedVersion: 1,
+      operationId: deleteOperationId,
+    });
+
+    await expect(
+      client.deleteWorkspaceOpenRouterCustomModel(WORKSPACE_ID, "../connections", {
+        expectedVersion: 1,
+        operationId: deleteOperationId,
+      }),
+    ).rejects.toThrow("customModelId must be a UUID");
+    expect(requests).toHaveLength(3);
+  });
+
   test("workspace model access policy reads and fully replaces the allowlist", async () => {
     const responses = [
       { allowedProviders: ["codex-subscription"], allowedModels: null },

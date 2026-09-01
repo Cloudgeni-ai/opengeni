@@ -97,6 +97,15 @@ config:
   OPENGENI_BILLING_MODE: disabled
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none
+  # Reviewed code/env catalog by default. Before changing this to "database",
+  # apply the drained maintenance migration
+  # 0389_model_catalog_and_gateway_custom_models.sql and follow the
+  # compatibility-first catalog cutover in docs/deployment.md; do not expose
+  # database-only membership during a mixed code/database rollout.
+  OPENGENI_MODEL_CATALOG_SOURCE: code
+  # Optional non-secret JSON values may be supplied here:
+  # OPENGENI_MODEL_COST_POLICY_JSON: '{"model-id":"free"}'
+  # OPENGENI_MODEL_NOTES_JSON: '{"model-id":"One-line agent guidance."}'
   OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
   OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
   OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
@@ -125,6 +134,8 @@ secret:
   # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
   # NATS, Temporal, sandbox, and object-storage secrets through this secret or
   # an ExternalSecret. Never commit real secrets in values.
+  # OPENGENI_OPENROUTER_API_KEY enables the deployment-managed reviewed
+  # OpenRouter catalog. It belongs here, never in config or catalog JSON.
   # Google Drive release-readiness configuration is demonstrated in
   # values.google-drive-readiness.example.yaml. When enabled, this Secret must
   # provide OPENGENI_INTEGRATIONS_STATE_SECRET,
@@ -217,7 +228,7 @@ api:
   probes:
     readiness:
       enabled: true
-      path: /healthz
+      path: /traffic-readyz
       initialDelaySeconds: 5
       periodSeconds: 10
       timeoutSeconds: 2
@@ -729,6 +740,8 @@ migrations:
   image:
     repository: opengeni-api
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    # Production and every drained maintenance rollout must also set an exact
+    # sha256 digest; never cross the drain boundary using a mutable tag/cache.
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
@@ -736,9 +749,11 @@ migrations:
     # Separate secret for migration/admin-only settings:
     # OPENGENI_MIGRATIONS_DATABASE_URL, the comma-separated exact API/worker
     # login list OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES, plus the exact
-    # application username/password consumed by db:provision-roles. Include old
-    # and new runtime identities during a role rotation. Production must not
-    # reuse the runtime Secret here; API/worker receive only the restricted URL.
+    # application username/password consumed by db:provision-roles. During a
+    # role rotation, include old and new identities in the login list only for
+    # drain detection; the exact application username/password names the sole
+    # target role provisioned after migration. Production must not reuse the
+    # runtime Secret here; API/worker receive only the restricted URL.
     # Empty reuse is retained only for disposable conformance fixtures.
     existingSecret: ""
   # The pre-upgrade hook is the rollout gate: schema first, then exact runtime

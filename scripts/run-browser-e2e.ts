@@ -8,6 +8,7 @@ const testFiles =
         "./test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
         "./test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
         "./test/e2e/artifact-static-renderer.browser.e2e.ts",
+        "./test/e2e/ai-gateway-connection.browser.e2e.ts",
         "./test/e2e/editable-artifacts.browser.e2e.ts",
         "./test/e2e/browser.e2e.ts",
         "./test/e2e/connected-machine-removal.browser.e2e.ts",
@@ -39,7 +40,9 @@ for (const testFile of testFiles) {
     ? { key: "OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE", ids: ["chromium", "firefox", "webkit"] }
     : testFile.endsWith("framework-ui-parity.browser.e2e.ts")
       ? { key: "OPENGENI_FRAMEWORK_UI_BROWSER_ENGINE", ids: ["chromium", "firefox", "webkit"] }
-      : null;
+      : testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+        ? { key: "OPENGENI_AI_GATEWAY_BROWSER_ENGINE", ids: ["chromium", "webkit"] }
+        : null;
   const engineIds = crossEngine?.ids ?? [undefined];
   for (const engineId of engineIds) {
     // Keep native browser engines in separate Bun processes so one engine's teardown cannot

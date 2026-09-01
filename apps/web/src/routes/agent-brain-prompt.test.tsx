@@ -16,6 +16,8 @@ function catalogModel(
   overrides: {
     selectable?: boolean;
     source?: WorkspaceModelCatalogModel["source"];
+    cost?: WorkspaceModelCatalogModel["cost"];
+    billing?: WorkspaceModelCatalogModel["billing"];
     efforts?: ReasoningEffort[];
     defaultEffort?: ReasoningEffort | null;
     latencyModes?: Array<{ id: LatencyMode; runnable: boolean }>;
@@ -32,6 +34,8 @@ function catalogModel(
     providerLabel: source === "codex" ? "Codex" : source === "supergrok" ? "SuperGrok" : "OpenGeni",
     source,
     api: "responses",
+    ...(overrides.cost ? { cost: overrides.cost } : {}),
+    ...(overrides.billing ? { billing: overrides.billing } : {}),
     credentialReadiness: {
       status: "ready",
       reason: null,
@@ -108,6 +112,44 @@ describe("resolveAgentBrainPromptModel", () => {
       latencyMode: "standard",
     });
     expect(selection?.model).toBe("codex/gpt-5.6-luna");
+  });
+
+  test("uses deployment cost instead of inferring payment from provider settlement", () => {
+    const openRouterBilling = {
+      upstreamPayer: "deployment",
+      metering: "external",
+    } as const;
+    const free = resolveAgentBrainPromptModel(
+      [
+        catalogModel("openrouter/nvidia/nemotron-3-super-120b-a12b:free", {
+          source: "openrouter",
+          cost: "free",
+          billing: openRouterBilling,
+        }),
+      ],
+      {
+        model: "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+      },
+    );
+    const credits = resolveAgentBrainPromptModel(
+      [
+        catalogModel("openrouter/nvidia/nemotron-3-super-120b-a12b:free", {
+          source: "openrouter",
+          cost: "credits",
+          billing: openRouterBilling,
+        }),
+      ],
+      {
+        model: "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+      },
+    );
+
+    expect(free?.paymentSource).toBe("Free in this deployment");
+    expect(credits?.paymentSource).toBe("OpenGeni credits");
   });
 
   test("falls back when the preferred model is absent from the catalog", () => {

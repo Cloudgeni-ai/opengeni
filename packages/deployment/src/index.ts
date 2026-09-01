@@ -1449,6 +1449,14 @@ export function requiredRuntimeEnvVars(
   if (env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY) {
     vars.push("OPENGENI_VERCEL_AI_GATEWAY_API_KEY");
   }
+  for (const key of [
+    "OPENGENI_MODEL_CATALOG_SOURCE",
+    "OPENGENI_MODEL_COST_POLICY_JSON",
+    "OPENGENI_MODEL_NOTES_JSON",
+    "OPENGENI_OPENROUTER_API_KEY",
+  ] as const) {
+    if (env[key]) vars.push(key);
+  }
   if (runtimeDatabaseUrlRequired(contract)) {
     vars.push("OPENGENI_DATABASE_URL");
   }
@@ -1600,10 +1608,11 @@ export function stackPlanFor(
       helmValuesFile,
       platformDependencies,
       productOverlay,
+      env,
     ),
     verifyCommands: verifyCommands(contract, platformDependencies, productOverlay),
     destroyCommands: destroyCommands(contract, terraformRoot, platformDependencies),
-    notes: planNotes(contract),
+    notes: planNotes(contract, env),
   };
 }
 
@@ -1617,10 +1626,24 @@ export function generateRuntimeArtifacts(
   addRuntimeConfigHelmValues(helmSetValues, contract, env);
   const helmValues = nestedObjectFromHelmSetValues(helmSetValues);
   const runtimeValues = runtimeEnvValues(contract, terraformOutputs, env);
-  const missingEnvVars = runtimeValues
-    .filter((entry) => entry.required && !entry.value)
-    .map((entry) => entry.key);
-  const requiredEnvVars = runtimeValues.filter((entry) => entry.required).map((entry) => entry.key);
+  const immutableImageDigestInputs =
+    contract.runtime.platform === "kubernetes" && contract.runtime.cloud !== "local"
+      ? [
+          "OPENGENI_API_IMAGE_DIGEST",
+          "OPENGENI_WORKER_IMAGE_DIGEST",
+          "OPENGENI_WEB_IMAGE_DIGEST",
+          "OPENGENI_MIGRATIONS_IMAGE_DIGEST",
+        ]
+      : [];
+  const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
+  const missingEnvVars = [
+    ...runtimeValues.filter((entry) => entry.required && !entry.value).map((entry) => entry.key),
+    ...immutableImageDigestInputs.filter((name) => !exactSha256Digest.test(env[name] ?? "")),
+  ];
+  const requiredEnvVars = [
+    ...runtimeValues.filter((entry) => entry.required).map((entry) => entry.key),
+    ...immutableImageDigestInputs,
+  ];
   const emittedRuntimeValues = runtimeValues.filter(
     (entry) => entry.required || entry.value !== undefined,
   );
@@ -1754,13 +1777,125 @@ function externalDependencies(contract: DeploymentContract): string[] {
   return out;
 }
 
+const HELM_APPLICATION_DRAIN_ARGS = [
+  "--set api.enabled=false",
+  "--set worker.enabled=false",
+  "--set web.enabled=false",
+  "--set relay.enabled=false",
+  "--set artifactMaterializer.enabled=false",
+  "--set artifactOutboxDispatcher.enabled=false",
+  "--set terraformMcp.enabled=false",
+  "--set migrations.enabled=false",
+].join(" ");
+
+export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0389_model_catalog_and_gateway_custom_models";
+
+const MAINTENANCE_IMAGE_DIGEST_ENV = {
+  api: "OPENGENI_API_IMAGE_DIGEST",
+  worker: "OPENGENI_WORKER_IMAGE_DIGEST",
+  web: "OPENGENI_WEB_IMAGE_DIGEST",
+  migrations: "OPENGENI_MIGRATIONS_IMAGE_DIGEST",
+} as const;
+
+function validatedImageDigests(
+  env: Record<string, string | undefined>,
+  purpose: string,
+): Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string> {
+  const exactSha256Digest = /^sha256:[a-f0-9]{64}$/u;
+  const digests = Object.fromEntries(
+    Object.entries(MAINTENANCE_IMAGE_DIGEST_ENV).map(([component, name]) => {
+      const digest = env[name]?.trim() ?? "";
+      if (!exactSha256Digest.test(digest)) {
+        throw new Error(`${name} must be an exact sha256 digest for ${purpose}`);
+      }
+      return [component, digest];
+    }),
+  ) as Record<keyof typeof MAINTENANCE_IMAGE_DIGEST_ENV, string>;
+  if (digests.migrations !== digests.api) {
+    throw new Error(
+      "OPENGENI_MIGRATIONS_IMAGE_DIGEST must equal OPENGENI_API_IMAGE_DIGEST because migrations run from the API image",
+    );
+  }
+  return digests;
+}
+
+function maintenanceImageDigestHelmArgs(
+  contract: DeploymentContract,
+  terraformRoot: string | null,
+  env: Record<string, string | undefined>,
+): string {
+  if (!requestedMaintenanceCutover(env)) return "";
+  // Managed plans resolve registry digests after publishing the exact images
+  // and inject them through helm-values.generated.yaml.
+  if (terraformRoot) return "";
+  if (contract.runtime.platform !== "kubernetes") {
+    throw new Error(
+      `${MODEL_CATALOG_MAINTENANCE_CUTOVER} requires a non-local Kubernetes deployment with immutable image artifacts`,
+    );
+  }
+  // Local Kubernetes derives one content identity from the freshly built
+  // Docker image IDs and binds both Helm revisions to that persisted tag.
+  if (contract.runtime.cloud === "local") return "";
+  const digests = validatedImageDigests(env, "a maintenance cutover");
+  return Object.entries(digests)
+    .map(([component, digest]) => ` --set-string ${component}.image.digest=${digest}`)
+    .join("");
+}
+
+function requestedMaintenanceCutover(
+  env: Record<string, string | undefined>,
+): typeof MODEL_CATALOG_MAINTENANCE_CUTOVER | null {
+  const requested = env.OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER?.trim();
+  if (!requested) return null;
+  if (requested !== MODEL_CATALOG_MAINTENANCE_CUTOVER) {
+    throw new Error(`unsupported OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: ${requested}`);
+  }
+  if (env.OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED !== "true") {
+    throw new Error(
+      "OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true is required for a maintenance cutover",
+    );
+  }
+  return requested;
+}
+
+function helmApplicationDrainWaitCommand(namespace: string, release: string): string {
+  const selector =
+    `app.kubernetes.io/instance=${release},` +
+    "app.kubernetes.io/component in (api,worker-control,worker-turns,artifact-materializer,artifact-outbox-dispatcher,relay,web,terraform-mcp)";
+  return `if kubectl -n ${namespace} get pods -l '${selector}' -o name | grep -q .; then kubectl -n ${namespace} wait --for=delete pod -l '${selector}' --timeout=10m; fi`;
+}
+
+function helmApplicationDrainCommands(input: {
+  contract: DeploymentContract;
+  namespace: string;
+  release: string;
+  drainUpgradeCommand: string;
+  env: Record<string, string | undefined>;
+}): string[] {
+  const wait = helmApplicationDrainWaitCommand(input.namespace, input.release);
+  if (requestedMaintenanceCutover(input.env)) {
+    return [input.drainUpgradeCommand, wait];
+  }
+  const needsBootstrapRevision =
+    input.contract.database.mode === "inCluster" ||
+    input.contract.temporal.mode === "inCluster" ||
+    input.contract.nats.mode === "inCluster" ||
+    input.contract.objectStorage.mode === "inCluster";
+  if (!needsBootstrapRevision) return [];
+  return [
+    `if ! helm status ${input.release} --namespace ${input.namespace} >/dev/null 2>&1; then ${input.drainUpgradeCommand} && ${wait}; fi`,
+  ];
+}
+
 function deployCommands(
   contract: DeploymentContract,
   terraformRoot: string | null,
   helmValuesFile: string | null,
   platformDependencies: PlatformDependencyPlan[],
   productOverlay: ProductOverlayId,
+  env: Record<string, string | undefined>,
 ): string[] {
+  const maintenanceImageValuesArg = maintenanceImageDigestHelmArgs(contract, terraformRoot, env);
   if (contract.profile === "local-compose") {
     return ["bun run dev"];
   }
@@ -1775,6 +1910,9 @@ function deployCommands(
     const sandboxValueArgs = opensandbox
       ? " --set-string config.OPENGENI_SANDBOX_BACKEND=opensandbox --set-string config.OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local"
       : "";
+    const drainUpgradeCommand =
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} ` +
+      `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageValuesArg} --wait --timeout 10m`;
     return [
       `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
       "bun run deployment:single-node-secrets -- --out-dir .agent/generated/single-node/secrets",
@@ -1783,11 +1921,18 @@ function deployCommands(
       `kubectl -n ${namespace} create secret generic opengeni-runtime --from-env-file=.agent/generated/single-node/secrets/runtime.env${sandboxSecretArgs} --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl -n ${namespace} create secret generic opengeni-migrations --from-env-file=.agent/generated/single-node/secrets/migrations.env --dry-run=client -o yaml | kubectl apply -f -`,
       ...platformDependencies.flatMap((dependency) => dependency.installCommands),
-      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} --set api.enabled=false --set worker.enabled=false --set web.enabled=false --set relay.enabled=false --set migrations.enabled=false --wait --timeout 10m`,
-      `helm upgrade ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} --wait --timeout 15m`,
+      ...helmApplicationDrainCommands({
+        contract,
+        namespace,
+        release,
+        drainUpgradeCommand,
+        env,
+      }),
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageValuesArg} --wait --timeout 15m`,
     ];
   }
   if (contract.profile === "local-kubernetes") {
+    const maintenanceCutover = requestedMaintenanceCutover(env) !== null;
     const opensandbox = platformDependencies.find((dependency) => dependency.id === "opensandbox");
     const sandboxSecretArgs = opensandbox
       ? ' --from-literal=OPENGENI_OPENSANDBOX_API_KEY="$OPENGENI_OPENSANDBOX_API_KEY" --from-literal=OPENGENI_OPENSANDBOX_IMAGE="$OPENGENI_OPENSANDBOX_IMAGE"'
@@ -1795,15 +1940,51 @@ function deployCommands(
     const sandboxValueArgs = opensandbox
       ? " --set-string config.OPENGENI_SANDBOX_BACKEND=opensandbox --set-string config.OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local"
       : "";
+    const namespace = contract.runtime.namespace ?? "opengeni-local";
+    const release = contract.runtime.releaseName;
+    const values = helmValuesFile ?? "deploy/helm/opengeni/values.local-kubernetes.example.yaml";
+    const maintenanceImageEnvFile = ".agent/generated/local-kubernetes/maintenance-image-tag.env";
+    const maintenanceImageEnvPrefix = maintenanceCutover
+      ? `set -a && . ${maintenanceImageEnvFile} && set +a && `
+      : "";
+    const localImageTag = maintenanceCutover ? "$OPENGENI_LOCAL_K8S_IMAGE_TAG" : "local-k8s";
+    const maintenanceImageTagHelmArgs = maintenanceCutover
+      ? ["api", "worker", "web", "migrations"]
+          .map(
+            (component) => ` --set-string ${component}.image.tag="$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
+          )
+          .join("")
+      : "";
+    const drainUpgradeCommand =
+      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs} ` +
+      `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageTagHelmArgs} --wait --timeout 10m`;
+    const localImageCommands = maintenanceCutover
+      ? [
+          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s-maintenance-candidate .",
+          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s-maintenance-candidate .",
+          "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-$(git rev-parse HEAD)} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s-maintenance-candidate .",
+          `mkdir -p .agent/generated/local-kubernetes && OPENGENI_LOCAL_K8S_IMAGE_TAG="maintenance-$(printf '%s\\n' "$(docker image inspect --format '{{.Id}}' opengeni-api:local-k8s-maintenance-candidate)" "$(docker image inspect --format '{{.Id}}' opengeni-worker:local-k8s-maintenance-candidate)" "$(docker image inspect --format '{{.Id}}' opengeni-web:local-k8s-maintenance-candidate)" | git hash-object --stdin)" && printf 'OPENGENI_LOCAL_K8S_IMAGE_TAG=%s\\n' "$OPENGENI_LOCAL_K8S_IMAGE_TAG" > ${maintenanceImageEnvFile} && docker tag opengeni-api:local-k8s-maintenance-candidate "opengeni-api:$OPENGENI_LOCAL_K8S_IMAGE_TAG" && docker tag opengeni-worker:local-k8s-maintenance-candidate "opengeni-worker:$OPENGENI_LOCAL_K8S_IMAGE_TAG" && docker tag opengeni-web:local-k8s-maintenance-candidate "opengeni-web:$OPENGENI_LOCAL_K8S_IMAGE_TAG"`,
+          `${maintenanceImageEnvPrefix}kind load docker-image "opengeni-api:${localImageTag}" "opengeni-worker:${localImageTag}" "opengeni-web:${localImageTag}" --name \${KIND_CLUSTER_NAME:-opengeni-local}`,
+        ]
+      : [
+          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
+          "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
+          "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
+          "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
+        ];
     return [
-      "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
-      "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
-      "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
-      "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
-      `kubectl create namespace ${contract.runtime.namespace ?? "opengeni-local"} --dry-run=client -o yaml | kubectl apply -f -`,
-      `kubectl -n ${contract.runtime.namespace ?? "opengeni-local"} create secret generic opengeni-runtime-local-k8s --from-literal=OPENGENI_ACCESS_KEY="$OPENGENI_ACCESS_KEY" --from-literal=OPENGENI_DATABASE_URL="postgres://opengeni_app:opengeni_app@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_MIGRATIONS_DATABASE_URL="postgres://opengeni:opengeni@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_APP_DATABASE_USER=opengeni_app --from-literal=OPENGENI_APP_DATABASE_PASSWORD=opengeni_app${sandboxSecretArgs} --dry-run=client -o yaml | kubectl apply -f -`,
+      ...localImageCommands,
+      `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
+      `kubectl -n ${namespace} create secret generic opengeni-runtime-local-k8s --from-literal=OPENGENI_ACCESS_KEY="$OPENGENI_ACCESS_KEY" --from-literal=OPENGENI_DATABASE_URL="postgres://opengeni_app:opengeni_app@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_MIGRATIONS_DATABASE_URL="postgres://opengeni:opengeni@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_APP_DATABASE_USER=opengeni_app --from-literal=OPENGENI_APP_DATABASE_PASSWORD=opengeni_app${sandboxSecretArgs} --dry-run=client -o yaml | kubectl apply -f -`,
       ...platformDependencies.flatMap((dependency) => dependency.installCommands),
-      `helm upgrade --install ${contract.runtime.releaseName} deploy/helm/opengeni --namespace ${contract.runtime.namespace ?? "opengeni-local"} --values ${helmValuesFile ?? "deploy/helm/opengeni/values.local-kubernetes.example.yaml"}${sandboxValueArgs}`,
+      ...helmApplicationDrainCommands({
+        contract,
+        namespace,
+        release,
+        drainUpgradeCommand,
+        env,
+      }),
+      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageTagHelmArgs} --wait --timeout 15m`,
     ];
   }
   const commands: string[] = [
@@ -1811,6 +1992,7 @@ function deployCommands(
   ];
   if (terraformRoot) {
     const overlayArg = productOverlay === "none" ? "" : ` --product-overlay ${productOverlay}`;
+    const runtimeImageEnvPrefix = `set -a && . .agent/generated/${contract.profile}/image-digests.env && set +a && `;
     commands.unshift(
       `terraform -chdir=${terraformRoot} init -backend=false`,
       `terraform -chdir=${terraformRoot} plan -var-file=terraform.tfvars`,
@@ -1820,7 +2002,8 @@ function deployCommands(
       `mkdir -p .agent/generated/${contract.profile}`,
       `terraform -chdir=${terraformRoot} output -json > .agent/generated/${contract.profile}/terraform-output.json`,
       ...imageBuildPushCommands(contract, terraformRoot),
-      `OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" bun run deployment:runtime-artifacts -- --profile ${contract.profile}${overlayArg} --terraform-output .agent/generated/${contract.profile}/terraform-output.json --out-dir .agent/generated/${contract.profile}`,
+      imageDigestResolutionCommand(contract, terraformRoot),
+      `${runtimeImageEnvPrefix}OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" bun run deployment:runtime-artifacts -- --profile ${contract.profile}${overlayArg} --terraform-output .agent/generated/${contract.profile}/terraform-output.json --out-dir .agent/generated/${contract.profile}`,
       `kubectl -n ${contract.runtime.namespace ?? "opengeni"} create secret generic opengeni-runtime --from-env-file=.agent/generated/${contract.profile}/runtime.env --dry-run=client -o yaml | kubectl apply -f -`,
     );
   }
@@ -1831,8 +2014,20 @@ function deployCommands(
     ? ` --values .agent/generated/${contract.profile}/helm-values.generated.yaml`
     : "";
   const valuesArg = `${helmValuesFile ? ` --values ${helmValuesFile}` : ""}${generatedValuesArg}`;
+  const release = contract.runtime.releaseName;
+  const namespace = contract.runtime.namespace ?? "opengeni";
+  const drainUpgradeCommand =
+    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg} ` +
+    `${HELM_APPLICATION_DRAIN_ARGS}${maintenanceImageValuesArg} --wait --timeout 15m`;
   commands.push(
-    `helm upgrade --install ${contract.runtime.releaseName} deploy/helm/opengeni --namespace ${contract.runtime.namespace ?? "opengeni"}${valuesArg}`,
+    ...helmApplicationDrainCommands({
+      contract,
+      namespace,
+      release,
+      drainUpgradeCommand,
+      env,
+    }),
+    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg}${maintenanceImageValuesArg} --wait --timeout 15m`,
   );
   return commands;
 }
@@ -1884,6 +2079,46 @@ function imageBuildPushCommands(contract: DeploymentContract, terraformRoot: str
     ];
   }
   return [];
+}
+
+function imageDigestResolutionCommand(contract: DeploymentContract, terraformRoot: string): string {
+  const output = `.agent/generated/${contract.profile}/image-digests.env`;
+  const writeEnv =
+    `umask 077 && { printf 'OPENGENI_API_IMAGE_DIGEST=%s\\n' "$OPENGENI_API_IMAGE_DIGEST"; ` +
+    `printf 'OPENGENI_WORKER_IMAGE_DIGEST=%s\\n' "$OPENGENI_WORKER_IMAGE_DIGEST"; ` +
+    `printf 'OPENGENI_WEB_IMAGE_DIGEST=%s\\n' "$OPENGENI_WEB_IMAGE_DIGEST"; ` +
+    `printf 'OPENGENI_MIGRATIONS_IMAGE_DIGEST=%s\\n' "$OPENGENI_API_IMAGE_DIGEST"; } > ${output}`;
+  if (contract.runtime.cloud === "azure") {
+    return (
+      `ACR_LOGIN_SERVER="$(terraform -chdir=${terraformRoot} output -raw acr_login_server)" && ` +
+      `ACR_NAME="\${ACR_LOGIN_SERVER%%.*}" && OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" && ` +
+      `OPENGENI_API_IMAGE_DIGEST="$(az acr repository show --name "$ACR_NAME" --image "opengeni-api:$OPENGENI_IMAGE_TAG" --query digest -o tsv)" && ` +
+      `OPENGENI_WORKER_IMAGE_DIGEST="$(az acr repository show --name "$ACR_NAME" --image "opengeni-worker:$OPENGENI_IMAGE_TAG" --query digest -o tsv)" && ` +
+      `OPENGENI_WEB_IMAGE_DIGEST="$(az acr repository show --name "$ACR_NAME" --image "opengeni-web:$OPENGENI_IMAGE_TAG" --query digest -o tsv)" && ${writeEnv}`
+    );
+  }
+  if (contract.runtime.cloud === "aws") {
+    return (
+      `AWS_REGION="$(terraform -chdir=${terraformRoot} output -raw region)" && ` +
+      `API_IMAGE="$(terraform -chdir=${terraformRoot} output -json ecr_repository_urls | jq -r .api)" && ` +
+      `WORKER_IMAGE="$(terraform -chdir=${terraformRoot} output -json ecr_repository_urls | jq -r .worker)" && ` +
+      `WEB_IMAGE="$(terraform -chdir=${terraformRoot} output -json ecr_repository_urls | jq -r .web)" && ` +
+      `OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" && ` +
+      `OPENGENI_API_IMAGE_DIGEST="$(aws ecr describe-images --region "$AWS_REGION" --repository-name "\${API_IMAGE#*/}" --image-ids imageTag="$OPENGENI_IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)" && ` +
+      `OPENGENI_WORKER_IMAGE_DIGEST="$(aws ecr describe-images --region "$AWS_REGION" --repository-name "\${WORKER_IMAGE#*/}" --image-ids imageTag="$OPENGENI_IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)" && ` +
+      `OPENGENI_WEB_IMAGE_DIGEST="$(aws ecr describe-images --region "$AWS_REGION" --repository-name "\${WEB_IMAGE#*/}" --image-ids imageTag="$OPENGENI_IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)" && ${writeEnv}`
+    );
+  }
+  if (contract.runtime.cloud === "gcp") {
+    return (
+      `GCP_IMAGE_REGISTRY="$(terraform -chdir=${terraformRoot} output -json helm_set_values | jq -r '."global.imageRegistry"')" && ` +
+      `OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" && ` +
+      `OPENGENI_API_IMAGE_DIGEST="$(gcloud artifacts docker images describe "$GCP_IMAGE_REGISTRY/opengeni-api:$OPENGENI_IMAGE_TAG" --format='value(image_summary.digest)')" && ` +
+      `OPENGENI_WORKER_IMAGE_DIGEST="$(gcloud artifacts docker images describe "$GCP_IMAGE_REGISTRY/opengeni-worker:$OPENGENI_IMAGE_TAG" --format='value(image_summary.digest)')" && ` +
+      `OPENGENI_WEB_IMAGE_DIGEST="$(gcloud artifacts docker images describe "$GCP_IMAGE_REGISTRY/opengeni-web:$OPENGENI_IMAGE_TAG" --format='value(image_summary.digest)')" && ${writeEnv}`
+    );
+  }
+  throw new Error(`immutable image digest resolution is unsupported for ${contract.runtime.cloud}`);
 }
 
 function destroyCommands(
@@ -2095,7 +2330,10 @@ function usesOfficialPlatformChart(
   );
 }
 
-function planNotes(contract: DeploymentContract): string[] {
+function planNotes(
+  contract: DeploymentContract,
+  env: Record<string, string | undefined>,
+): string[] {
   const notes = [
     "Keep provider resource names, generated credentials, kubeconfigs, Terraform state, and filled tfvars in private operator-controlled storage outside the repository.",
     "Use the generated destroy commands as the baseline cleanup path for environments created from this plan.",
@@ -2125,6 +2363,11 @@ function planNotes(contract: DeploymentContract): string[] {
       "This profile is one persistent machine with no service redundancy; Kubernetes owns restart, volume, and upgrade sequencing only.",
       "Bind NodePorts to loopback and expose only the documented edge ports through the private network boundary.",
       "Create the runtime, migration, Postgres, and Garage Secrets (env keys plus garage.toml) before the two-phase Helm bootstrap.",
+    );
+  }
+  if (requestedMaintenanceCutover(env)) {
+    notes.push(
+      `This plan includes the explicit ${MODEL_CATALOG_MAINTENANCE_CUTOVER} application drain; keep the application stopped until migration 0389 and the final exact-digest upgrade succeed.`,
     );
   }
   return notes;
@@ -2419,6 +2662,9 @@ function runtimeEnvValues(
       "OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS",
       env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh,max",
     ),
+    valueEnv("OPENGENI_MODEL_CATALOG_SOURCE", env.OPENGENI_MODEL_CATALOG_SOURCE),
+    valueEnv("OPENGENI_MODEL_COST_POLICY_JSON", env.OPENGENI_MODEL_COST_POLICY_JSON),
+    valueEnv("OPENGENI_MODEL_NOTES_JSON", env.OPENGENI_MODEL_NOTES_JSON),
     ...(inferredOpenAiProvider(env) === "azure"
       ? [
           env.OPENGENI_AZURE_OPENAI_BASE_URL
@@ -2441,6 +2687,9 @@ function runtimeEnvValues(
       : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
     ...(env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY
       ? [requiredEnv("OPENGENI_VERCEL_AI_GATEWAY_API_KEY", env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY)]
+      : []),
+    ...(env.OPENGENI_OPENROUTER_API_KEY
+      ? [requiredEnv("OPENGENI_OPENROUTER_API_KEY", env.OPENGENI_OPENROUTER_API_KEY)]
       : []),
   ];
 

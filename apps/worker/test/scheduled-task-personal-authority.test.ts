@@ -6,6 +6,7 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
+  TurnExecutionPolicyV1,
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
@@ -205,13 +206,14 @@ function delegation(
   ];
 }
 
-function activities() {
+function activities(overrides: Parameters<typeof testSettings>[0] = {}) {
   return createScheduledTaskActivities(
     async () =>
       ({
         settings: testSettings({
           databaseUrl: shared!.appUrl,
           sandboxBackend: "none",
+          ...overrides,
         }),
         db: client.db,
         bus: new MemoryEventBus(),
@@ -407,6 +409,11 @@ describe("scheduled task personal MCP authority", () => {
     const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
       workspaceId: workspace.workspaceId,
       runId: run!.id,
+    });
+    expect(TurnExecutionPolicyV1.parse(accepted?.turnExecutionPolicy)).toMatchObject({
+      productModelId: "scripted-model",
+      modelSource: "session",
+      reasoningSource: "session",
     });
     const addedBeforeFresh = `fresh-default-${crypto.randomUUID()}`;
     await installDefaultMcpServer(workspace, addedBeforeFresh);
@@ -696,12 +703,14 @@ describe("scheduled task personal MCP authority", () => {
         resources: [],
         tools: [],
         metadata: {},
-        model: "xai/grok-4",
+        model: "supergrok/grok-4.6",
       },
       xaiProviderAccountAuthoritySnapshot: credential.authoritySnapshot,
       metadata: {},
     });
-    const dispatched = await activities().dispatchScheduledTaskRun({
+    const dispatched = await activities({
+      supergrokSubscriptionEnabled: true,
+    }).dispatchScheduledTaskRun({
       workspaceId: workspace.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",

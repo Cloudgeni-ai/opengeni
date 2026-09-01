@@ -12,6 +12,7 @@ import {
   type SessionTurn,
   type ToolAuthNeededPayload,
   type TurnExecutionPolicyV1,
+  type XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { startOfUtcMonth } from "./model-usage";
@@ -36,6 +37,22 @@ export function credentialSubjectIdForTurnInitiator(
   turn: Pick<SessionTurn, "source" | "initiator" | "initiatorContext">,
 ): string | undefined {
   return directPersonalConnectionSubjectId(turn);
+}
+
+export function xaiCatalogReadinessAuthority(
+  turn: {
+    initiatingHumanSubjectId: string | null;
+    xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+  },
+  directCredentialSubjectId: string | undefined,
+): {
+  subjectId: string;
+  authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+} | null {
+  const subjectId = turn.initiatingHumanSubjectId ?? directCredentialSubjectId;
+  return subjectId
+    ? { subjectId, authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot }
+    : null;
 }
 
 /**
@@ -84,11 +101,13 @@ export function shouldPublishToolAuthNeededForTurn(
 
 export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
   externallyBilled: boolean;
+  countsTowardTokenCap: boolean;
   codexSubscription: boolean;
   xaiSubscription: boolean;
 } {
   return {
     externallyBilled: policy.billing.metering === "external",
+    countsTowardTokenCap: policy.billing.upstreamPayer === "deployment",
     codexSubscription:
       policy.providerId === "codex-subscription" &&
       policy.credentialSource.kind === "connected_subscription" &&
@@ -222,10 +241,13 @@ export async function ensureRunAllowed(
   workspaceId: string,
   isExternallyBilledTurn: boolean,
   entitlements?: ActivityServices["entitlements"],
+  chargesOpenGeniCredits = !isExternallyBilledTurn,
+  countsTowardTokenCap = !isExternallyBilledTurn,
 ): Promise<void> {
-  // Externally billed turns are paid outside OpenGeni: skip the credit-balance
-  // gate and monthly token cap. The agent-run COUNT cap below is a
-  // volume/fairness quota (not a credit/cost gate) and is intentionally kept.
+  // Upstream settlement and workspace-facing cost are independent. External
+  // metering skips the token cap; free/subscription/workspace cost skips the
+  // OpenGeni credit gate. The agent-run COUNT cap below is a volume/fairness
+  // quota and is intentionally kept for every funding path.
   //
   // §7.5 P3 — host-entitlements DELEGATION (the worker half of the same seam the
   // API edge exposes). For a non-codex turn, when the host binds `entitlements`, its
@@ -239,7 +261,7 @@ export async function ensureRunAllowed(
   // idempotency-keyed writer at recordModelUsageAndDebitCredits), so a PULL host meter
   // is consulted without ever double-charging.
   if (
-    !isExternallyBilledTurn &&
+    chargesOpenGeniCredits &&
     entitlements &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
@@ -253,7 +275,7 @@ export async function ensureRunAllowed(
       throw new Error(decision.reason || "insufficient OpenGeni credits");
     }
   } else if (
-    !isExternallyBilledTurn &&
+    chargesOpenGeniCredits &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
     const balance = await getBillingBalance(db, accountId);
@@ -278,7 +300,7 @@ export async function ensureRunAllowed(
         );
       }
     }
-    if (!isExternallyBilledTurn && limits.maxMonthlyTokensPerWorkspace) {
+    if (countsTowardTokenCap && limits.maxMonthlyTokensPerWorkspace) {
       const used = await sumUsageQuantity(db, {
         workspaceId,
         eventType: "model.tokens",

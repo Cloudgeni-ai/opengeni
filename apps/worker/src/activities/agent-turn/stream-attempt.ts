@@ -911,6 +911,8 @@ export async function runTurnStreamAttempt(
           latencyMode: turnExecutionPolicy.latencyMode,
           metricProvider: streamProvider,
           externallyBilled: billingState.isExternallyBilledTurn,
+          chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+          countsTowardTokenCap: billingState.countsTowardTokenCap,
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
           emittedSourceKeys: emittedModelUsageSourceKeys,
@@ -976,6 +978,8 @@ export async function runTurnStreamAttempt(
               input.workspaceId,
               billingState.isExternallyBilledTurn,
               entitlements,
+              billingState.chargesOpenGeniCredits,
+              billingState.countsTowardTokenCap,
             );
           } catch (limitError) {
             // Capture the run state at the boundary so the budget valve in
@@ -1351,6 +1355,8 @@ export async function runTurnStreamAttempt(
               turnAttemptId: input.attemptId,
               model: turn.model,
               externallyBilled: billingState.isExternallyBilledTurn,
+              chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+              countsTowardTokenCap: billingState.countsTowardTokenCap,
               usage: aggregateUsage,
               normalizedUsage: normalizedAggregateUsage,
               sourceKey: aggregateSourceKey,
@@ -1372,6 +1378,8 @@ export async function runTurnStreamAttempt(
               sourceKey: aggregateSourceKey,
               usage: { usage: aggregateUsage },
               normalizedUsage: normalizedAggregateUsage,
+              ...(billing ? { billingPath: billing.billingPath } : {}),
+              ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
               servingAccountHash: aggregateAccountCtx.servingAccountHash,
               accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
               emittedSourceKeys: emittedModelUsageSourceKeys,

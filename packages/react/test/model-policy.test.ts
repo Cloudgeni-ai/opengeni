@@ -65,15 +65,48 @@ describe("model-policy", () => {
     expect(rows.map((row) => row.id)).toEqual(["managed"]);
   });
 
-  test("labels a connected workspace Gateway as Your Gateway", () => {
+  test("labels a connected workspace Gateway as a workspace provider", () => {
     const rows = projectPickerRows([
       catalogModel({
         id: "workspace-gateway/kimi-k3",
         label: "Kimi K3",
+        provider: "workspace-gateway",
         source: "workspace_gateway",
+        cost: "workspace",
       }),
     ]);
-    expect(rows[0]).toMatchObject({ billingClass: "byok", billingClassLabel: "Your Gateway" });
+    expect(rows[0]).toMatchObject({
+      billingClass: "byok",
+      billingClassLabel: "Workspace providers",
+    });
+    expect(payerSummaryForModel(rows[0]!.catalog)).toBe("Billed to the workspace Vercel account");
+  });
+
+  test("keeps workspace OpenRouter billing separate from deployment OpenRouter", () => {
+    const workspaceModel = catalogModel({
+      id: "workspace-openrouter/anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6",
+      provider: "workspace-openrouter",
+      providerLabel: "Workspace OpenRouter",
+      source: "openrouter",
+      cost: "workspace",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+    });
+    const deploymentModel = catalogModel({
+      id: "openrouter/anthropic/claude-sonnet-4.6:free",
+      label: "Claude Sonnet 4.6 Free",
+      provider: "openrouter",
+      providerLabel: "OpenRouter",
+      source: "openrouter",
+      cost: "free",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    });
+
+    expect(billingClassForModel(workspaceModel)).toBe("byok");
+    expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the workspace OpenRouter account");
+    expect(advancedSourceSummary(workspaceModel)).toBe("Workspace OpenRouter connection");
+    expect(billingClassForModel(deploymentModel)).toBe("external");
+    expect(payerSummaryForModel(deploymentModel)).toBe("Free in this deployment");
   });
 
   test("labels an anonymous deployment route as External", () => {
@@ -89,6 +122,60 @@ describe("model-policy", () => {
     });
     expect(advancedSourceSummary(model)).toBe("Deployment route · no authentication");
     expect(payerSummaryForModel(model)).toBe("External provider · no OpenGeni credits");
+  });
+
+  test("uses deployment cost before upstream settlement in the payer summary", () => {
+    const externallySettled = {
+      billing: { upstreamPayer: "deployment", metering: "external" },
+      source: "openrouter",
+    } as const;
+
+    expect(
+      payerSummaryForModel(
+        catalogModel({
+          id: "openrouter/model:free",
+          label: "OpenRouter model",
+          ...externallySettled,
+          cost: "free",
+        }),
+      ),
+    ).toBe("Free in this deployment");
+    expect(
+      payerSummaryForModel(
+        catalogModel({
+          id: "openrouter/model:free",
+          label: "OpenRouter model",
+          ...externallySettled,
+          cost: "credits",
+        }),
+      ),
+    ).toBe("OpenGeni credits");
+  });
+
+  test("uses explicit ownership cost labels independently of legacy billing metadata", () => {
+    expect(
+      payerSummaryForModel(
+        catalogModel({
+          id: "supergrok/grok",
+          label: "Grok",
+          source: "supergrok",
+          cost: "subscription",
+          billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+        }),
+      ),
+    ).toBe("SuperGrok subscription · external billing");
+    expect(
+      payerSummaryForModel(
+        catalogModel({
+          id: "workspace-gateway/model",
+          label: "Gateway model",
+          provider: "workspace-gateway",
+          source: "workspace_gateway",
+          cost: "workspace",
+          billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+        }),
+      ),
+    ).toBe("Billed to the workspace Vercel account");
   });
 
   test("projects curated shortLabel into picker rows", () => {

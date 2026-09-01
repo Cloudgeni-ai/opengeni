@@ -49,6 +49,7 @@ export {
   type ManagedAuthActorMutationLeaseStamp,
 } from "./managed-session";
 export * from "./transcription";
+export * from "./model-catalog";
 
 // Sandbox fleet/routing service — the closure of `domain/sessions.ts`
 // (`swapActiveSandbox` + `FleetContext`). apps/api re-imports these for its MCP

@@ -577,8 +577,10 @@ jobs:
       # Firefox is included because the impact plan can select the artifact
       # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts). WebKit is
       # included because framework-ui-parity.browser.e2e.ts launches all three
-      # critical engines. Installing only browser binaries is insufficient:
-      # each selected engine also needs its pinned host dependencies.
+      # critical engines and multi-engine product E2E files such as the Gateway
+      # settings acceptance launch it directly. Installing only browser binaries
+      # is insufficient: every selected engine also needs its pinned host
+      # dependencies.
       - name: Install pinned browser runtimes
         uses: ./.github/actions/playwright-browsers
         timeout-minutes: 17

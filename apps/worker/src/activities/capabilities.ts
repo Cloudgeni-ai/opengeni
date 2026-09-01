@@ -1,17 +1,26 @@
 import {
   environmentsEncryptionKeyBytes,
   type Settings,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   withCodexCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
   withWorkspaceGatewayCredential,
+  withWorkspaceOpenRouterCatalogProvider,
+  withWorkspaceOpenRouterCredential,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
 import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
 import {
+  getWorkspaceGatewayCustomModelForExecution,
+  getWorkspaceOpenRouterCustomModelForExecution,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
+  listWorkspaceGatewayCustomModels,
+  listWorkspaceOpenRouterCustomModels,
   workspaceCodexSubscriptionActive,
   loadWorkspaceVercelAiGatewayApiKey,
+  loadWorkspaceOpenRouterApiKey,
   type Database,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
@@ -126,10 +135,71 @@ export function withXaiSubscriptionProvider(settings: Settings): Settings {
 
 export async function settingsWithWorkspaceGatewayCredential(
   db: Database,
+  accountId: string,
   workspaceId: string,
   settings: Settings,
+  retainedProductModelId?: string | null,
 ): Promise<Settings> {
-  const catalogSettings = withWorkspaceGatewayCatalogProvider(settings);
+  const activeCustomModels = await listWorkspaceGatewayCustomModels(db, { accountId, workspaceId });
+  const retainedUpstreamModelId = retainedProductModelId?.startsWith(
+    WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  )
+    ? retainedProductModelId.slice(WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length)
+    : null;
+  const retainedCustomModel = retainedUpstreamModelId
+    ? await getWorkspaceGatewayCustomModelForExecution(db, {
+        accountId,
+        workspaceId,
+        upstreamModelId: retainedUpstreamModelId,
+      })
+    : null;
+  const customModels =
+    retainedCustomModel &&
+    !activeCustomModels.some(
+      (model) => model.upstreamModelId === retainedCustomModel.upstreamModelId,
+    )
+      ? [...activeCustomModels, retainedCustomModel]
+      : activeCustomModels;
+  const catalogSettings = withWorkspaceGatewayCatalogProvider(settings, customModels);
   const apiKey = await loadWorkspaceVercelAiGatewayApiKey(db, settings, workspaceId);
-  return apiKey ? withWorkspaceGatewayCredential(catalogSettings, apiKey) : catalogSettings;
+  return apiKey
+    ? withWorkspaceGatewayCredential(catalogSettings, apiKey, customModels)
+    : catalogSettings;
+}
+
+export async function settingsWithWorkspaceOpenRouterCredential(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  settings: Settings,
+  retainedProductModelId?: string | null,
+): Promise<Settings> {
+  const activeCustomModels = await listWorkspaceOpenRouterCustomModels(db, {
+    accountId,
+    workspaceId,
+  });
+  const retainedUpstreamModelId = retainedProductModelId?.startsWith(
+    WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
+  )
+    ? retainedProductModelId.slice(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX.length)
+    : null;
+  const retainedCustomModel = retainedUpstreamModelId
+    ? await getWorkspaceOpenRouterCustomModelForExecution(db, {
+        accountId,
+        workspaceId,
+        upstreamModelId: retainedUpstreamModelId,
+      })
+    : null;
+  const customModels =
+    retainedCustomModel &&
+    !activeCustomModels.some(
+      (model) => model.upstreamModelId === retainedCustomModel.upstreamModelId,
+    )
+      ? [...activeCustomModels, retainedCustomModel]
+      : activeCustomModels;
+  const catalogSettings = withWorkspaceOpenRouterCatalogProvider(settings, customModels);
+  const apiKey = await loadWorkspaceOpenRouterApiKey(db, settings, workspaceId);
+  return apiKey
+    ? withWorkspaceOpenRouterCredential(catalogSettings, apiKey, customModels)
+    : catalogSettings;
 }
