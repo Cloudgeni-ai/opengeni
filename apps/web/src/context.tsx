@@ -79,6 +79,11 @@ import {
   SessionChannelProjectionAuthority,
 } from "@/lib/session-pins";
 import {
+  isAuthorizedWorkspaceId,
+  workspaceNavigationPreferenceStorageId,
+  writeLastWorkspaceId,
+} from "@/lib/workspace-navigation-preference";
+import {
   buildResources,
   buildOpenGeniUiTools,
   enabledWorkspaceCapabilityMcpServers,
@@ -997,6 +1002,22 @@ export function RootRouteComponent() {
     client,
     invalidatePrincipalWorkspaceState,
   ]);
+
+  // The workspace URL remains authoritative. This browser-local preference is
+  // only the landing target for a future visit to `/`, and is namespaced by the
+  // current subject so browser-account transitions cannot inherit each other's
+  // workspace selection.
+  useEffect(() => {
+    if (!accessContext) return;
+    const workspaceId = /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? null;
+    const listedWorkspaceIds = workspaces.map((workspace) => workspace.id);
+    const grantedWorkspaceIds = accessContext.workspaceGrants.map((grant) => grant.workspaceId);
+    if (!isAuthorizedWorkspaceId(workspaceId, listedWorkspaceIds, grantedWorkspaceIds)) return;
+    writeLastWorkspaceId(
+      workspaceNavigationPreferenceStorageId(accessContext.subjectId),
+      workspaceId,
+    );
+  }, [accessContext, pathname, workspaces]);
 
   // New-chat policy follows the active workspace. Explicit composer choices
   // remain local until the route moves to another workspace or its durable
