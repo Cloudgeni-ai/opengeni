@@ -202,6 +202,7 @@ export type TurnStreamAttemptDeps = {
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
   withProviderRequestContext: <T>(fn: () => Promise<T>) => Promise<T>;
+  withSessionTitleProviderRequestContext: <T>(fn: () => Promise<T>) => Promise<T>;
   publishCompactionLiveEvents: (events: SessionEvent[]) => Promise<void>;
   publishCompactionOutcomeEvents: (events: SessionEvent[]) => Promise<void>;
   recordCompanyBrainContributionReceiptOnce: () => void;
@@ -297,6 +298,7 @@ export async function runTurnStreamAttempt(
     attachCodemodeTokenRenewal,
     attachRunCredentialRenewal,
     withProviderRequestContext,
+    withSessionTitleProviderRequestContext,
     publishCompactionLiveEvents,
     publishCompactionOutcomeEvents,
     recordCompanyBrainContributionReceiptOnce,
@@ -1720,7 +1722,7 @@ export async function runTurnStreamAttempt(
     parallelSessionTitle = startParallelSessionTitleGeneration({
       signal: runtimeCancellationSignal,
       generate: async (signal) =>
-        await withProviderRequestContext(() =>
+        await withSessionTitleProviderRequestContext(() =>
           runtime.generateSessionTitle!(runSettings, sessionTitlePrompt, {
             ...(resolvedModel
               ? {
