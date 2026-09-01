@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { getSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
+import { generateKeyPairSync } from "node:crypto";
 import { createObjectStorage, DOWNLOAD_URL_TTL_SECONDS, UPLOAD_URL_TTL_SECONDS } from "../src";
 
 describe("signed-URL TTL policy", () => {
@@ -76,7 +77,10 @@ describe("object storage adapters", () => {
         key: "files/file-id/original/image.png",
         contentType: "image/png",
       });
-      const get = await storage.createGetUrl({ key: "files/file-id/original/image.png" });
+      const get = await storage.createGetUrl({
+        key: "files/file-id/original/image.png",
+        contentDisposition: 'attachment; filename="image.png"',
+      });
       const sandboxPut = await storage.createPutUrl({
         key: "files/file-id/original/image.png",
         contentType: "image/png",
@@ -88,6 +92,9 @@ describe("object storage adapters", () => {
       });
       expect(new URL(put.url).host).toBe("storage.example.com");
       expect(new URL(get.url).host).toBe("storage.example.com");
+      expect(new URL(get.url).searchParams.get("response-content-disposition")).toBe(
+        'attachment; filename="image.png"',
+      );
       expect(new URL(sandboxPut.url).host).toBe("sandbox-storage.example.com");
       expect(new URL(sandboxGet.url).host).toBe("sandbox-storage.example.com");
 
@@ -147,8 +154,12 @@ describe("object storage adapters", () => {
       "x-ms-meta-sha256": "checksum",
     });
 
-    const get = await storage!.createGetUrl({ key: "files/file-id/original/test.txt" });
+    const get = await storage!.createGetUrl({
+      key: "files/file-id/original/test.txt",
+      contentDisposition: 'attachment; filename="test.txt"',
+    });
     expect(get.url).toContain("sp=r");
+    expect(new URL(get.url).searchParams.get("rscd")).toBe('attachment; filename="test.txt"');
   });
 
   test("creates AWS S3 storage without requiring static credentials", () => {
@@ -178,6 +189,36 @@ describe("object storage adapters", () => {
 
     expect(storage?.backend).toBe("gcs");
     expect(storage?.bucket).toBe("opengeni-files");
+  });
+
+  test("signs GCS response content disposition without provider access", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const storage = withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
+        OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
+        OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID: "opengeni-test",
+        OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON: JSON.stringify({
+          client_email: "storage-signer@opengeni-test.iam.gserviceaccount.com",
+          private_key: privateKey,
+          project_id: "opengeni-test",
+        }),
+      },
+      () => createObjectStorage(getSettings()),
+    );
+
+    const get = await storage!.createGetUrl({
+      key: "files/file-id/original/test.txt",
+      contentDisposition: 'attachment; filename="test.txt"',
+    });
+
+    expect(new URL(get.url).searchParams.get("response-content-disposition")).toBe(
+      'attachment; filename="test.txt"',
+    );
   });
 });
 

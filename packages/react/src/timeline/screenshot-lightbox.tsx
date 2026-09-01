@@ -35,6 +35,7 @@ type LightboxController = {
     downloadFilename?: string,
     controlLabels?: LightboxControlLabels,
     releaseSource?: () => void,
+    downloadUrl?: string | null,
   ) => void;
 };
 
@@ -102,6 +103,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
     caption?: string;
     label: string;
     downloadFilename?: string;
+    downloadUrl?: string | null;
     controlLabels?: LightboxControlLabels;
   } | null>(null);
   const [tokenSource, setTokenSource] = useState<HTMLElement | null>(null);
@@ -123,6 +125,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
       downloadFilename?: string,
       controlLabels?: LightboxControlLabels,
       releaseSource?: () => void,
+      downloadUrl?: string | null,
     ) => {
       sourceOwner.replace(releaseSource);
       setTokenSource(source ?? null);
@@ -131,6 +134,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
         label,
         ...(caption ? { caption } : {}),
         ...(downloadFilename ? { downloadFilename } : {}),
+        ...(downloadUrl !== undefined ? { downloadUrl } : {}),
         ...(controlLabels ? { controlLabels } : {}),
       });
     },
@@ -207,6 +211,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                       <ScreenshotLightboxControls
                         src={state.src}
                         downloadFilename={state.downloadFilename}
+                        downloadUrl={state.downloadUrl}
                         controlLabels={state.controlLabels}
                       />
                     </div>
@@ -234,17 +239,20 @@ function LightboxRoot({ children }: { children: ReactNode }) {
 export function ScreenshotLightboxControls({
   src,
   downloadFilename,
+  downloadUrl,
   controlLabels,
 }: {
   src: string;
   downloadFilename?: string | undefined;
+  downloadUrl?: string | null | undefined;
   controlLabels?: LightboxControlLabels | undefined;
 }) {
+  const resolvedDownloadUrl = downloadUrl === undefined ? src : downloadUrl;
   return (
     <div className="absolute -right-3 -top-3 flex items-center gap-2">
-      {downloadFilename ? (
+      {downloadFilename && resolvedDownloadUrl ? (
         <a
-          href={src}
+          href={resolvedDownloadUrl}
           download={downloadFilename}
           className={cn(
             "inline-flex size-9 items-center justify-center rounded-full",

@@ -5606,6 +5606,8 @@ export type FileDownloadUrlResponse = {
   expiresAt: string;
 };
 
+export type FileDownloadDisposition = "inline" | "attachment";
+
 /** Bytes accepted by the `uploadFile` helper. */
 export type FileUploadData = Blob | ArrayBuffer | Uint8Array | string;
 

@@ -687,7 +687,15 @@ const file = await client.uploadFile(workspaceId, {
   data: notes, // string | Blob | ArrayBuffer | Uint8Array
 });
 const { url } = await client.createFileDownloadUrl(workspaceId, file.id);
+const { url: attachmentUrl } = await client.createFileDownloadUrl(workspaceId, file.id, {
+  disposition: "attachment",
+});
 ```
+
+The default URL preserves the stored content type for inline previews. Request
+`disposition: "attachment"` for a separately signed URL whose provider response
+includes `Content-Disposition: attachment` with the server-sanitized filename;
+use that URL for cross-origin browser download controls.
 
 Generated-image tool results use the same workspace file authority but expose a
 closed `generated_image` receipt. Prefer a short-lived zero-copy browser URL;

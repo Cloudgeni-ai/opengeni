@@ -1,5 +1,6 @@
 export { OpenGeniClient } from "./artifact-client";
 export type {
+  CreateFileDownloadUrlOptions,
   FetchLike,
   GetSessionOptions,
   OpenGeniClientOptions,
@@ -636,6 +637,7 @@ export type {
   EntitlementValue,
   EntitlementsMode,
   FileAsset,
+  FileDownloadDisposition,
   HumanInputAnswer,
   HumanInputOption,
   HumanInputQuestion,

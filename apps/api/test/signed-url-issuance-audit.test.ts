@@ -47,7 +47,9 @@ afterAll(async () => {
 
 const SIGNED_URL = "https://storage.example.test/opaque?signature=do-not-record";
 
-function storageStub(): ObjectStorage {
+function storageStub(
+  onCreateGetUrl?: (args: Parameters<ObjectStorage["createGetUrl"]>[0]) => void,
+): ObjectStorage {
   const unavailable = async (): Promise<never> => {
     throw new Error("unexpected object-storage operation");
   };
@@ -62,7 +64,8 @@ function storageStub(): ObjectStorage {
         expiresAt: new Date(Date.now() + 900_000),
       };
     },
-    async createGetUrl() {
+    async createGetUrl(args) {
+      onCreateGetUrl?.(args);
       return { url: SIGNED_URL, expiresAt: new Date(Date.now() + 300_000) };
     },
     headFile: unavailable,
@@ -75,12 +78,12 @@ function storageStub(): ObjectStorage {
   } as unknown as ObjectStorage;
 }
 
-function routeApp(): Hono {
+function routeApp(objectStorage: ObjectStorage = storageStub()): Hono {
   const app = new Hono();
   registerFileRoutes(app, {
     settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
     db: client.db,
-    objectStorage: storageStub(),
+    objectStorage,
     managedAuth: null,
   } as unknown as ApiRouteDeps);
   return app;
@@ -165,6 +168,38 @@ describe("signed-URL issuance audit facts", () => {
     const serialized = JSON.stringify(audit!.metadata);
     expect(serialized).not.toContain("signature=do-not-record");
     expect(serialized).not.toContain(objectKey);
+  });
+
+  test("attachment download URLs use the durable server filename in the signed response", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture(["files:read"]);
+    const { fileId, objectKey } = await readyFile(workspace);
+    const createGetUrlCalls: Array<Parameters<ObjectStorage["createGetUrl"]>[0]> = [];
+    const app = routeApp(storageStub((args) => createGetUrlCalls.push(args)));
+
+    const response = await app.request(
+      `http://x/v1/workspaces/${workspace.workspaceId}/files/${fileId}/download-url?disposition=attachment`,
+      { method: "POST", headers: { authorization: workspace.authorization } },
+    );
+
+    expect(response.status).toBe(200);
+    expect(createGetUrlCalls).toEqual([
+      {
+        key: objectKey,
+        contentDisposition: 'attachment; filename="data.bin"',
+      },
+    ]);
+
+    const [audit] = await shared!.admin<Array<{ metadata: Record<string, unknown> }>>`
+      select metadata from audit_events
+      where workspace_id = ${workspace.workspaceId}
+        and action = 'file.signed_url.issued'
+      order by occurred_at desc limit 1`;
+    expect(audit?.metadata).toMatchObject({
+      fileId,
+      kind: "download",
+      disposition: "attachment",
+    });
   });
 
   test("an upload mint records file.signed_upload.issued (size + type, never key/URL)", async () => {

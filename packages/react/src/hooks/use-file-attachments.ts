@@ -44,6 +44,8 @@ export type FileAttachment = {
   previewUrl?: string | undefined;
   /** Stable SDK failure code for UI behavior that must not parse error copy. */
   errorCode?: "secure_context_required" | undefined;
+  /** Signed attachment-disposition URL for restored remote previews. */
+  downloadUrl?: string | undefined;
   /** A local or signed image URL failed to load; render the typed icon instead. */
   previewFailed?: boolean | undefined;
   error?: string | undefined;
@@ -778,6 +780,20 @@ function hydrateRemotePreview({
         ),
       );
     });
+  void createFileDownloadUrl(workspaceId, file.id, { disposition: "attachment" })
+    .then((signed) => {
+      if (restoreGeneration.current !== generation) return;
+      setAttachments((current) =>
+        current.map((attachment) =>
+          attachment.restored === true &&
+          attachment.resource &&
+          keys.has(fileResourceIdentity(attachment.resource))
+            ? { ...attachment, downloadUrl: signed.url }
+            : attachment,
+        ),
+      );
+    })
+    .catch(() => undefined);
 }
 
 function optionalGetFile(

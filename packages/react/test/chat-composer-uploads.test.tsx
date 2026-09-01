@@ -256,6 +256,47 @@ describe("ChatComposer attachments", () => {
     expect(removedResources).toEqual([1]);
   });
 
+  test("removes a visible restored repository by its original backing index", async () => {
+    const removedResources: number[] = [];
+    const restoredFile: FileAttachment = {
+      ...readyChip("hidden-file.png"),
+      id: "hidden-restored-file",
+      resource: { kind: "file", fileId: RESTORED_FILE_ID },
+      restored: true,
+    };
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer({
+          draftPersistence: "durable",
+          restoredResources: [
+            { kind: "file", fileId: RESTORED_FILE_ID },
+            { kind: "repository", uri: "https://example.com/later.git", ref: "main" },
+          ],
+          removeRestoredResource: (index) => removedResources.push(index),
+        })}
+        attachments={makeAttachments({
+          attachments: [restoredFile],
+          readyResources: [{ kind: "file", fileId: RESTORED_FILE_ID }],
+          restoreResources: () => {},
+        })}
+      />,
+    );
+
+    expect(container.textContent ?? "").toContain("example.com/later.git");
+    expect(container.querySelector('[aria-label="Remove restored resource 1"]')).toBeNull();
+    const removeRepository = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Remove restored resource 2"]',
+    );
+    expect(removeRepository).not.toBeNull();
+
+    await act(async () => {
+      removeRepository?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(removedResources).toEqual([1]);
+  });
+
   test("a non-durable composer does not clear attachments owned by its external draft hook", async () => {
     const restoredCalls: unknown[][] = [];
     const container = await mount(
@@ -301,6 +342,12 @@ describe("ChatComposer attachments", () => {
       await Promise.resolve();
     });
     expect(retained).toEqual([attachment.id]);
+  });
+
+  test("hands restored disposition URLs to the lightbox without raw signed fallback", () => {
+    expect(composerSource).toContain(
+      "attachment.restored === true ? (attachment.downloadUrl ?? null) : undefined,",
+    );
   });
 
   test("uses composer message overrides for all attachment preview accessible names", async () => {

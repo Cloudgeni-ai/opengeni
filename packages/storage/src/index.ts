@@ -61,6 +61,8 @@ export type ObjectStorage = {
     expiresInSeconds?: number;
     /** Select the network endpoint embedded in the signed URL. */
     audience?: "public" | "sandbox";
+    /** Override the provider response header without mutating stored metadata. */
+    contentDisposition?: string;
   }) => Promise<{ url: string; expiresAt: Date }>;
   headFile: (file: FileAsset) => Promise<ObjectHead>;
   /** Check provider existence without downloading object bytes. */
@@ -215,6 +217,9 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
           new GetObjectCommand({
             Bucket: settings.objectStorageBucket,
             Key: args.key,
+            ...(args.contentDisposition
+              ? { ResponseContentDisposition: args.contentDisposition }
+              : {}),
           }),
           { expiresIn },
         ),
@@ -493,6 +498,7 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
         version: "v4",
         action: "read",
         expires: expiresAt,
+        ...(args.contentDisposition ? { responseDisposition: args.contentDisposition } : {}),
       });
       return { url, expiresAt };
     },
@@ -677,6 +683,7 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
           blobName: args.key,
           permissions: BlobSASPermissions.parse("r"),
           expiresOn: expiresAt,
+          ...(args.contentDisposition ? { contentDisposition: args.contentDisposition } : {}),
         },
         sharedKey,
       ).toString();

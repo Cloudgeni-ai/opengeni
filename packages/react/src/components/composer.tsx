@@ -442,10 +442,11 @@ export function useChatComposerController({
   );
   const visibleRestoredResources = useMemo(
     () =>
-      draft?.restoredResources.filter(
-        (resource) =>
-          resource.kind !== "file" ||
-          (!hydratesRestoredFiles && !attachmentResourceKeys.has(fileResourceIdentity(resource))),
+      draft?.restoredResources.flatMap((resource, index) =>
+        resource.kind !== "file" ||
+        (!hydratesRestoredFiles && !attachmentResourceKeys.has(fileResourceIdentity(resource)))
+          ? [{ resource, index }]
+          : [],
       ) ?? [],
     [attachmentResourceKeys, draft?.restoredResources, hydratesRestoredFiles],
   );
@@ -1600,7 +1601,10 @@ function RestoredResourceChips({
   messages,
   onRemove,
 }: {
-  resources: ComposerState["restoredResources"];
+  resources: Array<{
+    resource: ComposerState["restoredResources"][number];
+    index: number;
+  }>;
   messages: ChatComposerMessages;
   onRemove: (index: number) => void;
 }) {
@@ -1609,7 +1613,7 @@ function RestoredResourceChips({
       className="flex flex-wrap gap-1.5 border-b border-og-border px-3 py-2"
       aria-label={messages.restoredResourcesLabel}
     >
-      {resources.map((resource, index) => (
+      {resources.map(({ resource, index }) => (
         <span
           key={`${resource.kind}-${resource.kind === "file" ? resource.fileId : resource.uri}`}
           className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-og-md border border-og-border bg-og-surface-2 px-2 py-1 text-og-xs text-og-fg-muted"
@@ -1757,6 +1761,7 @@ function AttachmentChips({
                       close: messages.closeAttachmentPreview,
                     },
                     releasePreview,
+                    attachment.restored === true ? (attachment.downloadUrl ?? null) : undefined,
                   );
                 }}
               >

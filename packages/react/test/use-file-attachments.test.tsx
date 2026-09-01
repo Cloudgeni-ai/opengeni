@@ -556,17 +556,18 @@ describe("useFileAttachments", () => {
   test("hydrates a durable image into one named card with a signed preview", async () => {
     const asset = fakeAsset({ id: "durable-image", filename: "durable.png", sizeBytes: 4096 });
     const getFileCalls: string[] = [];
-    const downloadCalls: string[] = [];
+    const downloadCalls: Array<{ fileId: string; disposition: "inline" | "attachment" }> = [];
     const client = fakeClient({
       uploadFile: async () => asset,
       getFile: async (_workspaceId, fileId) => {
         getFileCalls.push(fileId);
         return asset;
       },
-      createFileDownloadUrl: async (_workspaceId, fileId) => {
-        downloadCalls.push(fileId);
+      createFileDownloadUrl: async (_workspaceId, fileId, options) => {
+        const disposition = options?.disposition ?? "inline";
+        downloadCalls.push({ fileId, disposition });
         return {
-          url: "https://files.example.test/durable-image",
+          url: `https://files.example.test/durable-image/${disposition}`,
           expiresAt: "2026-08-12T12:00:00.000Z",
         };
       },
@@ -591,19 +592,26 @@ describe("useFileAttachments", () => {
       file: asset,
       resource: { kind: "file", fileId: asset.id },
       restored: true,
-      previewUrl: "https://files.example.test/durable-image",
+      previewUrl: "https://files.example.test/durable-image/inline",
+      downloadUrl: "https://files.example.test/durable-image/attachment",
     });
     expect(hook.result.current.attachments[0]?.metadataStatus).toBeUndefined();
     expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
     expect(getFileCalls).toEqual([asset.id]);
-    expect(downloadCalls).toEqual([asset.id]);
+    expect(downloadCalls).toEqual([
+      { fileId: asset.id, disposition: "inline" },
+      { fileId: asset.id, disposition: "attachment" },
+    ]);
 
     await flushing(() =>
       hook.result.current.restoreResources?.([{ kind: "file", fileId: asset.id }]),
     );
     await flush();
     expect(getFileCalls).toEqual([asset.id]);
-    expect(downloadCalls).toEqual([asset.id]);
+    expect(downloadCalls).toEqual([
+      { fileId: asset.id, disposition: "inline" },
+      { fileId: asset.id, disposition: "attachment" },
+    ]);
     await hook.unmount();
   });
 
@@ -648,7 +656,7 @@ describe("useFileAttachments", () => {
     ]);
     expect(hook.result.current.readyResources).toEqual(resources.slice(0, 2));
     expect(getFileCalls).toBe(1);
-    expect(downloadCalls).toBe(1);
+    expect(downloadCalls).toBe(2);
     await hook.unmount();
   });
 

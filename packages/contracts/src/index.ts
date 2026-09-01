@@ -4817,6 +4817,9 @@ export const FileDownloadUrlResponse = z.object({
 });
 export type FileDownloadUrlResponse = z.infer<typeof FileDownloadUrlResponse>;
 
+export const FileDownloadDisposition = z.enum(["inline", "attachment"]);
+export type FileDownloadDisposition = z.infer<typeof FileDownloadDisposition>;
+
 export const DocumentStatus = z.enum(["queued", "indexing", "ready", "failed"]);
 export type DocumentStatus = z.infer<typeof DocumentStatus>;
 

@@ -254,6 +254,7 @@ import type {
   EnableCapabilityRequest,
   EnablePackRequest,
   FileAsset,
+  FileDownloadDisposition,
   FileDownloadUrlResponse,
   GetPackResponse,
   GitHubAppInfo,
@@ -611,6 +612,11 @@ export type OpenGeniClientOptions = {
 export type OpenGeniRequestOptions = {
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
+};
+
+export type CreateFileDownloadUrlOptions = OpenGeniRequestOptions & {
+  /** Ask object storage to serve the signed URL as a browser download. */
+  disposition?: FileDownloadDisposition | undefined;
 };
 
 export type SharedSessionReadOptions = {
@@ -5971,14 +5977,16 @@ export class OpenGeniClient {
   async createFileDownloadUrl(
     workspaceId: string,
     fileId: string,
-    options: OpenGeniRequestOptions = {},
+    options: CreateFileDownloadUrlOptions = {},
   ): Promise<FileDownloadUrlResponse> {
+    const { disposition = "inline", ...requestOptions } = options;
+    const query = disposition === "attachment" ? "?disposition=attachment" : "";
     return await this.requestJson<FileDownloadUrlResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/files/${fileId}/download-url`,
+      `/v1/workspaces/${workspaceId}/files/${fileId}/download-url${query}`,
       undefined,
       {},
-      options,
+      requestOptions,
     );
   }
 

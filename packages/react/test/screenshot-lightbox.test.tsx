@@ -12,12 +12,16 @@ import { registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
-function renderControls(controlLabels?: { download?: string; close?: string }) {
+function renderControls(
+  controlLabels?: { download?: string; close?: string },
+  downloadUrl?: string | null,
+) {
   return renderToStaticMarkup(
     <Dialog.Root open>
       <ScreenshotLightboxControls
         src="blob:screenshot.png"
         downloadFilename="screenshot.png"
+        downloadUrl={downloadUrl}
         controlLabels={controlLabels}
       />
     </Dialog.Root>,
@@ -42,6 +46,25 @@ describe("ScreenshotLightboxControls", () => {
     expect(markup).toContain('aria-label="Cerrar"');
     expect(markup).not.toContain('aria-label="Download screenshot.png"');
     expect(markup).not.toContain('aria-label="Close"');
+  });
+
+  test("uses an explicit cross-origin download URL instead of the preview source", () => {
+    const markup = renderControls(
+      undefined,
+      "https://files.example.test/screenshot.png?response-content-disposition=attachment",
+    );
+
+    expect(markup).toContain(
+      'href="https://files.example.test/screenshot.png?response-content-disposition=attachment"',
+    );
+    expect(markup).not.toContain('href="blob:screenshot.png"');
+  });
+
+  test("can suppress an unsafe preview-source download fallback", () => {
+    const markup = renderControls(undefined, null);
+
+    expect(markup).not.toContain('aria-label="Download screenshot.png"');
+    expect(markup).toContain('aria-label="Close"');
   });
 });
 
