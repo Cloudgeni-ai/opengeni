@@ -8,7 +8,9 @@ import {
   createDb,
   createOrganizationModelProviderCustomModel,
   getOrganizationModelProviderConnection,
+  getOrganizationModelProviderCustomModelForExecution,
   listOrganizationModelProviderCustomModels,
+  lockActiveOrganizationModelProviderCustomModelForAdmission,
   organizationModelProviderConnectionActiveForWorkspace,
   OrganizationModelProviderConflictError,
   retireOrganizationModelProviderCustomModel,
@@ -200,6 +202,39 @@ describe("migration 0390 organization model providers", () => {
         providerKind: "openrouter",
       }),
     ).toHaveLength(1);
+    expect(
+      await lockActiveOrganizationModelProviderCustomModelForAdmission(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        providerKind: "openrouter",
+        upstreamModelId: model.upstreamModelId,
+      }),
+    ).toMatchObject({ id: model.id });
+
+    const revoked = await revokeOrganizationModelProviderConnection(client.db, {
+      organizationId: account!.id,
+      actorSubjectId: owner,
+      providerKind: "openrouter",
+      operationId: crypto.randomUUID(),
+      expectedVersion: connected.version,
+    });
+    expect(revoked).toMatchObject({ status: "revoked", version: 2 });
+    expect(
+      await lockActiveOrganizationModelProviderCustomModelForAdmission(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        providerKind: "openrouter",
+        upstreamModelId: model.upstreamModelId,
+      }),
+    ).toBeNull();
+    expect(
+      await getOrganizationModelProviderCustomModelForExecution(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        providerKind: "openrouter",
+        upstreamModelId: model.upstreamModelId,
+      }),
+    ).toMatchObject({ id: model.id });
 
     const deleteOperationId = crypto.randomUUID();
     const retired = await retireOrganizationModelProviderCustomModel(client.db, {
@@ -221,15 +256,6 @@ describe("migration 0390 organization model providers", () => {
         operationId: deleteOperationId,
       }),
     ).toEqual(retired);
-
-    const revoked = await revokeOrganizationModelProviderConnection(client.db, {
-      organizationId: account!.id,
-      actorSubjectId: owner,
-      providerKind: "openrouter",
-      operationId: crypto.randomUUID(),
-      expectedVersion: connected.version,
-    });
-    expect(revoked).toMatchObject({ status: "revoked", version: 2 });
     expect(
       await getOrganizationModelProviderConnection(client.db, {
         organizationId: account!.id,
