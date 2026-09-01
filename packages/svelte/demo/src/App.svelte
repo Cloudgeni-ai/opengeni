@@ -1,6 +1,6 @@
 <script lang="ts">
   import { OpenGeniClient } from "@opengeni/sdk";
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
   import {
     LatencyPicker,
     ModelPicker,
@@ -80,10 +80,14 @@
   let density = $state<"comfortable" | "compact">("comfortable");
   let navigationOpen = $state(false);
   let inspectorOpen = $state(false);
+  let navigationTrigger = $state<HTMLButtonElement>();
+  let inspectorTrigger = $state<HTMLButtonElement>();
 
   function closeDrawers() {
+    const trigger = navigationOpen ? navigationTrigger : inspectorOpen ? inspectorTrigger : undefined;
     navigationOpen = false;
     inspectorOpen = false;
+    if (trigger) void tick().then(() => trigger.focus({ preventScroll: true }));
   }
 
   onMount(() => {
@@ -110,6 +114,7 @@
   <header class="mission-header">
     <div class="mission-brand">
       <button
+        bind:this={navigationTrigger}
         class="mission-mobile-action og-button"
         type="button"
         aria-controls="mission-navigation"
@@ -132,6 +137,7 @@
       <button class="og-button" type="button" onclick={() => (theme = theme === "dark" ? "light" : "dark")}>{theme === "dark" ? "Light" : "Dark"}</button>
       <button class="og-button" type="button" onclick={() => (density = density === "compact" ? "comfortable" : "compact")}>{density === "compact" ? "Comfortable" : "Compact"}</button>
       <button
+        bind:this={inspectorTrigger}
         class="mission-mobile-action og-button"
         type="button"
         aria-controls="mission-inspector"

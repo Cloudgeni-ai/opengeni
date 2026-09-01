@@ -162,15 +162,9 @@ describe("Learning & autonomy", () => {
       expect(autonomous).not.toBeNull();
       await act(async () => {
         autonomous!.click();
-      });
-      const save = [...container.querySelectorAll("button")].find((button) =>
-        button.textContent?.includes("Save learning mode"),
-      );
-      expect(save).toBeDefined();
-      await act(async () => {
-        save!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
+      expect(container.textContent).not.toContain("Save learning mode");
       expect(createRevision).toHaveBeenCalledTimes(1);
       expect(createRevision).toHaveBeenCalledWith(
         workspaceId,
@@ -224,12 +218,6 @@ describe("Learning & autonomy", () => {
       const reviewFirst = container.querySelector<HTMLInputElement>('input[value="suggest"]');
       await act(async () => {
         reviewFirst!.click();
-      });
-      const save = [...container.querySelectorAll("button")].find((button) =>
-        button.textContent?.includes("Save learning mode"),
-      );
-      await act(async () => {
-        save!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       expect(createRevision).toHaveBeenCalledTimes(1);
@@ -270,10 +258,7 @@ describe("Learning & autonomy", () => {
       expect(container.textContent).toContain(
         "Workspace admin access is required to change learning policy.",
       );
-      const save = [...container.querySelectorAll("button")].find((button) =>
-        button.textContent?.includes("Save learning mode"),
-      );
-      expect(save?.disabled).toBe(true);
+      expect(container.querySelector<HTMLFieldSetElement>("fieldset")?.disabled).toBe(true);
     } finally {
       await act(async () => root.unmount());
       context.accessContext.workspaceGrants = previousGrants;

@@ -64,6 +64,69 @@ async function sessionFixture() {
 }
 
 describe("atomic deferred session initialization options (real PostgreSQL)", () => {
+  test("commits an automatic title before the ordinary initial user turn", async () => {
+    if (!client) return;
+    const { grant, session } = await sessionFixture();
+    const started = await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: { source: "agent-child-title-turn-test" },
+      initialAutomaticTitle: "Inspect child session title creation",
+    });
+
+    expect(started.events.map((event) => event.type)).toEqual([
+      "session.created",
+      "session.title_set",
+      "user.message",
+      "session.status.changed",
+      "turn.queued",
+    ]);
+    expect(started.turn).toMatchObject({ status: "queued" });
+    expect(await getSession(client.db, grant.workspaceId, session.id)).toMatchObject({
+      title: "Inspect child session title creation",
+      titleSource: "agent",
+      lastSequence: 5,
+    });
+  });
+
+  test("commits an automatic child title with the initial timeline and replays idempotently", async () => {
+    if (!client) return;
+    const { grant, session } = await sessionFixture();
+    const input = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low" as const,
+      createdEventPayload: { source: "agent-child-title-test" },
+      initialAutomaticTitle: "Repair pull request accessibility defects",
+      goal: { text: "Repair the confirmed accessibility defects." },
+      deferInitialTurn: true,
+    };
+
+    const first = await initializeSessionStartAtomically(client.db, input);
+    expect(first.events.map((event) => [event.sequence, event.type])).toEqual([
+      [1, "session.created"],
+      [2, "session.title_set"],
+      [3, "goal.set"],
+    ]);
+    expect(first.events[1]?.payload).toEqual({
+      title: "Repair pull request accessibility defects",
+      source: "agent",
+    });
+    expect(await getSession(client.db, grant.workspaceId, session.id)).toMatchObject({
+      title: "Repair pull request accessibility defects",
+      titleSource: "agent",
+      lastSequence: 3,
+    });
+
+    const replay = await initializeSessionStartAtomically(client.db, input);
+    expect(replay.changed).toBe(false);
+    expect(replay.events).toEqual([]);
+    expect(await listSessionEvents(client.db, grant.workspaceId, session.id)).toHaveLength(3);
+  });
+
   test("preserves the legacy idle/api defaults and replays idempotently", async () => {
     if (!client) return;
     const { grant, session } = await sessionFixture();

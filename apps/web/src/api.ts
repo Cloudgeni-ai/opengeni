@@ -288,7 +288,10 @@ export async function managedActorFetch(
       acceptedEpoch !== managedActorEpoch ||
       (acceptedEpoch !== null && responseEpoch !== null && responseEpoch !== acceptedEpoch);
     if (responseIsStale()) {
-      void response.body?.cancel();
+      // The stale-response AbortError below is the authoritative result.
+      // WebKit can reject native body cancellation after actor rotation; that
+      // cleanup failure must not become an unhandled page-level rejection.
+      void response.body?.cancel().catch(() => undefined);
       throw new DOMException("Ignored a response from the previous browser account", "AbortError");
     }
     if (!response.body) return response;

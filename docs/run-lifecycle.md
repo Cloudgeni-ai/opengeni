@@ -15,8 +15,16 @@ internal-update batch is processed until the agent reaches a natural stopping
 point. Human/API prompts remain the only reorderable prompt rows. The same
 compact queue surface also projects canonical pending machine inputs, attached
 to the prompt they will join or grouped as standalone incoming updates. Goals,
-schedules, child results, and lifecycle notices never impersonate human
-messages. Codex capacity recovery preserves the current logical turn directly
+child results, and lifecycle notices remain internal machine inputs. A pure
+scheduled-occurrence batch that creates a standalone scheduler-owned turn is
+the deliberate model-facing exception: its durable history item uses the `user`
+role so the model receives a fresh task boundary, with exact task/run/update ids
+and an instruction to refresh mutable external state. A scheduled occurrence
+attached to an existing human/API turn remains system-role context. The fresh
+task boundary never impersonates a human in backend authority: the turn
+initiator remains the scheduler service and its frozen causal-human,
+personal-connection, provider-account, audit, and settlement facts remain
+unchanged. Codex capacity recovery preserves the current logical turn directly
 and is neither a queue row nor an internal update. One execution attempt runs as
 one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
@@ -30,6 +38,16 @@ remains; the preview is display-only, never persisted or searched as title
 metadata, and obvious credential-, URL-, or identifier-shaped prefixes retain
 the generic marker. When the durable title changes, the client naturally yields
 to it.
+
+The first-party `session_create` tool is the bounded exception for an
+agent-created child: the manager may provide a concise semantic title, and an
+omission derives one from the delegated goal or initial message through the same
+sensitive-safe automatic-title normalizer. The title row mutation and
+`session.title_set` event commit in the child's atomic initial-state transaction,
+before its first turn can wake. Public REST/SDK creation does not gain a title
+field, and a human title still wins over every automatic write. If every child
+candidate is rejected as sensitive or unsuitable, the ordinary pending marker
+and first-turn self-heal path remain.
 
 While a session still has the pending marker, and its exact selected first-party
 tool and permission policy permits `set_session_title`, the worker projects only
@@ -499,11 +517,17 @@ catalog identity.
 
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
-turn's durable provider-recovery count rather than unrelated execution attempts.
+turn's durable consecutive provider-recovery count rather than unrelated
+execution attempts. A fenced current-attempt `agent.model.request` completion
+atomically clears that durable count with its event; only after the commit does
+the worker clear its in-memory copy. Failed requests and late/zombie completion
+events cannot reset the streak. Successful inference between transient outages
+therefore starts the next outage at the first backoff step instead of consuming
+a lifetime budget for a long-running turn.
 An explicit provider retry hint is a lower bound. Rate limits use the provider's
 `Retry-After` when present and otherwise wait 60 s; other retryable classes keep
 their existing pacing. Automatic same-turn provider/MCP recovery is finite: five
-replacement attempts may be scheduled, and a sixth retryable failure settles the
+consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
 exhaustion evidence. This is an infrastructure retry budget, not a goal,
 continuation, model-call, or run-length cap; a later human/API prompt may retry as
@@ -967,14 +991,18 @@ interruption, or a settled interruption whose exact attempt still lacks its
 quiescence receipt as control work. A fully quiesced historical interruption is
 audit evidence and cannot upgrade a later ordinary queue wake to
 `sessionControl`.
-For Agent Steer, accepting that signal is not an admission acknowledgement: if
-effective control is active while the newest `agent_steer_instruction` remains
-pending, the delivery path leaves its coalesced workflow-wake revision
-unacknowledged. The bounded outbox dispatcher can therefore redeliver across a
-workflow close or `continueAsNew`; the attempt-fenced Postgres claim consumes
-the newest instruction once, so duplicate signals cannot duplicate inference.
-A real Pause is the truthful blocker and may acknowledge the old revision;
-Resume commits a fresh revision for the preserved pending instruction.
+For every accepted human/API prompt and Agent Steer, accepting a Temporal signal
+is not an admission acknowledgement. While effective control is active, the
+delivery path leaves the current coalesced workflow-wake revision
+unacknowledged if any human/API turn remains physically queued, and leaves the
+wake unacknowledged while the newest `agent_steer_instruction` remains pending.
+An older prompt sender may still advance only its own stale revision because the
+newer coalesced revision remains outstanding. The bounded outbox dispatcher can
+therefore redeliver across a workflow close or `continueAsNew`; the
+attempt-fenced Postgres claim consumes each prompt turn or newest instruction
+once, so duplicate signals cannot duplicate inference. A real Pause is the
+truthful blocker and may acknowledge the old revision; Resume commits a fresh
+revision for preserved pending direction.
 
 Control settlement and physical cancellation are deliberately separate
 boundaries. A receipt-gated v2 workflow first atomically settles the exact

@@ -1,5 +1,54 @@
 # @opengeni/worker-bundle
 
+## 0.23.4
+
+### Patch Changes
+
+- 3589136: Release abandoned shared rig setup ownership as soon as the superseded turn proves its sandbox writers are physically quiesced.
+- Updated dependencies [3589136]
+  - @opengeni/db@3.7.4
+  - @opengeni/core@2.6.4
+  - @opengeni/documents@0.8.14
+  - @opengeni/events@0.4.12
+
+## 0.23.3
+
+### Patch Changes
+
+- 463c709: Reset provider recovery backoff after a fenced successful model request so intermittent outages cannot exhaust a long-running turn's consecutive retry budget.
+- Updated dependencies [463c709]
+  - @opengeni/db@3.7.3
+  - @opengeni/core@2.6.3
+  - @opengeni/documents@0.8.13
+  - @opengeni/events@0.4.11
+
+## 0.23.2
+
+### Patch Changes
+
+- 59b286a: Add optional Modal CPU and memory reservations and preserve them through sandbox creation, exact resume, and snapshot replacement.
+- 9b844c8: Recover Modal command starts that fail on task-router DNS before connecting, while leaving generic unavailable, HTTP-status-bearing, mixed-tool, and sandbox-shutdown failures non-retryable.
+- 4fb337b: Reconcile stale Codex quota cooldowns from authoritative live usage without clearing generic rate limits or concurrently newer refusals.
+- Updated dependencies [59b286a]
+- Updated dependencies [3a7fe2f]
+- Updated dependencies [7e67729]
+- Updated dependencies [9b844c8]
+- Updated dependencies [4fb337b]
+- Updated dependencies [478f572]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/runtime@2.0.1
+  - @opengeni/db@3.7.2
+  - @opengeni/core@2.6.2
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+  - @opengeni/documents@0.8.12
+  - @opengeni/github@0.6.7
+  - @opengeni/storage@0.2.115
+  - @opengeni/events@0.4.10
+  - @opengeni/codemode@0.4.22
+  - @opengeni/observability@0.8.14
+
 ## 0.23.1
 
 ### Patch Changes

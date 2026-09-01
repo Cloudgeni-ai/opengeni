@@ -6,6 +6,7 @@ var/
 dist/
 packages/react/demo-dist/
 packages/svelte/.svelte-kit/
+packages/svelte/.svelte-check/
 packages/svelte/demo-dist/
 !packages/artifact-kernel-wasm-*/dist/
 !packages/artifact-kernel-wasm-*/dist/**

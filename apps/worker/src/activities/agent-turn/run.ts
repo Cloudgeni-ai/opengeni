@@ -45,6 +45,7 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
 import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
+import { providerRecoveryCountAfterModelRequestPhase } from "./errors";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
@@ -599,6 +600,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         },
                       },
                     ]);
+                    attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
+                      attempt.providerRecoveryCount,
+                      event.phase,
+                    );
                   } catch (error) {
                     auditOutcome = "failed";
                     throw error;
@@ -744,6 +749,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 },
               ]);
+              attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
+                attempt.providerRecoveryCount,
+                event.phase,
+              );
             } catch (error) {
               auditOutcome = "failed";
               throw error;

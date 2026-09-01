@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.20
+
+### Patch Changes
+
+- 4fb337b: Reconcile stale Codex quota cooldowns from authoritative live usage without clearing generic rate limits or concurrently newer refusals.
+
 ## 0.2.19
 
 ### Patch Changes

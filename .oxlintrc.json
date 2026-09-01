@@ -16,6 +16,7 @@
     "dist",
     "build",
     ".output",
+    ".svelte-check",
     "packages/db/drizzle",
     "**/*.gen.ts",
     "**/*.gen.tsx"

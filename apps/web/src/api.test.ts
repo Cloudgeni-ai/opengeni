@@ -459,16 +459,25 @@ describe("web API auth helpers", () => {
 
   test("rejects mismatched server provenance even before a local rotation hint", async () => {
     const originalFetch = globalThis.fetch;
+    let cancelCalls = 0;
     globalThis.fetch = (async () =>
-      Response.json(
-        { ok: true },
+      new Response(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            cancelCalls += 1;
+            return Promise.reject(new DOMException("Fetch is aborted", "AbortError"));
+          },
+        }),
         { headers: { "x-opengeni-actor-epoch": "10" } },
       )) as unknown as typeof fetch;
     try {
       configureManagedActorEpoch("9");
       await expect(managedActorFetch("https://api.example.test/v1/access")).rejects.toMatchObject({
+        message: "Ignored a response from the previous browser account",
         name: "AbortError",
       });
+      await Promise.resolve();
+      expect(cancelCalls).toBe(1);
     } finally {
       configureManagedActorEpoch(null);
       globalThis.fetch = originalFetch;

@@ -194,7 +194,7 @@ describe("web bundle budget policy", () => {
       PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET -
         PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_MEASUREMENT,
     ).toBe(1_189);
-    expect(PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT).toBe(33);
+    expect(PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT).toBe(34);
   });
 
   test("retains the organization Codex inheritance envelope", () => {

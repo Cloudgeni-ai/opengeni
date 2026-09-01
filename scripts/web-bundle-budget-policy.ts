@@ -99,7 +99,9 @@ export const PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_MEASUREMENT = 637_787
 export const PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET = wholeKibEnvelope(
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_MEASUREMENT,
 );
-export const PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT = 33;
+// The Svelte-support merge tree keeps all byte envelopes intact while exposing
+// one additional direct-session chunk in the production manifest.
+export const PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT = 34;
 
 /** Exact organization Codex inheritance Linux/x64 Bun 1.4 measurement. */
 export const ORGANIZATION_CODEX_INHERITANCE_RAW_MEASUREMENT = 2_271_792;

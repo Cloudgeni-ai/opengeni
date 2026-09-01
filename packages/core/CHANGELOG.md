@@ -1,5 +1,46 @@
 # @opengeni/core
 
+## 2.6.4
+
+### Patch Changes
+
+- Updated dependencies [3589136]
+  - @opengeni/db@3.7.4
+  - @opengeni/documents@0.8.14
+  - @opengeni/events@0.4.12
+
+## 2.6.3
+
+### Patch Changes
+
+- Updated dependencies [463c709]
+  - @opengeni/db@3.7.3
+  - @opengeni/documents@0.8.13
+  - @opengeni/events@0.4.11
+
+## 2.6.2
+
+### Patch Changes
+
+- 3a7fe2f: Reconcile retained-process terminal settlement races without leaving completed routes pinned.
+- 478f572: Harden organization API keys with explicit credential provenance, fail-closed revocation of ambiguous legacy account keys, bounded delegation, atomic organization-key and workspace limits, and safer rotation and one-time-secret UI behavior.
+- Updated dependencies [59b286a]
+- Updated dependencies [3a7fe2f]
+- Updated dependencies [7e67729]
+- Updated dependencies [9b844c8]
+- Updated dependencies [4fb337b]
+- Updated dependencies [478f572]
+- Updated dependencies [5b9acd1]
+  - @opengeni/config@0.22.5
+  - @opengeni/runtime@2.0.1
+  - @opengeni/db@3.7.2
+  - @opengeni/codex@0.2.20
+  - @opengeni/contracts@2.9.2
+  - @opengeni/documents@0.8.12
+  - @opengeni/storage@0.2.115
+  - @opengeni/events@0.4.10
+  - @opengeni/observability@0.8.14
+
 ## 2.6.1
 
 ### Patch Changes

@@ -5,20 +5,28 @@
 import { useWorkspaceSessions } from "@opengeni/react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { SendIcon } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { rootNeedsYou } from "@/lib/needs-you";
 import { workspacePriorityPath } from "@/lib/routes";
+import { subscribeToWorkspaceSessionListChanges } from "@/lib/session-list-invalidation";
 import { cn } from "@/lib/utils";
 
 export function ForYouLink(props: { embedded?: boolean }) {
   const rail = useRail();
-  const { sessions } = useWorkspaceSessions({
+  const { sessions, refresh } = useWorkspaceSessions({
     limit: 50,
     parentSessionId: null,
     pollIntervalMs: 60_000,
   });
+  useEffect(
+    () =>
+      subscribeToWorkspaceSessionListChanges(rail.workspaceId, () => {
+        void refresh();
+      }),
+    [rail.workspaceId, refresh],
+  );
   // rootNeedsYou is the same leaf predicate buildPriorityFeed classifies its
   // blocked+broken tiers with, so the badge and the page cannot drift. The
   // full feed lib stays un-imported here on purpose (bundle clustering).

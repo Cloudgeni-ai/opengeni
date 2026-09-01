@@ -612,6 +612,126 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
   );
 
   test(
+    "an accepted human Steer wake survives transport acceptance until its queued turn is claimed",
+    async () => {
+      const grant = await testGrant(dbClient.db, "human-steer-admission");
+      const target = await createDurableSession(
+        dbClient.db,
+        grant,
+        "idle target must retain accepted human direction",
+      );
+      const promptText = `accepted human steer ${crypto.randomUUID()}`;
+      const steered = await submitTestHumanPrompt(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: target.id,
+        subjectId: grant.subjectId,
+        text: promptText,
+        resources: [],
+        tools: [],
+        operationKey: `human-steer-${crypto.randomUUID()}`,
+        delivery: "steer",
+        reasoningEffortFallback: "low",
+      });
+      const wakeRevision = steered.command.wakeRevision;
+      const taskQueue = `durable-human-steer-${crypto.randomUUID()}`;
+      const model = new ScriptedModel("accepted human Steer consumed once");
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        temporalHost: services.temporalHost,
+        temporalTaskQueue: taskQueue,
+      });
+      const temporal = new Client({ connection });
+      const workflowClient = sessionWorkflowClient(temporal, taskQueue, dbClient.db);
+      const activities = createActivityTestHarness({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+        wakeSessionWorkflow: workflowClient.wakeSessionWorkflow,
+      });
+      const scope = {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: target.id,
+        maxTurnsPerRun: 1,
+      };
+
+      // Temporal may accept both the first signal and a lost-response retry
+      // before any worker polls this queue. Transport acceptance cannot consume
+      // the durable wake while the human/API turn remains physically queued.
+      const handle = await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue,
+        workflowId: steered.turn.temporalWorkflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [scope],
+        signal: "sessionControl",
+      });
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue,
+        workflowId: steered.turn.temporalWorkflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [scope],
+        signal: "sessionControl",
+      });
+      expect(
+        await markSessionWorkflowWakeDelivered(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: target.id,
+          temporalWorkflowId: steered.turn.temporalWorkflowId,
+          wakeRevision,
+        }),
+      ).toEqual({ action: "pending_admission", blocker: "pending_prompt_turn" });
+      expect(await workflowWakeRow(admin, grant.workspaceId, target.id)).toMatchObject({
+        wakeRevision,
+        deliveredRevision: 0,
+      });
+
+      const beforeAdmissionRepair = await activities.dispatchSessionWorkflowWakes();
+      expect(beforeAdmissionRepair.failed).toBe(0);
+      expect(beforeAdmissionRepair.claimed).toBeGreaterThanOrEqual(1);
+      expect(await workflowWakeRow(admin, grant.workspaceId, target.id)).toMatchObject({
+        wakeRevision,
+        deliveredRevision: 0,
+      });
+
+      const worker = await integrationWorker(nativeConnection, taskQueue, activities);
+      const workerRun = worker.run();
+      try {
+        await handle.result();
+        expect(model.calls).toBe(1);
+        const turns = await listSessionTurns(dbClient.db, grant.workspaceId, target.id);
+        expect(turns).toHaveLength(1);
+        expect(turns[0]).toMatchObject({
+          source: "user",
+          status: "completed",
+          prompt: promptText,
+        });
+
+        await waitFor(
+          async () => {
+            await activities.dispatchSessionWorkflowWakes();
+            const row = await workflowWakeRow(admin, grant.workspaceId, target.id);
+            return row?.deliveredRevision === wakeRevision;
+          },
+          {
+            timeoutMs: 5_000,
+            intervalMs: 100,
+            describe: () => "admitted human Steer wake revision was not acknowledged",
+          },
+        );
+        expect(model.calls).toBe(1);
+      } finally {
+        worker.shutdown();
+        await workerRun;
+      }
+    },
+    integrationTimeoutMs,
+  );
+
+  test(
     "an accepted idle Agent Steer wake survives duplicate delivery and continue-as-new until one newest-direction admission",
     async () => {
       const grant = await testGrant(dbClient.db, "idle-agent-steer-admission");

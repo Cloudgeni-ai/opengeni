@@ -36,9 +36,9 @@ describe("0257 governed goal revision authority migration", () => {
     const blank = await acquireBlankTestDatabase("migration-0257-dedicated-role-input");
     if (!blank) return;
     try {
-      await expect(migrate(blank.databaseUrl, "goal_revision_scoped")).rejects.toThrow(
-        "the exact application database roles",
-      );
+      await expect(
+        migrate(blank.databaseUrl, "goal_revision_scoped", { applicationDatabaseRoles: [] }),
+      ).rejects.toThrow("Migration application database roles must contain 1-");
     } finally {
       await blank.release();
     }

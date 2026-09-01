@@ -234,6 +234,8 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       modalTokenId: "tok-id",
       modalTokenSecret: "tok-secret",
       modalAppName: "my-app",
+      modalSandboxCpu: 1,
+      modalSandboxMemoryMiB: 2048,
     });
     const client = createSandboxClient(settings) as {
       backendId: string;
@@ -243,6 +245,8 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     expect(client.options?.appName).toBe("my-app");
     expect(client.options?.tokenId).toBe("tok-id");
     expect(client.options?.tokenSecret).toBe("tok-secret");
+    expect(client.options?.cpu).toBe(1);
+    expect(client.options?.memoryMiB).toBe(2048);
     // modalTimeoutSeconds default (3600s) → ms.
     expect(client.options?.timeoutMs).toBe(3_600_000);
     // Bounded create waits come from OPENGENI_SANDBOX_WARMING_TIMEOUT_MS.

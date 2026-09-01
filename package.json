@@ -55,7 +55,6 @@
     "test:unit:shard": "bun test --max-concurrency=1 --timeout=30000",
     "test:react:clean": "bun scripts/test-react-clean.ts",
     "test:framework-ui-differential": "bun scripts/framework-ui-differential.ts",
-    "test:framework-ui-soak": "bun --no-env-file test --max-concurrency=1 ./test/e2e/framework-ui-soak.browser.e2e.ts",
     "test:framework-ui-adversarial": "bun scripts/framework-session-adversarial.ts",
     "test:react-native-hermes-bundle": "bun scripts/test-react-native-hermes-bundle.ts",
     "test:control-algebra": "OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 120000 packages/db/test/session-control-algebra.test.ts packages/db/test/session-control-plane.test.ts packages/db/test/session-control-mega-migration.test.ts",

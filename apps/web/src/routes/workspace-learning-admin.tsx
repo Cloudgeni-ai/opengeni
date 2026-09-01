@@ -39,8 +39,9 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
     setMode(activeRevision?.workspaceMode ?? "off");
   }, [activeRevision]);
 
-  const save = async (): Promise<void> => {
+  const save = async (nextMode: WorkspaceLearningMode): Promise<void> => {
     if (!canEdit || saving) return;
+    setMode(nextMode);
     setSaving(true);
     setMessage(null);
     setMutationError(null);
@@ -52,7 +53,7 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
       ).map(({ kind, id, mode: overrideMode }) => ({ kind, id, mode: overrideMode }));
       const revision = await client.createWorkspaceLearningPolicyRevision(workspaceId, {
         operationId: crypto.randomUUID(),
-        workspaceMode: mode,
+        workspaceMode: nextMode,
         sourceOverrides,
         supersedesRevisionId: history.response?.head?.revisionId ?? null,
       });
@@ -65,6 +66,7 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
       await history.reload();
       setMessage("Learning mode saved. It applies from the next agent run.");
     } catch (error) {
+      setMode(activeRevision?.workspaceMode ?? "off");
       setMutationError(error instanceof Error ? error.message : String(error));
     } finally {
       setSaving(false);
@@ -109,7 +111,7 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
                 name="learning-mode"
                 value={candidate}
                 checked={mode === candidate}
-                onChange={() => setMode(candidate)}
+                onChange={() => void save(candidate)}
               />
               {MODE_COPY[candidate].label}
             </span>
@@ -130,19 +132,15 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
           {mutationError}
         </p>
       ) : null}
-      {message ? (
+      {saving ? (
+        <p role="status" className="mt-3 text-xs text-fg-muted">
+          Saving learning mode…
+        </p>
+      ) : message ? (
         <p role="status" className="mt-3 text-xs text-status-success">
           {message}
         </p>
       ) : null}
-      <button
-        type="button"
-        className="mt-4 rounded-md bg-brand px-3 py-2 text-sm font-medium text-white disabled:opacity-60"
-        disabled={!canEdit || saving}
-        onClick={() => void save()}
-      >
-        {saving ? "Saving…" : "Save learning mode"}
-      </button>
     </section>
   );
 }

@@ -834,6 +834,13 @@ const SettingsSchema = z.object({
   // larger timeout—is what lets a session outlive one finite provider box.
   // Knob: OPENGENI_MODAL_TIMEOUT_SECONDS.
   modalTimeoutSeconds: z.coerce.number().int().positive().max(86_400).default(86_400),
+  // Optional provider reservations for every new Modal sandbox. CPU is measured
+  // in physical cores and may be fractional; memory is measured in MiB. Leave
+  // both unset to preserve Modal's provider defaults. The Agents adapter stores
+  // the resolved values in its session state so snapshot replacement and exact
+  // resume cannot silently change the reservation.
+  modalSandboxCpu: z.coerce.number().positive().optional(),
+  modalSandboxMemoryMiB: z.coerce.number().int().positive().optional(),
   modalTokenId: z.string().optional(),
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
@@ -2495,6 +2502,8 @@ export function getSettings(): Settings {
     modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
+    modalSandboxCpu: optional("OPENGENI_MODAL_SANDBOX_CPU"),
+    modalSandboxMemoryMiB: optional("OPENGENI_MODAL_SANDBOX_MEMORY_MIB"),
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
     modalTokenSecret: optional("OPENGENI_MODAL_TOKEN_SECRET"),
     modalEnvironment: optional("OPENGENI_MODAL_ENVIRONMENT"),

@@ -237,13 +237,6 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
     "@opengeni/ui",
   ],
-  "test/e2e/framework-ui-soak.browser.e2e.ts": [
-    "@opengeni/react",
-    "@opengeni/sdk",
-    "@opengeni/svelte",
-    "@opengeni/testing",
-    "@opengeni/ui",
-  ],
   "test/e2e/svelte-demo.browser.e2e.ts": ["@opengeni/sdk", "@opengeni/svelte", "@opengeni/ui"],
   "test/e2e/session-pins.browser.e2e.ts": [
     "opengeni-web",

@@ -1999,6 +1999,27 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).toBe("snapshot_filesystem");
   });
 
+  test("parses optional Modal CPU and memory reservations", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.modalSandboxCpu).toBeUndefined();
+    expect(defaults.modalSandboxMemoryMiB).toBeUndefined();
+
+    const settings = withEnv(
+      {
+        OPENGENI_MODAL_SANDBOX_CPU: "1.5",
+        OPENGENI_MODAL_SANDBOX_MEMORY_MIB: "2048",
+      },
+      () => getSettings(),
+    );
+    expect(settings.modalSandboxCpu).toBe(1.5);
+    expect(settings.modalSandboxMemoryMiB).toBe(2048);
+
+    expect(() => withEnv({ OPENGENI_MODAL_SANDBOX_CPU: "0" }, () => getSettings())).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_MODAL_SANDBOX_MEMORY_MIB: "2048.5" }, () => getSettings()),
+    ).toThrow();
+  });
+
   test("keeps sandbox artifact-runtime admission explicit and disabled by default", () => {
     expect(withEnv({}, () => getSettings()).sandboxArtifactRuntimeEnabled).toBe(false);
     expect(
