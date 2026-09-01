@@ -112,7 +112,11 @@ test("native auth-needed recovery stays host-owned and works without a pre-minte
   expect(sessionSurface).toContain(
     "<MessageTimeline controller={controllers.events.controller} composer={controllers.composer.controller} {onReconnect} />",
   );
-  expect(row).toContain("auth.actionable && onReconnect");
+  expect(row).toContain('item.authoritySource === "host" && item.authorizationUrl');
+  expect(row).toContain('item.authoritySource !== "host" && auth.actionable && onReconnect');
+  expect(row).toContain(
+    'item.authoritySource !== "host" && auth.actionable && item.authorizationUrl',
+  );
   expect(row).toContain("await onReconnect(value)");
   expect(row).toContain("auth.requiredVariables.join");
   expect(row).toContain("auth.reasonLine");

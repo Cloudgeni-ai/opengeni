@@ -253,6 +253,49 @@ describe("native Svelte Mission Control demo", () => {
     await context.close();
   }, 60_000);
 
+  test("host-owned auth renders only the trusted recovery URL", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 1200, height: 800 },
+      reducedMotion: "reduce",
+      colorScheme: "dark",
+    });
+    const page = await context.newPage();
+    const diagnostics = captureDiagnostics(page);
+    await page.goto(`${baseUrl}?auth=host-url`, { waitUntil: "networkidle" });
+    await expectMissionControlReady(page);
+
+    const authNeeded = page.locator('[data-og-kind="auth-needed"]');
+    expect(await authNeeded.getByRole("button").count()).toBe(0);
+    const recovery = authNeeded.getByRole("link", { name: "Reconnect", exact: true });
+    expect(await recovery.getAttribute("href")).toBe("https://host.example/recover");
+    expect(await page.locator("[data-reconnect-request]").count()).toBe(0);
+
+    await assertAxeClean(page);
+    expect(diagnostics).toEqual([]);
+    await context.close();
+  }, 60_000);
+
+  test("host-owned auth without a recovery URL exposes no native action", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 1200, height: 800 },
+      reducedMotion: "reduce",
+      colorScheme: "dark",
+    });
+    const page = await context.newPage();
+    const diagnostics = captureDiagnostics(page);
+    await page.goto(`${baseUrl}?auth=host-no-url`, { waitUntil: "networkidle" });
+    await expectMissionControlReady(page);
+
+    const authNeeded = page.locator('[data-og-kind="auth-needed"]');
+    expect(await authNeeded.getByRole("button").count()).toBe(0);
+    expect(await authNeeded.getByRole("link").count()).toBe(0);
+    expect(await page.locator("[data-reconnect-request]").count()).toBe(0);
+
+    await assertAxeClean(page);
+    expect(diagnostics).toEqual([]);
+    await context.close();
+  }, 60_000);
+
   test("failed tool-policy and pause mutations reconcile without silent local state", async () => {
     const context = await browser.newContext({
       viewport: { width: 1200, height: 800 },

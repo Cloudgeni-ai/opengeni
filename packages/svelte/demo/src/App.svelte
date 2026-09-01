@@ -34,6 +34,9 @@
         ...(query.get("composer") === "definitive" || query.get("composer") === "outcome-unknown"
           ? { composerFailure: query.get("composer") as "definitive" | "outcome-unknown" }
           : {}),
+        ...(query.get("auth") === "host-url" || query.get("auth") === "host-no-url"
+          ? { authAuthority: query.get("auth") as "host-url" | "host-no-url" }
+          : {}),
       });
   const sharedEvents = [] as const;
   const session = createSessionResource({

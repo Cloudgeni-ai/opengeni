@@ -30,6 +30,7 @@ export type MissionControlMockClientOptions = Readonly<{
   failControl?: boolean;
   failToolPolicy?: boolean;
   composerFailure?: "definitive" | "outcome-unknown";
+  authAuthority?: "host-url" | "host-no-url";
 }>;
 
 export class MissionControlMockClient {
@@ -80,7 +81,21 @@ export class MissionControlMockClient {
     return this.session();
   }
   async listEvents(): Promise<SessionEvent[]> {
-    return [...events];
+    if (!this.options.authAuthority) return [...events];
+    return events.map((candidate) => {
+      if (candidate.type !== "tool.auth_needed") return candidate;
+      return {
+        ...candidate,
+        payload: {
+          ...(candidate.payload as Record<string, unknown>),
+          authoritySource: "host",
+          hostReason: "refresh_failed",
+          ...(this.options.authAuthority === "host-url"
+            ? { authorizationUrl: "https://host.example/recover" }
+            : {}),
+        },
+      };
+    });
   }
   streamEvents(): AsyncIterable<SessionEvent> {
     return {

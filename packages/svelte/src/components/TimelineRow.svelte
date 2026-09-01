@@ -204,9 +204,11 @@
         <p>Needs variables: <code>{auth.requiredVariables.join(", ")}</code></p>
       {/if}
       {#if item.toolName}<p>Requested by <code>{item.toolName}</code></p>{/if}
-      {#if auth.actionable && onReconnect}
+      {#if item.authoritySource === "host" && item.authorizationUrl}
+        <a class="og-button" href={item.authorizationUrl} rel="noreferrer" target="_blank">{auth.actionLabel}</a>
+      {:else if item.authoritySource !== "host" && auth.actionable && onReconnect}
         <button class="og-button" type="button" disabled={reconnecting} onclick={() => void reconnect(item)}>{reconnecting ? "Opening…" : auth.actionLabel}</button>
-      {:else if auth.actionable && item.authorizationUrl}
+      {:else if item.authoritySource !== "host" && auth.actionable && item.authorizationUrl}
         <a class="og-button" href={item.authorizationUrl} rel="noreferrer" target="_blank">{auth.actionLabel}</a>
       {/if}
       {#if auth.followUpLine}<p class="og-timeline-row__summary">{auth.followUpLine}</p>{/if}
