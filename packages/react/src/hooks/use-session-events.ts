@@ -86,6 +86,15 @@ const NEWER_FETCH_CAP = 2;
 const OLDEST_GROUP_TARGET = 32;
 const OLDEST_FETCH_CAP = 2;
 const BOUNDARY_PAGE_CAP = 4;
+// Foreground reconciliation is intentionally semantic, not merely time-based:
+// tiny raw gaps can stay on SSE; medium raw gaps get one compact probe so a
+// token-heavy single answer is not mistaken for hundreds of visible messages;
+// only a large/complex missed window reloads the latest tail.
+const FOREGROUND_DIRECT_REPLAY_MAX_SEQUENCES = 16;
+const FOREGROUND_COMPACT_PROBE_MAX_SEQUENCES = 5_000;
+const FOREGROUND_COMPACT_CATCHUP_MAX_EVENTS = 128;
+const FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS = 16;
+const FOREGROUND_COMPACT_CATCHUP_MAX_BYTES = 512 * 1024;
 const EMPTY_EVENTS: SessionEvent[] = [];
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -177,7 +186,7 @@ export function useSessionEvents(
   const loadingLatestRef = useRef(false);
   const viewModeRef = useRef<"live" | "history">("live");
   const initialWindowLoadedRef = useRef(false);
-  const reloadLatestAfterPageResumeRef = useRef(false);
+  const reconcileAfterPageResumeRef = useRef(false);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamKeyRef = useRef<string | null>(null);
   const generationRef = useRef(0);
@@ -224,7 +233,7 @@ export function useSessionEvents(
       viewModeRef.current = "live";
       setViewMode("live");
       initialWindowLoadedRef.current = false;
-      reloadLatestAfterPageResumeRef.current = false;
+      reconcileAfterPageResumeRef.current = false;
     }
     // AbortController is advisory: custom SDK clients and async iterators may
     // ignore it and resolve/yield after cleanup. Fence every effect instance so
@@ -250,7 +259,7 @@ export function useSessionEvents(
         viewModeRef.current === "live" &&
         initialWindowLoadedRef.current
       ) {
-        reloadLatestAfterPageResumeRef.current = true;
+        reconcileAfterPageResumeRef.current = true;
       }
       setConnectionState("idle");
       return;
@@ -258,31 +267,13 @@ export function useSessionEvents(
     // History view owns a non-tip window; do not open SSE (it would replay the
     // entire gap into the browser). jumpToLatest / catching loadNewer resume live.
     if (viewMode === "history") {
-      reloadLatestAfterPageResumeRef.current = false;
+      reconcileAfterPageResumeRef.current = false;
       setConnectionState("idle");
       setInitialLoading(false);
       return;
     }
-    if (reloadLatestAfterPageResumeRef.current && !fullReplay) {
-      reloadLatestAfterPageResumeRef.current = false;
-      // This is an intentional refresh, not forward replay. Clear the rendered
-      // window so MessageTimeline re-arms its bottom-anchored bulk-load path;
-      // the latest compact tail then lands in one paint and SSE resumes from
-      // that fresh durable head. Full-replay/nonzero-after consumers retain
-      // their exact cursor semantics above.
-      eventWindowRef.current = EMPTY_EVENT_WINDOW;
-      oldestSequenceRef.current = null;
-      newestSequenceRef.current = null;
-      hasOlderRef.current = false;
-      hasNewerRef.current = false;
-      initialWindowLoadedRef.current = false;
-      streamResumeSequenceRef.current = after;
-      setEventWindow(EMPTY_EVENT_WINDOW);
-      setHasOlder(false);
-      setHasNewer(false);
-      setInitialLoading(true);
-      setError(null);
-    }
+    const reconcileForegroundResume = reconcileAfterPageResumeRef.current && !fullReplay;
+    reconcileAfterPageResumeRef.current = false;
     const controller = new AbortController();
     const isCurrent = () => generationRef.current === generation && !controller.signal.aborted;
     streamAbortRef.current = controller;
@@ -353,6 +344,65 @@ export function useSessionEvents(
 
     void (async () => {
       try {
+        if (reconcileForegroundResume) {
+          setConnectionState("connecting");
+          const cursor = streamResumeSequenceRef.current;
+          let plan: ForegroundCatchupPlan = { kind: "resume" };
+          try {
+            plan = await planForegroundCatchup(client, workspaceId, sessionId, cursor, {
+              signal: controller.signal,
+            });
+          } catch {
+            if (controller.signal.aborted) return;
+            // This read is an optimization gate, not a new availability
+            // dependency. If it fails, preserve the SDK's exact cursor replay
+            // rather than blanking a usable timeline or failing the stream.
+            plan = { kind: "resume" };
+          }
+          if (!isCurrent()) return;
+          if (plan.kind === "append") {
+            const current = eventWindowRef.current;
+            assertAppendOrder(current.events, plan.events);
+            const status = observeSessionStatus(plan.events, sessionStatusRef);
+            const next = boundBrowserSessionEventWindow([...current.events, ...plan.events]);
+            const retained = {
+              ...next,
+              truncated: current.truncated || next.truncated,
+            };
+            eventWindowRef.current = retained;
+            oldestSequenceRef.current = retained.events[0]?.sequence ?? null;
+            newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
+            lastSequenceRef.current = Math.max(lastSequenceRef.current, plan.resumeSequence);
+            streamResumeSequenceRef.current = Math.max(
+              streamResumeSequenceRef.current,
+              plan.resumeSequence,
+            );
+            if (status !== undefined) {
+              setSessionStatusProjection(status);
+            }
+            setEventWindow(retained);
+            if (retained.truncated) {
+              hasOlderRef.current = true;
+              setHasOlder(true);
+            }
+          } else if (plan.kind === "reload") {
+            // A large/complex missed window would make the foreground timeline
+            // and pinned camera chase many rapid commits. Clear once so the
+            // normal bottom-anchored bulk-load path can paint one latest tail.
+            eventWindowRef.current = EMPTY_EVENT_WINDOW;
+            oldestSequenceRef.current = null;
+            newestSequenceRef.current = null;
+            hasOlderRef.current = false;
+            hasNewerRef.current = false;
+            initialWindowLoadedRef.current = false;
+            streamResumeSequenceRef.current = after;
+            setEventWindow(EMPTY_EVENT_WINDOW);
+            setHasOlder(false);
+            setHasNewer(false);
+            setInitialLoading(true);
+            setError(null);
+          }
+        }
         if (!fullReplay && !initialWindowLoadedRef.current) {
           setConnectionState("connecting");
           // First paint is ONE compact fetch — the newest window, revealed at
@@ -1127,6 +1177,67 @@ function observeSessionStatus(
   if (!latest || latest.sequence < ref.current.sequence) return undefined;
   ref.current = latest;
   return latest.status;
+}
+
+type ForegroundCatchupPlan =
+  | { kind: "resume" }
+  | { kind: "append"; events: SessionEvent[]; resumeSequence: number }
+  | { kind: "reload" };
+
+/**
+ * Decide how a sustained hidden-tab suspension rejoins the durable event log.
+ *
+ * `lastSequence - cursor` is the exact raw durable work missed, but it is not
+ * the number of visible messages: one streaming answer can own thousands of
+ * adjacent delta rows. Small raw gaps therefore resume directly; medium gaps
+ * get one forward compact page and are judged by the browser-visible result;
+ * a page that cannot prove complete bounded coverage, or that would add too
+ * many rows/groups/bytes, reloads the latest tail instead.
+ */
+async function planForegroundCatchup(
+  client: EmbeddedSessionClientLike,
+  workspaceId: string,
+  sessionId: string,
+  cursor: number,
+  options: { signal?: AbortSignal } = {},
+): Promise<ForegroundCatchupPlan> {
+  if (options.signal?.aborted) throw abortError();
+  const session = await client.getSession(workspaceId, sessionId);
+  if (options.signal?.aborted) throw abortError();
+  const durableHead = Math.max(cursor, session.lastSequence);
+  const rawGap = durableHead - cursor;
+  if (rawGap <= FOREGROUND_DIRECT_REPLAY_MAX_SEQUENCES) {
+    return { kind: "resume" };
+  }
+  if (rawGap > FOREGROUND_COMPACT_PROBE_MAX_SEQUENCES) {
+    return { kind: "reload" };
+  }
+
+  const page = await loadNextPage(client, workspaceId, sessionId, cursor, {
+    pageSize: rawGap,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  const events = page
+    .filter((event) => eventResumeSequence(event) > cursor)
+    .map(boundBrowserLegacyEvent);
+  if (events.length === 0) {
+    return { kind: "reload" };
+  }
+  assertAscending(events);
+  const resumeSequence = maxResumeSequence(events);
+  if (resumeSequence < durableHead) {
+    // Byte/count truncation or an incomplete projection means this page cannot
+    // prove that one append reaches the head observed above.
+    return { kind: "reload" };
+  }
+  if (
+    events.length > FOREGROUND_COMPACT_CATCHUP_MAX_EVENTS ||
+    groupCount(events) > FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS ||
+    browserJsonBytes(events) > FOREGROUND_COMPACT_CATCHUP_MAX_BYTES
+  ) {
+    return { kind: "reload" };
+  }
+  return { kind: "append", events, resumeSequence };
 }
 
 type LoadedEventWindow = {

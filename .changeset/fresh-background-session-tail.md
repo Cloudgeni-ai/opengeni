@@ -2,4 +2,4 @@
 "@opengeni/react": patch
 ---
 
-Refresh the compact latest session tail after a browser tab resumes from a sustained hidden state, avoiding long foreground replay bursts and delayed scrolling to the newest messages.
+Reconcile sustained hidden-tab sessions by measuring their durable event gap: replay tiny gaps normally, append semantically small compact catch-ups in one paint, and reload the latest tail only for large or complex backlogs.
