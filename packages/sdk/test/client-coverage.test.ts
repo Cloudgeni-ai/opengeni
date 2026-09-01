@@ -1404,12 +1404,17 @@ describe("OpenGeniClient files", () => {
     );
     await client.getFile(WORKSPACE_ID, FILE_ID);
     await client.createFileDownloadUrl(WORKSPACE_ID, FILE_ID);
-    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
-      [
-        `GET /v1/workspaces/${WORKSPACE_ID}/files/${FILE_ID}`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/files/${FILE_ID}/download-url`,
-      ],
-    );
+    await client.createFileDownloadUrl(WORKSPACE_ID, FILE_ID, { disposition: "attachment" });
+    expect(
+      requests.map((request) => {
+        const url = new URL(request.url);
+        return `${request.method} ${url.pathname}${url.search}`;
+      }),
+    ).toEqual([
+      `GET /v1/workspaces/${WORKSPACE_ID}/files/${FILE_ID}`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/files/${FILE_ID}/download-url`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/files/${FILE_ID}/download-url?disposition=attachment`,
+    ]);
   });
 
   test("reads retained metadata and one authenticated bounded API range", async () => {

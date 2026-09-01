@@ -35,6 +35,7 @@ type LightboxController = {
     downloadFilename?: string,
     controlLabels?: LightboxControlLabels,
     releaseSource?: () => void,
+    resolveDownloadUrl?: (() => Promise<string | undefined>) | null,
   ) => void;
 };
 
@@ -102,6 +103,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
     caption?: string;
     label: string;
     downloadFilename?: string;
+    resolveDownloadUrl?: (() => Promise<string | undefined>) | null;
     controlLabels?: LightboxControlLabels;
   } | null>(null);
   const [tokenSource, setTokenSource] = useState<HTMLElement | null>(null);
@@ -123,6 +125,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
       downloadFilename?: string,
       controlLabels?: LightboxControlLabels,
       releaseSource?: () => void,
+      resolveDownloadUrl?: (() => Promise<string | undefined>) | null,
     ) => {
       sourceOwner.replace(releaseSource);
       setTokenSource(source ?? null);
@@ -131,6 +134,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
         label,
         ...(caption ? { caption } : {}),
         ...(downloadFilename ? { downloadFilename } : {}),
+        ...(resolveDownloadUrl !== undefined ? { resolveDownloadUrl } : {}),
         ...(controlLabels ? { controlLabels } : {}),
       });
     },
@@ -207,6 +211,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                       <ScreenshotLightboxControls
                         src={state.src}
                         downloadFilename={state.downloadFilename}
+                        resolveDownloadUrl={state.resolveDownloadUrl}
                         controlLabels={state.controlLabels}
                       />
                     </div>
@@ -234,27 +239,47 @@ function LightboxRoot({ children }: { children: ReactNode }) {
 export function ScreenshotLightboxControls({
   src,
   downloadFilename,
+  resolveDownloadUrl,
   controlLabels,
 }: {
   src: string;
   downloadFilename?: string | undefined;
+  resolveDownloadUrl?: (() => Promise<string | undefined>) | null | undefined;
   controlLabels?: LightboxControlLabels | undefined;
 }) {
+  const [downloading, setDownloading] = useState(false);
+  const canDownload = downloadFilename && resolveDownloadUrl !== null;
+  const download = useCallback(() => {
+    if (!downloadFilename || downloading) return;
+    if (resolveDownloadUrl === undefined) {
+      triggerBrowserDownload(src, downloadFilename);
+      return;
+    }
+    setDownloading(true);
+    void Promise.resolve()
+      .then(resolveDownloadUrl)
+      .then((url) => {
+        if (url) triggerBrowserDownload(url, downloadFilename);
+      })
+      .catch(() => undefined)
+      .finally(() => setDownloading(false));
+  }, [downloadFilename, downloading, resolveDownloadUrl, src]);
   return (
     <div className="absolute -right-3 -top-3 flex items-center gap-2">
-      {downloadFilename ? (
-        <a
-          href={src}
-          download={downloadFilename}
+      {canDownload ? (
+        <button
+          type="button"
+          disabled={downloading}
+          onClick={download}
           className={cn(
             "inline-flex size-9 items-center justify-center rounded-full",
             "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
-            "transition-colors hover:border-white/30 hover:text-white",
+            "transition-colors hover:border-white/30 hover:text-white disabled:cursor-wait disabled:opacity-60",
           )}
           aria-label={controlLabels?.download ?? `Download ${downloadFilename}`}
         >
           <DownloadIcon className="size-4" />
-        </a>
+        </button>
       ) : null}
       <Dialog.Close
         className={cn(
@@ -268,4 +293,16 @@ export function ScreenshotLightboxControls({
       </Dialog.Close>
     </div>
   );
+}
+
+/** Start a browser download without retaining a signed bearer URL in rendered state. */
+function triggerBrowserDownload(url: string, filename: string): void {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.rel = "noreferrer";
+  anchor.hidden = true;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
 }

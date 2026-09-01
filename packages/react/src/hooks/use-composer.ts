@@ -1,5 +1,4 @@
 import {
-  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   type ComposerDraft,
   type DraftTimelineAnnotation,
   type EffectiveControlResumeOption,
@@ -15,6 +14,7 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
+import { resourceIdentity } from "../lib/resource-identity";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerPolicy = {
@@ -2849,10 +2849,7 @@ function mergeResources(base: ResourceRef[], additions: ResourceRef[]): Resource
     // preserving the first representation keeps custom mounts and ordering
     // intact while preventing the draft and command paths from seeing
     // different duplicate counts after server normalization.
-    const key =
-      resource.kind === "file"
-        ? `file:${resource.fileId}\u0000${resource.mountPath ?? `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`}`
-        : JSON.stringify(resource);
+    const key = resourceIdentity(resource);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

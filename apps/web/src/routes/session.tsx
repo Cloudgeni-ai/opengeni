@@ -1520,9 +1520,7 @@ function SessionChatPane(props: {
     // draft, while retry keeps the original resource refs in the failed bubble.
     onSubmitted: (_text, input) => {
       attachments.removeReadyFiles(
-        (input.resources ?? []).flatMap((resource) =>
-          resource.kind === "file" ? [resource.fileId] : [],
-        ),
+        (input.resources ?? []).filter((resource) => resource.kind === "file"),
       );
       repositories.commitSent(input.resources ?? []);
     },

@@ -3,6 +3,7 @@ import {
   CreateFileUploadRequest,
   CreateFileUploadResponse,
   FileAsset,
+  FileDownloadDisposition,
   FileDownloadUrlResponse,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
@@ -436,6 +437,13 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/files/:fileId/download-url", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const parsedDisposition = FileDownloadDisposition.safeParse(
+      c.req.query("disposition") ?? "inline",
+    );
+    if (!parsedDisposition.success) {
+      throw new HTTPException(400, { message: "invalid download disposition" });
+    }
+    const disposition = parsedDisposition.data;
     if (!objectStorage) {
       throw new HTTPException(503, {
         message: "object storage is not configured",
@@ -459,7 +467,12 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!present) {
       throw new HTTPException(410, { message: "file bytes are unavailable" });
     }
-    const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    const signed = await objectStorage.createGetUrl({
+      key: file.objectKey,
+      ...(disposition === "attachment"
+        ? { contentDisposition: attachmentContentDisposition(file.safeFilename) }
+        : {}),
+    });
     await recordAuditEvent(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -470,6 +483,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       metadata: {
         fileId: file.id,
         kind: "download",
+        disposition,
         expiresAt: signed.expiresAt.toISOString(),
       },
     });
@@ -569,6 +583,10 @@ export function sanitizeFilename(filename: string): string {
     .replace(/\s+/g, " ")
     .trim();
   return safe || "file";
+}
+
+function attachmentContentDisposition(filename: string): string {
+  return `attachment; filename="${sanitizeFilename(filename)}"`;
 }
 
 /** Keep the cleanup lease internal; clients only consume terminal upload states. */

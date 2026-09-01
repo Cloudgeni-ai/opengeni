@@ -76,6 +76,7 @@ function attachments(overrides: Partial<UseFileAttachmentsResult> = {}): UseFile
     restoreReadyFiles: () => {},
     retry: () => {},
     retainPreview: () => undefined,
+    createDownloadUrl: async () => undefined,
     remove: () => {},
     removeReadyFiles: () => {},
     clear: () => {},

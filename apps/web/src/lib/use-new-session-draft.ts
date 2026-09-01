@@ -1,6 +1,7 @@
 import { stableJson } from "@opengeni/contracts";
 import type {
   FileAsset,
+  FileResourceRef,
   NewSessionDraft,
   NewSessionSelectionHistory,
   OpenGeniClient,
@@ -23,7 +24,7 @@ export type UseNewSessionDraftOptions = {
     selectionHistory: NewSessionSelectionHistory,
   ) => void;
   /** Replace finalized attachments with freshly revalidated server assets. */
-  restoreReadyFiles: (files: Iterable<FileAsset>) => void;
+  restoreReadyFiles: (files: Iterable<FileAsset>, resources?: Iterable<FileResourceRef>) => void;
   /** Revalidate non-file resource identities against the current UI catalog. */
   hydrateResources?: (resources: ResourceRef[]) => ResourceRef[] | Promise<ResourceRef[]>;
   /** Keep the first read pending until catalogs needed for hydration are ready. */
@@ -67,6 +68,7 @@ type ValidatedRemoteDraft = {
   draft: NewSessionDraft;
   editable: NewSessionDraftEditable;
   files: FileAsset[];
+  fileResources: FileResourceRef[];
 };
 
 /**
@@ -134,36 +136,33 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         ? await hydrateResources(remote.resources)
         : remote.resources;
       if (generation !== targetGeneration.current || signal.aborted) return null;
-      const seen = new Set<string>();
-      const fileRefs = hydratedResources.flatMap((resource) => {
-        if (resource.kind !== "file" || seen.has(resource.fileId)) return [];
-        seen.add(resource.fileId);
-        return [resource];
-      });
+      const fileResources = hydratedResources.filter(
+        (resource): resource is FileResourceRef => resource.kind === "file",
+      );
+      const fileIds = [...new Set(fileResources.map((resource) => resource.fileId))];
       const settled = await Promise.allSettled(
-        fileRefs.map((resource) => client.getFile(workspaceId, resource.fileId, { signal })),
+        fileIds.map((fileId) => client.getFile(workspaceId, fileId, { signal })),
       );
       if (generation !== targetGeneration.current || signal.aborted) return null;
       const files = settled.flatMap((result, index) => {
         if (result.status !== "fulfilled") return [];
         const file = result.value;
-        const expected = fileRefs[index]?.fileId;
+        const expected = fileIds[index];
         return file.id === expected && file.workspaceId === workspaceId && file.status === "ready"
           ? [file]
           : [];
       });
+      const readyFileIds = new Set(files.map((file) => file.id));
+      const readyFileResources = fileResources.filter((resource) =>
+        readyFileIds.has(resource.fileId),
+      );
       return {
         draft: remote,
         editable: {
           text: remote.text,
           resources: [
             ...hydratedResources.filter((resource) => resource.kind === "repository"),
-            ...files.map(
-              (file): ResourceRef => ({
-                kind: "file",
-                fileId: file.id,
-              }),
-            ),
+            ...readyFileResources,
           ],
           tools: remote.tools,
           toolsProvided: remote.toolsProvided,
@@ -173,6 +172,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           options: remote.options,
         },
         files,
+        fileResources: readyFileResources,
       };
     },
     [client, hydrateResources, resourceHydrationReady, workspaceId],
@@ -206,7 +206,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       setDraft(remote.draft);
       setCurrentConflict(null);
       setError(null);
-      restoreReadyFilesRef.current(remote.files);
+      restoreReadyFilesRef.current(remote.files, remote.fileResources);
       onApplyRemoteRef.current(remote.editable, remote.draft.selectionHistory);
     },
     [setCurrentConflict],

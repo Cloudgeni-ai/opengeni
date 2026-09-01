@@ -2,6 +2,7 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  DURABLE_COMPOSER_ATTACHMENTS_GZIP_BUDGET,
   EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   KIB as kib,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
@@ -385,6 +386,12 @@ const budgets = {
   // existing Codex/settings chunks. Linux/x64 Bun 1.4 measures 2,271,792 raw
   // bytes across the same 33 files. Advance only the raw whole-KiB envelope;
   // gzip, file count, initial, per-file, lazy, and CSS caps remain fixed.
+  // Durable composer attachment restoration preserves exact resource mounts
+  // and mints restored-file URLs on demand. Its exact Linux/x64 Bun 1.4
+  // production graph measures 2,281,075 raw / 639,495 gzip bytes across 32
+  // files. Advance only the whole-KiB direct-session envelopes to 2,229 KiB
+  // raw and 626 KiB gzip, retaining 1,421 and 1,529 bytes of headroom.
+  // Initial, per-file, lazy-chunk, file-count, and CSS caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
@@ -405,6 +412,7 @@ const effectiveBudgets = {
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
+    DURABLE_COMPOSER_ATTACHMENTS_GZIP_BUDGET,
     625 * kib,
   ),
   directSessionFiles: Math.max(
