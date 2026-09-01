@@ -112,8 +112,7 @@ export const OPEN_GENI_SESSION_PARITY_CAPABILITIES = {
   >
 >;
 
-export type OpenGeniSessionParityCapability =
-  keyof typeof OPEN_GENI_SESSION_PARITY_CAPABILITIES;
+export type OpenGeniSessionParityCapability = keyof typeof OPEN_GENI_SESSION_PARITY_CAPABILITIES;
 
 export function openGeniAnatomy(options: {
   component: OpenGeniComponentName;

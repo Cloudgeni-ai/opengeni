@@ -12328,63 +12328,65 @@ export const ToolAuthNeededReason = z.enum([
 ]);
 export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
 
-export const ToolAuthNeededPayload = z.object({
-  serverId: z.string().min(1),
-  toolName: z.string().min(1).nullable().optional(),
-  providerDomain: z.string().min(1),
-  provider: z.string().min(1).max(128).optional(),
-  // Embedded hosts may use an opaque connection identity; never assume an
-  // OpenGeni UUID on the public event wire.
-  connectionId: z.string().min(1).nullable().optional(),
-  /** The failed binding is owned by the embedding host, not OpenGeni's connection broker. */
-  authoritySource: z.literal("host").optional(),
-  reason: ToolAuthNeededReason,
-  /** Exact host recovery reason consumed by host-aware clients. */
-  hostReason: ToolAuthNeededReason.optional(),
-  scopes: z.array(z.string().min(1)).optional(),
-  resource: z.string().min(1).optional(),
-  selectedResources: McpConnectionResourceScopes.optional(),
-  authorizationUrl: z.string().url().optional(),
-  subjectId: z.string().min(1).nullable().optional(),
-  // A catalog recommendation is still a tool-level authorization condition:
-  // the agent may describe and request it, but only the authenticated host UI
-  // can start setup. Keeping this nested and optional preserves the established
-  // auth-needed event for ordinary failed MCP calls.
-  capability: z
-    .object({
-      id: z.string().min(1).max(512),
-      name: z.string().min(1).max(256),
-      kind: CapabilityKind,
-      source: CapabilitySource,
-      action: z.enum(["connect", "add_credentials", "enable"]),
-      rationale: z.string().min(1).max(2000),
-      requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
-    })
-    .optional(),
-}).superRefine((payload, context) => {
-  if (payload.authoritySource === "host") {
-    if (payload.reason !== "unsupported_auth") {
+export const ToolAuthNeededPayload = z
+  .object({
+    serverId: z.string().min(1),
+    toolName: z.string().min(1).nullable().optional(),
+    providerDomain: z.string().min(1),
+    provider: z.string().min(1).max(128).optional(),
+    // Embedded hosts may use an opaque connection identity; never assume an
+    // OpenGeni UUID on the public event wire.
+    connectionId: z.string().min(1).nullable().optional(),
+    /** The failed binding is owned by the embedding host, not OpenGeni's connection broker. */
+    authoritySource: z.literal("host").optional(),
+    reason: ToolAuthNeededReason,
+    /** Exact host recovery reason consumed by host-aware clients. */
+    hostReason: ToolAuthNeededReason.optional(),
+    scopes: z.array(z.string().min(1)).optional(),
+    resource: z.string().min(1).optional(),
+    selectedResources: McpConnectionResourceScopes.optional(),
+    authorizationUrl: z.string().url().optional(),
+    subjectId: z.string().min(1).nullable().optional(),
+    // A catalog recommendation is still a tool-level authorization condition:
+    // the agent may describe and request it, but only the authenticated host UI
+    // can start setup. Keeping this nested and optional preserves the established
+    // auth-needed event for ordinary failed MCP calls.
+    capability: z
+      .object({
+        id: z.string().min(1).max(512),
+        name: z.string().min(1).max(256),
+        kind: CapabilityKind,
+        source: CapabilitySource,
+        action: z.enum(["connect", "add_credentials", "enable"]),
+        rationale: z.string().min(1).max(2000),
+        requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
+      })
+      .optional(),
+  })
+  .superRefine((payload, context) => {
+    if (payload.authoritySource === "host") {
+      if (payload.reason !== "unsupported_auth") {
+        context.addIssue({
+          code: "custom",
+          message: "host auth-needed events require the legacy-safe unsupported_auth reason",
+          path: ["reason"],
+        });
+      }
+      if (!payload.hostReason) {
+        context.addIssue({
+          code: "custom",
+          message: "host auth-needed events require hostReason",
+          path: ["hostReason"],
+        });
+      }
+    } else if (payload.hostReason) {
       context.addIssue({
         code: "custom",
-        message: "host auth-needed events require the legacy-safe unsupported_auth reason",
-        path: ["reason"],
-      });
-    }
-    if (!payload.hostReason) {
-      context.addIssue({
-        code: "custom",
-        message: "host auth-needed events require hostReason",
+        message: "hostReason is reserved for host-owned auth-needed events",
         path: ["hostReason"],
       });
     }
-  } else if (payload.hostReason) {
-    context.addIssue({
-      code: "custom",
-      message: "hostReason is reserved for host-owned auth-needed events",
-      path: ["hostReason"],
-    });
-  }
-});
+  });
 export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
 
 /** A host-owned non-tool credential needed by the active run. */

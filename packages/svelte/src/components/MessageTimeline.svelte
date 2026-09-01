@@ -44,7 +44,7 @@
   let followLatest = true;
 
   $effect(() => {
-    groups.length;
+    void groups.length;
     if ($snapshot.viewMode !== "live") return;
     queueMicrotask(() => {
       if (timeline && followLatest) timeline.scrollTop = timeline.scrollHeight;

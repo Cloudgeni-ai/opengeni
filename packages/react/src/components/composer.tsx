@@ -812,7 +812,9 @@ export const Root = forwardRef<HTMLDivElement, ComposerRootProps>(function Compo
             ref={mergeRefs(controller.rootRef, responsiveRootRef, forwardedRef)}
             data-og-composer-id={controller.id}
             data-og-component="composer"
-            data-og-state={controller.sending ? "submitting" : controller.disabled ? "disabled" : "ready"}
+            data-og-state={
+              controller.sending ? "submitting" : controller.disabled ? "disabled" : "ready"
+            }
             data-og-responsive-basis={responsiveBasis}
             className={cn("og-root og-composer", className)}
             style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}

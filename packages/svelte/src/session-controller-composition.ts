@@ -77,25 +77,29 @@ export function createSessionControllerComposition(
 ): SessionSurfaceControllers {
   const common = { workspaceId: context.workspaceId, sessionId };
   const sharedEvents = [] as const;
-  const attachmentClient = features.attachments === false
-    ? undefined
-    : context.fileAttachmentClient ??
-      clientCapability<FileAttachmentClientLike>(context.client, ["uploadFile"]);
-  const goalClient = features.goal === false
-    ? undefined
-    : context.goalClient ??
-      clientCapability<GoalClientLike>(context.client, ["getGoal", "updateGoal", "deleteGoal"]);
-  const humanInputClient = features.humanInput === false
-    ? undefined
-    : context.humanInputClient ??
-      clientCapability<HumanInputSessionClientLike>(context.client, [
-        "listHumanInputRequests",
-        "submitHumanInputResponse",
-      ]);
-  const lineageClient = features.lineage === false
-    ? undefined
-    : context.lineageClient ??
-      clientCapability<SessionLineageClientLike>(context.client, ["getSessionLineage"]);
+  const attachmentClient =
+    features.attachments === false
+      ? undefined
+      : (context.fileAttachmentClient ??
+        clientCapability<FileAttachmentClientLike>(context.client, ["uploadFile"]));
+  const goalClient =
+    features.goal === false
+      ? undefined
+      : (context.goalClient ??
+        clientCapability<GoalClientLike>(context.client, ["getGoal", "updateGoal", "deleteGoal"]));
+  const humanInputClient =
+    features.humanInput === false
+      ? undefined
+      : (context.humanInputClient ??
+        clientCapability<HumanInputSessionClientLike>(context.client, [
+          "listHumanInputRequests",
+          "submitHumanInputResponse",
+        ]));
+  const lineageClient =
+    features.lineage === false
+      ? undefined
+      : (context.lineageClient ??
+        clientCapability<SessionLineageClientLike>(context.client, ["getSessionLineage"]));
   const sessionController = createSessionResourceStore({
     client: context.sessionClient ?? context.client,
     ...common,

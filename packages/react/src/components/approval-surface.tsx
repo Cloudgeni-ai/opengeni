@@ -165,7 +165,10 @@ export function ApprovalSurface({
                   ) : null}
                 </>
               )}
-              <div data-og-part="actions" className="og-approval__actions mt-3 flex flex-wrap justify-end gap-2">
+              <div
+                data-og-part="actions"
+                className="og-approval__actions mt-3 flex flex-wrap justify-end gap-2"
+              >
                 <button
                   type="button"
                   disabled={busy}

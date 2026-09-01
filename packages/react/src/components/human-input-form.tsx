@@ -262,7 +262,10 @@ function HumanInputRequestForm({
           className,
         )}
       >
-        <span data-og-part="icon" className="og-human-input__icon inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
+        <span
+          data-og-part="icon"
+          className="og-human-input__icon inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting"
+        >
           <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
         </span>
         <div className="min-w-0 flex-1">
@@ -303,9 +306,15 @@ function HumanInputRequestForm({
         className,
       )}
     >
-      <header data-og-part="header" className="og-human-input__header shrink-0 border-b border-og-status-waiting/20 px-4 py-3">
+      <header
+        data-og-part="header"
+        className="og-human-input__header shrink-0 border-b border-og-status-waiting/20 px-4 py-3"
+      >
         <div className="flex items-start gap-3">
-          <span data-og-part="icon" className="og-human-input__icon mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
+          <span
+            data-og-part="icon"
+            className="og-human-input__icon mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting"
+          >
             <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
           </span>
           <div className="min-w-0 flex-1">
@@ -364,12 +373,20 @@ function HumanInputRequestForm({
           ref={scrollRef}
           className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
         >
-          <fieldset disabled={busy} className="og-human-input__questions min-w-0 space-y-4 px-4 py-3">
+          <fieldset
+            disabled={busy}
+            className="og-human-input__questions min-w-0 space-y-4 px-4 py-3"
+          >
             {request.questions.map((question, index) => {
               if (singleQuestion) {
                 // Title already carries the question; only render the control + help extras.
                 return (
-                  <div className="og-human-input__question" data-og-part="item" key={question.id} data-human-input-question={question.id}>
+                  <div
+                    className="og-human-input__question"
+                    data-og-part="item"
+                    key={question.id}
+                    data-human-input-question={question.id}
+                  >
                     <QuestionControls
                       question={question}
                       questionNumber={null}
@@ -438,7 +455,10 @@ function HumanInputRequestForm({
         </p>
       ) : null}
 
-      <footer data-og-part="actions" className="og-human-input__actions relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]">
+      <footer
+        data-og-part="actions"
+        className="og-human-input__actions relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]"
+      >
         {request.allowSkip ? (
           <button
             type="button"

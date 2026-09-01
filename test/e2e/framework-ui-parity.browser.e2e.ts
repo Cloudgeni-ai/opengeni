@@ -410,7 +410,7 @@ type AnatomyCapture = Record<
 >;
 
 async function captureSharedAnatomy(page: Page): Promise<AnatomyCapture> {
-  return await page.evaluate((selectors) => {
+  return (await page.evaluate((selectors) => {
     const result: Record<string, unknown> = {};
     for (const [name, selector] of Object.entries(selectors)) {
       const element = document.querySelector<HTMLElement>(selector);
@@ -431,7 +431,7 @@ async function captureSharedAnatomy(page: Page): Promise<AnatomyCapture> {
       };
     }
     return result;
-  }, sharedAnatomySelectors) as AnatomyCapture;
+  }, sharedAnatomySelectors)) as AnatomyCapture;
 }
 
 async function preparePairwiseCapture(page: Page): Promise<void> {
