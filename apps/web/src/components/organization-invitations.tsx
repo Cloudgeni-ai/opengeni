@@ -58,9 +58,24 @@ export function useOrganizationInvitations(input: {
     setLoading(true);
     setError(null);
     try {
-      const result = await acceptedClient.listOrganizationInvitations({ limit: 100 });
-      if (activeClient.current !== acceptedClient || readSequence.current !== sequence) return;
-      setInvitations(result.invitations.filter((invitation) => invitation.status === "pending"));
+      const listedInvitations: OrganizationInvitation[] = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const result = await acceptedClient.listOrganizationInvitations({
+          ...(cursor === undefined ? {} : { cursor }),
+          limit: 100,
+        });
+        if (activeClient.current !== acceptedClient || readSequence.current !== sequence) return;
+        listedInvitations.push(...result.invitations);
+        const nextCursor = result.nextCursor ?? undefined;
+        if (nextCursor !== undefined && seenCursors.has(nextCursor)) {
+          throw new Error("Organization invitation pagination did not advance");
+        }
+        if (nextCursor !== undefined) seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      } while (cursor !== undefined);
+      setInvitations(listedInvitations.filter((invitation) => invitation.status === "pending"));
       setLoaded(true);
     } catch (caught) {
       if (activeClient.current !== acceptedClient || readSequence.current !== sequence) return;
