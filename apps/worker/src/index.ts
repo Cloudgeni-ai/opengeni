@@ -64,6 +64,7 @@ import {
   type TurnTaskQueueStats,
 } from "./observability-metrics";
 import {
+  resolveCatalogSettings,
   SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
   SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
@@ -804,6 +805,16 @@ export async function createOpenGeniWorkerService(
   let memoryPressureGuard: TurnWorkerMemoryPressureGuard | undefined;
 
   try {
+    const resolvedCatalog = await retryStartupDependency(
+      "model catalog",
+      () => resolveCatalogSettings(options.activityDependencies.db, settings),
+      { ...retryOptions, onRetry },
+    );
+    observability.info("OpenGeni model catalog resolved", {
+      role: options.role,
+      catalogSource: resolvedCatalog.source,
+      catalogVersion: resolvedCatalog.version,
+    });
     const needsSignaler =
       options.role === "turn" ||
       !options.activityDependencies.wakeSessionWorkflow ||
@@ -911,14 +922,18 @@ export async function createOpenGeniWorkerService(
     }
 
     if (options.http !== false) {
+      const databaseReady = dbReadyCheck(
+        options.http?.readinessDb ?? options.activityDependencies.db,
+        options.databasePosture,
+      );
       httpServer = startWorkerHttpServer({
         settings,
         observability,
         checks: {
-          db: dbReadyCheck(
-            options.http?.readinessDb ?? options.activityDependencies.db,
-            options.databasePosture,
-          ),
+          db: async () => {
+            await databaseReady();
+            await resolveCatalogSettings(options.activityDependencies.db, settings);
+          },
           nats: natsReadyCheck(options.activityDependencies.bus),
           temporal: temporalReadyCheck(workerBundle.connection),
         },

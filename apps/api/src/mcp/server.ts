@@ -155,6 +155,7 @@ import {
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
+  resolveWorkspaceCatalogSettings,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   saveWorkspaceMemoryWithSlackPublication,
@@ -1722,7 +1723,7 @@ export function buildOpenGeniMcpServer(
       async ({ id, triggerId }) => {
         const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
         if (task.action.kind === "agent_turn") {
-          await validateScheduledTaskTarget({
+          const targetSession = await validateScheduledTaskTarget({
             db: deps.db,
             sessionAuthorization: deps.sessionAuthorization,
             authorizationSurface: "first_party_mcp",
@@ -1734,8 +1735,16 @@ export function buildOpenGeniMcpServer(
             agentConfig: task.agentConfig,
             missingTargetStatus: 404,
           });
+          const catalogSourceSettings = deps.catalogSourceSettings ?? deps.settings;
+          const catalogSettings = (
+            await resolveWorkspaceCatalogSettings(deps.db, catalogSourceSettings, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              ...(targetSession ? { retainedProductModelId: targetSession.model } : {}),
+            })
+          ).settings;
           await validateScheduledTaskMachineTarget({
-            settings: deps.settings,
+            settings: catalogSettings,
             db: deps.db,
             grant,
             runMode: task.runMode,

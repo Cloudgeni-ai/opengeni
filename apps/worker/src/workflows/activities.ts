@@ -68,6 +68,21 @@ export const automationActivity = proxyActivities<Pick<typeof activities, "dispa
   },
 );
 
+/** Dispatch has a bounded retry window, but an accepted automation event must
+ * not remain durably `dispatching` after that window closes. This compensating
+ * database write is idempotent and retries without a cap until the run reaches
+ * a terminal state (or is observed as already dispatched). */
+export const automationFailureActivity = proxyActivities<
+  Pick<typeof activities, "settleAutomationRunFailure">
+>({
+  startToCloseTimeout: "2 minutes",
+  retry: {
+    initialInterval: "1 second",
+    backoffCoefficient: 2,
+    maximumInterval: "30 seconds",
+  },
+});
+
 /** Goal continuation evaluates a durable Postgres obligation at an idle
  * boundary. A transient failure gets a short retry window, then records an
  * explicit delayed outbox wake instead of relying on an unrelated mutation or

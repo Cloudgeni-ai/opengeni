@@ -54,6 +54,19 @@ describe("session control surface architecture", () => {
     expect(route).toContain("loadRetainedScreenshot={loadRetainedScreenshot}");
   });
 
+  test("keeps host-owned auth recovery out of the native connection broker", async () => {
+    const route = await source("routes/session.tsx");
+    const hostGuard = route.indexOf('if (item.authoritySource === "host")');
+    const nativeRecovery = route.indexOf("if (item.capability)", hostGuard);
+    const hostBranch = route.slice(hostGuard, nativeRecovery);
+
+    expect(hostGuard).toBeGreaterThan(-1);
+    expect(nativeRecovery).toBeGreaterThan(hostGuard);
+    expect(hostBranch).toContain("window.location.assign(item.authorizationUrl)");
+    expect(hostBranch).not.toContain("listConnections");
+    expect(hostBranch).not.toContain("startConnectionOAuth");
+  });
+
   test("routes every markdown sandbox file reference into Files without implicit publication", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("onSandboxFile={props.onOpenSandboxFile}");
@@ -94,10 +107,12 @@ describe("session control surface architecture", () => {
     expect(setupImplementation).not.toContain("<ModelPicker");
   });
 
-  test("keeps Variable Set access inside the multi-select setup instead of a status box", async () => {
-    const [route, establishedControl] = await Promise.all([
+  test("keeps Variable Sets editable at create time and beside an established composer", async () => {
+    const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
       source("routes/sessions-index.tsx"),
+      source("routes/session.tsx"),
       source("components/personal-resource-attachment-control.tsx"),
+      source("components/session/session-variable-set-picker.tsx"),
     ]);
     expect(route).toContain("Add Variable Set…");
     expect(route).toContain("<SelectedVariableSetList");
@@ -106,12 +121,9 @@ describe("session control surface architecture", () => {
     );
     expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
-    expect(route).toContain("personalResourceSendBlocker");
-    expect(route).toContain(
-      "This workspace-visible chat uses an Only me Variable Set. Confirm private credential use below before sending.",
-    );
-    expect(route).toContain("Confirm private credential or resource use before sending");
-    expect(route).toContain("messages={");
+    expect(route).toContain("will be used only for the message you send");
+    expect(route).not.toContain("personalResourceSendBlocker");
+    expect(route).not.toContain("Confirm private credential or resource use before sending");
     expect(route).not.toContain("PersonalResourceAttachmentControl");
     expect(route).not.toContain("Your resource access");
     expect(route).not.toContain("loadPersonalResourceCatalog");
@@ -137,10 +149,43 @@ describe("session control surface architecture", () => {
     );
     expect(route).toContain("Couldn’t verify the selected Variable Set or Rig");
     expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
-    expect(establishedControl).not.toContain("<fieldset");
-    expect(establishedControl).toContain("aria-labelledby={durationLabelId}");
-    expect(establishedControl).not.toContain("Your resource access");
-    expect(establishedControl).not.toContain("couldn’t check access");
+    expect(establishedRoute).toContain("<SessionVariableSetPicker");
+    expect(establishedPicker).toContain("Attach Variable Set…");
+    expect(establishedPicker).toContain("all attachments must be removed together");
+    expect(establishedPicker).toContain("The complete attachment selection can still be cleared.");
+    expect(establishedPicker).toContain("The update committed");
+    expect(establishedPicker).toContain("Retry refresh");
+    expect(establishedPicker).toContain("updateSessionVariableSets");
+    expect(establishedPicker).toContain(
+      "const visible = refreshRequired || currentIds.length > 0 || canAdd",
+    );
+    expect(establishedPicker).toContain("committedSelection?.sessionId === props.session.id &&");
+    expect(establishedRoute).toContain("const variableSetComposerBlocked =");
+    expect(establishedRoute).toContain("variableSetPickerState.saving ||");
+    expect(establishedRoute).toContain("variableSetComposerBlocked ||");
+    expect(establishedPicker).toContain("props.canControl && props.canAttach");
+    expect(
+      establishedRoute.match(
+        /canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
+      ),
+    ).toHaveLength(2);
+    expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(2);
+    expect(establishedRoute.match(/voiceActive=\{voiceActive\}/g)).toHaveLength(2);
+    expect(establishedRoute.match(/busy=\{\s*voiceActive \|\|/g)).toHaveLength(2);
+    expect(establishedRoute).toContain(
+      "const [variableSetPickerState, setVariableSetPickerState] =",
+    );
+    expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(2);
+    expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(2);
+    expect(establishedPicker).toContain(
+      "const busy = props.busy || props.goalActive || props.voiceActive",
+    );
+    expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
+    expect(establishedControl).not.toContain('value: "once"');
+    expect(establishedControl).not.toContain('value: "session"');
+    expect(establishedControl).not.toContain('value: "always"');
+    expect(establishedControl).not.toContain('type="checkbox"');
+    expect(establishedControl).toContain("is available in this private session");
   });
 
   test("announces pin results through an independent live region", async () => {

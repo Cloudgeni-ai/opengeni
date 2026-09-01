@@ -1054,6 +1054,69 @@ describe("rig provider image build ledger", () => {
     expect(orphanClaims.some((claim) => claim.id === artifact.artifactId)).toBe(true);
   });
 
+  test("ready v3 change provider images protect their artifacts from GC", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "provider-image-change-gc-fence",
+      initialVersion: { setupScript: "echo base" },
+    });
+    const change = await createRigChange(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "definition_edit",
+      payload: { setupScript: "echo candidate" },
+    });
+    const verifying = await beginRigChangeVerificationAttempt(db, ws.workspaceId, change.id, {
+      startedAt: "2026-09-01T10:00:00.000Z",
+    });
+    const artifact = await registerRigProviderImageArtifact(ws, change.id, "im-rig-change");
+    const image = rigProviderImage({
+      status: "ready",
+      imageId: "im-rig-change",
+      artifactId: artifact.artifactId,
+      providerBindingKeyHash: artifact.providerBindingKeyHash,
+      provenance: {
+        kind: "rig_verification",
+        targetKind: "change",
+        targetId: change.id,
+      },
+    });
+    await updateRigChangeStatus(db, ws.workspaceId, change.id, {
+      status: "proposed",
+      verification: {
+        attemptId: verifying.verification?.attemptId,
+        executionGeneration: verifying.verification?.executionGeneration ?? 1,
+        passed: true,
+        providerImage: image,
+        platformSurfaceValidation: surfaceReceipt(change.id, image),
+      },
+    });
+
+    expect(
+      await markSandboxCheckpointArtifactDeletePending(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        artifactId: artifact.artifactId,
+        reason: "must remain protected while the change is promotable",
+      }),
+    ).toBe(false);
+
+    await updateRigChangeStatus(db, ws.workspaceId, change.id, { status: "rejected" });
+    expect(
+      await markSandboxCheckpointArtifactDeletePending(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        artifactId: artifact.artifactId,
+        reason: "change rejected",
+      }),
+    ).toBe(true);
+  });
+
   test("rebuilds operational provider metadata when the deployment base rotates", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

@@ -4,6 +4,7 @@ import { getOrCreateTrace } from "@openai/agents-core";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import {
+  applyModelCatalogDocument,
   configuredProviders,
   resolveModelProvider,
   type ResolvedModelProvider,
@@ -39,10 +40,12 @@ import {
   HUMAN_INPUT_TOOL_NAME,
   modelRequestPolicyForProvider,
   MultiProviderModelProvider,
+  OpenGeniResponsesModel,
   resolveTurnModel,
   summarizeForCompaction,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   vercelGatewayRoutingFetch,
+  WorkspaceOpenRouterUnavailableError,
   XaiSubscriptionUnavailableError,
 } from "../src/index";
 import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-body";
@@ -222,6 +225,58 @@ describe("Vercel AI Gateway request fence", () => {
       routed("https://ai-gateway.vercel.sh/v1/responses", {
         method: "POST",
         body: JSON.stringify({ model: "unreviewed/model" }),
+      }),
+    ).rejects.toThrow("approved catalogue");
+    expect(calls).toBe(0);
+  });
+
+  test("configured workspace custom models remain unpinned and strip caller routing", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const policies = new Map([["anthropic/claude-sonnet-4.6", undefined]]);
+    const routed = vercelGatewayRoutingFetch(
+      "vercel-gateway-workspace",
+      (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch,
+      policies,
+    );
+
+    await routed("https://ai-gateway.vercel.sh/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "anthropic/claude-sonnet-4.6",
+        providerOptions: {
+          gateway: {
+            only: ["caller-chosen-provider"],
+            order: ["caller-chosen-provider"],
+            models: ["fallback/model"],
+          },
+          anthropic: { thinking: { type: "enabled", budgetTokens: 1_024 } },
+        },
+      }),
+    });
+
+    expect(captured?.providerOptions).toEqual({
+      anthropic: { thinking: { type: "enabled", budgetTokens: 1_024 } },
+    });
+  });
+
+  test("workspace Gateway rejects an unstored custom slug with the exact configured fence", async () => {
+    let calls = 0;
+    const routed = vercelGatewayRoutingFetch(
+      "vercel-gateway-workspace",
+      (async () => {
+        calls += 1;
+        return new Response("{}");
+      }) as typeof fetch,
+      new Map([["stored/custom-model", undefined]]),
+    );
+
+    await expect(
+      routed("https://ai-gateway.vercel.sh/v1/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "unstored/custom-model" }),
       }),
     ).rejects.toThrow("approved catalogue");
     expect(calls).toBe(0);
@@ -1723,7 +1778,7 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
 });
 
 describe("buildProviderClient", () => {
-  test("a registry provider gets a client pointed at its base URL with its key/headers, cached by id", () => {
+  test("a registry provider is cached only while its resolved configuration is unchanged", () => {
     const settings = multiProviderSettings();
     const provider = configuredProviders(settings).find(
       (candidate) => candidate.id === "fireworks",
@@ -1733,8 +1788,92 @@ describe("buildProviderClient", () => {
     expect(client.baseURL).toBe("https://api.fireworks.ai/inference/v1");
     expect(client.apiKey).toBe("fw-test-key");
     expect(client.maxRetries).toBe(settings.openaiMaxRetries);
-    // One client per provider id (module-level cache).
     expect(buildProviderClient(provider, settings)).toBe(client);
+
+    const changed = multiProviderSettings({
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "fireworks",
+          baseUrl: "https://changed.fireworks.example/v1",
+          apiKey: "changed-key",
+          models: [{ id: "fireworks/model" }],
+        },
+      ]),
+    });
+    const changedProvider = configuredProviders(changed).find(
+      (candidate) => candidate.id === "fireworks",
+    )!;
+    expect(buildProviderClient(changedProvider, changed)).not.toBe(client);
+  });
+
+  test("managed Gateway cache keys include the live catalog request policy", () => {
+    const gatewayModel = (providers: string[]) => ({
+      productId: "gateway/database-model",
+      workspaceProductId: "workspace-gateway/database-model",
+      upstreamModelId: "database/model",
+      label: "Database model",
+      providers,
+    });
+    const firstSettings = testSettings({
+      vercelAiGatewayApiKey: "gateway-key",
+      resolvedGatewayModelsJson: JSON.stringify([gatewayModel(["provider-a"])]),
+    });
+    const firstProvider = configuredProviders(firstSettings).find(
+      (candidate) => candidate.id === "opengeni-gateway",
+    )!;
+    const firstClient = buildProviderClient(firstProvider, firstSettings);
+
+    const secondSettings = testSettings({
+      vercelAiGatewayApiKey: "gateway-key",
+      resolvedGatewayModelsJson: JSON.stringify([gatewayModel(["provider-b"])]),
+    });
+    const secondProvider = configuredProviders(secondSettings).find(
+      (candidate) => candidate.id === "opengeni-gateway",
+    )!;
+    expect(buildProviderClient(secondProvider, secondSettings)).not.toBe(firstClient);
+  });
+
+  test("workspace OpenRouter clients are attempt-local and require the workspace key", () => {
+    const settings = multiProviderSettings();
+    const provider: ResolvedModelProvider = {
+      id: "workspace-openrouter",
+      label: "Your OpenRouter",
+      kind: "openrouter-workspace",
+      api: "chat",
+      wireProfile: "openai",
+      builtin: false,
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "workspace-openrouter-key",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "workspace", metering: "external" },
+    };
+
+    const first = buildProviderClient(provider, settings);
+    expect(first).not.toBe(buildProviderClient(provider, settings));
+    expect(settings.openaiMaxRetries).toBeGreaterThan(0);
+    expect(first.maxRetries).toBe(0);
+    expect(() => buildProviderClient({ ...provider, apiKey: undefined }, settings)).toThrow(
+      WorkspaceOpenRouterUnavailableError,
+    );
+  });
+
+  test("managed OpenRouter clients disable blind SDK retries", () => {
+    const settings = multiProviderSettings();
+    const provider: ResolvedModelProvider = {
+      id: "openrouter",
+      label: "OpenRouter",
+      kind: "openrouter-managed",
+      api: "chat",
+      wireProfile: "openai",
+      builtin: false,
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "deployment-openrouter-key",
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    };
+
+    expect(settings.openaiMaxRetries).toBeGreaterThan(0);
+    expect(buildProviderClient(provider, settings).maxRetries).toBe(0);
   });
 
   test("an anonymous provider sends no authentication or ambient OpenAI identity headers", async () => {
@@ -2326,6 +2465,43 @@ describe("registry model shadowing is closed — the built-in never claims a nam
     });
     const model = await new MultiProviderModelProvider(settings).getModel("scripted-1");
     expect(model).toBeInstanceOf(OpenAIChatCompletionsModel);
+  });
+
+  test("the run-scoped provider routes a bare database Gateway model with one built-in default", async () => {
+    const gatewayModelId = "deepseek-v4-flash-0731";
+    const deploymentSettings = applyModelCatalogDocument(
+      testSettings({
+        openaiProvider: "azure",
+        azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+        azureOpenaiApiKey: "az-test-key",
+        openaiModel: "gpt-5.6-terra",
+        openaiAllowedModels: "gpt-5.6-terra",
+        vercelAiGatewayApiKey: "gateway-key",
+      }),
+      {
+        schemaVersion: 1,
+        defaultModel: "gpt-5.6-terra",
+        builtInModels: ["gpt-5.6-terra"],
+        gatewayModels: [
+          {
+            productId: gatewayModelId,
+            workspaceProductId: `workspace-gateway/${gatewayModelId}`,
+            upstreamModelId: `deepseek/${gatewayModelId}`,
+            label: "DeepSeek V4 Flash 0731",
+            providers: ["baseten"],
+          },
+        ],
+      },
+    );
+    const resolved = resolveTurnModel(deploymentSettings, gatewayModelId);
+    expect(resolved?.provider.id).toBe("opengeni-gateway");
+
+    const runSettings = { ...deploymentSettings, openaiModel: gatewayModelId };
+    const model = await new MultiProviderModelProvider(runSettings).getModel(gatewayModelId);
+    expect(model).toBeInstanceOf(OpenGeniResponsesModel);
+    expect((model as unknown as { provider: ResolvedModelProvider }).provider.id).toBe(
+      "opengeni-gateway",
+    );
   });
 
   test("fails loud when a registry redeclares a bare built-in product id", () => {

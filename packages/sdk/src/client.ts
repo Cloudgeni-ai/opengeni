@@ -1,6 +1,7 @@
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
 } from "./errors";
 import {
@@ -169,6 +170,14 @@ import type {
   ClientConfig,
   WorkspaceModelAccessPolicy,
   WorkspaceModelCatalogResponse,
+  WorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse,
+  CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
+  WorkspaceOpenRouterCustomModel,
+  WorkspaceOpenRouterCustomModelsResponse,
+  CreateWorkspaceOpenRouterCustomModelRequest,
+  DeleteWorkspaceOpenRouterCustomModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -4046,6 +4055,90 @@ export class OpenGeniClient {
     );
   }
 
+  /** List workspace-owned unpinned Vercel AI Gateway model slugs. */
+  async listWorkspaceGatewayCustomModels(
+    workspaceId: string,
+  ): Promise<WorkspaceGatewayCustomModelsResponse> {
+    return await this.requestJson<WorkspaceGatewayCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/gateway-custom-models`,
+    );
+  }
+
+  /** Add one exact upstream Vercel AI Gateway slug. */
+  async createWorkspaceGatewayCustomModel(
+    workspaceId: string,
+    request: CreateWorkspaceGatewayCustomModelRequest,
+  ): Promise<WorkspaceGatewayCustomModel> {
+    return await this.requestJson<WorkspaceGatewayCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/gateway-custom-models`,
+      request,
+    );
+  }
+
+  /** Remove one workspace custom Gateway model by its stable row id. */
+  async deleteWorkspaceGatewayCustomModel(
+    workspaceId: string,
+    customModelId: string,
+    request: DeleteWorkspaceGatewayCustomModelRequest,
+  ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new TypeError("customModelId must be a UUID");
+    }
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/gateway-custom-models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
+  /** List workspace-owned unpinned OpenRouter model slugs. */
+  async listWorkspaceOpenRouterCustomModels(
+    workspaceId: string,
+  ): Promise<WorkspaceOpenRouterCustomModelsResponse> {
+    return await this.requestJson<WorkspaceOpenRouterCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/openrouter-custom-models`,
+    );
+  }
+
+  /** Add one exact upstream OpenRouter slug. */
+  async createWorkspaceOpenRouterCustomModel(
+    workspaceId: string,
+    request: CreateWorkspaceOpenRouterCustomModelRequest,
+  ): Promise<WorkspaceOpenRouterCustomModel> {
+    return await this.requestJson<WorkspaceOpenRouterCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/openrouter-custom-models`,
+      request,
+    );
+  }
+
+  /** Remove one workspace custom OpenRouter model by its stable row id. */
+  async deleteWorkspaceOpenRouterCustomModel(
+    workspaceId: string,
+    customModelId: string,
+    request: DeleteWorkspaceOpenRouterCustomModelRequest,
+  ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new TypeError("customModelId must be a UUID");
+    }
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/openrouter-custom-models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
   /** Read the workspace's hard provider/model allowlist. */
   async getWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
@@ -5519,6 +5612,7 @@ export class OpenGeniClient {
     ) {
       throw new Error("File upload timeout must be a positive number");
     }
+    assertBrowserFileUploadSecureContext();
     const withTimeout = async <T>(
       timeoutMs: number,
       operation: (signal: AbortSignal) => Promise<T>,
@@ -7740,6 +7834,28 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
     mutation: true,
     displayMessage: "OpenGeni could not confirm the request — reconcile before retrying.",
   });
+}
+
+function assertBrowserFileUploadSecureContext(): void {
+  const secureContext =
+    typeof window !== "undefined"
+      ? window.isSecureContext
+      : typeof globalThis.isSecureContext === "boolean"
+        ? globalThis.isSecureContext
+        : undefined;
+  // The framework-agnostic SDK also runs in Node, Bun, Deno, and edge
+  // runtimes. Preserve their existing upload behavior; this typed HTTPS error
+  // is only meaningful where the browser exposes a secure-context state.
+  if (secureContext === undefined) return;
+  if (!secureContext) {
+    throw new OpenGeniSecureContextRequiredError("insecure_context");
+  }
+  if (
+    typeof globalThis.crypto === "undefined" ||
+    typeof globalThis.crypto.subtle?.digest !== "function"
+  ) {
+    throw new OpenGeniSecureContextRequiredError("web_crypto_unavailable");
+  }
 }
 
 async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<string> {

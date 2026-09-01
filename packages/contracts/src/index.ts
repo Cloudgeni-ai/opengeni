@@ -2306,6 +2306,79 @@ export const UpdateWorkspaceModelPolicyRequest = z.object({
 });
 export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
 
+export const WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH = 238;
+
+export const CreateWorkspaceGatewayCustomModelRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    upstreamModelId: z
+      .string()
+      .max(WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH)
+      .regex(/^[!-{}-~]+$/),
+    label: z
+      .string()
+      .min(1)
+      .max(128)
+      .refine((value) => new TextEncoder().encode(value).byteLength <= 128, {
+        message: "label must be at most 128 UTF-8 bytes",
+      })
+      .refine((value) => !/[\r\n|]/u.test(value), {
+        message: "label must not contain newlines or the | field separator",
+      })
+      .optional(),
+  })
+  .strict();
+export type CreateWorkspaceGatewayCustomModelRequest = z.infer<
+  typeof CreateWorkspaceGatewayCustomModelRequest
+>;
+
+export const DeleteWorkspaceGatewayCustomModelRequest = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type DeleteWorkspaceGatewayCustomModelRequest = z.infer<
+  typeof DeleteWorkspaceGatewayCustomModelRequest
+>;
+
+export const WorkspaceGatewayCustomModel = z.object({
+  id: z.string().uuid(),
+  upstreamModelId: z.string(),
+  label: z.string().nullable(),
+  version: z.number().int().positive(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type WorkspaceGatewayCustomModel = z.infer<typeof WorkspaceGatewayCustomModel>;
+
+export const WorkspaceGatewayCustomModelsResponse = z.object({
+  models: z.array(WorkspaceGatewayCustomModel),
+});
+export type WorkspaceGatewayCustomModelsResponse = z.infer<
+  typeof WorkspaceGatewayCustomModelsResponse
+>;
+
+export const CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+export type CreateWorkspaceOpenRouterCustomModelRequest = z.infer<
+  typeof CreateWorkspaceOpenRouterCustomModelRequest
+>;
+
+export const DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+export type DeleteWorkspaceOpenRouterCustomModelRequest = z.infer<
+  typeof DeleteWorkspaceOpenRouterCustomModelRequest
+>;
+
+export const WorkspaceOpenRouterCustomModel = WorkspaceGatewayCustomModel;
+export type WorkspaceOpenRouterCustomModel = z.infer<typeof WorkspaceOpenRouterCustomModel>;
+
+export const WorkspaceOpenRouterCustomModelsResponse = z.object({
+  models: z.array(WorkspaceOpenRouterCustomModel),
+});
+export type WorkspaceOpenRouterCustomModelsResponse = z.infer<
+  typeof WorkspaceOpenRouterCustomModelsResponse
+>;
+
 const turnInitiatorIdentityFields = {
   subjectId: z.string().min(1),
   /** Immutable display snapshot; never an authorization input. */
@@ -3853,6 +3926,8 @@ export const McpServerConnectionRef = z
   .object({
     /** Opaque host or standalone connection identifier. */
     connectionId: z.string().min(1).optional(),
+    /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
+    authoritySource: z.literal("host").optional(),
     /** Stable provider family (for example github, gitlab, or azure_devops). */
     provider: z.string().min(1).max(128).optional(),
     /** Provider host or tenant domain. */
@@ -3867,6 +3942,13 @@ export const McpServerConnectionRef = z
   })
   .strict()
   .superRefine((reference, context) => {
+    if (reference.authoritySource === "host" && !reference.connectionId) {
+      context.addIssue({
+        code: "custom",
+        message: "host authority requires connectionId",
+        path: ["connectionId"],
+      });
+    }
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({
@@ -8822,6 +8904,10 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
     resolvedModel: z.string().min(1),
     resolvedReasoningEffort: ReasoningEffort,
     resolvedLatencyMode: LatencyMode,
+    /** Secret-safe TurnExecutionPolicyV1 accepted with this occurrence. Kept
+     * structurally open here because the canonical policy schema is declared
+     * later in this package; consumers must parse it with TurnExecutionPolicyV1. */
+    turnExecutionPolicy: z.unknown().optional(),
     resolvedSandboxBackend: SandboxBackend,
     resolvedSandboxOs: SandboxOs,
     resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
@@ -10525,6 +10611,15 @@ function compareDescending(left: number | string, right: number | string): numbe
 export const ConnectionCredentialBundle = z.record(z.string(), z.unknown());
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
 
+export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY =
+  "vercelAiGatewayCredentialOperationId" as const;
+export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
+  "vercelAiGatewayCredentialOperationDigest" as const;
+export const OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY =
+  "openRouterCredentialOperationId" as const;
+export const OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
+  "openRouterCredentialOperationDigest" as const;
+
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),
   kind: ConnectionKind,
@@ -10535,6 +10630,7 @@ export const CreateConnectionRequest = z.object({
   grantedScopes: z.array(z.string().min(1)).default([]),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  operationId: z.string().uuid().optional(),
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
 
@@ -10590,6 +10686,8 @@ export const UpdateConnectionRequest = z.object({
   grantedScopes: z.array(z.string().min(1)).optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  expectedVersion: z.number().int().positive().optional(),
+  operationId: z.string().uuid().optional(),
 });
 export type UpdateConnectionRequest = z.infer<typeof UpdateConnectionRequest>;
 
@@ -10785,11 +10883,14 @@ export const CapabilityCatalogItem = z.object({
   /** @deprecated Compatibility explanation paired with enabled. */
   enabledReason: z.string().nullable().default(null),
   // The non-secret connection binding stored with an enabled installation.
-  // Workspace refs retain an exact row id. Subject refs deliberately omit it:
-  // each caller resolves their own visible row by provider/kind at runtime.
+  // Native workspace refs retain an exact row id. Native subject refs omit it
+  // so each caller resolves their own row. The first-party catalog projects a
+  // host-owned installation as null for old-browser safety; the schema remains
+  // tolerant of additive host projections from embedding-specific catalogs.
   connectionRef: z
     .object({
       connectionId: z.string().min(1).optional(),
+      authoritySource: z.literal("host").optional(),
       providerDomain: z.string().min(1),
       kind: z.string().min(1),
       subjectScope: z.enum(["workspace", "subject"]).optional(),
@@ -12352,44 +12453,81 @@ export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFil
   return { includeTypes: [...included], excludeTypes: [...excluded] };
 }
 
-export const ToolAuthNeededPayload = z.object({
-  serverId: z.string().min(1),
-  toolName: z.string().min(1).nullable().optional(),
-  providerDomain: z.string().min(1),
-  provider: z.string().min(1).max(128).optional(),
-  // Embedded hosts may use an opaque connection identity; never assume an
-  // OpenGeni UUID on the public event wire.
-  connectionId: z.string().min(1).nullable().optional(),
-  reason: z.enum([
-    "missing_connection",
-    "expired",
-    "insufficient_scope",
-    "refresh_failed",
-    "personal_authority_unavailable",
-    "unsupported_auth",
-    "resource_scope_unavailable",
-  ]),
-  scopes: z.array(z.string().min(1)).optional(),
-  resource: z.string().min(1).optional(),
-  selectedResources: McpConnectionResourceScopes.optional(),
-  authorizationUrl: z.string().url().optional(),
-  subjectId: z.string().min(1).nullable().optional(),
-  // A catalog recommendation is still a tool-level authorization condition:
-  // the agent may describe and request it, but only the authenticated host UI
-  // can start setup. Keeping this nested and optional preserves the established
-  // auth-needed event for ordinary failed MCP calls.
-  capability: z
-    .object({
-      id: z.string().min(1).max(512),
-      name: z.string().min(1).max(256),
-      kind: CapabilityKind,
-      source: CapabilitySource,
-      action: z.enum(["connect", "add_credentials", "enable"]),
-      rationale: z.string().min(1).max(2000),
-      requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
-    })
-    .optional(),
-});
+export const ToolAuthNeededReason = z.enum([
+  "missing_connection",
+  "expired",
+  "insufficient_scope",
+  "refresh_failed",
+  "personal_authority_unavailable",
+  "unsupported_auth",
+  "resource_scope_unavailable",
+]);
+export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
+
+export const ToolAuthNeededPayload = z
+  .object({
+    serverId: z.string().min(1),
+    toolName: z.string().min(1).nullable().optional(),
+    providerDomain: z.string().min(1),
+    provider: z.string().min(1).max(128).optional(),
+    // Embedded hosts may use an opaque connection identity; never assume an
+    // OpenGeni UUID on the public event wire.
+    connectionId: z.string().min(1).nullable().optional(),
+    /** The failed binding is owned by the embedding host, not OpenGeni's connection broker. */
+    authoritySource: z.literal("host").optional(),
+    /**
+     * Legacy-compatible reason. Host-owned event writers pin this to
+     * unsupported_auth so a pre-host-authority browser cannot launch native
+     * OAuth for the opaque id.
+     */
+    reason: ToolAuthNeededReason,
+    /** Exact host recovery reason consumed by host-aware clients. */
+    hostReason: ToolAuthNeededReason.optional(),
+    scopes: z.array(z.string().min(1)).optional(),
+    resource: z.string().min(1).optional(),
+    selectedResources: McpConnectionResourceScopes.optional(),
+    authorizationUrl: z.string().url().optional(),
+    subjectId: z.string().min(1).nullable().optional(),
+    // A catalog recommendation is still a tool-level authorization condition:
+    // the agent may describe and request it, but only the authenticated host UI
+    // can start setup. Keeping this nested and optional preserves the established
+    // auth-needed event for ordinary failed MCP calls.
+    capability: z
+      .object({
+        id: z.string().min(1).max(512),
+        name: z.string().min(1).max(256),
+        kind: CapabilityKind,
+        source: CapabilitySource,
+        action: z.enum(["connect", "add_credentials", "enable"]),
+        rationale: z.string().min(1).max(2000),
+        requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
+      })
+      .optional(),
+  })
+  .superRefine((payload, context) => {
+    if (payload.authoritySource === "host") {
+      if (payload.reason !== "unsupported_auth") {
+        context.addIssue({
+          code: "custom",
+          message: "host auth-needed events require the legacy-safe unsupported_auth reason",
+          path: ["reason"],
+        });
+      }
+      if (!payload.hostReason) {
+        context.addIssue({
+          code: "custom",
+          message: "host auth-needed events require hostReason",
+          path: ["hostReason"],
+        });
+      }
+    } else if (payload.hostReason) {
+      context.addIssue({
+        code: "custom",
+        message: "hostReason is reserved for host-owned auth-needed events",
+        path: ["hostReason"],
+      });
+    }
+  });
 export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
 
 /** A host-owned non-tool credential needed by the active run. */
@@ -13158,6 +13296,8 @@ export const SessionEvent = z.object({
   workspaceId: z.string().uuid(),
   sessionId: z.string().uuid(),
   sequence: z.number().int().positive(),
+  /** Server-owned durable high-water mark for a synthetic compact event. */
+  coveredThrough: z.number().int().positive().optional(),
   type: SessionEventType,
   payload: z.unknown().default({}),
   occurredAt: z.string(),
@@ -13747,6 +13887,15 @@ export function boundSessionEvent(
   const turnGeneration = canonicalSessionEventGeneration(source.turnGeneration);
   const turnAttemptId = canonicalOptionalSessionEventUuid(source.turnAttemptId);
   const duplicateOfEventId = canonicalOptionalSessionEventUuid(source.duplicateOfEventId);
+  const rawCoveredThrough = source.coveredThrough.readable
+    ? source.coveredThrough.value
+    : undefined;
+  const coveredThrough =
+    typeof rawCoveredThrough === "number" &&
+    Number.isSafeInteger(rawCoveredThrough) &&
+    rawCoveredThrough >= sequence
+      ? rawCoveredThrough
+      : undefined;
   const envelopeFields = [
     sessionEventCustomSerializerProjection(event),
     sessionEventAdditionalTopLevelFieldProjection(event),
@@ -13780,6 +13929,14 @@ export function boundSessionEvent(
           rawDuplicateReason,
           duplicateReason,
           source.duplicateReason.readable,
+        )
+      : null,
+    !source.coveredThrough.readable || rawCoveredThrough !== coveredThrough
+      ? sessionEventEnvelopeFieldProjection(
+          "coveredThrough",
+          rawCoveredThrough,
+          coveredThrough,
+          source.coveredThrough.readable,
         )
       : null,
     ...sessionEventCanonicalFieldProjections(source, {
@@ -13824,6 +13981,7 @@ export function boundSessionEvent(
     workspaceId,
     sessionId,
     sequence,
+    ...(coveredThrough === undefined ? {} : { coveredThrough }),
     type: typeIsSafe ? (rawType as SessionEvent["type"]) : "session.event.envelope_omitted",
     payload,
     occurredAt,
@@ -13844,6 +14002,7 @@ export function boundSessionEvent(
     workspaceId,
     sessionId,
     sequence,
+    ...(coveredThrough === undefined ? {} : { coveredThrough }),
     type: "session.event.envelope_omitted",
     payload: boundSessionEventPayload(
       {
@@ -13942,6 +14101,7 @@ const SESSION_EVENT_OWN_DATA_FIELDS = [
   "workspaceId",
   "sessionId",
   "sequence",
+  "coveredThrough",
   "type",
   "payload",
   "occurredAt",
@@ -15594,6 +15754,11 @@ export const ModelBillingAttributionV1 =
   );
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
+export const ModelCostClassV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["free", "credits", "subscription", "workspace"]),
+);
+export type ModelCostClassV1 = z.infer<typeof ModelCostClassV1>;
+
 export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
 
 export const TurnExecutionModelSourceV1 =
@@ -15781,7 +15946,9 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),
-    source: z.enum(["opengeni", "codex", "supergrok", "workspace_gateway"]).optional(),
+    source: z
+      .enum(["opengeni", "codex", "supergrok", "workspace_gateway", "openrouter"])
+      .optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     // Additive normalized definition metadata. Optional so older server payloads
     // remain parseable; current servers project the complete V1 set.
@@ -15803,6 +15970,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
       .optional(),
     credentialSource: ModelCredentialSourceV1.optional(),
     billing: ModelBillingAttributionV1.optional(),
+    cost: ModelCostClassV1.optional(),
     capabilities: ModelCapabilitiesV1.optional(),
     pricing: ModelPricingScheduleV1.optional(),
     definitionVersion: z

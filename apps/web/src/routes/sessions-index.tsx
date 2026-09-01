@@ -31,7 +31,6 @@ import {
 } from "@opengeni/react/realtime";
 import {
   OpenGeniApiError,
-  PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING,
   type NewSessionSelectionHistory,
   type Rig,
   type SessionRealtimeModel,
@@ -505,18 +504,12 @@ function SessionsIndexRouteContent({
   const selectedPersonalResourceCount = personalResourceSelectionKey
     ? personalResourceSelectionKey.split("\u0000").length
     : 0;
-  const [personalResourcesSharedAcknowledged, setPersonalResourcesSharedAcknowledged] =
-    useState(false);
   const [personalResourceCatalogRefreshPending, setPersonalResourceCatalogRefreshPending] =
     useState(false);
   const personalResourceCatalogRefreshGeneration = useRef(0);
-  useEffect(() => {
-    setPersonalResourcesSharedAcknowledged(false);
-  }, [personalResourceSelectionKey, draft.visibility]);
   const personalResourceAttachment = newSessionPersonalResourceAttachment({
     personalResourceCount: selectedPersonalResourceCount,
     visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
-    sharedAcknowledged: personalResourcesSharedAcknowledged,
   });
   const refreshPersonalResourceCatalogs = useLatestCallback(async (): Promise<void> => {
     const generation = ++personalResourceCatalogRefreshGeneration.current;
@@ -542,7 +535,6 @@ function SessionsIndexRouteContent({
       void recoverNewSessionPersonalResourceAttachment({
         error,
         attemptedInput,
-        resetAcknowledgement: () => setPersonalResourcesSharedAcknowledged(false),
         refreshCatalogs: refreshPersonalResourceCatalogs,
       });
     },
@@ -551,13 +543,6 @@ function SessionsIndexRouteContent({
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
-  const personalResourceConfirmationRequired =
-    createdSessionAuthority === null && personalResourceAttachment.requiresAcknowledgement;
-  const personalResourceSendBlocker = personalResourceConfirmationRequired
-    ? selectedPersonalVariableSets.length > 0
-      ? "This workspace-visible chat uses an Only me Variable Set. Confirm private credential use below before sending."
-      : "This workspace-visible chat uses an Only me resource. Confirm its use below before sending."
-    : null;
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   // 0 = no explicit request (mount uses ConsoleComposer autoFocus). >0 = same-route
   // new-session / shortcut asked us to put the caret back in the create composer.
@@ -814,8 +799,7 @@ function SessionsIndexRouteContent({
         !newSessionPolicyValid ||
         privateCreateUnavailable ||
         personalResourceCatalogRefreshPending ||
-        (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved) ||
-        personalResourceConfirmationRequired
+        (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved)
       )
         return false;
       if (realtimeModel && personalMachineSelected) {
@@ -1059,7 +1043,6 @@ function SessionsIndexRouteContent({
       newSessionPolicyValid &&
       !personalResourceCatalogRefreshPending &&
       (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
-      !personalResourceConfirmationRequired &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
     pausing: false,
@@ -1141,9 +1124,6 @@ function SessionsIndexRouteContent({
             attachments={attachments}
             autoFocus
             disabled={newSessionDraft.loading}
-            messages={
-              personalResourceSendBlocker ? { sendTitle: personalResourceSendBlocker } : undefined
-            }
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
             controlsLeading={
@@ -1283,8 +1263,6 @@ function SessionsIndexRouteContent({
             personalResourceAccess={{
               names: selectedPersonalResourceNames,
               visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
-              sharedAcknowledged: personalResourcesSharedAcknowledged,
-              onSharedAcknowledgedChange: setPersonalResourcesSharedAcknowledged,
             }}
             fleet={fleet}
             machines={machines}
@@ -1695,8 +1673,6 @@ function WorkspaceRepositoryMenuBody({
 type NewSessionPersonalResourceAccess = {
   names: string[];
   visibility: "private" | "workspace";
-  sharedAcknowledged: boolean;
-  onSharedAcknowledgedChange: (acknowledged: boolean) => void;
 };
 
 type FixedResourceCatalogRecovery = {
@@ -2222,29 +2198,10 @@ function PersonalResourceAccessInline(props: {
   if (props.access.names.length === 0) return null;
   const content =
     props.access.visibility === "workspace" ? (
-      <label className="flex cursor-pointer items-start gap-2 text-xs text-fg-muted">
-        <input
-          type="checkbox"
-          checked={props.access.sharedAcknowledged}
-          disabled={props.disabled}
-          onChange={(event) => props.access.onSharedAcknowledgedChange(event.target.checked)}
-          className="mt-0.5 size-4 shrink-0 accent-brand"
-        />
-        <span>
-          <span
-            className="block font-medium text-fg"
-            role={props.access.sharedAcknowledged ? undefined : "alert"}
-          >
-            {props.access.sharedAcknowledged
-              ? "Private resource use confirmed"
-              : "Confirm private credential or resource use before sending"}
-          </span>
-          <span className="mt-0.5 block text-2xs leading-4 text-fg-subtle">
-            Use {props.access.names.join(", ")} in this workspace-visible chat.{" "}
-            {PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING}
-          </span>
-        </span>
-      </label>
+      <p className="text-2xs leading-4 text-fg-subtle">
+        {props.access.names.join(", ")} will be used only for the message you send. Other members
+        may see the result, but cannot use your private credential or resource.
+      </p>
     ) : (
       <p className="text-2xs text-fg-subtle">
         {props.access.names.join(", ")} will be available only to this session.

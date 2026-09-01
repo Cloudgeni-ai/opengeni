@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
@@ -12,6 +12,7 @@ import {
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   type Database,
 } from "@opengeni/db";
+import * as opengeniDb from "@opengeni/db";
 import {
   createOpenGeniWorker,
   createOpenGeniWorkerService,
@@ -121,6 +122,24 @@ describe("embedded worker lifecycle contract", () => {
         },
       } as never),
     ).rejects.toThrow("sessionEventDurableFanout v1");
+  });
+
+  test("embedded worker startup fails closed when database catalog mode has no singleton row", async () => {
+    const getCatalog = spyOn(opengeniDb, "getDeploymentModelCatalog").mockResolvedValue(null);
+    try {
+      await expect(
+        createOpenGeniWorkerService({
+          role: "control",
+          settings: testSettings({ modelCatalogSource: "database" }),
+          activityDependencies: {
+            db: {} as Database,
+            bus: new MemoryEventBus(),
+          },
+        } as never),
+      ).rejects.toThrow("singleton row is missing");
+    } finally {
+      getCatalog.mockRestore();
+    }
   });
 
   test("worker readiness requires the durable subscriber-recovery capability", () => {

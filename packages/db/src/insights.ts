@@ -1106,7 +1106,7 @@ export async function backfillModelCallFactsFromSessionEvents(
 
   let considered = 0;
   let upserted = 0;
-  let cursorOccurredAt = input.since;
+  let cursorOccurredAt = input.since.toISOString();
   let cursorId = "00000000-0000-0000-0000-000000000000";
 
   while (considered < limit) {
@@ -1122,6 +1122,7 @@ export async function backfillModelCallFactsFromSessionEvents(
           turnAttemptId: schema.sessionEvents.turnAttemptId,
           payload: schema.sessionEvents.payload,
           occurredAt: schema.sessionEvents.occurredAt,
+          cursorOccurredAt: sql<string>`${schema.sessionEvents.occurredAt}::text`,
         })
         .from(schema.sessionEvents)
         .where(
@@ -1132,7 +1133,7 @@ export async function backfillModelCallFactsFromSessionEvents(
             lt(schema.sessionEvents.occurredAt, until),
             sql`${schema.sessionEvents.turnId} is not null`,
             // Keyset on (occurred_at, id) so same-millisecond bursts cannot be skipped.
-            sql`(${schema.sessionEvents.occurredAt}, ${schema.sessionEvents.id}) > (${cursorOccurredAt}, ${cursorId}::uuid)`,
+            sql`(${schema.sessionEvents.occurredAt}, ${schema.sessionEvents.id}) > (${cursorOccurredAt}::timestamptz, ${cursorId}::uuid)`,
           ),
         )
         .orderBy(schema.sessionEvents.occurredAt, schema.sessionEvents.id)
@@ -1141,7 +1142,7 @@ export async function backfillModelCallFactsFromSessionEvents(
     if (page.length === 0) break;
     considered += page.length;
     const last = page[page.length - 1]!;
-    cursorOccurredAt = last.occurredAt;
+    cursorOccurredAt = last.cursorOccurredAt;
     cursorId = last.id;
 
     const batchUpserted = await withRlsContext(db, context, async (scopedDb) => {
@@ -1158,6 +1159,15 @@ export async function backfillModelCallFactsFromSessionEvents(
         const providerApi = typeof payload.providerApi === "string" ? payload.providerApi : null;
         const model = typeof payload.model === "string" ? payload.model : null;
         if (!sourceKey || !provider || !providerApi || !model) continue;
+        const upstreamProvider =
+          typeof payload.upstreamProvider === "string" &&
+          /^[a-z0-9][a-z0-9-]{0,63}$/.test(payload.upstreamProvider)
+            ? payload.upstreamProvider
+            : null;
+        const durableBillingPath =
+          payload.billingPath === "external" || payload.billingPath === "opengeni_credits"
+            ? payload.billingPath
+            : null;
 
         const sourceResourceId = `${event.turnId}:${sourceKey}`;
         const [cost] = await scopedDb
@@ -1183,11 +1193,15 @@ export async function backfillModelCallFactsFromSessionEvents(
           )
           .limit(1);
 
-        // External turns always write model.cost=0 and never model.tokens.
-        // Credits turns with totalTokens=0 write neither — keep those as credits.
+        // New usage events carry the accepted billing authority because a
+        // deployment-funded free call legitimately writes both model.tokens
+        // and model.cost=0. Older events predate that field: their external
+        // subscription/workspace calls wrote cost=0 without tokens, while
+        // zero-token credits calls wrote neither.
         const pricedCostMicros = cost ? Number(cost.quantity) : 0;
         const billingPath =
-          cost != null && pricedCostMicros === 0 && !tokenRow ? "external" : "opengeni_credits";
+          durableBillingPath ??
+          (cost != null && pricedCostMicros === 0 && !tokenRow ? "external" : "opengeni_credits");
 
         const [turn] = await scopedDb
           .select({
@@ -1239,7 +1253,7 @@ export async function backfillModelCallFactsFromSessionEvents(
             turnId: event.turnId,
             turnAttemptId: event.turnAttemptId,
             sourceKey,
-            provider,
+            provider: upstreamProvider ?? provider,
             providerApi,
             model,
             billingPath,

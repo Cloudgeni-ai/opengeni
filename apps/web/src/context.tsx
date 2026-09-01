@@ -50,6 +50,7 @@ import {
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
+import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -78,6 +79,11 @@ import {
   reconcileFailedSessionPin,
   SessionChannelProjectionAuthority,
 } from "@/lib/session-pins";
+import {
+  isAuthorizedWorkspaceId,
+  workspaceNavigationPreferenceStorageId,
+  writeLastWorkspaceId,
+} from "@/lib/workspace-navigation-preference";
 import {
   buildResources,
   buildOpenGeniUiTools,
@@ -997,6 +1003,20 @@ export function RootRouteComponent() {
     client,
     invalidatePrincipalWorkspaceState,
   ]);
+
+  // The workspace URL remains authoritative. This browser-local preference is
+  // only the landing target for a future visit to `/`, and is namespaced by the
+  // current subject so browser-account transitions cannot inherit each other's
+  // workspace selection.
+  useEffect(() => {
+    if (!accessContext) return;
+    const workspaceId = /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? null;
+    if (!isAuthorizedWorkspaceId(workspaceId, workspaces, accessContext)) return;
+    writeLastWorkspaceId(
+      workspaceNavigationPreferenceStorageId(accessContext.subjectId),
+      workspaceId,
+    );
+  }, [accessContext, pathname, workspaces]);
 
   // New-chat policy follows the active workspace. Explicit composer choices
   // remain local until the route moves to another workspace or its durable
@@ -2638,7 +2658,10 @@ export function RootRouteComponent() {
           />
         </Suspense>
       ) : null}
-      {actorFencedSurface}
+      {clientConfig ? (
+        <SecureContextWarning productAccessMode={clientConfig.productAccessMode} />
+      ) : null}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{actorFencedSurface}</div>
     </main>
   );
 }

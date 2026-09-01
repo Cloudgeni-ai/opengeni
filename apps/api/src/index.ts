@@ -30,7 +30,10 @@ import {
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
-import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
+import {
+  resolveCatalogSettings,
+  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
+} from "@opengeni/core";
 import {
   Connection,
   Client as TemporalClient,
@@ -375,6 +378,15 @@ export async function startApi(
       () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
       { ...retryOptions, onRetry },
     );
+    const resolvedCatalog = await retryStartupDependency(
+      "model catalog",
+      () => resolveCatalogSettings(dbClient.db, settings),
+      { ...retryOptions, onRetry },
+    );
+    observability.info("OpenGeni model catalog resolved", {
+      catalogSource: resolvedCatalog.source,
+      catalogVersion: resolvedCatalog.version,
+    });
     bus = await retryStartupDependency(
       "NATS",
       () =>

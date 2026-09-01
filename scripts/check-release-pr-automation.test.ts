@@ -3530,14 +3530,16 @@ describe("workflow contracts", () => {
     );
     const imageLeaves = [
       "api-image",
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
       "sandbox-image",
     ];
     for (const jobName of [
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
     ]) {
@@ -3580,7 +3582,8 @@ describe("workflow contracts", () => {
     const exactSelectorJobs = new Set([
       "deployment",
       "api-image",
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
@@ -3599,7 +3602,8 @@ describe("workflow contracts", () => {
       "test",
       "deployment",
       "api-image",
-      "worker-web-images",
+      "worker-image",
+      "web-image",
       "artifact-materializer-image",
       "artifact-outbox-dispatcher-image",
       "relay-image",
@@ -3755,6 +3759,12 @@ describe("workflow contracts", () => {
     expect(
       e2e.steps.find((step: any) => step.name === "Run exactly the impacted E2E tests").run,
     ).toContain("scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e");
+    expect(
+      e2e.steps.find((step: any) => step.name === "Install pinned browser runtimes"),
+    ).toMatchObject({
+      uses: "./.github/actions/playwright-browsers",
+      with: { browsers: "chromium firefox webkit" },
+    });
 
     for (const jobName of ["e2e-shards", "browser-acceptance", "package-contracts"]) {
       const aptStabilizer = ci.jobs[jobName].steps.find(

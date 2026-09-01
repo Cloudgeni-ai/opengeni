@@ -89,6 +89,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
+      catalogSourceSettings = settings,
       db,
       bus,
       runtime,
@@ -302,6 +303,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const claimed = await claimTurnAttempt({
         input,
         settings,
+        catalogSourceSettings,
         db,
         bus,
         runtime,
@@ -796,7 +798,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
       const compactionPrep = await prepareCompaction({
         input,
-        settings,
+        settings: capabilitySettings,
         db,
         bus,
         observability,
@@ -1062,6 +1064,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ];
       const toolRuntime = await prepareTurnToolRuntime({
         input,
+        catalogSourceSettings,
         db,
         bus,
         runtime,
@@ -1243,7 +1246,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
       const postAgentCompaction = await runPostAgentCompaction({
         input,
-        settings,
+        settings: capabilitySettings,
         db,
         bus,
         observability,
@@ -1408,7 +1411,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       return await runTurnStreamAttempt({
         input,
-        settings,
+        settings: capabilitySettings,
         db,
         runtime,
         objectStorage,

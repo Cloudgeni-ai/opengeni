@@ -82,36 +82,36 @@ async function settleCreation(
   input: TrustedRigPlatformSurfaceOperation,
 ): Promise<TrustedRigPlatformSidecar> {
   const deadlineAtMs = operationDeadline(input);
+  const timeoutMs = remainingMs(deadlineAtMs);
   const controller = new AbortController();
   const onAbort = (): void =>
     controller.abort(input.signal?.reason ?? new Error("operation aborted"));
-  input.signal?.addEventListener("abort", onAbort, { once: true });
+  if (input.signal?.aborted) onAbort();
+  else input.signal?.addEventListener("abort", onAbort, { once: true });
   const timer = setTimeout(
     () =>
       controller.abort(
         new BrowserControlTransportError("trusted Rig platform surface deadline was reached"),
       ),
-    remainingMs(deadlineAtMs),
+    timeoutMs,
   );
   try {
     const winner = await Promise.race([
       create.then((sidecar) => ({ kind: "created" as const, sidecar })),
       new Promise<{ kind: "aborted"; reason: unknown }>((resolve) => {
         const settle = (): void => resolve({ kind: "aborted", reason: controller.signal.reason });
-        controller.signal.addEventListener("abort", settle, { once: true });
+        if (controller.signal.aborted) settle();
+        else controller.signal.addEventListener("abort", settle, { once: true });
       }),
     ]);
     if (winner.kind === "created") return winner.sidecar;
 
-    // Provider sidecar creation is not universally cancellable. Do not return
-    // while it can still materialize: await the exact request, terminate any
-    // late sidecar, then surface the original deadline/cancellation reason.
-    let late: TrustedRigPlatformSidecar | null = null;
-    try {
-      late = await create;
-    } finally {
-      if (late) await terminateSidecar(late, input).catch(() => undefined);
-    }
+    // A provider adapter must carry the operation signal/deadline into its
+    // create call, but keep a final local guard for a buggy or older provider.
+    // Never pin the verifier lease on a promise that ignores cancellation.
+    // If that request eventually materializes, terminate its exact sidecar in
+    // the background; provider-specific adapters also recover by stable name.
+    void create.then(async (late) => await terminateSidecar(late, input)).catch(() => undefined);
     throw winner.reason;
   } finally {
     clearTimeout(timer);

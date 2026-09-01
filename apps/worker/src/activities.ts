@@ -107,6 +107,7 @@ export const expireSessionInteractionIntervention =
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
 export const dispatchAutomationRun = defaultControlActivities.dispatchAutomationRun;
+export const settleAutomationRunFailure = defaultControlActivities.settleAutomationRunFailure;
 export const runKnowledgeSourceSyncBatch = defaultControlActivities.runKnowledgeSourceSyncBatch;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
 export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;

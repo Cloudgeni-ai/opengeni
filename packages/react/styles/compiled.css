@@ -4495,6 +4495,11 @@
       max-width: 12rem;
     }
   }
+:where(.og-root).sm\:max-w-\[32rem\],:where(.og-root) .sm\:max-w-\[32rem\] {
+    @media (width >= 40rem) {
+      max-width: 32rem;
+    }
+  }
 :where(.og-root).sm\:max-w-\[82\%\],:where(.og-root) .sm\:max-w-\[82\%\] {
     @media (width >= 40rem) {
       max-width: 82%;

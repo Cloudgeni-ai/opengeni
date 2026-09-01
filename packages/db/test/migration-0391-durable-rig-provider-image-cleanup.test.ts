@@ -13,7 +13,7 @@ import {
 } from "../src/runtime-posture";
 
 const migrationUrl = new URL(
-  "../drizzle/0389_durable_rig_provider_image_cleanup.sql",
+  "../drizzle/0391_durable_rig_provider_image_cleanup.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -25,7 +25,7 @@ const providerBinding = {
 };
 const providerBindingKey = JSON.stringify(providerBinding);
 
-describe("migration 0389 durable Rig provider image cleanup", () => {
+describe("migration 0391 durable Rig provider image cleanup", () => {
   test("persists pre-creation identity and protects registered artifacts from cleanup", async () => {
     const source = await Bun.file(migrationUrl).text();
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -45,7 +45,7 @@ describe("migration 0389 durable Rig provider image cleanup", () => {
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0389 PostgreSQL harness is unavailable",
+          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0391 PostgreSQL harness is unavailable",
         );
       }
       return;
@@ -56,7 +56,7 @@ describe("migration 0389 durable Rig provider image cleanup", () => {
     try {
       await migrate(blank.databaseUrl);
       if (!blank.appPassword) {
-        throw new Error("migration 0389 test database has no shared app-role password");
+        throw new Error("migration 0391 test database has no shared app-role password");
       }
       await provisionRoles(blank.databaseUrl, {
         rlsStrategy: "force",

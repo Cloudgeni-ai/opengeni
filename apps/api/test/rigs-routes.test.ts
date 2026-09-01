@@ -2,6 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import {
+  rigProviderImageBuildRequestId,
+  rigProviderImageContentHash,
+  rigProviderImageSetupHash,
+} from "@opengeni/core";
 import { sql } from "drizzle-orm";
 import {
   beginRigVersionVerificationAttempt,
@@ -946,7 +951,27 @@ describe("rig route permission matrix", () => {
       }),
     });
     const change = await proposed.json();
-    const providerImage = testRigProviderImage(change.id, "change");
+    const candidateDefinition = {
+      setupScript: "echo edited",
+      checks: [],
+      credentialHooks: [],
+      defaultVariableSetIds: [],
+    };
+    const contentHash = rigProviderImageContentHash({
+      backend: "docker",
+      sourceImage: "example.invalid/opengeni:test",
+      definition: candidateDefinition,
+    });
+    const providerImage = {
+      ...testRigProviderImage(change.id, "change"),
+      contentHash,
+      setupHash: rigProviderImageSetupHash(candidateDefinition),
+      buildRequestId: rigProviderImageBuildRequestId({
+        targetId: change.id,
+        backend: "docker",
+        contentHash,
+      }),
+    };
     await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
       status: "proposed",
       verification: {
@@ -955,9 +980,16 @@ describe("rig route permission matrix", () => {
         platformSurfaceValidation: testRigSurfaceReceipt(change.id, providerImage),
       },
     });
-    await createVerifiedTestRigVersion(client.db, ws.workspaceId, rig.id, {
-      setupScript: "echo independently-promoted",
-    });
+    const independentlyPromoted = await createVerifiedTestRigVersion(
+      client.db,
+      ws.workspaceId,
+      rig.id,
+      {
+        setupScript: "echo independently-promoted",
+      },
+    );
+    const auditBeforePromote = await auditActions(ws.workspaceId, rig.id);
+    const workflowCallsBeforePromote = calls.length;
 
     const promoted = await http.request(`${base}/${rig.id}/changes/${change.id}/promote`, {
       method: "POST",
@@ -966,7 +998,10 @@ describe("rig route permission matrix", () => {
     expect(promoted.status).toBe(409);
     const versions = await listRigVersions(client.db, ws.workspaceId, rig.id);
     expect(versions).toHaveLength(2);
+    expect(versions.find((version) => version.active)?.id).toBe(independentlyPromoted.id);
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("proposed");
+    expect(await auditActions(ws.workspaceId, rig.id)).toEqual(auditBeforePromote);
+    expect(calls).toHaveLength(workflowCallsBeforePromote);
   });
 
   test("manager-authored versions stay inactive when verification dispatch is deferred", async () => {

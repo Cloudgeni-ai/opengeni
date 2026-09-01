@@ -63,6 +63,8 @@ describe("provider-owned trusted Rig platform surfaces", () => {
     let sidecarExecCalls = 0;
     let createdImageId = "";
     let createdName = "";
+    let imageTimeoutMs = 0;
+    let createTimeoutMs = 0;
     const sidecar = {
       containerId: "container-trusted",
       containerName: "",
@@ -92,16 +94,19 @@ describe("provider-owned trusted Rig platform surfaces", () => {
       },
       modal: {
         images: {
-          fromId: async (imageId: string) => {
+          fromId: async (imageId: string, options?: { timeoutMs?: number }) => {
             createdImageId = imageId;
+            imageTimeoutMs = options?.timeoutMs ?? 0;
             return { imageId };
           },
         },
       },
       sandbox: {
         experimentalSidecars: {
-          create: async (name: string) => {
+          create: async (_name: string, _image: unknown, options?: { timeoutMs?: number }) => {
+            const name = _name;
             createdName = name;
+            createTimeoutMs = options?.timeoutMs ?? 0;
             sidecar.containerName = name;
             return sidecar;
           },
@@ -153,6 +158,8 @@ describe("provider-owned trusted Rig platform surfaces", () => {
     });
     expect(createdImageId).toBe(IMAGE_ID);
     expect(createdName).toStartWith("opengeni-rig-surface-");
+    expect(imageTimeoutMs).toBeGreaterThan(0);
+    expect(createTimeoutMs).toBeGreaterThan(0);
     expect(sidecarExecCalls).toBe(1);
     expect(rootExecCalls).toBe(0);
 
@@ -184,9 +191,58 @@ describe("provider-owned trusted Rig platform surfaces", () => {
     expect(Object.hasOwn(session, "trustedRigPlatformSurface")).toBe(false);
   });
 
-  test("deadline cancellation waits for and terminates a sidecar that materializes late", async () => {
+  test("cancellation does not wait forever for a provider create call", async () => {
+    const surface = createTrustedRigPlatformSurface({
+      binding: {
+        authority: "deployment_control_plane",
+        backendId: "modal",
+        instanceId: INSTANCE_ID,
+        providerImage: PROVIDER_IMAGE,
+        providerImageId: IMAGE_ID,
+        leaseId: LEASE_ID,
+        leaseEpoch: 7,
+        workspaceGeneration: 3,
+        sandboxGroupId: GROUP_ID,
+        rigVersionId: VERSION_ID,
+      },
+      desktopEnabled: false,
+      createSidecar: async () => await new Promise<TrustedRigPlatformSidecar>(() => undefined),
+    });
+    const controller = new AbortController();
+    const pending = surface.runTerminalProbe(operation({ signal: controller.signal }));
+    controller.abort(new Error("cancel never-settling sidecar"));
+    await expect(pending).rejects.toThrow("cancel never-settling sidecar");
+  });
+
+  test("creation observes cancellation that happens synchronously inside the provider factory", async () => {
+    const controller = new AbortController();
+    const surface = createTrustedRigPlatformSurface({
+      binding: {
+        authority: "deployment_control_plane",
+        backendId: "modal",
+        instanceId: INSTANCE_ID,
+        providerImage: PROVIDER_IMAGE,
+        providerImageId: IMAGE_ID,
+        leaseId: LEASE_ID,
+        leaseEpoch: 7,
+        workspaceGeneration: 3,
+        sandboxGroupId: GROUP_ID,
+        rigVersionId: VERSION_ID,
+      },
+      desktopEnabled: false,
+      createSidecar: async () => {
+        controller.abort(new Error("cancel during provider create"));
+        return await new Promise<TrustedRigPlatformSidecar>(() => undefined);
+      },
+    });
+    await expect(
+      surface.runTerminalProbe(operation({ signal: controller.signal })),
+    ).rejects.toThrow("cancel during provider create");
+  });
+
+  test("cancellation terminates a sidecar that materializes after the caller is released", async () => {
     let resolveCreate: ((sidecar: TrustedRigPlatformSidecar) => void) | null = null;
-    let terminated = false;
+    let terminateCalls = 0;
     const surface = createTrustedRigPlatformSurface({
       binding: {
         authority: "deployment_control_plane",
@@ -209,15 +265,83 @@ describe("provider-owned trusted Rig platform surfaces", () => {
     const controller = new AbortController();
     const pending = surface.runTerminalProbe(operation({ signal: controller.signal }));
     controller.abort(new Error("cancel trusted sidecar"));
-    await Bun.sleep(1);
+    await expect(pending).rejects.toThrow("cancel trusted sidecar");
     resolveCreate?.({
       sidecarId: "late-sidecar",
       exec: async () => ({ exitCode: 0, output: "OPENGENI_TRUSTED_TERMINAL_OK" }),
       terminate: async () => {
-        terminated = true;
+        terminateCalls += 1;
       },
     });
-    await expect(pending).rejects.toThrow("cancel trusted sidecar");
-    expect(terminated).toBe(true);
+    await Bun.sleep(1);
+    expect(terminateCalls).toBe(1);
+  });
+
+  test("the Modal adapter forwards cancellation and performs bounded stable-name cleanup", async () => {
+    let imageSignal: AbortSignal | undefined;
+    let createSignal: AbortSignal | undefined;
+    let cleanupTimeoutMs = 0;
+    const session = {
+      state: { sandboxId: INSTANCE_ID, imageId: IMAGE_ID },
+      modal: {
+        images: {
+          fromId: async (_imageId: string, options?: { signal?: AbortSignal }) => {
+            imageSignal = options?.signal;
+            return { imageId: IMAGE_ID };
+          },
+        },
+      },
+      sandbox: {
+        experimentalSidecars: {
+          create: async (_name: string, _image: unknown, options?: { signal?: AbortSignal }) => {
+            createSignal = options?.signal;
+            return await new Promise<never>((_resolve, reject) => {
+              if (options?.signal?.aborted) {
+                reject(options.signal.reason);
+                return;
+              }
+              options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+                once: true,
+              });
+            });
+          },
+          get: async (_name: string, options?: { timeoutMs?: number }) => {
+            cleanupTimeoutMs = options?.timeoutMs ?? 0;
+            const error = new Error("missing sidecar");
+            error.name = "NotFoundError";
+            throw error;
+          },
+        },
+      },
+      resolveExposedPort: async () => ({
+        baseUrl: "http://127.0.0.1:7682",
+        hostFetchAllowed: true,
+      }),
+    };
+    await expect(
+      attachProviderTrustedRigPlatformSurface({
+        backend: "modal",
+        settings: testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: false }),
+        session,
+        instanceId: INSTANCE_ID,
+        providerImage: PROVIDER_IMAGE,
+        expectedProviderImageId: IMAGE_ID,
+        leaseId: LEASE_ID,
+        leaseEpoch: 7,
+        workspaceGeneration: 3,
+        sandboxGroupId: GROUP_ID,
+        rigVersionId: VERSION_ID,
+      }),
+    ).resolves.toBe(true);
+    const controller = new AbortController();
+    const pending = (
+      session as BrowserControlPlacementSession
+    ).trustedRigPlatformSurface!.runTerminalProbe(operation({ signal: controller.signal }));
+    controller.abort(new Error("cancel Modal create"));
+    await expect(pending).rejects.toThrow("cancel Modal create");
+    await Bun.sleep(1);
+    expect(imageSignal).toBe(controller.signal);
+    expect(createSignal).toBe(controller.signal);
+    expect(cleanupTimeoutMs).toBeGreaterThan(0);
   });
 });

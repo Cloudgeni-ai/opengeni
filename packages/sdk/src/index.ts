@@ -26,10 +26,12 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
   isRetryableStreamError,
 } from "./errors";
+export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   deriveSessionDisplayTitle,
@@ -134,7 +136,7 @@ export {
   TtydClientCommand,
   TtydServerCommand,
 } from "./terminal";
-export { streamSessionEvents } from "./stream";
+export { sessionEventStreamCoveredThrough, streamSessionEvents } from "./stream";
 export type {
   SessionEventStreamTransport,
   StreamConnectionState,
@@ -478,6 +480,7 @@ export type {
   EndSessionRealtimeRequest,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
+  ModelCostClassV1,
   ModelCapabilitiesV1,
   ModelCapabilityStateV1,
   ModelCapabilitySupportV1,
@@ -493,6 +496,14 @@ export type {
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
+  WorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse,
+  CreateWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
+  WorkspaceOpenRouterCustomModel,
+  WorkspaceOpenRouterCustomModelsResponse,
+  CreateWorkspaceOpenRouterCustomModelRequest,
+  DeleteWorkspaceOpenRouterCustomModelRequest,
   WorkspaceModelAccessPolicy,
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,

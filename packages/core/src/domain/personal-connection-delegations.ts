@@ -4,6 +4,7 @@ import type {
   ConnectionMetadata,
   McpConnectionAuthoritySelection,
   McpPersonalConnectionDelegation,
+  McpServerConnectionRef,
   ResourceRef,
   SessionTurn,
   SocialConnection,
@@ -290,8 +291,14 @@ export function selectedPersonalConnectionServers(
 ): McpServerConfig[] {
   const selected = new Set(tools.map((tool) => tool.id));
   return settings.mcpServers.filter(
-    (server) => selected.has(server.id) && server.connectionRef?.subjectScope === "subject",
+    (server) => selected.has(server.id) && isNativeSubjectConnectionRef(server.connectionRef),
   );
+}
+
+function isNativeSubjectConnectionRef(
+  ref: McpServerConnectionRef | null | undefined,
+): ref is McpServerConnectionRef & { subjectScope: "subject" } {
+  return ref?.subjectScope === "subject" && ref.authoritySource !== "host";
 }
 
 function canonicalPersonalConnections(connections: ConnectionMetadata[]): ConnectionMetadata[] {
@@ -324,7 +331,7 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
   );
   for (const server of input.servers) {
     const ref = server.connectionRef;
-    if (!ref || ref.subjectScope !== "subject") continue;
+    if (!isNativeSubjectConnectionRef(ref)) continue;
     const selection = selections.get(server.id);
     const eligible = connections.filter(
       (candidate) =>
@@ -400,7 +407,7 @@ export function personalConnectionDelegationsFromParent(input: {
   };
   const mcp = input.servers.flatMap((server) => {
     const ref = server.connectionRef;
-    if (!ref || ref.subjectScope !== "subject") return [];
+    if (!isNativeSubjectConnectionRef(ref)) return [];
     const delegation = input.parentDelegations.find(
       (candidate) =>
         candidate.serverId === server.id &&
@@ -700,7 +707,7 @@ export function personalConnectionDelegationForServer(
   server: Pick<McpServerConfig, "id" | "connectionRef">,
 ): McpPersonalConnectionDelegation | null {
   const ref = server.connectionRef;
-  if (!ref || ref.subjectScope !== "subject") return null;
+  if (!isNativeSubjectConnectionRef(ref)) return null;
   return (
     delegations.find(
       (delegation) =>
@@ -750,7 +757,8 @@ export function withFrozenPersonalConnectionDelegations(input: {
 }): ConnectionCredentialResolver {
   return async (request) => {
     let effectiveRequest = request;
-    if (request.connectionRef.subjectScope === "subject") {
+    const nativeSubjectAuthority = isNativeSubjectConnectionRef(request.connectionRef);
+    if (nativeSubjectAuthority) {
       const config = input.settings.mcpServers.find((server) => server.id === request.serverId);
       const publicationDelegations =
         request.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID &&
@@ -787,7 +795,7 @@ export function withFrozenPersonalConnectionDelegations(input: {
       };
     }
     const result = await input.resolveCredential(effectiveRequest);
-    if (result.status === "ok" || request.connectionRef.subjectScope !== "subject") {
+    if (result.status === "ok" || !nativeSubjectAuthority) {
       return result;
     }
     return personalAuthorityUnavailable(request);

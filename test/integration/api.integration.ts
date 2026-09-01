@@ -89,6 +89,7 @@ import {
   parseSseBlock,
   startTestMcpServer,
   startTestServices,
+  installTestRigProviderImage,
   testSettings,
   testRigSurfaceReceipt,
   waitFor,
@@ -4206,13 +4207,18 @@ describe("API component integration", () => {
         { workspaceId, rigId, versionId: version!.id },
         { allowAlreadyPending: true },
       );
+      const providerImage = await installTestRigProviderImage(
+        dbClient.db,
+        workspaceId,
+        version!.id,
+      );
       const activation = await completeRigVersionVerification(dbClient.db, {
         workspaceId,
         rigId,
         versionId: version!.id,
         attemptId: attempt.attemptId,
         executionGeneration: attempt.executionGeneration,
-        receipt: testRigSurfaceReceipt(version!.id),
+        receipt: testRigSurfaceReceipt(version!.id, providerImage),
       });
       expect(activation).toMatchObject({ activated: true, stale: false });
     };
