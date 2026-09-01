@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type {
+  GitHubAppRepositoryBranchPage,
   GitHubInstallationBindingCandidate,
   GitHubInstallationBindingProof,
   GitHubRepository,
@@ -7,6 +8,7 @@ import type {
   GitHubUserInstallationAccess,
   GitHubUserRepositoryAccess,
 } from "@opengeni/contracts";
+import { readResponseTextBounded } from "@opengeni/network";
 import {
   createCipheriv,
   createDecipheriv,
@@ -23,6 +25,11 @@ const githubApiVersion = "2022-11-28";
 const githubTokenMintTimeoutMs = 60_000;
 /** Bound for the server-side repository-id lookup at turn start (mint + read). */
 export const githubRepositoryLookupTimeoutMs = 10_000;
+export const githubRepositoryBranchesTimeoutMs = 10_000;
+const githubRepositoryBranchesResponseMaxBytes = 256 * 1024;
+const githubInstallationTokenResponseMaxBytes = 64 * 1024;
+const githubErrorResponseMaxBytes = 64 * 1024;
+const githubErrorMessageMaxLength = 1024;
 export const stateMaxAgeSeconds = 60 * 60;
 const pkcs8PrivateKeyHeader = `-----BEGIN ${"PRIVATE KEY"}-----`;
 const rsaPrivateKeyHeader = `-----BEGIN ${"RSA PRIVATE KEY"}-----`;
@@ -864,6 +871,111 @@ export function createGitHubAppInstallationRepositoryLookup(
   };
 }
 
+/**
+ * List one bounded page of branch suggestions with an exact repository-scoped
+ * installation token. The token remains local to this server-side helper and
+ * is never returned in repository or branch metadata.
+ */
+export async function listGitHubAppRepositoryBranches(
+  settings: Settings,
+  input: {
+    installationId: number;
+    repositoryId: number;
+    page: number;
+    limit: number;
+  },
+): Promise<GitHubAppRepositoryBranchPage> {
+  if (
+    !Number.isSafeInteger(input.installationId) ||
+    input.installationId <= 0 ||
+    !Number.isSafeInteger(input.repositoryId) ||
+    input.repositoryId <= 0 ||
+    !Number.isSafeInteger(input.page) ||
+    input.page <= 0 ||
+    input.page > 10_000 ||
+    !Number.isSafeInteger(input.limit) ||
+    input.limit <= 0 ||
+    input.limit > 100
+  ) {
+    throw new GitHubAppApiError("GitHub branch lookup requires bounded exact repository input");
+  }
+  const minted = await createGitHubAppInstallationTokenWithSigningSettings(settings, {
+    installationId: input.installationId,
+    repositoryIds: [input.repositoryId],
+    permissions: { contents: "read", metadata: "read" },
+    timeoutMs: githubRepositoryBranchesTimeoutMs,
+  });
+  const repositoryResponse = await githubRepositoryBranchesFetch(
+    new URL(`${githubApiBase}/repositories/${input.repositoryId}`),
+    minted.token,
+    "GitHub repository branch identity",
+  );
+  const repositoryPayload = await githubResponseJsonBounded(
+    repositoryResponse,
+    "GitHub repository branch identity response",
+  );
+  if (
+    !repositoryPayload ||
+    typeof repositoryPayload !== "object" ||
+    Array.isArray(repositoryPayload)
+  ) {
+    throw new GitHubAppApiError("GitHub returned an invalid repository branch identity payload");
+  }
+  const repository = repositoryPayload as Record<string, unknown>;
+  const repositoryId = asInt(repository.id);
+  const fullName = typeof repository.full_name === "string" ? repository.full_name : "";
+  const defaultBranch =
+    typeof repository.default_branch === "string" ? repository.default_branch : "";
+  const coordinates = fullName.split("/");
+  if (
+    repositoryId !== input.repositoryId ||
+    coordinates.length !== 2 ||
+    !coordinates[0] ||
+    !coordinates[1] ||
+    defaultBranch.length === 0 ||
+    defaultBranch.length > 1024
+  ) {
+    throw new GitHubAppApiError("GitHub returned an invalid repository branch identity payload");
+  }
+  const branchUrl = new URL(
+    `${githubApiBase}/repos/${encodeURIComponent(coordinates[0])}/${encodeURIComponent(coordinates[1])}/branches`,
+  );
+  branchUrl.searchParams.set("page", String(input.page));
+  branchUrl.searchParams.set("per_page", String(input.limit));
+  const branchesResponse = await githubRepositoryBranchesFetch(
+    branchUrl,
+    minted.token,
+    "GitHub repository branches",
+  );
+  const branchPayload = await githubResponseJsonBounded(
+    branchesResponse,
+    "GitHub repository branches response",
+  );
+  if (!Array.isArray(branchPayload) || branchPayload.length > input.limit) {
+    throw new GitHubAppApiError("GitHub returned an invalid repository branches payload");
+  }
+  const branches: string[] = [];
+  const seen = new Set<string>();
+  for (const value of branchPayload) {
+    const name =
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>).name
+        : null;
+    if (typeof name !== "string" || name.length === 0 || name.length > 1024 || seen.has(name)) {
+      throw new GitHubAppApiError("GitHub returned an invalid repository branches payload");
+    }
+    seen.add(name);
+    branches.push(name);
+  }
+  return {
+    installationId: input.installationId,
+    repositoryId: input.repositoryId,
+    defaultBranch,
+    branches,
+    nextPage: branchPayload.length === input.limit && input.page < 10_000 ? input.page + 1 : null,
+  };
+}
+
 export async function createGitHubAppInstallationToken(
   settings: Settings,
   input: {
@@ -900,6 +1012,7 @@ export async function createGitHubAppInstallationTokenWithSigningSettings(
     installationId: number;
     repositoryIds: number[];
     permissions?: Record<string, "read" | "write">;
+    timeoutMs?: number;
   },
 ): Promise<GitHubAppInstallationToken> {
   const missing = githubAppTokenMissingSettings(settings);
@@ -928,6 +1041,7 @@ export async function createGitHubAppInstallationTokenWithSigningSettings(
     installationId: input.installationId,
     repositoryIds,
     ...(input.permissions ? { permissions: input.permissions } : {}),
+    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
   });
 }
 
@@ -1210,20 +1324,36 @@ async function createInstallationToken(
         ...githubHeaders(appJwt),
         ...(scoped ? { "Content-Type": "application/json" } : {}),
       },
+      redirect: "manual",
       signal: AbortSignal.timeout(input.timeoutMs ?? githubTokenMintTimeoutMs),
       ...(scoped ? { body: JSON.stringify(body) } : {}),
     },
   );
   if (!response.ok) {
-    throw new GitHubAppApiError(await githubErrorMessage(response));
+    throw new GitHubAppApiError(await githubErrorMessage(response), response.status);
   }
-  const payload = await response.json();
-  if (!payload || typeof payload !== "object" || typeof payload.token !== "string") {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(
+      await readResponseTextBounded(
+        response,
+        githubInstallationTokenResponseMaxBytes,
+        "GitHub installation token response",
+      ),
+    ) as unknown;
+  } catch {
+    throw new GitHubAppApiError("GitHub returned an invalid installation token payload");
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new GitHubAppApiError("GitHub returned an invalid installation token payload");
+  }
+  const record = payload as Record<string, unknown>;
+  if (typeof record.token !== "string") {
     throw new GitHubAppApiError("GitHub returned an invalid installation token payload");
   }
   return {
-    token: payload.token,
-    expiresAt: typeof payload.expires_at === "string" ? payload.expires_at : null,
+    token: record.token,
+    expiresAt: typeof record.expires_at === "string" ? record.expires_at : null,
   };
 }
 
@@ -1297,6 +1427,37 @@ async function githubGet(
   return await response.json();
 }
 
+async function githubRepositoryBranchesFetch(
+  url: URL,
+  token: string,
+  label: string,
+): Promise<Response> {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: githubHeaders(token),
+      redirect: "manual",
+      signal: AbortSignal.timeout(githubRepositoryBranchesTimeoutMs),
+    });
+  } catch {
+    throw new GitHubAppApiError(`${label} request failed`);
+  }
+  if (!response.ok) {
+    throw new GitHubAppApiError(await githubErrorMessage(response), response.status);
+  }
+  return response;
+}
+
+async function githubResponseJsonBounded(response: Response, label: string): Promise<unknown> {
+  try {
+    return JSON.parse(
+      await readResponseTextBounded(response, githubRepositoryBranchesResponseMaxBytes, label),
+    ) as unknown;
+  } catch {
+    throw new GitHubAppApiError(`${label} was invalid or too large`);
+  }
+}
+
 function repositoryFromPayload(
   payload: Record<string, unknown>,
   installationId: number,
@@ -1344,15 +1505,27 @@ function githubHeaders(token?: string): HeadersInit {
 }
 
 async function githubErrorMessage(response: Response): Promise<string> {
+  let text: string;
   try {
-    const payload = await response.json();
+    text = await readResponseTextBounded(
+      response,
+      githubErrorResponseMaxBytes,
+      "GitHub error response",
+    );
+  } catch {
+    return `GitHub API ${response.status}`;
+  }
+  try {
+    const payload = JSON.parse(text) as unknown;
     if (payload && typeof payload === "object" && "message" in payload) {
-      return `GitHub API ${response.status}: ${String(payload.message)}`;
+      return `GitHub API ${response.status}: ${String(
+        (payload as Record<string, unknown>).message,
+      ).slice(0, githubErrorMessageMaxLength)}`;
     }
   } catch {
-    // fall through
+    // Fall through to the bounded text body.
   }
-  return `GitHub API ${response.status}: ${await response.text()}`;
+  return `GitHub API ${response.status}: ${text.slice(0, githubErrorMessageMaxLength)}`;
 }
 
 export function normalizeGitHubAppPrivateKey(value: string): string {

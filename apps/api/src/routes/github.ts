@@ -1,5 +1,6 @@
 import {
   GitHubAppManifestCreate,
+  ListGitHubRepositoryBranchesQuery,
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
   type GitHubInstallationBindingProof,
@@ -42,7 +43,9 @@ import {
 } from "../github-browser-flow";
 import {
   githubBindingStatus,
+  GitHubRepositoryBranchAuthorityError,
   listWorkspaceGitHubInstallationBindings,
+  listWorkspaceGitHubRepositoryBranches,
   listWorkspaceGitHubRepositories,
 } from "../github-access";
 
@@ -176,6 +179,33 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
   });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/github/installations/:installationId/repositories/:repositoryId/branches",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "github:use");
+      const installationId = parsePositiveInteger(c.req.param("installationId"));
+      const repositoryId = parsePositiveInteger(c.req.param("repositoryId"));
+      if (installationId === null || repositoryId === null) {
+        throw new HTTPException(400, { message: "invalid GitHub repository identity" });
+      }
+      const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
+      try {
+        return c.json(
+          await listWorkspaceGitHubRepositoryBranches(deps, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            installationId,
+            repositoryId,
+            query,
+          }),
+        );
+      } catch (error) {
+        throw githubRepositoryBranchesRouteError(error);
+      }
+    },
+  );
 
   app.delete("/v1/workspaces/:workspaceId/github/installations/:installationId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -747,6 +777,36 @@ function githubAuthorityHttpError(error: unknown): HTTPException {
     return new HTTPException(502, { message: error.message });
   }
   return new HTTPException(502, { message: "GitHub authority verification failed" });
+}
+
+function githubRepositoryBranchesRouteError(error: unknown): Error {
+  if (error instanceof HTTPException) {
+    return error;
+  }
+  if (error instanceof GitHubRepositoryBranchAuthorityError) {
+    return error.code === "not_authorized"
+      ? new HTTPException(404, {
+          message: "GitHub repository is not authorized for this workspace",
+        })
+      : new HTTPException(409, {
+          message: "GitHub repository authorization changed; refresh and try again",
+        });
+  }
+  if (error instanceof GitHubAppConfigurationError) {
+    return new HTTPException(409, { message: "GitHub App is not configured" });
+  }
+  if (error instanceof GitHubAppApiError) {
+    if (error.status === 429) {
+      return new HTTPException(503, { message: "GitHub is temporarily rate limited" });
+    }
+    if (error.status === 401 || error.status === 403 || error.status === 404) {
+      return new HTTPException(409, {
+        message: "GitHub repository access changed; refresh and try again",
+      });
+    }
+    return new HTTPException(502, { message: "GitHub branch discovery is unavailable" });
+  }
+  return new HTTPException(502, { message: "GitHub branch discovery is unavailable" });
 }
 
 function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {

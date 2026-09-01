@@ -437,6 +437,7 @@
       "dependencies": {
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
+        "@opengeni/network": "workspace:*",
         "jose": "^6.1.3",
       },
       "devDependencies": {

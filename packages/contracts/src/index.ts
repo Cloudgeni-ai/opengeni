@@ -4319,6 +4319,14 @@ export type GitHubUserInstallationAccess = GitHubInstallationSummary & {
   repositories: GitHubUserRepositoryAccess[];
 };
 
+export type GitHubAppRepositoryBranchPage = {
+  installationId: number;
+  repositoryId: number;
+  defaultBranch: string;
+  branches: string[];
+  nextPage: number | null;
+};
+
 export type GitHubAppApiPort = {
   /**
    * Exchange one fresh GitHub user-authorization code and prove current
@@ -4350,6 +4358,18 @@ export type GitHubAppApiPort = {
     installationId: number;
   }) => Promise<GitHubInstallationSummary | null>;
   listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
+  /**
+   * List one bounded page of branch suggestions for one exact repository.
+   * Implementations must keep the provider credential server-side and scope
+   * it to exactly `repositoryId`; the caller separately rechecks the durable
+   * workspace binding immediately before and after this provider request.
+   */
+  listRepositoryBranches?: (input: {
+    installationId: number;
+    repositoryId: number;
+    page: number;
+    limit: number;
+  }) => Promise<GitHubAppRepositoryBranchPage>;
 };
 
 export const BillingBalance = z.object({
@@ -14821,6 +14841,59 @@ export const GitHubRepositoriesResponse = z.object({
   repositories: z.array(GitHubRepository),
 });
 export type GitHubRepositoriesResponse = z.infer<typeof GitHubRepositoriesResponse>;
+
+export const GITHUB_REPOSITORY_BRANCH_PAGE_MAX = 100 as const;
+
+export const ListGitHubRepositoryBranchesQuery = z
+  .object({
+    cursor: z.coerce.number().int().positive().max(10_000).default(1),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(GITHUB_REPOSITORY_BRANCH_PAGE_MAX)
+      .default(GITHUB_REPOSITORY_BRANCH_PAGE_MAX),
+  })
+  .strict();
+export type ListGitHubRepositoryBranchesQuery = z.infer<typeof ListGitHubRepositoryBranchesQuery>;
+
+export const GitHubRepositoryBranch = z
+  .object({
+    name: z.string().min(1).max(1024),
+    isDefault: z.boolean(),
+  })
+  .strict();
+export type GitHubRepositoryBranch = z.infer<typeof GitHubRepositoryBranch>;
+
+export const GitHubRepositoryBranchesResponse = z
+  .object({
+    branches: z.array(GitHubRepositoryBranch).max(GITHUB_REPOSITORY_BRANCH_PAGE_MAX),
+    nextCursor: z.number().int().positive().max(10_000).nullable(),
+  })
+  .strict()
+  .superRefine((response, context) => {
+    const names = new Set<string>();
+    let defaultCount = 0;
+    response.branches.forEach((branch, index) => {
+      if (names.has(branch.name)) {
+        context.addIssue({
+          code: "custom",
+          path: ["branches", index, "name"],
+          message: "branch names must be unique",
+        });
+      }
+      names.add(branch.name);
+      if (branch.isDefault) defaultCount += 1;
+    });
+    if (defaultCount > 1) {
+      context.addIssue({
+        code: "custom",
+        path: ["branches"],
+        message: "at most one branch may be marked as default",
+      });
+    }
+  });
+export type GitHubRepositoryBranchesResponse = z.infer<typeof GitHubRepositoryBranchesResponse>;
 
 export const ClientAuthConfig = z.discriminatedUnion("mode", [
   z.object({
