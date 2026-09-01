@@ -110,7 +110,7 @@ test("native auth-needed recovery stays host-owned and works without a pre-minte
   expect(timeline).toContain("onReconnect?: AuthReconnectHandler");
   expect(timeline).toContain("<TimelineGroup {group} {renderers} {onReconnect} />");
   expect(sessionSurface).toContain(
-    "<MessageTimeline controller={controllers.events.controller} {onReconnect} />",
+    "<MessageTimeline controller={controllers.events.controller} composer={controllers.composer.controller} {onReconnect} />",
   );
   expect(row).toContain("auth.actionable && onReconnect");
   expect(row).toContain("await onReconnect(value)");

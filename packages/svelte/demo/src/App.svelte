@@ -31,6 +31,9 @@
     : new MissionControlMockClient({
         failControl: query.get("control") === "fail",
         failToolPolicy: query.get("toolPolicy") === "fail",
+        ...(query.get("composer") === "definitive" || query.get("composer") === "outcome-unknown"
+          ? { composerFailure: query.get("composer") as "definitive" | "outcome-unknown" }
+          : {}),
       });
   const sharedEvents = [] as const;
   const session = createSessionResource({

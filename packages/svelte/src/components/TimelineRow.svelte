@@ -27,6 +27,7 @@
   let label = $derived(timelineItemLabel(item));
   let outcome = $derived(timelineItemOutcome(item));
   let summary = $derived(timelineItemSummary(item));
+  let deliveryFailed = $derived(item.kind === "user-message" && item.delivery?.state === "failed");
   let reconnecting = $state(false);
   let reconnectFailed = $state(false);
 
@@ -71,7 +72,7 @@
     {:else if item.kind === "user-message"}
       <UserMessageBody text={item.text} />
     {:else if item.kind === "agent-message" || item.kind === "reasoning"}
-      <div data-og-state={item.streaming ? "streaming" : "ready"}>{item.text}</div>
+      <div data-og-part="message-text" data-og-state={item.streaming ? "streaming" : "ready"}>{item.text}</div>
     {:else if item.kind === "tool-call"}
       <strong>{item.name}</strong>
       {#if item.arguments !== undefined}<pre>{boundedTimelineValue(item.arguments)}</pre>{/if}
@@ -218,4 +219,11 @@
       {#if item.failureText}<p class="og-timeline-row__failure">{item.failureText}</p>{/if}
     {/if}
   </div>
+  {#if item.kind === "user-message" && deliveryFailed}
+    <div class="og-message-delivery" role="status" aria-live="polite" aria-atomic="true" title={item.delivery?.error}>
+      <span>Message not sent</span>
+      {#if item.delivery?.onRetry}<button class="og-button" type="button" onclick={item.delivery.onRetry}>Retry</button>{/if}
+      {#if item.delivery?.onRemove}<button class="og-button" type="button" onclick={item.delivery.onRemove}>Remove</button>{/if}
+    </div>
+  {/if}
 </article>

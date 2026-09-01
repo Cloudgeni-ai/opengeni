@@ -98,6 +98,33 @@ describe("native Svelte Mission Control demo", () => {
     );
     expect(await page.getByRole("textbox", { name: "Message" }).isVisible()).toBe(true);
     expect(await page.getByRole("button", { name: "Send", exact: true }).isVisible()).toBe(true);
+    const composedStatus = page.locator(
+      '[data-og-component="chrome"] [data-og-component="status"]',
+    );
+    expect(await composedStatus.getAttribute("role")).toBe("status");
+    expect(await composedStatus.getAttribute("aria-live")).toBe("polite");
+    expect(await composedStatus.getAttribute("aria-atomic")).toBe("true");
+    const preservedText = await page.evaluate(() => {
+      const user = document.querySelector<HTMLElement>(
+        '[data-og-kind="user-message"] [data-og-part="message-text"]',
+      )!;
+      const agent = document.querySelector<HTMLElement>(
+        '[data-og-kind="agent-message"] [data-og-part="message-text"]',
+      )!;
+      return {
+        user: user.textContent,
+        agent: agent.textContent,
+        userWhiteSpace: getComputedStyle(user).whiteSpace,
+        agentWhiteSpace: getComputedStyle(agent).whiteSpace,
+      };
+    });
+    expect(preservedText).toEqual({
+      user: "Review the infrastructure rollout.\nPreserve  the operator's spacing.",
+      agent:
+        "I verified the rollout receipts.\nOne approval  and one operator answer remain before completion.",
+      userWhiteSpace: "pre-wrap",
+      agentWhiteSpace: "pre-wrap",
+    });
     for (const kind of [
       "worker",
       "worker-completion",
@@ -259,6 +286,45 @@ describe("native Svelte Mission Control demo", () => {
     await assertAxeClean(page);
     expect(diagnostics).toEqual([]);
     await context.close();
+  }, 60_000);
+
+  test("definitive and outcome-unknown composer failures remain visible and recoverable", async () => {
+    for (const failure of ["definitive", "outcome-unknown"] as const) {
+      const context = await browser.newContext({
+        viewport: { width: 1200, height: 800 },
+        reducedMotion: "reduce",
+        colorScheme: "dark",
+      });
+      const page = await context.newPage();
+      const diagnostics = captureDiagnostics(page);
+      await page.goto(`${baseUrl}?composer=${failure}`, { waitUntil: "networkidle" });
+      await expectMissionControlReady(page);
+
+      const text = `Retain failed ${failure} delivery`;
+      const input = page.getByRole("textbox", { name: "Message" });
+      await input.fill(text);
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+
+      const row = page
+        .locator('[data-og-component="timeline-row"][data-og-kind="user-message"]')
+        .filter({ hasText: text });
+      await row.getByText("Message not sent", { exact: true }).waitFor();
+      expect(await input.inputValue()).toBe("");
+      const delivery = row.locator('[role="status"]');
+      expect(await delivery.getAttribute("aria-live")).toBe("polite");
+      expect(await delivery.getAttribute("aria-atomic")).toBe("true");
+      expect(await row.getByRole("button", { name: "Retry", exact: true }).isVisible()).toBe(true);
+      expect(await row.getByRole("button", { name: "Remove", exact: true }).isVisible()).toBe(true);
+
+      await row.getByRole("button", { name: "Retry", exact: true }).click();
+      await row.getByText("Message not sent", { exact: true }).waitFor();
+      await row.getByRole("button", { name: "Remove", exact: true }).click();
+      await row.waitFor({ state: "detached" });
+
+      await assertAxeClean(page);
+      expect(diagnostics).toEqual([]);
+      await context.close();
+    }
   }, 60_000);
 });
 

@@ -29,6 +29,7 @@ let humanRequests = [humanInputFixture()];
 export type MissionControlMockClientOptions = Readonly<{
   failControl?: boolean;
   failToolPolicy?: boolean;
+  composerFailure?: "definitive" | "outcome-unknown";
 }>;
 
 export class MissionControlMockClient {
@@ -111,6 +112,14 @@ export class MissionControlMockClient {
     _sessionId: string,
     request: SubmitComposerDraftRequest,
   ): Promise<SubmitComposerDraftResponse> {
+    if (this.options.composerFailure === "definitive") {
+      throw new Error("Fixture composer delivery failed.");
+    }
+    if (this.options.composerFailure === "outcome-unknown") {
+      throw Object.assign(new Error("Fixture composer delivery outcome is unknown."), {
+        outcomeUnknown: true as const,
+      });
+    }
     const accepted = {
       ...event("user.message", { text: request.text, resources: request.resources }, ++sequence),
       clientEventId: request.clientEventId,
@@ -269,13 +278,13 @@ function fixtureEvents(): SessionEvent[] {
     event("session.created", {}, 1),
     event(
       "user.message",
-      { text: "Review the infrastructure rollout and surface any unsafe assumption." },
+      { text: "Review the infrastructure rollout.\nPreserve  the operator's spacing." },
       2,
     ),
     event(
       "agent.message.completed",
       {
-        text: "I verified the rollout receipts. One approval and one operator answer remain before completion.",
+        text: "I verified the rollout receipts.\nOne approval  and one operator answer remain before completion.",
       },
       3,
     ),

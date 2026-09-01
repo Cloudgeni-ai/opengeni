@@ -1,6 +1,7 @@
 <script lang="ts">
   import { projectPendingApprovals } from "@opengeni/sdk/session";
   import type { SessionSurfaceControllers } from "../controllers";
+  import { projectOptimisticQueuedMessages } from "../optimistic-messages";
   import { editQueuedTurnIntoComposer } from "../queue-edit";
   import type { AuthReconnectHandler } from "../renderers";
   import { readableFromController } from "../store";
@@ -33,10 +34,14 @@
   let events = $derived(readableFromController(controllers.events.controller, { owned: false }));
   let control = $derived(readableFromController(controllers.control.controller, { owned: false }));
   let queue = $derived(readableFromController(controllers.queue.controller, { owned: false }));
+  let composer = $derived(readableFromController(controllers.composer.controller, { owned: false }));
   let humanInput = $derived(controllers.humanInput ? readableFromController(controllers.humanInput.controller, { owned: false }) : null);
   let goal = $derived(controllers.goal ? readableFromController(controllers.goal.controller, { owned: false }) : null);
   let approvals = $derived(projectPendingApprovals([...$events.events]));
   let status = $derived($events.sessionStatus ?? $session.value?.status ?? "queued");
+  let optimisticQueueCount = $derived(
+    projectOptimisticQueuedMessages($composer.optimisticMessages, $queue).length,
+  );
 
   $effect(() => controllers.acquire());
 
@@ -73,7 +78,7 @@
     {status}
     paused={$queue.effectiveControl?.state === "paused"}
     controlling={$control.controlling}
-    queueCount={$queue.queue.length}
+    queueCount={$queue.queue.length + optimisticQueueCount}
     approvalCount={approvals.length}
     inputCount={humanInput ? ($humanInput?.requests.length ?? 0) : 0}
     goalLabel={goal ? $goal?.value?.status : undefined}
@@ -81,12 +86,12 @@
     onResume={resume}
   />
   {#if $control.error}<div class="og-error" data-og-part="control-error" role="alert">{$control.error.message}</div>{/if}
-  <MessageTimeline controller={controllers.events.controller} {onReconnect} />
+  <MessageTimeline controller={controllers.events.controller} composer={controllers.composer.controller} {onReconnect} />
   <div data-og-part="controls">
     {#if approvals.length > 0}<ApprovalSurface {approvals} controller={controllers.control.controller} showError={false} />{/if}
     {#if controllers.humanInput}<HumanInputSurface controller={controllers.humanInput.controller} />{/if}
     {#if controllers.goal}<GoalSurface controller={controllers.goal.controller} />{/if}
-    {#if $queue.queue.length > 0}<QueueSurface controller={controllers.queue.controller} onEdit={editQueuedTurn} />{/if}
+    {#if $queue.queue.length > 0 || optimisticQueueCount > 0}<QueueSurface controller={controllers.queue.controller} composer={controllers.composer.controller} onEdit={editQueuedTurn} />{/if}
   </div>
   <SessionComposer
     controller={controllers.composer.controller}

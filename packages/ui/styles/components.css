@@ -77,6 +77,7 @@
 .og-timeline-row__body { min-width: 0; overflow-wrap: anywhere; }
 .og-timeline-row__body > :first-child { margin-block-start: 0; }
 .og-timeline-row__body > :last-child { margin-block-end: 0; }
+.og-timeline-row [data-og-part="message-text"] { white-space: pre-wrap; }
 .og-timeline-row__headline { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: var(--og-space-2); }
 .og-timeline-row__summary, .og-timeline-row__identifier { color: var(--og-color-fg-subtle); font-size: var(--og-font-size-sm); }
 .og-timeline-row__identifier { display: block; margin-block-start: var(--og-space-2); overflow-wrap: anywhere; }
@@ -112,6 +113,8 @@
   border: 1px solid var(--og-color-border);
   border-radius: var(--og-radius-lg) var(--og-radius-lg) var(--og-radius-xs) var(--og-radius-lg);
 }
+.og-message-delivery { display: flex; align-items: center; gap: var(--og-space-2); color: var(--og-color-status-failed); font-size: var(--og-font-size-xs); }
+.og-message-delivery .og-button { min-height: 1.75rem; padding: 0.1875rem 0.5rem; }
 .og-timeline-row[data-og-kind="agent-message"] .og-timeline-row__body { font-size: var(--og-font-size-base); line-height: 1.65; }
 .og-timeline-row[data-og-kind="notice"] .og-timeline-row__body,
 .og-timeline-row[data-og-kind="auth-needed"] .og-timeline-row__body,
@@ -211,6 +214,7 @@
 .og-queue__list { display: grid; gap: var(--og-space-2); margin: 0; padding: 0; list-style: none; }
 .og-queue-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: var(--og-space-2); padding: var(--og-space-2); background: var(--og-color-surface-2); border: 1px solid var(--og-color-border); border-radius: var(--og-radius-md); }
 .og-queue-item__content { min-width: 0; overflow-wrap: anywhere; }
+.og-queue-item[data-og-state="failed"] { color: var(--og-color-status-failed); border-color: color-mix(in oklch, var(--og-color-danger) 55%, var(--og-color-border)); }
 .og-queue-item__actions { display: flex; align-items: center; gap: var(--og-space-1); }
 .og-approval__arguments { max-height: 12rem; overflow: auto; white-space: pre-wrap; padding: var(--og-space-2); font-family: var(--og-font-mono); font-size: var(--og-code-font-size); background: var(--og-color-surface-2); border-radius: var(--og-radius-md); }
 .og-approval__actions, .og-human-input__actions, .og-goal__actions, .og-mcp-policy__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--og-space-2); }
