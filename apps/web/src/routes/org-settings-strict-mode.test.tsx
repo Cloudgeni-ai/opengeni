@@ -188,6 +188,17 @@ async function flush() {
   });
 }
 
+async function waitForOrganizationApiKeyReads() {
+  const deadline = Date.now() + 1_000;
+  while (listOrganizationApiKeys.mock.calls.length < 2 && Date.now() < deadline) {
+    // The developer section is loaded through React.lazy. On a busy runner,
+    // StrictMode's two effect passes may settle after more than one tick.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+  }
+}
+
 beforeAll(() => {
   GlobalRegistrator.register();
   (
@@ -265,7 +276,7 @@ describe("organization billing StrictMode ownership", () => {
         </StrictMode>,
       );
     });
-    await flush();
+    await waitForOrganizationApiKeyReads();
 
     expect(listOrganizationApiKeys.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(
