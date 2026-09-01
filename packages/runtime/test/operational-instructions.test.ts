@@ -31,6 +31,9 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.ts](<sandbox:C:/repo/app.ts:12>)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Never link directly to `/tmp`");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "or any file outside the current workspace",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "copy it into the current workspace before responding",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("canonical sandbox path");
