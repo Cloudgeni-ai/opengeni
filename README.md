@@ -221,6 +221,8 @@ Copy `.env.example` to `.env` and configure at least:
 - `OPENGENI_DEV_BACKEND` when automatic Docker/native selection is not desired
 - `OPENGENI_OPENAI_PROVIDER`
 - OpenAI or Azure OpenAI credentials
+- Extra OpenAI-compatible servers, AI Gateway, OpenRouter, Codex, and SuperGrok: see
+  [Configuring inference](docs/model-providers.md#configuring-inference)
 - `OPENGENI_SANDBOX_BACKEND`
 - `OPENGENI_SANDBOX_PREPARATION_PROFILES` when sandbox credentials or lifecycle hooks are needed
 
