@@ -2,14 +2,28 @@ import { CheckIcon, LifeBuoyIcon, RotateCcwIcon, SparklesIcon } from "lucide-rea
 import { AnimatePresence, motion } from "motion/react";
 import { lazy, Suspense, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import {
+  AgentPanelLoadBoundary,
+  createBrowserAgentPanelLoadEnvironment,
+  loadAgentPanelModule,
+  removeAgentPanelReloadParameter,
+  shouldRestoreAgentPanel,
+} from "./agent-panel-load";
 import { SupportInbox } from "./support-inbox";
 import { SupportTicketView } from "./support-ticket";
 import type { SupportCase } from "./types";
 import { useSupportDemo } from "./use-support-demo";
 import "./styles.css";
 
+const agentPanelLoadEnvironment = createBrowserAgentPanelLoadEnvironment(import.meta.url);
+const restoreAgentPanel = shouldRestoreAgentPanel(agentPanelLoadEnvironment);
+removeAgentPanelReloadParameter();
+
 const SupportAgentPanel = lazy(async () => {
-  const mod = await import("./support-agent-panel");
+  const mod = await loadAgentPanelModule(
+    () => import("./support-agent-panel"),
+    agentPanelLoadEnvironment,
+  );
   return { default: mod.SupportAgentPanel };
 });
 
@@ -21,7 +35,7 @@ declare global {
 
 function NorthstarApp() {
   const demo = useSupportDemo();
-  const [agentEnabled, setAgentEnabled] = useState(false);
+  const [agentEnabled, setAgentEnabled] = useState(restoreAgentPanel);
   const [agentPanelExpanded, setAgentPanelExpanded] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [selectedTicketId, setSelectedTicketId] = useState("TKT-2847");
@@ -102,17 +116,19 @@ function NorthstarApp() {
             transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
             className="min-h-0 min-w-0 overflow-hidden"
           >
-            <Suspense fallback={<AgentPanelSkeleton />}>
-              <SupportAgentPanel
-                health={demo.health}
-                supportCase={selectedCase}
-                sessionId={sessionId}
-                expanded={agentPanelExpanded}
-                onExpandedChange={setAgentPanelExpanded}
-                onSessionCreated={setSessionId}
-                onClearSession={() => setSessionId(null)}
-              />
-            </Suspense>
+            <AgentPanelLoadBoundary>
+              <Suspense fallback={<AgentPanelSkeleton />}>
+                <SupportAgentPanel
+                  health={demo.health}
+                  supportCase={selectedCase}
+                  sessionId={sessionId}
+                  expanded={agentPanelExpanded}
+                  onExpandedChange={setAgentPanelExpanded}
+                  onSessionCreated={setSessionId}
+                  onClearSession={() => setSessionId(null)}
+                />
+              </Suspense>
+            </AgentPanelLoadBoundary>
           </motion.div>
         ) : null}
       </AnimatePresence>
