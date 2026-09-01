@@ -58,4 +58,22 @@ describe("provider-neutral operational instructions", () => {
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("continuation segment settlements");
   });
+
+  test("holds an unchanged external wait during the status turn without stalling useful work", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "do not end with only a status reply and leave an immediate continuation",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "only when further progress genuinely depends on an unchanged child or external event",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Do not use `goal_wait` for work you can still advance or for a blocker that requires a human decision.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "after calling `goal_wait`, end without another final or status restatement unless you found material new information",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "except for the unchanged-wait `goal_wait` continuation described above",
+    );
+  });
 });

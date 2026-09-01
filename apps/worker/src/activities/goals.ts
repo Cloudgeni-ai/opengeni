@@ -261,6 +261,7 @@ export function goalContinuationPrompt(
         "Waiting on child sessions or external events:",
         "- When the next progress depends on child sessions you spawned or on an external event, do not sleep, loop, or poll sessions_list/session_get/session_events to wait for it.",
         "- Re-check sessions_list or session_get once; if the work is still in flight, call opengeni__goal_wait with a concrete reason and a deadline (untilSeconds), then end your turn immediately. You will be woken by a child result, a message, a human prompt, or at the deadline, and this goal stays active.",
+        "- If the immediately preceding user-facing update already reported this same unchanged wait, do not restate it or produce another equivalent final answer. Call opengeni__goal_wait and end the turn. Report only material new state or a newly discovered blocker.",
         "- A hold is for child/external progress only. If you are blocked on a human decision, use opengeni__goal_pause under the blocked audit below instead.",
         "",
       ]
