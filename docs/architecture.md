@@ -390,7 +390,13 @@ period, including after the default backend changes because historical Modal
 leases remain durable. A drain timeout therefore cannot outlive the rotation
 window. An explicit drain budget is also admitted only when one reaper period,
 the full durable capture, and retry handoff fit inside the lifecycle transition
-wait ceiling.
+wait ceiling. A caller's current configuration supplies only its initial wait:
+after it observes an active capture, PostgreSQL's remaining
+`archive_capture_deadline_at` plus the fixed handoff grace extends that wait up
+to the same one-hour ceiling. Lowering the timeout or rolling the setting across
+processes therefore cannot make an opted-in viewer, turn, or mutation caller
+abandon a still-valid child whose timeout was frozen earlier. Zero-wait internal
+probes remain immediate.
 
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row

@@ -254,6 +254,8 @@ import {
 } from "@opengeni/contracts";
 import {
   environmentsEncryptionKeyBytes,
+  SANDBOX_LIFECYCLE_RETRY_HANDOFF_GRACE_MS,
+  SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
@@ -38960,6 +38962,8 @@ type LeaseRow = {
   archive_capture_generation: number | string | null;
   archive_capture_started_at: Date | string | null;
   archive_capture_deadline_at: Date | string | null;
+  /** Transaction-local PostgreSQL-clock projection used only by bounded waiters. */
+  archive_capture_remaining_ms?: number | string | null;
   archive_capture_published_at: Date | string | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
@@ -39149,6 +39153,9 @@ export type AcquireLeaseResult =
         | "rotation_in_progress"
         | "provider_recovery_in_progress";
       lease: LeaseSnapshot;
+      /** Remaining durable capture budget from PostgreSQL's clock. Present only
+       * for an exact active capture; callers cap it at the lifecycle ceiling. */
+      captureRemainingMs?: number;
     };
 
 export type SandboxSharedPreparationSnapshot = {
@@ -39699,6 +39706,33 @@ function leaseBackendRequiresResumableInstance(row: LeaseRow): boolean {
   // Fail closed for an unknown/new provider until its exact address contract is
   // registered. `none` is intentionally the sole providerless backend today.
   return fields === undefined || fields.length > 0;
+}
+
+function archiveCaptureRemainingMs(
+  row: Pick<LeaseRow, "archive_capture_remaining_ms">,
+): number | null {
+  if (row.archive_capture_remaining_ms === null || row.archive_capture_remaining_ms === undefined) {
+    return null;
+  }
+  const remainingMs = Number(row.archive_capture_remaining_ms);
+  return Number.isSafeInteger(remainingMs) &&
+    remainingMs >= 0 &&
+    remainingMs <= SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS
+    ? remainingMs
+    : null;
+}
+
+function extendSandboxTransitionDeadline(
+  currentDeadline: number,
+  hardDeadline: number,
+  remainingCaptureMs: number | null | undefined,
+  now: number,
+): number {
+  if (remainingCaptureMs === null || remainingCaptureMs === undefined) return currentDeadline;
+  return Math.min(
+    hardDeadline,
+    Math.max(currentDeadline, now + remainingCaptureMs + SANDBOX_LIFECYCLE_RETRY_HANDOFF_GRACE_MS),
+  );
 }
 
 function providerlessLeaseBackendPredicateSql() {
@@ -40259,9 +40293,19 @@ async function acquireLeaseOnce(
         // UPDATE (block, do NOT skip) — unlike concurrent enrollment scans,
         // because we WANT the loser to block then attach, not skip and lose.
         const rows = await tx.execute<LeaseRow>(sql`
-        select *
-        from sandbox_leases
-        where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}
+        select lease.*,
+          case
+            when lease.archive_capture_deadline_at is null then null
+            else greatest(
+              0,
+              ceil(extract(epoch from (
+                lease.archive_capture_deadline_at - clock_timestamp()
+              )) * 1000)
+            )::bigint
+          end as archive_capture_remaining_ms
+        from sandbox_leases as lease
+        where lease.workspace_id = ${workspaceId}
+          and lease.sandbox_group_id = ${sandboxGroupId}
         for update
       `);
         const row = rows[0];
@@ -40293,10 +40337,12 @@ async function acquireLeaseOnce(
         // another holder while that operation owns the exact lease: the caller
         // retries after the claim clears, before it can reach the provider.
         if (row.archive_capture_id !== null) {
+          const captureRemainingMs = archiveCaptureRemainingMs(row);
           return {
             role: "fenced" as const,
             reason: "capture_in_progress" as const,
             lease: mapLeaseRow(row),
+            ...(captureRemainingMs === null ? {} : { captureRemainingMs }),
           };
         }
 
@@ -40520,20 +40566,30 @@ export async function acquireLease(
   }
   // A bounded in-process wait must use a monotonic clock. Wall-clock steps from
   // NTP/VM resume may change timestamp interpretation, but must never stretch
-  // or prematurely consume the caller's resource budget.
-  const deadline = performance.now() + captureWaitMs;
+  // or prematurely consume the caller's resource budget. PostgreSQL projects
+  // an active claim's remaining time on its own authoritative clock; that may
+  // extend a positive caller budget after a rolling config change, but never
+  // beyond the same one-hour lifecycle ceiling.
+  const startedAt = performance.now();
+  const hardDeadline = startedAt + SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS;
+  let deadline = Math.min(hardDeadline, startedAt + captureWaitMs);
   let delayMs = 25;
   for (;;) {
     const result = await acquireLeaseOnce(db, input);
-    if (
-      result.role !== "fenced" ||
-      result.reason === "superseded" ||
-      performance.now() >= deadline
-    ) {
+    const now = performance.now();
+    if (captureWaitMs > 0 && result.role === "fenced" && result.reason === "capture_in_progress") {
+      deadline = extendSandboxTransitionDeadline(
+        deadline,
+        hardDeadline,
+        result.captureRemainingMs,
+        now,
+      );
+    }
+    if (result.role !== "fenced" || result.reason === "superseded" || now >= deadline) {
       return result;
     }
     await waitForSandboxTransition(
-      Math.min(delayMs, Math.max(1, deadline - performance.now())),
+      Math.min(delayMs, Math.max(1, deadline - now)),
       input.waitSignal,
       "Sandbox lease transition wait cancelled",
     );
@@ -45141,6 +45197,9 @@ export class SandboxWorkspaceMutationFencedError extends Error {
       // The exact grant identity behind this writer is no longer active.
       | "authority_revoked",
     message: string,
+    /** Remaining exact archive-capture budget projected by PostgreSQL. This is
+     * observational wait input only; it never licenses capture takeover. */
+    public readonly captureRemainingMs: number | null = null,
   ) {
     super(message);
   }
@@ -46156,6 +46215,7 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
             rotation_pending: boolean;
             holder_current: boolean;
             capture_in_progress: boolean;
+            archive_capture_remaining_ms: number | string | null;
           }>(sql`
             select lease.workspace_generation,
               (
@@ -46177,6 +46237,15 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
                 and (${locked.expectedBackend}::text is null or lease.backend = ${locked.expectedBackend}::text)
               ) as rotation_pending,
               (lease.archive_capture_id is not null) as capture_in_progress,
+              case
+                when lease.archive_capture_deadline_at is null then null
+                else greatest(
+                  0,
+                  ceil(extract(epoch from (
+                    lease.archive_capture_deadline_at - clock_timestamp()
+                  )) * 1000)
+                )::bigint
+              end as archive_capture_remaining_ms,
               exists (
                 select 1 from sandbox_lease_holders as holder
                 where holder.lease_id = lease.id
@@ -46205,9 +46274,13 @@ async function advanceWorkspaceGenerationForAuthorityOnce(
             );
           }
           if (current[0]?.lease_current && current[0].capture_in_progress) {
+            const captureRemainingMs = archiveCaptureRemainingMs({
+              archive_capture_remaining_ms: current[0].archive_capture_remaining_ms,
+            });
             throw new SandboxWorkspaceMutationFencedError(
               "capture_in_progress",
               "Workspace mutation is waiting for the exact provider archive capture to settle",
+              captureRemainingMs,
             );
           }
           if (current[0]?.rotation_pending) {
@@ -46240,7 +46313,9 @@ async function advanceWorkspaceGenerationForAuthority(
   if (!Number.isSafeInteger(captureWaitMs) || captureWaitMs < 0 || captureWaitMs > 60 * 60_000) {
     throw new Error("Workspace archive capture wait is invalid");
   }
-  const deadline = performance.now() + captureWaitMs;
+  const startedAt = performance.now();
+  const hardDeadline = startedAt + SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS;
+  let deadline = Math.min(hardDeadline, startedAt + captureWaitMs);
   let delayMs = 25;
   let captureWaitStartedAt: number | undefined;
   let captureWaitOutcome: "completed" | "failed" = "failed";
@@ -46255,16 +46330,29 @@ async function advanceWorkspaceGenerationForAuthority(
         captureWaitOutcome = "completed";
         return admission;
       } catch (error) {
+        const now = performance.now();
+        if (
+          captureWaitMs > 0 &&
+          error instanceof SandboxWorkspaceMutationFencedError &&
+          error.code === "capture_in_progress"
+        ) {
+          deadline = extendSandboxTransitionDeadline(
+            deadline,
+            hardDeadline,
+            error.captureRemainingMs,
+            now,
+          );
+        }
         if (
           !(error instanceof SandboxWorkspaceMutationFencedError) ||
           error.code !== "capture_in_progress" ||
-          performance.now() >= deadline
+          now >= deadline
         ) {
           throw error;
         }
         captureWaitStartedAt ??= performance.now();
         await waitForSandboxTransition(
-          Math.min(delayMs, Math.max(1, deadline - performance.now())),
+          Math.min(delayMs, Math.max(1, deadline - now)),
           waitSignal,
           "Sandbox workspace mutation wait cancelled",
         );

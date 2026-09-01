@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { sandboxArchiveCaptureTimeoutMs } from "@opengeni/config";
+import { sandboxArchiveCaptureTimeoutMs, sandboxLifecycleTransitionWaitMs } from "@opengeni/config";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import { readFileSync } from "node:fs";
@@ -101,6 +101,54 @@ describe("sandbox reaper per-box timeout contract", () => {
         captureTimeoutMs: 61 * 60_000,
       }),
     ).toThrow("timeout values are invalid");
+  });
+
+  test("a rolling config change can leave a caller budget below the frozen child budget", () => {
+    const childTiming = sandboxDrainTiming({
+      sandboxSnapshotTimeoutMs: 60_000,
+      sandboxDrainSnapshotTimeoutMs: 30 * 60_000,
+    });
+    const loweredCallerWaitMs = sandboxLifecycleTransitionWaitMs({
+      sandboxSnapshotTimeoutMs: 60_000,
+      sandboxLeaseReaperPeriodMs: 30_000,
+    });
+
+    expect(loweredCallerWaitMs).toBe(110_000);
+    expect(childTiming.captureTimeoutMs).toBe(30 * 60_000 + 10_000);
+    expect(loweredCallerWaitMs).toBeLessThan(childTiming.captureTimeoutMs);
+    expect(() => assertSandboxDrainInputTiming(childTiming)).not.toThrow();
+  });
+
+  test("every lifecycle caller reaches both deadline-aware database wait loops", () => {
+    const callerFiles = [
+      "../../../packages/core/src/sandbox/routing.ts",
+      "../src/sandbox-routing.ts",
+      "../src/sandbox-resume.ts",
+      "../src/activities/rig-verification.ts",
+      "../src/activities/agent-turn/sandbox-runtime.ts",
+      "../../../apps/api/src/sandbox/channel-a.ts",
+      "../../../apps/api/src/sandbox/viewer.ts",
+    ];
+    const callerSources = callerFiles.map((path) =>
+      readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8"),
+    );
+    const waitCallCount = callerSources.reduce(
+      (count, source) =>
+        count + (source.match(/captureWaitMs: sandboxLifecycleTransitionWaitMs\(/gu)?.length ?? 0),
+      0,
+    );
+    expect(waitCallCount).toBe(9);
+
+    const dbSource = readFileSync(
+      fileURLToPath(new URL("../../../packages/db/src/index.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(dbSource.match(/archive_capture_deadline_at - clock_timestamp\(\)/gu)).toHaveLength(2);
+    expect(dbSource.match(/extendSandboxTransitionDeadline\(/gu)).toHaveLength(3);
+    expect(dbSource).toContain(
+      "hardDeadline = startedAt + SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS",
+    );
+    expect(dbSource).toContain("captureWaitMs > 0");
   });
 
   test("exact workspace/group/epoch identity deduplicates only a live attempt", () => {
