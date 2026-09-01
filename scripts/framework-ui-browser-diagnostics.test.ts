@@ -9,6 +9,16 @@ test("classifies only the exact Firefox xterm runner-policy WebGL warning", () =
   expect(isExpectedFirefoxWebGLUnavailableWarning(firefoxRunnerWarning)).toBe(true);
   expect(
     isExpectedFirefoxWebGLUnavailableWarning(
+      firefoxRunnerWarning.replace("WebGL creation failed:\n", "WebGL creation failed: \n"),
+    ),
+  ).toBe(true);
+  expect(
+    isExpectedFirefoxWebGLUnavailableWarning(
+      firefoxRunnerWarning.replace("WebGL creation failed:\n", "WebGL creation failed:  \n"),
+    ),
+  ).toBe(false);
+  expect(
+    isExpectedFirefoxWebGLUnavailableWarning(
       firefoxRunnerWarning.replace("@xterm_addon-webgl.js", "host-application.js"),
     ),
   ).toBe(false);

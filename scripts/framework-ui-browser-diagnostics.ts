@@ -1,6 +1,6 @@
 export function isExpectedFirefoxWebGLUnavailableWarning(diagnostic: string): boolean {
   const match =
-    /^console\.warning: \[JavaScript Warning: "Failed to create WebGL context: WebGL creation failed:\n\* AllowWebgl2:false restricts context creation on this system\. \(\)" \{file: "([^"\r\n]+)" line: ([1-9]\d*)\}\]$/u.exec(
+    /^console\.warning: \[JavaScript Warning: "Failed to create WebGL context: WebGL creation failed: ?\n\* AllowWebgl2:false restricts context creation on this system\. \(\)" \{file: "([^"\r\n]+)" line: ([1-9]\d*)\}\]$/u.exec(
       diagnostic,
     );
   if (!match) return false;
