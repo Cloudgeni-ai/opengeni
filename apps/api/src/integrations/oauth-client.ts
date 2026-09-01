@@ -200,6 +200,25 @@ class OAuthStartStageError extends Error {
   }
 }
 
+class OAuthMetadataHttpStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`OAuth metadata request returned HTTP ${status}`);
+    this.name = "OAuthMetadataHttpStatusError";
+  }
+}
+
+class OAuthMetadataUpstreamError extends Error {
+  constructor(
+    readonly discovery: "protected-resource" | "authorization-server",
+    readonly upstreamStatus: number,
+  ) {
+    super(
+      `${discovery === "protected-resource" ? "MCP" : "OAuth"} provider returned HTTP ${upstreamStatus} during ${discovery} discovery.`,
+    );
+    this.name = "OAuthMetadataUpstreamError";
+  }
+}
+
 class OAuthStartDeadline {
   readonly signal: AbortSignal;
   private readonly controller = new AbortController();
@@ -885,6 +904,7 @@ async function discoverProtectedResourceMetadata(
   advertisedUrl?: string,
   signal?: AbortSignal,
 ): Promise<ProtectedResourceMetadata> {
+  const upstreamFailures: OAuthMetadataHttpStatusError[] = [];
   const candidates = uniqueStrings([
     ...(advertisedUrl ? [advertisedUrl] : []),
     ...wellKnownCandidates(resource, "oauth-protected-resource"),
@@ -893,6 +913,13 @@ async function discoverProtectedResourceMetadata(
     const payload = await fetchJsonObject(candidate, settings, signal).catch((error) => {
       if (error instanceof HTTPException) {
         throw error;
+      }
+      if (
+        error instanceof OAuthMetadataHttpStatusError &&
+        error.status !== 404 &&
+        error.status !== 410
+      ) {
+        upstreamFailures.push(error);
       }
       return null;
     });
@@ -910,6 +937,10 @@ async function discoverProtectedResourceMetadata(
       ...(stringValue(payload.resource) ? { resource: stringValue(payload.resource)! } : {}),
     };
   }
+  const upstreamFailure = upstreamFailures[0];
+  if (upstreamFailure) {
+    throw new OAuthMetadataUpstreamError("protected-resource", upstreamFailure.status);
+  }
   throw new HTTPException(422, {
     message: "could not discover MCP protected resource metadata",
   });
@@ -920,6 +951,7 @@ async function discoverAuthorizationServerMetadata(
   settings: Settings,
   signal: AbortSignal,
 ): Promise<AuthorizationServerMetadata> {
+  const upstreamFailures: OAuthMetadataHttpStatusError[] = [];
   const safeAuthorizationServer = oauthEndpointUrl(
     authorizationServer,
     settings,
@@ -939,6 +971,13 @@ async function discoverAuthorizationServerMetadata(
     const payload = await fetchJsonObject(candidate, settings, signal).catch((error) => {
       if (error instanceof HTTPException) {
         throw error;
+      }
+      if (
+        error instanceof OAuthMetadataHttpStatusError &&
+        error.status !== 404 &&
+        error.status !== 410
+      ) {
+        upstreamFailures.push(error);
       }
       return null;
     });
@@ -976,6 +1015,10 @@ async function discoverAuthorizationServerMetadata(
       raw: payload,
       ...(safeRegistrationEndpoint ? { registrationEndpoint: safeRegistrationEndpoint } : {}),
     };
+  }
+  const upstreamFailure = upstreamFailures[0];
+  if (upstreamFailure) {
+    throw new OAuthMetadataUpstreamError("authorization-server", upstreamFailure.status);
   }
   throw new HTTPException(422, {
     message: "could not discover OAuth authorization server metadata",
@@ -1686,6 +1729,9 @@ function logOAuthStartFailure(
 function oauthStartFailureReason(error: unknown): string {
   if (error instanceof RequestDeadlineError) return "timeout";
   if (error instanceof DestinationPolicyError) return error.reason;
+  if (error instanceof OAuthMetadataUpstreamError) {
+    return `upstream_http_${error.upstreamStatus}`;
+  }
   if (error instanceof HTTPException) return `http_${error.status}`;
   if (error instanceof SyntaxError) return "invalid_response";
   return "request_failed";
@@ -1729,15 +1775,29 @@ function isDatabaseStatementTimeout(error: unknown): boolean {
 
 function oauthStartApiError(error: OAuthStartStageError): ApiHttpError {
   const timeout = error.reason === "timeout";
-  const status = timeout ? 408 : error.cause instanceof HTTPException ? error.cause.status : 422;
+  const metadataUpstream = error.cause instanceof OAuthMetadataUpstreamError ? error.cause : null;
+  const status = timeout
+    ? 408
+    : metadataUpstream
+      ? 502
+      : error.cause instanceof HTTPException
+        ? error.cause.status
+        : 422;
   return new ApiHttpError(status, {
     code: timeout || status >= 500 ? "upstream_unavailable" : "validation_failed",
-    retryable: timeout || status === 429 || status >= 500,
+    retryable:
+      timeout ||
+      status === 429 ||
+      (metadataUpstream
+        ? metadataUpstream.upstreamStatus === 429 || metadataUpstream.upstreamStatus >= 500
+        : status >= 500),
     message: timeout
       ? oauthStartTimeoutMessage(error.stage)
-      : error.cause instanceof HTTPException
-        ? error.cause.message
-        : `Connection setup failed during ${oauthStartStageLabel(error.stage)}.`,
+      : metadataUpstream
+        ? metadataUpstream.message
+        : error.cause instanceof HTTPException
+          ? error.cause.message
+          : `Connection setup failed during ${oauthStartStageLabel(error.stage)}.`,
     details: {
       oauthStage: error.stage,
       oauthReason: error.reason,
@@ -2044,7 +2104,7 @@ async function fetchJsonObject(
   });
   if (!response.ok) {
     await cancelResponseBody(response);
-    throw new Error(`HTTP ${response.status}`);
+    throw new OAuthMetadataHttpStatusError(response.status);
   }
   const payload = await readResponseJsonBounded<unknown>(
     response,
