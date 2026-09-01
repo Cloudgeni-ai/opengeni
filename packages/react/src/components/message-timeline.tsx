@@ -1717,7 +1717,7 @@ export function MessageTimeline({
               <TooltipProvider delayDuration={400}>
                 <div
                   data-og-component="timeline"
-                  data-og-state={status === "running" ? "streaming" : "ready"}
+                  data-og-state={_status === "running" ? "streaming" : "ready"}
                   role="region"
                   aria-label="Session timeline"
                   className={cn("og-root og-timeline relative flex min-h-0 flex-col", className)}
