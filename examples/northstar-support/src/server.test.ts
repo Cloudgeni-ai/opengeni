@@ -62,17 +62,28 @@ describe("Northstar production static serving", () => {
     expect(directory.status).toBe(404);
   });
 
-  test("keeps missing assets, traversal, and symlink escapes outside the SPA fallback", async () => {
+  test("does not cache missing hashed assets across a rollback", async () => {
     const root = await fixture();
-    expect(
-      (
-        await staticResponse(
-          new Request("https://demo.opengeni.ai/assets/missing.js"),
-          "/assets/missing.js",
-          root,
-        )
-      ).status,
-    ).toBe(404);
+    const missing = await staticResponse(
+      new Request("https://demo.opengeni.ai/assets/app-rollback.js"),
+      "/assets/app-rollback.js",
+      root,
+    );
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get("cache-control")).toBe("no-store");
+
+    await Bun.write(join(root, "assets", "app-rollback.js"), "export const restored = true;\n");
+    const restored = await staticResponse(
+      new Request("https://demo.opengeni.ai/assets/app-rollback.js"),
+      "/assets/app-rollback.js",
+      root,
+    );
+    expect(restored.status).toBe(200);
+    expect(restored.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  });
+
+  test("keeps traversal and symlink escapes outside the SPA fallback", async () => {
+    const root = await fixture();
     expect(
       (
         await staticResponse(

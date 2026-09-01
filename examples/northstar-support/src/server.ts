@@ -24,6 +24,7 @@ const STATIC_ROOT = join(import.meta.dir, "../dist");
 const MCP_SERVER_ID = "northstar_support";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
+const NOT_FOUND_CACHE_CONTROL = "no-store";
 const MCP_TOOLS = ["get_ticket", "get_customer", "update_ticket", "add_internal_note"];
 const encoder = new TextEncoder();
 
@@ -288,6 +289,13 @@ function cacheControlFor(pathname: string): string {
   return IMMUTABLE_CACHE_CONTROL;
 }
 
+function notFound(): Response {
+  return new Response("Not found", {
+    status: 404,
+    headers: { "cache-control": NOT_FOUND_CACHE_CONTROL },
+  });
+}
+
 function acceptsEncoding(header: string | null, encoding: string): boolean {
   if (!header) return false;
   let wildcardAccepted = false;
@@ -353,26 +361,26 @@ export async function staticResponse(
   try {
     requested = decodeURIComponent(pathname);
   } catch {
-    return new Response("Not found", { status: 404 });
+    return notFound();
   }
   if (requested.split("/").includes("..")) {
-    return new Response("Not found", { status: 404 });
+    return notFound();
   }
   requested = requested === "/" ? "/index.html" : requested;
   const filePath = safeStaticPath(root, requested);
   if (!filePath) {
-    return new Response("Not found", { status: 404 });
+    return notFound();
   }
   const exact = await serveStaticFile(request, root, filePath, cacheControlFor(requested));
   if (exact) return exact;
   if (requested.startsWith("/assets/")) {
-    return new Response("Not found", { status: 404 });
+    return notFound();
   }
   const indexPath = safeStaticPath(root, "/index.html");
-  if (!indexPath) return new Response("Not found", { status: 404 });
+  if (!indexPath) return notFound();
   return (
     (await serveStaticFile(request, root, indexPath, REVALIDATE_CACHE_CONTROL)) ??
-    new Response("Not found", { status: 404 })
+    notFound()
   );
 }
 

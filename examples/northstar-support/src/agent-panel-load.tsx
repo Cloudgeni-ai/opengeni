@@ -73,7 +73,7 @@ export async function loadAgentPanelModule<T>(
 ): Promise<T> {
   try {
     const loaded = await load();
-    if (readReloadTarget(environment.storage) === environment.loadedBuildId) {
+    if (readReloadTarget(environment.storage) !== null) {
       removeReloadTarget(environment.storage);
     }
     return loaded;

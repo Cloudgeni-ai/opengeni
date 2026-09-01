@@ -43,18 +43,73 @@ describe("Northstar deferred agent panel recovery", () => {
     expect(reloads).toHaveLength(1);
   });
 
+  test("consumes a build-B marker after a successful build-C load so a later disable persists", async () => {
+    const storage = memoryStorage();
+    const reloads: string[] = [];
+    const navigation = new Error("navigation requested");
+    const staleEnvironment = environment({
+      loadedBuildId: "/assets/index-a.js",
+      currentBuildId: "/assets/index-b.js",
+      storage,
+      reloads,
+      navigation,
+    });
+
+    await expect(
+      loadAgentPanelModule(async () => {
+        throw new TypeError("Failed to fetch dynamically imported module");
+      }, staleEnvironment),
+    ).rejects.toBe(navigation);
+    expect(shouldRestoreAgentPanel(staleEnvironment)).toBe(true);
+
+    const loadedBuildC = environment({
+      loadedBuildId: "/assets/index-c.js",
+      currentBuildId: "/assets/index-c.js",
+      storage,
+      reloads,
+      navigation,
+    });
+    await expect(loadAgentPanelModule(async () => "loaded", loadedBuildC)).resolves.toBe("loaded");
+    expect(shouldRestoreAgentPanel(loadedBuildC)).toBe(false);
+
+    const laterReloadAfterUserDisable = environment({
+      loadedBuildId: "/assets/index-c.js",
+      currentBuildId: "/assets/index-c.js",
+      storage,
+      reloads,
+      navigation,
+    });
+    expect(shouldRestoreAgentPanel(laterReloadAfterUserDisable)).toBe(false);
+    expect(reloads).toEqual(["/assets/index-b.js"]);
+  });
+
   test("repeated same-build failures reject visibly without a reload loop", async () => {
     const storage = memoryStorage();
     const reloads: string[] = [];
+    const navigation = new Error("navigation requested");
     const failure = new Error("module initialization failed");
+    const staleEnvironment = environment({
+      loadedBuildId: "/assets/index-old.js",
+      currentBuildId: "/assets/index-current.js",
+      storage,
+      reloads,
+      navigation,
+    });
+
+    await expect(
+      loadAgentPanelModule(async () => {
+        throw failure;
+      }, staleEnvironment),
+    ).rejects.toBe(navigation);
+    expect(shouldRestoreAgentPanel(staleEnvironment)).toBe(true);
+
     const currentEnvironment = environment({
       loadedBuildId: "/assets/index-current.js",
       currentBuildId: "/assets/index-current.js",
       storage,
       reloads,
-      navigation: new Error("navigation requested"),
+      navigation,
     });
-
     for (let attempt = 0; attempt < 2; attempt += 1) {
       await expect(
         loadAgentPanelModule(async () => {
@@ -62,7 +117,8 @@ describe("Northstar deferred agent panel recovery", () => {
         }, currentEnvironment),
       ).rejects.toBe(failure);
     }
-    expect(reloads).toEqual([]);
+    expect(shouldRestoreAgentPanel(currentEnvironment)).toBe(false);
+    expect(reloads).toEqual(["/assets/index-current.js"]);
 
     expect(AgentPanelLoadBoundary.getDerivedStateFromError()).toEqual({ failed: true });
     const fallback = renderToStaticMarkup(<AgentPanelLoadError />);
