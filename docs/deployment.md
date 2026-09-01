@@ -157,7 +157,16 @@ HTTPS/WSS is the supported private-edge posture. The web bootstrap retains a
 cryptographically random UUID compatibility path so a private HTTP origin can
 render the core workspace UI and useful diagnostics instead of crashing, but
 that fallback does not make HTTP feature-complete: browsers still withhold APIs
-used by voice, clipboard, and encrypted browser-side artifact operations.
+used by uploads, voice, clipboard, and encrypted browser-side artifact
+operations. Treat HTTPS as required for every non-loopback browser address;
+localhost and loopback development URLs remain subject to the browser's secure
+context rules. On an insecure self-hosted origin, the stock console keeps a
+persistent warning visible, and picker, drag-and-drop, and pasted-image
+attachments all fail before any upload request with the typed SDK code
+`secure_context_required` plus HTTPS setup guidance on the attachment card.
+OpenGeni deliberately does not provide a hashing fallback that would make only
+uploads appear healthy while the rest of the secure-browser feature contract
+remains broken.
 
 For a tailnet-only deployment, `OPENGENI_AUTH_REQUIRED=false` and
 `OPENGENI_PRODUCT_ACCESS_MODE=local` mean there is no shared deployment access

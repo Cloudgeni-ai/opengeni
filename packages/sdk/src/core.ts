@@ -13,9 +13,11 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
   isRetryableStreamError,
 } from "./errors";
+export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export { resolveWorkspaceVoiceInputEnabled } from "./transcription";
 export { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";

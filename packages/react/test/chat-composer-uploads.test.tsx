@@ -4,7 +4,7 @@
    that blocks BOTH the button and Enter while files are unresolved.
    -------------------------------------------------------------------------- */
 import { afterEach, describe, expect, test } from "bun:test";
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ChatComposer } from "../src/components/chat-composer";
@@ -359,6 +359,34 @@ describe("ChatComposer attachments", () => {
       await Promise.resolve();
     });
     expect(sent).toBe(0);
+  });
+
+  test("shows secure-context guidance directly on the failed card without a futile retry", async () => {
+    const failure = new OpenGeniSecureContextRequiredError("insecure_context");
+    const attachments = makeAttachments({
+      hasUnresolved: true,
+      attachments: [
+        {
+          ...readyChip("dragged.png"),
+          status: "failed",
+          errorCode: failure.code,
+          error: failure.message,
+        },
+      ],
+    });
+    const container = await mount(
+      <ChatComposer composer={makeComposer()} attachments={attachments} />,
+    );
+
+    expect(container.textContent ?? "").toContain(
+      "Couldn’t attach this file because OpenGeni is open over HTTP.",
+    );
+    expect(container.textContent ?? "").toContain(
+      "Open the secure site or configure HTTPS for this deployment.",
+    );
+    expect(container.querySelector('[aria-label="Retry dragged.png"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Remove dragged.png"]')).not.toBeNull();
+    expect(sendButton(container)?.disabled).toBe(true);
   });
 
   test("removing the failed attachment unblocks send without dropping the typed prompt", async () => {
