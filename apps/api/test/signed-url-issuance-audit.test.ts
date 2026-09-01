@@ -202,6 +202,28 @@ describe("signed-URL issuance audit facts", () => {
     });
   });
 
+  test("download-url rejects unsupported dispositions before signing or auditing", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture(["files:read"]);
+    const { fileId } = await readyFile(workspace);
+    const createGetUrlCalls: Array<Parameters<ObjectStorage["createGetUrl"]>[0]> = [];
+    const app = routeApp(storageStub((args) => createGetUrlCalls.push(args)));
+
+    const response = await app.request(
+      `http://x/v1/workspaces/${workspace.workspaceId}/files/${fileId}/download-url?disposition=download`,
+      { method: "POST", headers: { authorization: workspace.authorization } },
+    );
+
+    expect(response.status).toBe(400);
+    expect(createGetUrlCalls).toEqual([]);
+    const [audit] = await shared!.admin<Array<{ present: number }>>`
+      select 1 as present from audit_events
+      where workspace_id = ${workspace.workspaceId}
+        and action = 'file.signed_url.issued'
+      limit 1`;
+    expect(audit).toBeUndefined();
+  });
+
   test("an upload mint records file.signed_upload.issued (size + type, never key/URL)", async () => {
     if (!available) return;
     const workspace = await workspaceFixture(["files:upload"]);

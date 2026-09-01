@@ -437,7 +437,13 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/files/:fileId/download-url", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
-    const disposition = FileDownloadDisposition.parse(c.req.query("disposition") ?? "inline");
+    const parsedDisposition = FileDownloadDisposition.safeParse(
+      c.req.query("disposition") ?? "inline",
+    );
+    if (!parsedDisposition.success) {
+      throw new HTTPException(400, { message: "invalid download disposition" });
+    }
+    const disposition = parsedDisposition.data;
     if (!objectStorage) {
       throw new HTTPException(503, {
         message: "object storage is not configured",
