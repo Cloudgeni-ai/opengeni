@@ -1,5 +1,42 @@
 # @opengeni/worker-bundle
 
+## 0.24.0
+
+### Minor Changes
+
+- 2d0fad4: Add deployment-defined model catalogs and cost policy, workspace-managed Gateway and OpenRouter credentials plus custom models, a separate deployment-managed OpenRouter rail, live catalog refresh, the `list_models` agent tool, and model-picker/API/SDK support for the new catalog surfaces.
+
+### Patch Changes
+
+- 6934f99: Prevent an active-goal status update from immediately spawning a continuation that repeats the same unchanged external wait. Status turns now establish an available goal hold when progress is genuinely blocked, while continuation turns avoid restating an already-reported wait before calling `goal_wait`.
+- fcb5662: Read generated-image references through the generic full-file storage API so valid images larger than one MiB cannot fail the owning turn.
+- 9e21a09: Generate pending semantic session titles in a bounded parallel model request so the main assistant response no longer waits on a title tool round trip, while retaining the serialized compatibility path for custom runtimes.
+- bcacd54: Release durable BrowserSession and ComputerSession holders when a requested finite-lifetime Modal lease reaches its hard provider deadline, preserve honest operation outcomes, and expose interaction-blocked rotation telemetry.
+- c356468: Add explicit host authority provenance for opaque MCP connection references so embedding hosts can resolve any binding identity, including UUID values, without native delegation, catalog, attachment reauthorization, or reconnect flows reinterpreting it. Preserve the legacy non-UUID host-binding lane during rolling upgrades, retain host provenance after successful credential resolution, make auth-needed events inert in legacy browsers, and gate newly marked refs behind a default-off two-phase fleet activation.
+- 5ef0757: Allow zero-holder sandbox drains to use a separate extended provider snapshot timeout without lengthening ordinary periodic or turn-end snapshot finalization, while keeping current and historical Modal rotation admission inside provider-deadline headroom and making opted-in lifecycle waiters honor an in-flight child's persisted bounded capture deadline across rolling configuration changes.
+- Updated dependencies [f5e2dfc]
+- Updated dependencies [8e2f71d]
+- Updated dependencies [6934f99]
+- Updated dependencies [aa19556]
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [9e21a09]
+- Updated dependencies [bcacd54]
+- Updated dependencies [c356468]
+- Updated dependencies [5ef0757]
+- Updated dependencies [9af1666]
+  - @opengeni/db@3.8.0
+  - @opengeni/runtime@2.1.0
+  - @opengeni/config@0.23.0
+  - @opengeni/contracts@2.10.0
+  - @opengeni/core@2.7.0
+  - @opengeni/events@0.4.13
+  - @opengeni/documents@0.8.15
+  - @opengeni/github@0.6.8
+  - @opengeni/storage@0.2.116
+  - @opengeni/codemode@0.4.23
+  - @opengeni/observability@0.8.15
+
 ## 0.23.4
 
 ### Patch Changes
