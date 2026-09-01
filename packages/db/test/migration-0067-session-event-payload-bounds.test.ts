@@ -264,7 +264,7 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
           projectionClient.db,
           workspace!.id,
           sessionId,
-          { before: 10, limit: 1, batchSize: 1 },
+          { before: 10, limit: 1 },
         );
         expect(projectedCursorStrandingPage.events).toHaveLength(1);
         expect(projectedCursorStrandingPage.events[0]?.sequence).toBe(9);

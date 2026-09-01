@@ -2622,7 +2622,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(result);
     }
     const projected = compact ? coalesceSessionEventDeltas(events) : events;
-    const forensicExact = mode === "forensic" && payloadMode === "full" && dbPage.fullPayloadsExact;
+    const forensicExact =
+      !compact && mode === "forensic" && payloadMode === "full" && dbPage.fullPayloadsExact;
     const page = boundSessionEventHttpPage(projected, {
       direction,
       eventProjection: forensicExact ? "exact" : "bounded",
