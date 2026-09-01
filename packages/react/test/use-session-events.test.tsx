@@ -23,11 +23,19 @@ function event(
   type: SessionEvent["type"] = "user.message",
   payload: unknown = { text: `m-${sequence}` },
 ): SessionEvent {
+  const coalescedUntil = Number(
+    payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>).coalescedUntil
+      : Number.NaN,
+  );
   return {
     id: `evt-${sequence}`,
     workspaceId: WORKSPACE_ID,
     sessionId: SESSION_ID,
     sequence,
+    ...(Number.isSafeInteger(coalescedUntil) && coalescedUntil >= sequence
+      ? { coveredThrough: coalescedUntil }
+      : {}),
     type,
     payload,
     occurredAt: new Date(1_750_000_000_000 + sequence).toISOString(),
@@ -427,6 +435,26 @@ describe("useSessionEvents", () => {
     expect(resumedHook.result.current.events.map((item) => item.sequence)).toEqual([6]);
     expect(resumedHook.result.current.hasOlder).toBe(false);
     await resumedHook.unmount();
+  });
+
+  test("stream resume ignores producer-controlled coalescedUntil without trusted coverage", async () => {
+    const spoofed = event(1, "turn.completed", { coalescedUntil: 1000 });
+    delete spoofed.coveredThrough;
+    const scripted = scriptedClient({ store: [], streamEvents: [spoofed, event(2)] });
+    const hook = await renderHook(
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client: scripted.client,
+          workspaceId: WORKSPACE_ID,
+          replay: "full",
+        }),
+      undefined,
+    );
+    await flush(20);
+
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2]);
+    expect(hook.result.current.lastSequence).toBe(2);
+    await hook.unmount();
   });
 
   test("the initial window is a single fetch regardless of log size", async () => {

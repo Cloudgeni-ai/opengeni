@@ -217,8 +217,12 @@ import {
 } from "@opengeni/contracts";
 
 import {
+  approximateSessionEventTokens,
   approvalIdentifier,
+  boundSessionEvent,
   boundWorkspaceControlEvent,
+  sessionEventJsonBytes,
+  sessionEventPayloadTruncation,
   workspaceControlUtf8Bytes,
   WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -35197,6 +35201,8 @@ export type SessionEventPage = {
   events: SessionEvent[];
   hasMore: boolean;
   bytes: number;
+  /** True only when every full-mode event is the exact retained database row. */
+  fullPayloadsExact: boolean;
   direction: SessionEventReadDirection;
   coveredSequence: { first: number; last: number } | null;
   nextAfter: number | null;
@@ -35226,12 +35232,21 @@ type SessionEventProjectionRow = {
   duplicateReason: string | null;
 };
 
+type SessionEventProjectionMetadataRow = {
+  id: string;
+  sequence: number;
+  /** Conservative server-side size including columns omitted from the public event. */
+  transferBytes: number;
+};
+
 /**
  * Read one direction-aware session-event page. Full mode selects the canonical
- * row exactly; summary/none modes derive bounded monitoring projections in SQL
- * without rewriting the retained source. `bytes` is the exact UTF-8 size of
- * `JSON.stringify(events)`; `hasMore` is true whenever count or byte selection
- * stopped before the durable range ended.
+ * row exactly when it fits the page; an oversized historical row that predates
+ * the durable write guard is projected at the bounded database-read boundary
+ * when it would otherwise strand its cursor forever. Summary/none modes derive
+ * bounded monitoring projections in SQL without rewriting the retained source.
+ * `bytes` is the exact UTF-8 size of `JSON.stringify(events)`; `hasMore` is true
+ * whenever count or byte selection stopped before the durable range ended.
  */
 export async function listSessionEventPage(
   db: Database,
@@ -35266,6 +35281,7 @@ export async function listSessionEventPage(
     let bytes = 2; // []
     let cursor = direction === "before" ? before : after;
     let hasMore = false;
+    let fullPayloadsExact = payloadMode === "full";
     let truncatedBy: SessionEventPage["truncatedBy"] = null;
 
     for (;;) {
@@ -35310,19 +35326,89 @@ export async function listSessionEventPage(
         filters.push(lt(schema.sessionEvents.sequence, before));
       }
 
-      const rows = await scopedDb
-        .select(sessionEventProjectionSelect(payloadMode))
-        .from(schema.sessionEvents)
-        .where(and(...filters))
-        .orderBy(
-          options.authoritativeLatest
-            ? desc(schema.sessionEvents.sequence)
-            : direction === "before"
-              ? desc(schema.sessionEvents.sequence)
-              : asc(schema.sessionEvents.sequence),
-        )
-        .limit(queryLimit);
-      if (rows.length === 0) break;
+      const ordering =
+        options.authoritativeLatest || direction === "before"
+          ? desc(schema.sessionEvents.sequence)
+          : asc(schema.sessionEvents.sequence);
+      let rows: SessionEventProjectionRow[];
+      let sourceRowCount: number;
+      let sourceRowsFullyConsumed = true;
+      let databaseReadProjected = false;
+      if (payloadMode === "full") {
+        // Plan the page from bounded metadata before selecting any canonical
+        // payload. row_to_json includes private storage columns omitted by the
+        // public event, so this conservatively bounds payload transfer without
+        // moving an oversized legacy value through postgres.js.
+        const metadataRows = await scopedDb
+          .select(sessionEventProjectionMetadataSelect())
+          .from(schema.sessionEvents)
+          .where(and(...filters))
+          .orderBy(ordering)
+          .limit(queryLimit);
+        sourceRowCount = metadataRows.length;
+        if (metadataRows.length === 0) break;
+
+        const exactIds: string[] = [];
+        let projectId: string | null = null;
+        let estimatedBytes = bytes;
+        for (const metadata of metadataRows) {
+          if (events.length + exactIds.length >= requestedLimit) {
+            hasMore = true;
+            truncatedBy = "count";
+            break;
+          }
+          const separatorBytes = events.length + exactIds.length === 0 ? 0 : 1;
+          const transferBytes = Number(metadata.transferBytes);
+          if (estimatedBytes + separatorBytes + transferBytes > maxBytes) {
+            if (events.length === 0 && exactIds.length === 0) {
+              projectId = metadata.id;
+            } else {
+              hasMore = true;
+              truncatedBy = "bytes";
+            }
+            break;
+          }
+          exactIds.push(metadata.id);
+          estimatedBytes += separatorBytes + transferBytes;
+        }
+        sourceRowsFullyConsumed =
+          exactIds.length + (projectId === null ? 0 : 1) >= metadataRows.length;
+
+        if (projectId !== null) {
+          rows = await scopedDb
+            .select(sessionEventProjectionSelect("full", { databaseReadProjection: true }))
+            .from(schema.sessionEvents)
+            .where(and(...filters, eq(schema.sessionEvents.id, projectId)))
+            .orderBy(ordering)
+            .limit(1);
+          fullPayloadsExact = false;
+          databaseReadProjected = true;
+        } else if (exactIds.length > 0) {
+          rows = await scopedDb
+            .select(sessionEventProjectionSelect("full"))
+            .from(schema.sessionEvents)
+            .where(and(...filters, inArray(schema.sessionEvents.id, exactIds)))
+            .orderBy(ordering)
+            .limit(exactIds.length);
+        } else {
+          rows = [];
+        }
+      } else {
+        rows = await scopedDb
+          .select(sessionEventProjectionSelect(payloadMode))
+          .from(schema.sessionEvents)
+          .where(and(...filters))
+          .orderBy(ordering)
+          .limit(queryLimit);
+        sourceRowCount = rows.length;
+        if (rows.length === 0) break;
+      }
+
+      if (databaseReadProjected) {
+        for (const row of rows) {
+          settleDatabaseReadProjectionPayload(row.payload);
+        }
+      }
 
       for (const row of rows) {
         if (events.length >= requestedLimit) {
@@ -35330,25 +35416,33 @@ export async function listSessionEventPage(
           truncatedBy = "count";
           break;
         }
-        const event = mapProjectedEvent(row);
-        const eventBytes = utf8JsonBytes(event);
+        let event = mapProjectedEvent(row);
+        let eventBytes = utf8JsonBytes(event);
         const separatorBytes = events.length === 0 ? 0 : 1;
         if (bytes + separatorBytes + eventBytes > maxBytes) {
           if (events.length === 0) {
-            throw new RangeError(
-              `A projected session event cannot fit in the database page envelope (${eventBytes + 2} > ${maxBytes} bytes)`,
-            );
+            if (payloadMode === "full") {
+              event = boundSessionEvent(event, { surface: "database_read_projection" });
+              eventBytes = utf8JsonBytes(event);
+              fullPayloadsExact = false;
+            }
+            if (eventBytes + 2 > maxBytes) {
+              throw new RangeError(
+                `A projected session event cannot fit in the database page envelope (${eventBytes + 2} > ${maxBytes} bytes)`,
+              );
+            }
+          } else {
+            hasMore = true;
+            truncatedBy = "bytes";
+            break;
           }
-          hasMore = true;
-          truncatedBy = "bytes";
-          break;
         }
         events.push(event);
         bytes += separatorBytes + eventBytes;
         cursor = event.sequence;
       }
       if (hasMore) break;
-      if (rows.length < queryLimit) break;
+      if (sourceRowsFullyConsumed && sourceRowCount < queryLimit) break;
     }
 
     if (direction === "before") events.reverse();
@@ -35358,6 +35452,7 @@ export async function listSessionEventPage(
       events,
       hasMore,
       bytes,
+      fullPayloadsExact,
       direction,
       coveredSequence: first === null || last === null ? null : { first, last },
       nextAfter: direction === "after" ? (last ?? after) : null,
@@ -35367,7 +35462,18 @@ export async function listSessionEventPage(
   });
 }
 
-function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "full") {
+function sessionEventProjectionMetadataSelect() {
+  return {
+    id: schema.sessionEvents.id,
+    sequence: schema.sessionEvents.sequence,
+    transferBytes: sql<number>`octet_length(row_to_json(${schema.sessionEvents})::text)::int`,
+  } satisfies Record<keyof SessionEventProjectionMetadataRow, unknown>;
+}
+
+function sessionEventProjectionSelect(
+  payloadMode: SessionEventPayloadMode = "full",
+  options: { databaseReadProjection?: boolean } = {},
+) {
   const typeInvalid = sql`(
     octet_length(${schema.sessionEvents.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
     or position(E'\\n' in ${schema.sessionEvents.type}) > 0
@@ -35446,10 +35552,40 @@ function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "fu
     )
     else opengeni_private.project_session_event_payload(${schema.sessionEvents.payload})
   end`;
+  const databaseReadProjectedPayload = sql<unknown>`case
+    when ${envelopeInvalid} then ${projectedPayload}
+    else jsonb_build_object(
+      'preview', jsonb_build_object(
+        'head', left(${schema.sessionEvents.payload}::text, 2048),
+        'omission', '[middle payload bytes omitted at bounded database read boundary]',
+        'tail', right(${schema.sessionEvents.payload}::text, 2048)
+      ),
+      'truncation', jsonb_build_object(
+        'truncated', true,
+        'surface', 'database_read_projection',
+        'reason', 'payload_bytes_exceeded',
+        'originalBytes', octet_length(${schema.sessionEvents.payload}::text),
+        'deliveredBytes', 0,
+        'omittedBytes', octet_length(${schema.sessionEvents.payload}::text),
+        'estimatedOriginalTokens', ceil(
+          octet_length(${schema.sessionEvents.payload}::text) / 4.0
+        )::integer,
+        'estimatedDeliveredTokens', 0,
+        'fullEvidence', jsonb_build_object('available', false, 'reason', 'not_retained'),
+        'details', jsonb_build_array(jsonb_build_object(
+          'path', '$',
+          'kind', 'object',
+          'originalBytes', octet_length(${schema.sessionEvents.payload}::text)
+        ))
+      )
+    )
+  end`;
   const projectedPayloadBytes = sql<number>`octet_length((${projectedPayload})::text)`;
   const selectedPayload =
     payloadMode === "full"
-      ? schema.sessionEvents.payload
+      ? options.databaseReadProjection
+        ? databaseReadProjectedPayload
+        : schema.sessionEvents.payload
       : payloadMode === "none"
         ? sql<unknown>`jsonb_build_object(
           '_monitoring', jsonb_build_object(
@@ -35476,22 +35612,57 @@ function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "fu
     workspaceId: schema.sessionEvents.workspaceId,
     sessionId: schema.sessionEvents.sessionId,
     sequence: schema.sessionEvents.sequence,
-    type: payloadMode === "full" ? schema.sessionEvents.type : projectedType,
+    type:
+      payloadMode === "full" && !options.databaseReadProjection
+        ? schema.sessionEvents.type
+        : projectedType,
     payload: selectedPayload,
     payloadCodecVersion:
-      payloadMode === "full" ? schema.sessionEvents.payloadCodecVersion : sql<number | null>`null`,
+      payloadMode === "full" && !options.databaseReadProjection
+        ? schema.sessionEvents.payloadCodecVersion
+        : sql<number | null>`null`,
     occurredAt: schema.sessionEvents.occurredAt,
     clientEventId:
-      payloadMode === "full" ? schema.sessionEvents.clientEventId : projectedClientEventId,
+      payloadMode === "full" && !options.databaseReadProjection
+        ? schema.sessionEvents.clientEventId
+        : projectedClientEventId,
     turnId: schema.sessionEvents.turnId,
     turnGeneration: schema.sessionEvents.turnGeneration,
     turnAttemptId: schema.sessionEvents.turnAttemptId,
     turnAssociation:
-      payloadMode === "full" ? schema.sessionEvents.turnAssociation : projectedTurnAssociation,
+      payloadMode === "full" && !options.databaseReadProjection
+        ? schema.sessionEvents.turnAssociation
+        : projectedTurnAssociation,
     duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
     duplicateReason:
-      payloadMode === "full" ? schema.sessionEvents.duplicateReason : projectedDuplicateReason,
+      payloadMode === "full" && !options.databaseReadProjection
+        ? schema.sessionEvents.duplicateReason
+        : projectedDuplicateReason,
   };
+}
+
+function settleDatabaseReadProjectionPayload(payload: unknown): void {
+  const truncation = sessionEventPayloadTruncation(payload);
+  if (truncation?.surface !== "database_read_projection") return;
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const deliveredBytes = sessionEventJsonBytes(payload);
+    const omittedBytes =
+      truncation.originalBytes === null
+        ? null
+        : Math.max(0, truncation.originalBytes - deliveredBytes);
+    const deliveredTokens = approximateSessionEventTokens(deliveredBytes);
+    if (
+      truncation.deliveredBytes === deliveredBytes &&
+      truncation.omittedBytes === omittedBytes &&
+      truncation.estimatedDeliveredTokens === deliveredTokens
+    ) {
+      return;
+    }
+    truncation.deliveredBytes = deliveredBytes;
+    truncation.omittedBytes = omittedBytes;
+    truncation.estimatedDeliveredTokens = deliveredTokens;
+  }
+  throw new RangeError("Database-read session event payload byte accounting did not converge");
 }
 
 export async function listSessionEvents(

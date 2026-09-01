@@ -517,6 +517,16 @@ describe("API helpers", () => {
     expect(externalResponse.headers.get("access-control-expose-headers")).toContain(
       "Content-Range",
     );
+    for (const eventHeader of [
+      "X-OpenGeni-Forensic-Exact",
+      "X-OpenGeni-Has-More",
+      "X-OpenGeni-Next-After",
+      "X-OpenGeni-Next-Before",
+      "X-OpenGeni-Page-Bytes",
+      "X-OpenGeni-Truncated-By",
+    ]) {
+      expect(externalResponse.headers.get("access-control-expose-headers")).toContain(eventHeader);
+    }
 
     const trusted = await preflight("http://localhost:5173");
     expect(trusted.status).toBe(204);

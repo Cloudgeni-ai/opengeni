@@ -13212,6 +13212,8 @@ export const SessionEvent = z.object({
   workspaceId: z.string().uuid(),
   sessionId: z.string().uuid(),
   sequence: z.number().int().positive(),
+  /** Server-owned durable high-water mark for a synthetic compact event. */
+  coveredThrough: z.number().int().positive().optional(),
   type: SessionEventType,
   payload: z.unknown().default({}),
   occurredAt: z.string(),
@@ -13801,6 +13803,15 @@ export function boundSessionEvent(
   const turnGeneration = canonicalSessionEventGeneration(source.turnGeneration);
   const turnAttemptId = canonicalOptionalSessionEventUuid(source.turnAttemptId);
   const duplicateOfEventId = canonicalOptionalSessionEventUuid(source.duplicateOfEventId);
+  const rawCoveredThrough = source.coveredThrough.readable
+    ? source.coveredThrough.value
+    : undefined;
+  const coveredThrough =
+    typeof rawCoveredThrough === "number" &&
+    Number.isSafeInteger(rawCoveredThrough) &&
+    rawCoveredThrough >= sequence
+      ? rawCoveredThrough
+      : undefined;
   const envelopeFields = [
     sessionEventCustomSerializerProjection(event),
     sessionEventAdditionalTopLevelFieldProjection(event),
@@ -13834,6 +13845,14 @@ export function boundSessionEvent(
           rawDuplicateReason,
           duplicateReason,
           source.duplicateReason.readable,
+        )
+      : null,
+    !source.coveredThrough.readable || rawCoveredThrough !== coveredThrough
+      ? sessionEventEnvelopeFieldProjection(
+          "coveredThrough",
+          rawCoveredThrough,
+          coveredThrough,
+          source.coveredThrough.readable,
         )
       : null,
     ...sessionEventCanonicalFieldProjections(source, {
@@ -13878,6 +13897,7 @@ export function boundSessionEvent(
     workspaceId,
     sessionId,
     sequence,
+    ...(coveredThrough === undefined ? {} : { coveredThrough }),
     type: typeIsSafe ? (rawType as SessionEvent["type"]) : "session.event.envelope_omitted",
     payload,
     occurredAt,
@@ -13898,6 +13918,7 @@ export function boundSessionEvent(
     workspaceId,
     sessionId,
     sequence,
+    ...(coveredThrough === undefined ? {} : { coveredThrough }),
     type: "session.event.envelope_omitted",
     payload: boundSessionEventPayload(
       {
@@ -13996,6 +14017,7 @@ const SESSION_EVENT_OWN_DATA_FIELDS = [
   "workspaceId",
   "sessionId",
   "sequence",
+  "coveredThrough",
   "type",
   "payload",
   "occurredAt",
