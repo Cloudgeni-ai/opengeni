@@ -91,6 +91,30 @@ describe("native Svelte session controller composition", () => {
       controllers.destroy();
     }
   });
+
+  test("a mounted raw-controller surface keeps the composition alive after linked consumers leave", async () => {
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {} });
+    const controllers = createSessionControllerComposition(
+      { client: baselineClient({ calls: 0 }), workspaceId: "workspace-test" },
+      "session-test",
+    );
+    try {
+      const releaseSurface = controllers.acquire();
+      const unsubscribeLinked = controllers.queue.store.subscribe(() => undefined);
+      unsubscribeLinked();
+      await Promise.resolve();
+      expect(controllers.events.controller.diagnostics().destroyed).toBe(false);
+      expect(controllers.queue.controller.diagnostics().destroyed).toBe(false);
+      releaseSurface();
+      expect(controllers.events.controller.diagnostics().destroyed).toBe(true);
+      expect(controllers.queue.controller.diagnostics().destroyed).toBe(true);
+    } finally {
+      controllers.destroy();
+      if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  });
 });
 
 function baselineClient(streams: { calls: number }): SessionClientLike {

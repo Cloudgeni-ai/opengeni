@@ -1,6 +1,7 @@
 <script lang="ts">
   import { projectPendingApprovals } from "@opengeni/sdk/session";
   import type { SessionSurfaceControllers } from "../controllers";
+  import { editQueuedTurnIntoComposer } from "../queue-edit";
   import { readableFromController } from "../store";
   import ApprovalSurface from "./ApprovalSurface.svelte";
   import GoalSurface from "./GoalSurface.svelte";
@@ -29,6 +30,36 @@
   let goal = $derived(controllers.goal ? readableFromController(controllers.goal.controller, { owned: false }) : null);
   let approvals = $derived(projectPendingApprovals([...$events.events]));
   let status = $derived($events.sessionStatus ?? $session.value?.status ?? "queued");
+
+  $effect(() => controllers.acquire());
+
+  function pause() {
+    controllers.control.controller.clearError();
+    return controllers.control.controller.pause();
+  }
+
+  function resume() {
+    controllers.control.controller.clearError();
+    return controllers.control.controller.resume();
+  }
+
+  async function editQueuedTurn(turnId: string) {
+    const edited = await editQueuedTurnIntoComposer({
+      queue: controllers.queue.controller,
+      composer: controllers.composer.controller,
+      turnId,
+      confirmReplace: () =>
+        window.confirm(
+          "Your composer already has a draft. Replace it with this queued prompt? The current draft will be permanently discarded.",
+        ),
+    });
+    if (!edited) return;
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLTextAreaElement>('textarea[aria-label="Message the agent"]')
+        ?.focus();
+    });
+  }
 </script>
 
 <section class="og-root og-session" data-og-component="session" data-og-state={status}>
@@ -42,16 +73,17 @@
       approvalCount={approvals.length}
       inputCount={humanInput ? ($humanInput?.requests.length ?? 0) : 0}
       goalLabel={goal ? $goal?.value?.status : undefined}
-      onPause={() => controllers.control.controller.pause()}
-      onResume={() => controllers.control.controller.resume()}
+      onPause={pause}
+      onResume={resume}
     />
   {/if}
+  {#if $control.error}<div class="og-error" data-og-part="control-error" role="alert">{$control.error.message}</div>{/if}
   <MessageTimeline controller={controllers.events.controller} />
   <div data-og-part="controls">
     {#if approvals.length > 0}<ApprovalSurface {approvals} controller={controllers.control.controller} />{/if}
     {#if controllers.humanInput}<HumanInputSurface controller={controllers.humanInput.controller} />{/if}
     {#if controllers.goal}<GoalSurface controller={controllers.goal.controller} />{/if}
-    {#if $queue.queue.length > 0}<QueueSurface controller={controllers.queue.controller} />{/if}
+    {#if $queue.queue.length > 0}<QueueSurface controller={controllers.queue.controller} onEdit={editQueuedTurn} />{/if}
   </div>
   <div class="og-session__composer" data-og-part="composer">
     <SessionComposer

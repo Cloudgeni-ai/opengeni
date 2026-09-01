@@ -37,6 +37,8 @@ export type SessionSurfaceControllers = Readonly<{
   goal?: OpenGeniControllerStore<GoalStore> | undefined;
   humanInput?: OpenGeniControllerStore<HumanInputStore> | undefined;
   lineage?: OpenGeniControllerStore<SessionLineageStore> | undefined;
+  /** Hold the shared composition while a raw-controller adapter is mounted. */
+  acquire(): () => void;
   destroy(): void;
 }>;
 
@@ -136,8 +138,8 @@ export function createSessionControllerComposition(
     },
   });
   let owners = 0;
-  const acquireComposition = () => {
-    if (destroyed) return undefined;
+  const acquireComposition = (): (() => void) => {
+    if (destroyed) return () => undefined;
     owners += 1;
     if (owners === 1) void eventController.start();
     let released = false;
@@ -213,7 +215,11 @@ export function createSessionControllerComposition(
     humanInputController?.destroy();
     lineageController?.destroy();
   }
-  return Object.freeze({ ...controllers, destroy: destroyComposition });
+  return Object.freeze({
+    ...controllers,
+    acquire: acquireComposition,
+    destroy: destroyComposition,
+  });
 }
 
 function clientCapability<Capability>(

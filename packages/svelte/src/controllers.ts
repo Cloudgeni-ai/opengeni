@@ -16,6 +16,7 @@ import {
   type SessionControlStore,
   type SessionEventStore,
   type SessionLineageStore,
+  type SessionMcpApprovalPolicyClientLike,
   type SessionMcpApprovalPolicyStore,
   type SessionResourceStore,
   type SessionComposerRuntimeStore,
@@ -66,6 +67,30 @@ export function createMcpApprovalPolicy(
     createSessionMcpApprovalPolicyStore(options),
   );
 }
+
+export function createContextMcpApprovalPolicy(
+  options: Omit<
+    Parameters<typeof createSessionMcpApprovalPolicyStore>[0],
+    "client" | "workspaceId"
+  >,
+) {
+  const context = getOpenGeniContext();
+  const client =
+    context.mcpApprovalPolicyClient ??
+    clientCapability<SessionMcpApprovalPolicyClientLike>(context.client, [
+      "getSession",
+      "streamEvents",
+      "updateSessionMcpApprovalPolicy",
+    ]);
+  if (!client) {
+    throw new Error("@opengeni/svelte: MCP approval policy client is not available");
+  }
+  return createMcpApprovalPolicy({
+    ...options,
+    client,
+    workspaceId: context.workspaceId,
+  });
+}
 export function createLineage(options: Parameters<typeof createSessionLineageStore>[0]) {
   return controllerStore<SessionLineageStore>(createSessionLineageStore(options));
 }
@@ -81,4 +106,14 @@ export function approvalsFromEventStore(
   events: Readable<ReturnType<SessionEventStore["getSnapshot"]>>,
 ) {
   return derived(events, (snapshot) => projectPendingApprovals([...snapshot.events]));
+}
+
+function clientCapability<Capability>(
+  client: unknown,
+  methods: readonly string[],
+): Capability | undefined {
+  const candidate = client as Record<string, unknown>;
+  return methods.every((method) => typeof candidate[method] === "function")
+    ? (client as Capability)
+    : undefined;
 }

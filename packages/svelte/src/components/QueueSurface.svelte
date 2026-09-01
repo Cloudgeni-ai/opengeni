@@ -18,7 +18,7 @@
           <div class="og-queue-item__content">{turn.prompt}</div>
           <div class="og-queue-item__actions">
             <button class="og-button" type="button" disabled={index === 0} onclick={() => void controller.moveTurn(turn.id, $snapshot.queue[index - 1]?.id ?? null)}>Up</button>
-            <button class="og-button" type="button" onclick={() => void onEdit?.(turn.id)}>Edit</button>
+            {#if onEdit}<button class="og-button" type="button" onclick={() => void onEdit(turn.id)}>Edit</button>{/if}
             <button class="og-button" type="button" onclick={() => void controller.steerTurn(turn.id)}>Steer</button>
             <button class="og-button" data-og-variant="danger" type="button" onclick={() => void controller.removeTurn(turn.id)}>Remove</button>
           </div>
