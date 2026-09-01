@@ -83,6 +83,8 @@ describe("API helpers", () => {
 
   test("leaves only route-specific workspace protocols outside ordinary actor middleware", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
+    expect(workspaceActorContextExempt("PUT", "/v1/workspaces/external")).toBe(true);
+    expect(workspaceActorContextExempt("GET", "/v1/workspaces/external")).toBe(false);
     expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp`)).toBe(true);
     expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/github/connect`)).toBe(
       true,
