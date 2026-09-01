@@ -928,6 +928,14 @@ approvals. Hooks outside that baseline export exact structural refinements:
 used by the mounted hooks; it does not stub workspace administration, billing,
 rig, connected-machine, or unrelated workbench APIs.
 
+The native Svelte context follows the same boundary. Its required `client` is
+`SessionClientLike`; session mutation, goals, lineage, human input, MCP policy,
+and file upload remain optional context refinements. The composed Svelte
+surface omits attachment state and controls when no upload capability is
+present. Any composed public-store subscription lazily starts the one shared
+event feed, while the composition owner releases every controller with its
+final `destroy()` call.
+
 Generated-image timeline rows carry a compact permanent artifact receipt. A
 host using the styled `MessageTimeline` can pass `loadRetainedArtifact`; the
 stock web implementation calls the SDK's

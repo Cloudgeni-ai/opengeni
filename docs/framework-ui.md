@@ -133,9 +133,17 @@ only after subscription/mount.
 `OpenGeniProvider` keys its descendant context boundary on every supplied client
 and the workspace identity. Replacing any authority-bearing field remounts that
 subtree and retires host-owned controllers through their ordinary `onDestroy`
-cleanup. `createContextSessionControllers` also refreshes every authoritative
-projection whenever its single shared event stream opens or reconnects, closing
-the initial-read/SSE handoff gap.
+cleanup. Its required `client` is the narrow `SessionClientLike` baseline;
+session mutation, goals, lineage, human input, MCP policy, and uploads are
+optional refinements. A full SDK client is detected structurally, while a
+narrow proxy does not stub unrelated methods. Without an upload capability the
+composed attachment store and attachment controls are absent.
+
+`createContextSessionControllers` refreshes every authoritative projection
+whenever its single shared event stream opens or reconnects, closing the
+initial-read/SSE handoff gap. Subscribing to any composed public store lazily
+starts that shared feed. Construction and SSR remain transport-free, and the
+composition owner must call `destroy()` during final teardown.
 
 Actionable `auth-needed` rows accept a host-owned `onReconnect` callback on
 `MessageTimeline` and `SessionSurface`. The callback receives the projected

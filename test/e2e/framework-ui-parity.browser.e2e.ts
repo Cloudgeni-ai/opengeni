@@ -15,7 +15,11 @@ import {
   type WebKitBrowser,
 } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
-import { isExpectedFirefoxWebGLUnavailableWarning } from "../../scripts/framework-ui-browser-diagnostics";
+import {
+  isExpectedFirefoxHarnessWarning,
+  isExpectedFirefoxWebGLUnavailableWarning,
+  isExpectedReducedMotionWarning,
+} from "../../scripts/framework-ui-browser-diagnostics";
 import { startFrameworkUiDemos } from "../../scripts/framework-ui-demo-processes";
 
 type EngineId = "chromium" | "firefox" | "webkit";
@@ -309,19 +313,6 @@ function captureDiagnostics(page: Page): string[] {
     if (!request.url().startsWith("ws:")) diagnostics.push(`request: ${request.url()}`);
   });
   return diagnostics;
-}
-
-function isExpectedReducedMotionWarning(diagnostic: string): boolean {
-  return diagnostic.startsWith(
-    "console.warning: You have Reduced Motion enabled on your device. Animations may not appear as expected.",
-  );
-}
-
-function isExpectedFirefoxHarnessWarning(diagnostic: string): boolean {
-  return (
-    diagnostic.includes("Layout was forced before the page was fully loaded") &&
-    diagnostic.includes('file: "chrome://juggler/content/content/main.js"')
-  );
 }
 
 function isExpectedWebKitTerminalTaskQueueWarning(diagnostic: string): boolean {

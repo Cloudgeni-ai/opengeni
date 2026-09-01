@@ -3,6 +3,7 @@ import type { Readable } from "svelte/store";
 
 export type ControllerReadableOptions = Readonly<{
   owned?: boolean | undefined;
+  acquire?: (() => (() => void) | undefined) | undefined;
   release?: (() => void) | undefined;
   startOnServer?: boolean | undefined;
 }>;
@@ -12,10 +13,31 @@ export function readableFromController<Snapshot>(
   controller: OpenGeniExternalStore<Snapshot>,
   options: ControllerReadableOptions = {},
 ): Readable<Snapshot> {
+  return createControllerReadableLifecycle(controller, options).store;
+}
+
+function createControllerReadableLifecycle<Snapshot>(
+  controller: OpenGeniExternalStore<Snapshot>,
+  options: ControllerReadableOptions,
+): Readonly<{ store: Readable<Snapshot>; destroy(): void }> {
   let subscribers = 0;
   let destroyed = false;
   let retirement = 0;
-  return {
+  let releaseAcquisition: (() => void) | undefined;
+
+  const retire = () => {
+    releaseAcquisition?.();
+    releaseAcquisition = undefined;
+    if (options.release) {
+      destroyed = true;
+      options.release();
+    } else if (options.owned ?? true) {
+      destroyed = true;
+      controller.destroy();
+    }
+  };
+
+  const store: Readable<Snapshot> = {
     subscribe(run) {
       if (destroyed) {
         run(controller.getSnapshot());
@@ -26,6 +48,7 @@ export function readableFromController<Snapshot>(
       run(controller.getSnapshot());
       const unsubscribe = controller.subscribe(() => run(controller.getSnapshot()));
       if (subscribers === 1 && (options.startOnServer || typeof window !== "undefined")) {
+        releaseAcquisition = options.acquire?.();
         void controller.start();
       }
       let active = true;
@@ -38,15 +61,21 @@ export function readableFromController<Snapshot>(
         const ticket = ++retirement;
         queueMicrotask(() => {
           if (destroyed || subscribers !== 0 || ticket !== retirement) return;
-          if (options.release) {
-            destroyed = true;
-            options.release();
-          } else if (options.owned ?? true) {
-            destroyed = true;
-            controller.destroy();
-          }
+          retire();
         });
       };
+    },
+  };
+  return {
+    store,
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      retirement += 1;
+      releaseAcquisition?.();
+      releaseAcquisition = undefined;
+      if (options.release) options.release();
+      else if (options.owned ?? true) controller.destroy();
     },
   };
 }
@@ -61,18 +90,13 @@ export function controllerStore<Controller extends OpenGeniExternalStore<unknown
   controller: Controller,
   options: ControllerReadableOptions = {},
 ): OpenGeniControllerStore<Controller> {
-  let destroyed = false;
+  const readable = createControllerReadableLifecycle(
+    controller as OpenGeniExternalStore<ReturnType<Controller["getSnapshot"]>>,
+    options,
+  );
   return Object.freeze({
     controller,
-    store: readableFromController(
-      controller as OpenGeniExternalStore<ReturnType<Controller["getSnapshot"]>>,
-      options,
-    ),
-    destroy() {
-      if (destroyed) return;
-      destroyed = true;
-      if (options.release) options.release();
-      else if (options.owned ?? true) controller.destroy();
-    },
+    store: readable.store,
+    destroy: readable.destroy,
   });
 }

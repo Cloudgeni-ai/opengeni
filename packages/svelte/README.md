@@ -45,12 +45,21 @@ controller with explicit `{ client, workspaceId, sessionId }` options. Context
 contains only clients, workspace identity, and optional controller factories;
 it does not duplicate session state.
 
+The required `client` is the narrow `SessionClientLike` baseline for events,
+composer, queue, control, and approvals. Supply `sessionClient`, `goalClient`,
+`lineageClient`, `humanInputClient`, `mcpApprovalPolicyClient`, or
+`fileAttachmentClient` only for the corresponding optional capability. A full
+`OpenGeniClient` is detected structurally, while a narrow proxy does not need to
+stub unrelated methods. The styled composer omits attachment controls when no
+upload capability is present.
+
 `createContextSessionControllers(sessionId)` composes the ordinary session
-resource, event, composer, attachment, queue, and control controllers plus
-optional goal, human-input, and lineage controllers supported by the supplied
-client. The shared event feed reconciles every authoritative controller when a
-live connection opens or reconnects. Call the composition's `destroy()` method
-from `onDestroy` when the host owns it.
+resource, event, composer, queue, and control controllers plus attachment, goal,
+human-input, and lineage controllers supported by the supplied client. The
+shared event feed reconciles every authoritative controller when a live
+connection opens or reconnects. Subscribing to any composed public store lazily
+starts that shared feed; construction and SSR remain transport-free. Call the
+composition's `destroy()` method from `onDestroy` when the host owns it.
 
 `OpenGeniProvider` treats each client and workspace field as authority. Replacing
 one remounts the provided subtree so old reads, streams, and controllers retire;

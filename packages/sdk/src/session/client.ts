@@ -29,6 +29,11 @@ export type SessionClientLike = Pick<
 
 export type SessionReadClientLike = SessionEventClientLike &
   Pick<OpenGeniClient, "getSession" | "updateSession">;
+export type SessionResourceClientLike = Pick<
+  SessionEventClientLike,
+  "getSession" | "streamEvents"
+> &
+  Partial<Pick<OpenGeniClient, "updateSession">>;
 export type GoalClientLike = SessionEventClientLike &
   Pick<OpenGeniClient, "getGoal" | "updateGoal" | "deleteGoal">;
 export type SessionLineageClientLike = SessionEventClientLike &
