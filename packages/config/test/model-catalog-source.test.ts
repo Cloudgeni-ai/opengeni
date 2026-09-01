@@ -181,7 +181,7 @@ describe("deployment model catalog source", () => {
       document,
     );
     expect(settings.openaiModel).toBe("gpt-5.6-luna");
-    expect(settings.openaiAllowedModels).toBe("");
+    expect(settings.openaiAllowedModels).toBe("gpt-5.6-luna");
     expect(settings.modelNotesJson).toBe(JSON.stringify(document.modelNotes));
 
     for (const note of ["bad\nnote", "bad|note", "x".repeat(501)]) {
