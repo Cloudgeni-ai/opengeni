@@ -1,8 +1,18 @@
 import { describe, expect, test } from "bun:test";
 
-import { installVitePreloadRecovery } from "./vite-preload-recovery";
+import { availableSessionStorage, installVitePreloadRecovery } from "./vite-preload-recovery";
 
 describe("Vite preload recovery", () => {
+  test("reports unavailable storage when the sessionStorage getter throws", () => {
+    const owner = {
+      get sessionStorage(): Storage {
+        throw new DOMException("Access denied", "SecurityError");
+      },
+    };
+
+    expect(availableSessionStorage(owner)).toBeNull();
+  });
+
   test("reloads once for one app build and prevents the lazy import error", () => {
     const target = new EventTarget();
     const storage = memoryStorage();

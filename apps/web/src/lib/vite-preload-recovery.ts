@@ -2,6 +2,7 @@ const VITE_PRELOAD_RECOVERY_STORAGE_KEY = "opengeni:vite-preload-recovery-build"
 
 type PreloadRecoveryTarget = Pick<EventTarget, "addEventListener" | "removeEventListener">;
 type PreloadRecoveryStorage = Pick<Storage, "getItem" | "setItem">;
+type SessionStorageOwner = Pick<Window, "sessionStorage">;
 
 export type VitePreloadRecoveryOptions = {
   target: PreloadRecoveryTarget;
@@ -9,6 +10,14 @@ export type VitePreloadRecoveryOptions = {
   buildId: string;
   reload: () => void;
 };
+
+export function availableSessionStorage(owner: SessionStorageOwner): Storage | null {
+  try {
+    return owner.sessionStorage;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Recover a page that still references hashed assets removed by a newer
