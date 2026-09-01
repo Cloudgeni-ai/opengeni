@@ -50,6 +50,11 @@ import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const registryId = /^[A-Za-z0-9_-]+$/;
+export const DEFAULT_OPENROUTER_MODEL_ID =
+  "openrouter/nvidia/nemotron-3-super-120b-a12b:free" as const;
+export const DEFAULT_MODEL_COST_POLICY_JSON = JSON.stringify({
+  [DEFAULT_OPENROUTER_MODEL_ID]: "free",
+});
 
 // Archive capture claims are also the admission/teardown fence around a
 // provider snapshot. Keep a real settlement window after the provider request;
@@ -699,6 +704,24 @@ const SettingsSchema = z.object({
   // keep subscription model routing while disabling Codex voice input.
   voiceInputCodexExperimentalEnabled: EnvBoolean.default(false),
   modelPricingJson: z.string().default("{}"),
+  // Supported-model membership source. Database mode is resolved by the async
+  // core overlay; getSettings remains synchronous and env-only.
+  modelCatalogSource: z.enum(["code", "database"]).default("code"),
+  // Deployment-owned workspace-facing price policy. This is deliberately
+  // separate from catalog membership and upstream credential ownership.
+  // Shape: { "product/model-id": "free" | "credits" }.
+  modelCostPolicyJson: z.string().default("{}"),
+  // Optional per-product agent guidance. Database mode replaces this with the
+  // singleton document's validated modelNotes map.
+  modelNotesJson: z.string().default("{}"),
+  // Managed OpenRouter credential. The curated model table is injected in
+  // code/catalog-document resolution and never read from host provider JSON.
+  openrouterApiKey: z.string().optional(),
+  // Internal, secret-free catalog overlays populated only by
+  // applyModelCatalogDocument. They intentionally have no OPENGENI_* env
+  // binding so database mode cannot be bypassed with a second source.
+  resolvedGatewayModelsJson: z.string().optional(),
+  resolvedOpenRouterModelsJson: z.string().optional(),
   // Extra (non-built-in) model providers, declared by the host as a JSON
   // provider registry. Each entry carries its own base URL, API key, wire API
   // ("responses" | "chat") and the models it exposes. The models a client may
@@ -1825,6 +1848,7 @@ export const RegistryProviderKind = z.enum([
   "xai-subscription",
   "vercel-gateway-managed",
   "vercel-gateway-workspace",
+  "openrouter-workspace",
 ]);
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
@@ -1947,6 +1971,336 @@ const RegistryProviderSchema = z
   });
 export type RegistryProvider = z.infer<typeof RegistryProviderSchema>;
 
+export const OPENGENI_GATEWAY_PROVIDER_ID = "opengeni-gateway" as const;
+export const WORKSPACE_GATEWAY_PROVIDER_ID = "workspace-gateway" as const;
+export const WORKSPACE_GATEWAY_MODEL_ID_PREFIX = "workspace-gateway/" as const;
+export const OPENROUTER_PROVIDER_ID = "openrouter" as const;
+export const OPENROUTER_MODEL_ID_PREFIX = "openrouter/" as const;
+export const WORKSPACE_OPENROUTER_PROVIDER_ID = "workspace-openrouter" as const;
+export const WORKSPACE_OPENROUTER_MODEL_ID_PREFIX = "workspace-openrouter/" as const;
+export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1" as const;
+
+const RESERVED_MODEL_PROVIDER_IDS = new Set<string>([
+  "openai",
+  "azure",
+  CODEX_PROVIDER_ID,
+  XAI_SUBSCRIPTION_PROVIDER_ID,
+  OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  OPENROUTER_PROVIDER_ID,
+  WORKSPACE_OPENROUTER_PROVIDER_ID,
+]);
+
+export const ModelCostClass = z.enum(["free", "credits"]);
+export type ModelCostClass = z.infer<typeof ModelCostClass>;
+
+export const ConfiguredModelCostClass = z.enum(["free", "credits", "subscription", "workspace"]);
+export type ConfiguredModelCostClass = z.infer<typeof ConfiguredModelCostClass>;
+
+const ModelNote = z
+  .string()
+  .max(500)
+  .refine((value) => !/[\r\n|]/u.test(value), {
+    message: "model notes must not contain newlines or the | field separator",
+  });
+
+export function parseModelCostPolicyJson(raw: string): Record<string, ModelCostClass> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `OPENGENI_MODEL_COST_POLICY_JSON must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  return z.record(z.string().min(1), ModelCostClass).parse(parsed);
+}
+
+export function parseModelNotesJson(raw: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `OPENGENI_MODEL_NOTES_JSON must be valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  return z.record(z.string().min(1), ModelNote).parse(parsed);
+}
+
+export function configuredModelNotes(
+  settings: Pick<Settings, "modelNotesJson">,
+): Record<string, string> {
+  return parseModelNotesJson(settings.modelNotesJson);
+}
+
+export const GatewayCatalogModel = z
+  .object({
+    productId: z.string().min(1),
+    workspaceProductId: z.string().min(1).startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX),
+    upstreamModelId: z.string().min(1),
+    label: z.string().min(1),
+    shortLabel: z.string().min(1).max(64).optional(),
+    providers: z.array(z.string().min(1)).min(1),
+    implicitCaching: z.boolean().default(false),
+    vision: z.boolean().default(false),
+    inputFileMediaTypes: z.array(z.string().min(1)).default([]),
+    contextWindowTokens: z.number().int().positive().default(1_000_000),
+    effectiveContextWindowTokens: z.number().int().positive().default(900_000),
+    autoCompactTokenLimit: z.number().int().positive().default(850_000),
+    pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
+    credentialSource: z.never().optional(),
+    billing: z.never().optional(),
+    apiKey: z.never().optional(),
+  })
+  .strict();
+export type GatewayCatalogModel = z.infer<typeof GatewayCatalogModel>;
+
+export const OpenRouterCatalogModel = z
+  .object({
+    upstreamModelId: z.string().min(1).endsWith(":free"),
+    label: z.string().min(1),
+    shortLabel: z.string().min(1).max(64).optional(),
+    aliases: z.array(z.string().min(1)).default([]),
+    capabilities: ModelCapabilitiesV1Schema,
+    contextWindowTokens: z.number().int().positive().optional(),
+    effectiveContextWindowTokens: z.number().int().positive().optional(),
+    autoCompactTokenLimit: z.number().int().positive().optional(),
+    toolOutputTruncationTokens: z.number().int().positive().optional(),
+    credentialSource: z.never().optional(),
+    billing: z.never().optional(),
+    pricing: z.never().optional(),
+    apiKey: z.never().optional(),
+  })
+  .strict();
+export type OpenRouterCatalogModel = z.infer<typeof OpenRouterCatalogModel>;
+
+const DeploymentRegistryBaseUrl = z
+  .string()
+  .url()
+  .superRefine((value, context) => {
+    const url = new URL(value);
+    if (url.username || url.password) {
+      context.addIssue({
+        code: "custom",
+        message: "database catalog provider baseUrl must not contain userinfo",
+      });
+    }
+    if (url.search) {
+      context.addIssue({
+        code: "custom",
+        message: "database catalog provider baseUrl must not contain a query",
+      });
+    }
+    if (url.hash) {
+      context.addIssue({
+        code: "custom",
+        message: "database catalog provider baseUrl must not contain a fragment",
+      });
+    }
+  });
+
+const DeploymentRegistryProviderKind = z.enum(["api-key", "anonymous"]);
+
+const DeploymentRegistryModelSchema = RegistryModelSchema.safeExtend({
+  pricing: z.never().optional(),
+}).strict();
+
+const DeploymentRegistryProviderSchema = RegistryProviderSchema.safeExtend({
+  kind: DeploymentRegistryProviderKind.default("api-key"),
+  baseUrl: DeploymentRegistryBaseUrl,
+  models: z.array(DeploymentRegistryModelSchema).min(1),
+  apiKey: z.never().optional(),
+  apiKeyEnv: z.never().optional(),
+  defaultHeaders: z.never().optional(),
+  defaultQuery: z.never().optional(),
+  publicDefaultHeaderNames: z.never().optional(),
+  publicDefaultQueryNames: z.never().optional(),
+}).strict();
+
+const DeploymentGatewayCatalogModelSchema = GatewayCatalogModel.safeExtend({
+  pricing: z.never().optional(),
+}).strict();
+
+export const ModelCatalogDocument = z
+  .object({
+    schemaVersion: z.literal(1),
+    /** Canonical deployment default. Omission preserves the V1 first-built-in
+     * fallback for existing documents; operators should set this explicitly
+     * when cutting over a registry or connected-subscription default. */
+    defaultModel: z.string().min(1).optional(),
+    builtInModels: z.array(z.string().min(1)).min(1),
+    registryProviders: z.array(DeploymentRegistryProviderSchema).default([]),
+    gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).default([]),
+    openrouterModels: z.array(OpenRouterCatalogModel).default([]),
+    modelNotes: z.record(z.string().min(1), ModelNote).default({}),
+    billing: z.never().optional(),
+    enabled: z.never().optional(),
+    apiKey: z.never().optional(),
+    bands: z.never().optional(),
+  })
+  .strict()
+  .superRefine((document, context) => {
+    const productIds = new Set<string>();
+    const providerIds = new Set<string>();
+    const gatewayUpstreamIds = new Set<string>();
+    const add = (id: string, path: Array<string | number>): void => {
+      if (/[\u000A\u000D|]/u.test(id)) {
+        context.addIssue({
+          code: "custom",
+          path,
+          message: "catalog product ids must not contain newlines or the | field separator",
+        });
+      }
+      if (productIds.has(id)) {
+        context.addIssue({
+          code: "custom",
+          path,
+          message: `duplicate product id ${id}`,
+        });
+      }
+      productIds.add(id);
+    };
+    document.builtInModels.forEach((id, index) => add(id, ["builtInModels", index]));
+    document.registryProviders.forEach((provider, providerIndex) => {
+      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["registryProviders", providerIndex, "id"],
+          message: `provider id ${provider.id} is reserved for a reviewed OpenGeni provider`,
+        });
+      }
+      if (providerIds.has(provider.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["registryProviders", providerIndex, "id"],
+          message: `duplicate provider id ${provider.id}`,
+        });
+      }
+      providerIds.add(provider.id);
+      provider.models.forEach((model, modelIndex) =>
+        add(model.id, ["registryProviders", providerIndex, "models", modelIndex, "id"]),
+      );
+    });
+    document.gatewayModels.forEach((model, index) => {
+      if (gatewayUpstreamIds.has(model.upstreamModelId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["gatewayModels", index, "upstreamModelId"],
+          message: `duplicate Gateway upstream model id ${model.upstreamModelId}`,
+        });
+      }
+      gatewayUpstreamIds.add(model.upstreamModelId);
+      add(model.productId, ["gatewayModels", index, "productId"]);
+      add(model.workspaceProductId, ["gatewayModels", index, "workspaceProductId"]);
+    });
+    document.openrouterModels.forEach((model, index) =>
+      add(`${OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`, [
+        "openrouterModels",
+        index,
+        "upstreamModelId",
+      ]),
+    );
+    if (document.defaultModel && /[\u000A\u000D|]/u.test(document.defaultModel)) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultModel"],
+        message: "catalog default model must not contain newlines or the | field separator",
+      });
+    }
+    if (
+      document.defaultModel &&
+      !productIds.has(document.defaultModel) &&
+      !document.defaultModel.startsWith(CODEX_MODEL_ID_PREFIX) &&
+      !document.defaultModel.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultModel"],
+        message:
+          "catalog default model must reference deployment catalog membership or a connected-subscription product",
+      });
+    }
+    for (const productId of Object.keys(document.modelNotes)) {
+      if (!productIds.has(productId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["modelNotes", productId],
+          message: "model note references a product id outside the deployment catalog",
+        });
+      }
+    }
+  });
+export type ModelCatalogDocument = z.infer<typeof ModelCatalogDocument>;
+
+export function parseModelCatalogDocument(value: unknown): ModelCatalogDocument {
+  return ModelCatalogDocument.parse(value);
+}
+
+function deploymentRegistryProvidersWithHostCredentials(
+  settings: Settings,
+  providers: readonly z.infer<typeof DeploymentRegistryProviderSchema>[],
+): RegistryProvider[] {
+  const hostProviders = new Map(
+    parseModelProvidersJson(settings.modelProvidersJson).map((provider) => [provider.id, provider]),
+  );
+  return providers.map((provider) => {
+    if (provider.kind !== "api-key") return provider;
+    const host = hostProviders.get(provider.id);
+    if (!host || host.kind !== "api-key") {
+      throw new Error(
+        `database model catalog provider ${provider.id} has no matching host-authorized api-key transport`,
+      );
+    }
+    const transportIdentity = (candidate: typeof provider | RegistryProvider) => ({
+      kind: candidate.kind,
+      baseUrl: candidate.baseUrl,
+      api: candidate.api,
+      wireProfile: candidate.wireProfile,
+    });
+    if (canonicalJson(transportIdentity(provider)) !== canonicalJson(transportIdentity(host))) {
+      throw new Error(
+        `database model catalog provider ${provider.id} does not match its host-authorized transport`,
+      );
+    }
+    return {
+      ...provider,
+      ...(host.defaultHeaders === undefined ? {} : { defaultHeaders: host.defaultHeaders }),
+      ...(host.defaultQuery === undefined ? {} : { defaultQuery: host.defaultQuery }),
+      ...(host.publicDefaultHeaderNames === undefined
+        ? {}
+        : { publicDefaultHeaderNames: host.publicDefaultHeaderNames }),
+      ...(host.publicDefaultQueryNames === undefined
+        ? {}
+        : { publicDefaultQueryNames: host.publicDefaultQueryNames }),
+      ...(host.apiKey === undefined ? {} : { apiKey: host.apiKey }),
+      ...(host.apiKeyEnv === undefined ? {} : { apiKeyEnv: host.apiKeyEnv }),
+    };
+  });
+}
+
+/** Pure secret-free database catalog overlay. getSettings remains env-only. */
+export function applyModelCatalogDocument(settings: Settings, rawDocument: unknown): Settings {
+  const document = parseModelCatalogDocument(rawDocument);
+  const defaultModel = document.defaultModel ?? document.builtInModels[0]!;
+  const resolved = {
+    ...settings,
+    openaiModel: defaultModel,
+    openaiAllowedModels: document.builtInModels
+      .filter((modelId) => modelId !== defaultModel)
+      .join(","),
+    modelProvidersJson: JSON.stringify(
+      deploymentRegistryProvidersWithHostCredentials(settings, document.registryProviders),
+    ),
+    resolvedGatewayModelsJson: JSON.stringify(document.gatewayModels),
+    resolvedOpenRouterModelsJson: JSON.stringify(document.openrouterModels),
+    modelNotesJson: JSON.stringify(document.modelNotes),
+  };
+  return resolved;
+}
+
 export const IntegrationOAuthClientConfigSchema = z.object({
   clientId: z.string().min(1),
   clientSecret: z.string().min(1).optional(),
@@ -1966,7 +2320,7 @@ export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClient
 export interface ResolvedModelProvider {
   id: string; // "openai" | "azure" | registry id
   label: string;
-  kind: RegistryProviderKind; // "api-key" (built-ins + most registry) | "anonymous" | subscription
+  kind: RegistryProviderKind | "openrouter-managed";
   api: ModelProviderApi;
   wireProfile: ModelProviderWireProfile;
   builtin: boolean;
@@ -1979,6 +2333,10 @@ export interface ResolvedModelProvider {
   credentialSource: CredentialSourceV1;
   billing: BillingAttributionV1;
 }
+
+type InternalRegistryProvider = Omit<RegistryProvider, "kind"> & {
+  kind: RegistryProviderKind | "openrouter-managed";
+};
 
 /** A single exposed model + the provider that serves it. */
 export interface ConfiguredModel {
@@ -1996,6 +2354,8 @@ export interface ConfiguredModel {
   executionLimits: ModelExecutionLimitsV1;
   credentialSource: CredentialSourceV1;
   billing: BillingAttributionV1;
+  /** Workspace-facing funding policy, independent of upstream settlement. */
+  cost: ConfiguredModelCostClass;
   capabilities: ModelCapabilitiesV1;
   requestPolicy?: {
     gateway: {
@@ -2015,11 +2375,10 @@ export interface ConfiguredModel {
 
 export const VERCEL_AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1" as const;
 export const VERCEL_AI_GATEWAY_AI_SDK_BASE_URL = "https://ai-gateway.vercel.sh/v4/ai" as const;
-export const OPENGENI_GATEWAY_PROVIDER_ID = "opengeni-gateway" as const;
-export const WORKSPACE_GATEWAY_PROVIDER_ID = "workspace-gateway" as const;
-export const WORKSPACE_GATEWAY_MODEL_ID_PREFIX = "workspace-gateway/" as const;
 export const VERCEL_AI_GATEWAY_CONNECTION_DOMAIN = "ai-gateway.vercel.sh" as const;
 export const VERCEL_AI_GATEWAY_CONNECTION_ROLE = "vercel_ai_gateway" as const;
+export const WORKSPACE_OPENROUTER_CONNECTION_DOMAIN = "openrouter.ai" as const;
+export const WORKSPACE_OPENROUTER_CONNECTION_ROLE = "openrouter" as const;
 
 export const CODEX_REALTIME_MODEL_ID = "gpt-live-1-boulder-alpha" as const;
 export const SUPERGROK_REALTIME_MODEL_ID = "supergrok/grok-voice-think-fast-2.0" as const;
@@ -2088,6 +2447,112 @@ export const OPENGENI_GATEWAY_MODELS = {
     implicitCaching: true,
   },
 } as const;
+
+export const OPENGENI_OPENROUTER_MODELS: readonly OpenRouterCatalogModel[] = [
+  OpenRouterCatalogModel.parse({
+    upstreamModelId: "nvidia/nemotron-3-super-120b-a12b:free",
+    label: "Nemotron 3 Super 120B",
+    shortLabel: "Nemotron 3 Super",
+    aliases: [],
+    capabilities: {
+      reasoning: {
+        upstream: "supported",
+        // OpenRouter advertises the reasoning controls, but the catalogue does
+        // not publish this model's accepted effort vocabulary. Preserve that
+        // upstream fact without exposing an unverified runnable selector.
+        runnable: false,
+        efforts: [],
+        defaultEffort: null,
+        required: false,
+      },
+      functionCalling: { upstream: "supported", runnable: true },
+      structuredOutput: { upstream: "supported", runnable: true },
+      hostedTools: {
+        webSearch: { upstream: "unknown", runnable: false },
+        xSearch: { upstream: "unknown", runnable: false },
+        codeExecution: { upstream: "unknown", runnable: false },
+        imageGeneration: { upstream: "unknown", runnable: false },
+      },
+      inputModalities: ["text"],
+      inputFileMediaTypes: [],
+      outputModalities: ["text"],
+      transports: {
+        sse: { upstream: "supported", runnable: true },
+        responsesWebSocket: { upstream: "unknown", runnable: false },
+        realtimeAudio: { upstream: "unsupported", runnable: false },
+      },
+      latencyModes: [{ id: "standard", upstream: "unknown", runnable: true }],
+    },
+    contextWindowTokens: 262_144,
+    effectiveContextWindowTokens: 235_929,
+    autoCompactTokenLimit: 220_000,
+  }),
+];
+
+function defaultGatewayCatalogModels(): GatewayCatalogModel[] {
+  return [
+    {
+      ...OPENGENI_GATEWAY_MODELS.deepseek,
+      vision: false,
+      inputFileMediaTypes: [],
+      contextWindowTokens: 1_000_000,
+      effectiveContextWindowTokens: 900_000,
+      autoCompactTokenLimit: 850_000,
+    },
+    {
+      ...OPENGENI_GATEWAY_MODELS.kimi,
+      vision: true,
+      inputFileMediaTypes: ["application/pdf"],
+      contextWindowTokens: 1_000_000,
+      effectiveContextWindowTokens: 900_000,
+      autoCompactTokenLimit: 850_000,
+    },
+  ].map((model) => GatewayCatalogModel.parse(model));
+}
+
+function configuredGatewayCatalogModels(settings: Settings): GatewayCatalogModel[] {
+  if (settings.resolvedGatewayModelsJson === undefined) {
+    return defaultGatewayCatalogModels();
+  }
+  return z.array(GatewayCatalogModel).parse(JSON.parse(settings.resolvedGatewayModelsJson));
+}
+
+export function configuredGatewayUpstreamModelIds(settings: Settings): string[] {
+  return configuredGatewayCatalogModels(settings).map((model) => model.upstreamModelId);
+}
+
+export function configuredGatewayWorkspaceProductModelIds(settings: Settings): string[] {
+  return configuredGatewayCatalogModels(settings).map((model) => model.workspaceProductId);
+}
+
+export function configuredModelInputIdentities(settings: Settings): string[] {
+  return configuredModels(settings).flatMap((model) => [model.id, ...model.aliases]);
+}
+
+function configuredOpenRouterCatalogModels(settings: Settings): OpenRouterCatalogModel[] {
+  if (settings.resolvedOpenRouterModelsJson === undefined) {
+    return [...OPENGENI_OPENROUTER_MODELS];
+  }
+  return z.array(OpenRouterCatalogModel).parse(JSON.parse(settings.resolvedOpenRouterModelsJson));
+}
+
+export function configuredOpenRouterUpstreamModelIds(settings: Settings): string[] {
+  return configuredOpenRouterCatalogModels(settings).map((model) => model.upstreamModelId);
+}
+
+function workspaceOpenRouterProductId(modelId: string): string {
+  return `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${
+    modelId.startsWith(OPENROUTER_MODEL_ID_PREFIX)
+      ? modelId.slice(OPENROUTER_MODEL_ID_PREFIX.length)
+      : modelId
+  }`;
+}
+
+export function configuredOpenRouterWorkspaceProductModelIds(settings: Settings): string[] {
+  return configuredOpenRouterCatalogModels(settings).flatMap((model) =>
+    [model.upstreamModelId, ...model.aliases].map(workspaceOpenRouterProductId),
+  );
+}
 
 /**
  * Built-in OpenGeni credit pricing schedules.
@@ -2284,12 +2749,17 @@ function objectStorageConfiguredForWorkspaceArchives(settings: Settings): boolea
   }
 }
 
-function optional(name: string): string | undefined {
-  const value = process.env[name];
+function optionalEnvironmentValue(name: string, source: NodeJS.ProcessEnv): string | undefined {
+  const value = source[name];
   return value && value.trim().length > 0 ? value : undefined;
 }
 
-export function getSettings(): Settings {
+export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
+  const optional = (name: string): string | undefined => optionalEnvironmentValue(name, source);
+  const modelCatalogSource = optional("OPENGENI_MODEL_CATALOG_SOURCE");
+  const modelCostPolicyJson =
+    optional("OPENGENI_MODEL_COST_POLICY_JSON") ??
+    (modelCatalogSource === "database" ? "{}" : DEFAULT_MODEL_COST_POLICY_JSON);
   const raw = {
     serviceName: optional("OPENGENI_SERVICE_NAME"),
     environment: optional("OPENGENI_ENVIRONMENT"),
@@ -2482,6 +2952,10 @@ export function getSettings(): Settings {
     voiceInputAzureAdToken: optional("OPENGENI_VOICE_INPUT_AZURE_AD_TOKEN"),
     voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
+    modelCatalogSource,
+    modelCostPolicyJson,
+    modelNotesJson: optional("OPENGENI_MODEL_NOTES_JSON"),
+    openrouterApiKey: optional("OPENGENI_OPENROUTER_API_KEY"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
@@ -2713,7 +3187,7 @@ export function getSettings(): Settings {
         : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
   };
-  validateSettings(settings);
+  validateSettings(settings, source);
   return settings;
 }
 
@@ -3158,10 +3632,9 @@ function legacyModelCapabilities(
 
 export function gatewayRequestPolicyForUpstreamModel(
   upstreamModelId: string,
+  models: readonly GatewayCatalogModel[] = defaultGatewayCatalogModels(),
 ): ConfiguredModel["requestPolicy"] {
-  const model = Object.values(OPENGENI_GATEWAY_MODELS).find(
-    (candidate) => candidate.upstreamModelId === upstreamModelId,
-  );
+  const model = models.find((candidate) => candidate.upstreamModelId === upstreamModelId);
   if (!model) {
     return undefined;
   }
@@ -3175,7 +3648,11 @@ export function gatewayRequestPolicyForUpstreamModel(
 
 function gatewayModelCapabilities(
   settings: Settings,
-  input: { implicitCaching: boolean; vision: boolean; inputFileMediaTypes?: string[] },
+  input: {
+    implicitCaching: boolean;
+    vision: boolean;
+    inputFileMediaTypes?: string[];
+  },
 ): ModelCapabilitiesV1 {
   const legacy = legacyModelCapabilities(settings, {
     reasoningEffort: true,
@@ -3199,31 +3676,93 @@ function gatewayModelCapabilities(
   });
 }
 
+function openRouterCustomModelCapabilities(settings: Settings): ModelCapabilitiesV1 {
+  const legacy = legacyModelCapabilities(settings, {
+    reasoningEffort: false,
+    hostedWebSearch: false,
+  });
+  return normalizeCapabilities({
+    ...legacy,
+    functionCalling: { upstream: "supported", runnable: true },
+    inputModalities: ["text"],
+    inputFileMediaTypes: [],
+    transports: {
+      ...legacy.transports,
+      sse: { upstream: "supported", runnable: true },
+    },
+    promptCaching: { upstream: "unsupported", runnable: false, mode: "none" },
+    latencyModes: [{ id: "standard", upstream: "supported", runnable: true }],
+  });
+}
+
 function gatewayRegistryProvider(
   settings: Settings,
   input:
     | { kind: "vercel-gateway-managed"; apiKey: string }
-    | { kind: "vercel-gateway-workspace"; apiKey?: string },
-): RegistryProvider {
+    | {
+        kind: "vercel-gateway-workspace";
+        apiKey?: string;
+        customModels?: readonly {
+          upstreamModelId: string;
+          label?: string | null;
+        }[];
+      },
+): InternalRegistryProvider {
   const workspace = input.kind === "vercel-gateway-workspace";
-  const models = [OPENGENI_GATEWAY_MODELS.deepseek, OPENGENI_GATEWAY_MODELS.kimi].map((model) => {
-    const kimi = model === OPENGENI_GATEWAY_MODELS.kimi;
+  const curated = configuredGatewayCatalogModels(settings);
+  const upstreamIds = new Set(curated.map((model) => model.upstreamModelId));
+  const productIds = new Set(
+    parseModelProvidersJson(settings.modelProvidersJson)
+      .filter((provider) => provider.id !== WORKSPACE_GATEWAY_PROVIDER_ID)
+      .flatMap((provider) =>
+        provider.models.flatMap((model) => [model.id, ...(model.aliases ?? [])]),
+      ),
+  );
+  const models = curated.map((model) => {
+    productIds.add(workspace ? model.workspaceProductId : model.productId);
     return {
       id: workspace ? model.workspaceProductId : model.productId,
       upstreamModelId: model.upstreamModelId,
       label: model.label,
-      shortLabel: model.shortLabel,
+      ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
       capabilities: gatewayModelCapabilities(settings, {
         implicitCaching: model.implicitCaching,
-        vision: kimi,
-        inputFileMediaTypes: kimi ? ["application/pdf"] : [],
+        vision: model.vision,
+        inputFileMediaTypes: model.inputFileMediaTypes,
       }),
-      contextWindowTokens: 1_000_000,
-      effectiveContextWindowTokens: 900_000,
-      autoCompactTokenLimit: 850_000,
+      contextWindowTokens: model.contextWindowTokens,
+      effectiveContextWindowTokens: model.effectiveContextWindowTokens,
+      autoCompactTokenLimit: model.autoCompactTokenLimit,
       toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
     };
   });
+  if (workspace) {
+    for (const custom of input.customModels ?? []) {
+      const productId = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
+      // Deployment membership wins over an older or concurrently-created
+      // workspace row with the same upstream identity or generated product id.
+      // This keeps runtime routing deterministic and prevents a legacy/admin
+      // row from making the entire workspace catalog fail uniqueness checks.
+      if (upstreamIds.has(custom.upstreamModelId) || productIds.has(productId)) continue;
+      upstreamIds.add(custom.upstreamModelId);
+      productIds.add(productId);
+      models.push({
+        id: productId,
+        upstreamModelId: custom.upstreamModelId,
+        label: custom.label?.trim() || custom.upstreamModelId,
+        capabilities: gatewayModelCapabilities(settings, {
+          implicitCaching: false,
+          vision: false,
+          inputFileMediaTypes: [],
+        }),
+        contextWindowTokens: 1_000_000,
+        effectiveContextWindowTokens: 900_000,
+        autoCompactTokenLimit: 850_000,
+        toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      });
+    }
+  }
   return {
     kind: input.kind,
     id: workspace ? WORKSPACE_GATEWAY_PROVIDER_ID : OPENGENI_GATEWAY_PROVIDER_ID,
@@ -3239,48 +3778,195 @@ function gatewayRegistryProvider(
   };
 }
 
-function configuredRegistryProviders(settings: Settings): RegistryProvider[] {
-  const providers = parseModelProvidersJson(settings.modelProvidersJson);
-  if (!settings.vercelAiGatewayApiKey) {
-    return providers;
+function openRouterRegistryProvider(
+  settings: Settings,
+  input:
+    | { kind: "openrouter-managed"; apiKey: string }
+    | {
+        kind: "openrouter-workspace";
+        apiKey?: string;
+        customModels?: readonly {
+          upstreamModelId: string;
+          label?: string | null;
+        }[];
+      },
+): InternalRegistryProvider | null {
+  const workspace = input.kind === "openrouter-workspace";
+  const curated = configuredOpenRouterCatalogModels(settings);
+  const upstreamIds = new Set(curated.map((model) => model.upstreamModelId));
+  const productIds = new Set(
+    parseModelProvidersJson(settings.modelProvidersJson)
+      .filter((provider) => provider.id !== WORKSPACE_OPENROUTER_PROVIDER_ID)
+      .flatMap((provider) =>
+        provider.models.flatMap((model) => [model.id, ...(model.aliases ?? [])]),
+      ),
+  );
+  const models: RegistryProvider["models"] = curated.map((model) => {
+    const id = workspace
+      ? workspaceOpenRouterProductId(model.upstreamModelId)
+      : `${OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`;
+    const aliases = workspace ? model.aliases.map(workspaceOpenRouterProductId) : model.aliases;
+    productIds.add(id);
+    for (const alias of aliases) productIds.add(alias);
+    return {
+      id,
+      upstreamModelId: model.upstreamModelId,
+      aliases,
+      label: model.label,
+      ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+      capabilities: model.capabilities,
+      ...(model.contextWindowTokens === undefined
+        ? {}
+        : { contextWindowTokens: model.contextWindowTokens }),
+      ...(model.effectiveContextWindowTokens === undefined
+        ? {}
+        : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
+      ...(model.autoCompactTokenLimit === undefined
+        ? {}
+        : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
+      toolOutputTruncationTokens:
+        model.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens,
+    };
+  });
+  if (workspace) {
+    for (const custom of input.customModels ?? []) {
+      const productId = `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
+      if (upstreamIds.has(custom.upstreamModelId) || productIds.has(productId)) continue;
+      upstreamIds.add(custom.upstreamModelId);
+      productIds.add(productId);
+      models.push({
+        id: productId,
+        upstreamModelId: custom.upstreamModelId,
+        aliases: [],
+        label: custom.label?.trim() || custom.upstreamModelId,
+        capabilities: openRouterCustomModelCapabilities(settings),
+        toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+      });
+    }
   }
-  if (providers.some((provider) => provider.id === OPENGENI_GATEWAY_PROVIDER_ID)) {
-    throw new Error(
-      `${OPENGENI_GATEWAY_PROVIDER_ID} is reserved for OPENGENI_VERCEL_AI_GATEWAY_API_KEY`,
+  if (models.length === 0) return null;
+  const defaultHeaders: Record<string, string> = {
+    "x-title": "OpenGeni",
+    ...(settings.publicBaseUrl ? { "http-referer": settings.publicBaseUrl } : {}),
+  };
+  return {
+    kind: input.kind,
+    id: workspace ? WORKSPACE_OPENROUTER_PROVIDER_ID : OPENROUTER_PROVIDER_ID,
+    label: workspace ? "Your OpenRouter" : "OpenRouter",
+    api: "chat",
+    wireProfile: "openai",
+    baseUrl: OPENROUTER_BASE_URL,
+    ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+    defaultHeaders,
+    publicDefaultHeaderNames: Object.keys(defaultHeaders),
+    models,
+  };
+}
+
+function configuredRegistryProviders(settings: Settings): InternalRegistryProvider[] {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  const injected: InternalRegistryProvider[] = [...providers];
+  if (settings.vercelAiGatewayApiKey && configuredGatewayCatalogModels(settings).length > 0) {
+    injected.push(
+      gatewayRegistryProvider(settings, {
+        kind: "vercel-gateway-managed",
+        apiKey: settings.vercelAiGatewayApiKey,
+      }),
     );
   }
-  return [
-    ...providers,
-    gatewayRegistryProvider(settings, {
-      kind: "vercel-gateway-managed",
-      apiKey: settings.vercelAiGatewayApiKey,
-    }),
-  ];
+  const openrouter = settings.openrouterApiKey
+    ? openRouterRegistryProvider(settings, {
+        kind: "openrouter-managed",
+        apiKey: settings.openrouterApiKey,
+      })
+    : null;
+  if (openrouter) injected.push(openrouter);
+  return injected;
 }
 
 /** Static catalog overlay; it contains no concrete workspace credential. */
-export function withWorkspaceGatewayCatalogProvider(settings: Settings): Settings {
+export function withWorkspaceGatewayCatalogProvider(
+  settings: Settings,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson);
-  if (providers.some((provider) => provider.id === WORKSPACE_GATEWAY_PROVIDER_ID)) {
-    return settings;
-  }
+  const withoutWorkspace = providers.filter(
+    (provider) => provider.id !== WORKSPACE_GATEWAY_PROVIDER_ID,
+  );
+  const curatedCount = configuredGatewayCatalogModels(settings).length;
+  if (curatedCount === 0 && customModels.length === 0) return settings;
   return {
     ...settings,
     modelProvidersJson: JSON.stringify([
-      ...providers,
-      gatewayRegistryProvider(settings, { kind: "vercel-gateway-workspace" }),
+      ...withoutWorkspace,
+      gatewayRegistryProvider(settings, {
+        kind: "vercel-gateway-workspace",
+        customModels,
+      }),
     ]),
   };
 }
 
 /** Runtime overlay after the worker resolves the workspace's encrypted key. */
-export function withWorkspaceGatewayCredential(settings: Settings, apiKey: string): Settings {
+export function withWorkspaceGatewayCredential(
+  settings: Settings,
+  apiKey: string,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
   if (!apiKey.trim()) {
     throw new Error("workspace AI Gateway credential is empty");
   }
-  const catalogSettings = withWorkspaceGatewayCatalogProvider(settings);
+  const catalogSettings = withWorkspaceGatewayCatalogProvider(settings, customModels);
   const providers = parseModelProvidersJson(catalogSettings.modelProvidersJson).map((provider) =>
     provider.id === WORKSPACE_GATEWAY_PROVIDER_ID ? { ...provider, apiKey } : provider,
+  );
+  return { ...catalogSettings, modelProvidersJson: JSON.stringify(providers) };
+}
+
+/** Static OpenRouter catalog overlay; it contains no concrete workspace credential. */
+export function withWorkspaceOpenRouterCatalogProvider(
+  settings: Settings,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  const withoutWorkspace = providers.filter(
+    (provider) => provider.id !== WORKSPACE_OPENROUTER_PROVIDER_ID,
+  );
+  const provider = openRouterRegistryProvider(settings, {
+    kind: "openrouter-workspace",
+    customModels,
+  });
+  if (!provider) return settings;
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify([...withoutWorkspace, provider]),
+  };
+}
+
+/** Runtime overlay after the worker resolves the workspace's encrypted OpenRouter key. */
+export function withWorkspaceOpenRouterCredential(
+  settings: Settings,
+  apiKey: string,
+  customModels: readonly {
+    upstreamModelId: string;
+    label?: string | null;
+  }[] = [],
+): Settings {
+  if (!apiKey.trim()) {
+    throw new Error("workspace OpenRouter credential is empty");
+  }
+  const catalogSettings = withWorkspaceOpenRouterCatalogProvider(settings, customModels);
+  const providers = parseModelProvidersJson(catalogSettings.modelProvidersJson).map((provider) =>
+    provider.id === WORKSPACE_OPENROUTER_PROVIDER_ID ? { ...provider, apiKey } : provider,
   );
   return { ...catalogSettings, modelProvidersJson: JSON.stringify(providers) };
 }
@@ -3484,33 +4170,64 @@ function assertLatencyModeRunnable(
   }
 }
 
-function registryCredentialSource(provider: RegistryProvider): CredentialSourceV1 {
-  if (provider.kind === "anonymous") {
-    return { kind: "deployment", mechanism: "none" };
+function registryCredentialSource(provider: InternalRegistryProvider): CredentialSourceV1 {
+  switch (provider.kind) {
+    case "anonymous":
+      return { kind: "deployment", mechanism: "none" };
+    case "codex-subscription":
+      return { kind: "connected_subscription", provider: "codex" };
+    case "xai-subscription":
+      return { kind: "connected_subscription", provider: "xai" };
+    case "vercel-gateway-workspace":
+    case "openrouter-workspace":
+      return { kind: "workspace_connection", mechanism: "api_key" };
+    case "api-key":
+    case "vercel-gateway-managed":
+    case "openrouter-managed":
+      return { kind: "deployment", mechanism: "api_key" };
+    default: {
+      const _exhaustive: never = provider.kind;
+      return _exhaustive;
+    }
   }
-  if (provider.kind === "codex-subscription") {
-    return { kind: "connected_subscription", provider: "codex" };
-  }
-  if (provider.kind === "xai-subscription") {
-    return { kind: "connected_subscription", provider: "xai" };
-  }
-  if (provider.kind === "vercel-gateway-workspace") {
-    return { kind: "workspace_connection", mechanism: "api_key" };
-  }
-  return { kind: "deployment", mechanism: "api_key" };
 }
 
-function registryBilling(provider: RegistryProvider): BillingAttributionV1 {
-  if (provider.kind === "anonymous") {
-    return { upstreamPayer: "deployment", metering: "external" };
+function registryBilling(provider: InternalRegistryProvider): BillingAttributionV1 {
+  switch (provider.kind) {
+    case "anonymous":
+    case "openrouter-managed":
+      return { upstreamPayer: "deployment", metering: "external" };
+    case "codex-subscription":
+    case "xai-subscription":
+      return { upstreamPayer: "connected_subscription", metering: "external" };
+    case "vercel-gateway-workspace":
+    case "openrouter-workspace":
+      return { upstreamPayer: "workspace", metering: "external" };
+    case "api-key":
+    case "vercel-gateway-managed":
+      return { upstreamPayer: "deployment", metering: "opengeni_credits" };
+    default: {
+      const _exhaustive: never = provider.kind;
+      return _exhaustive;
+    }
   }
-  if (provider.kind === "codex-subscription" || provider.kind === "xai-subscription") {
-    return { upstreamPayer: "connected_subscription", metering: "external" };
-  }
-  if (provider.kind === "vercel-gateway-workspace") {
-    return { upstreamPayer: "workspace", metering: "external" };
-  }
-  return { upstreamPayer: "deployment", metering: "opengeni_credits" };
+}
+
+function configuredCostForModel(
+  settings: Settings,
+  productModelId: string,
+  credentialSource: CredentialSourceV1,
+): ConfiguredModelCostClass {
+  if (credentialSource.kind === "workspace_connection") return "workspace";
+  if (credentialSource.kind === "connected_subscription") return "subscription";
+  return parseModelCostPolicyJson(settings.modelCostPolicyJson)[productModelId] ?? "credits";
+}
+
+export function modelCostClassForConfiguredModel(
+  _settings: Settings,
+  model: Pick<ConfiguredModel, "cost">,
+): ConfiguredModelCostClass {
+  return model.cost;
 }
 
 function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
@@ -3596,6 +4313,10 @@ function definitionVersionFor(
     billing: model.billing,
     executionLimits: model.executionLimits,
     capabilities: model.capabilities,
+    // Workspace-facing free/credits classification is a separate live
+    // deployment policy. Operators must drain/fence accepted turns before
+    // changing it; it is intentionally not a second executable-definition
+    // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
     pricing: model.pricing ?? null,
   });
@@ -3611,7 +4332,9 @@ function legacyImplicitOpenAiDefinitionVersionFor(
 ): string | null {
   if (provider.wireProfile !== "openai") return null;
   const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
-  return definitionVersionFor(modelWithoutVersion, provider, { includeWireProfile: false });
+  return definitionVersionFor(modelWithoutVersion, provider, {
+    includeWireProfile: false,
+  });
 }
 
 /**
@@ -3637,7 +4360,10 @@ function builtinProviderLabel(settings: Pick<Settings, "openaiProvider">): strin
  * registry entry for the rest. Registry ids may not collide with the built-in
  * id — validateSettings rejects that at boot.
  */
-export function configuredProviders(settings: Settings): ResolvedModelProvider[] {
+export function configuredProviders(
+  settings: Settings,
+  source: NodeJS.ProcessEnv = process.env,
+): ResolvedModelProvider[] {
   const credentialSource = builtinCredentialSource(settings);
   const builtin: ResolvedModelProvider = {
     id: builtinProviderId(settings),
@@ -3668,7 +4394,7 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
       wireProfile: provider.wireProfile,
       builtin: false,
       baseUrl: provider.baseUrl,
-      apiKey: resolveProviderApiKey(provider),
+      apiKey: resolveProviderApiKey(provider, source),
       defaultQuery: provider.defaultQuery,
       defaultHeaders: provider.defaultHeaders,
       publicDefaultQueryNames: provider.publicDefaultQueryNames,
@@ -3768,8 +4494,14 @@ export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings
         { id: "standard", upstream: "supported", runnable: true },
         { id: "fast", upstream: "supported", runnable: true },
       ];
-      capabilities.hostedTools.xSearch = { upstream: "supported", runnable: true };
-      capabilities.hostedTools.imageGeneration = { upstream: "supported", runnable: true };
+      capabilities.hostedTools.xSearch = {
+        upstream: "supported",
+        runnable: true,
+      };
+      capabilities.hostedTools.imageGeneration = {
+        upstream: "supported",
+        runnable: true,
+      };
       return {
         id: `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}${slug}`,
         upstreamModelId: slug,
@@ -3787,7 +4519,10 @@ export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings
       };
     }),
   };
-  return { ...settings, modelProvidersJson: JSON.stringify([...providers, provider]) };
+  return {
+    ...settings,
+    modelProvidersJson: JSON.stringify([...providers, provider]),
+  };
 }
 
 /**
@@ -3813,6 +4548,9 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   }
   if (canonicalModelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
     return WORKSPACE_GATEWAY_PROVIDER_ID;
+  }
+  if (canonicalModelId.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)) {
+    return WORKSPACE_OPENROUTER_PROVIDER_ID;
   }
   const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
   return configured?.providerId ?? builtinProviderId(settings);
@@ -3841,15 +4579,19 @@ function resolvedExecutionLimits(
 function finalizeConfiguredModel(
   settings: Settings,
   provider: ResolvedModelProvider,
-  input: Omit<ConfiguredModel, "schemaVersion" | "definitionVersion" | "executionLimits">,
+  input: Omit<ConfiguredModel, "schemaVersion" | "definitionVersion" | "executionLimits" | "cost">,
 ): ConfiguredModel {
   const requestPolicy =
     provider.kind === "vercel-gateway-managed" || provider.kind === "vercel-gateway-workspace"
-      ? gatewayRequestPolicyForUpstreamModel(input.upstreamModelId)
+      ? gatewayRequestPolicyForUpstreamModel(
+          input.upstreamModelId,
+          configuredGatewayCatalogModels(settings),
+        )
       : undefined;
   const modelWithoutVersion: Omit<ConfiguredModel, "definitionVersion"> = {
     schemaVersion: 1,
     ...input,
+    cost: configuredCostForModel(settings, input.id, input.credentialSource),
     ...(requestPolicy ? { requestPolicy } : {}),
     executionLimits: resolvedExecutionLimits(settings, input),
   };
@@ -3900,10 +4642,13 @@ function assertUniqueModelIdentities(models: ConfiguredModel[]): void {
  * default false). De-duplicated by id (first wins) so the default model stays
  * first and the built-in allow-list takes precedence over registry entries.
  */
-export function configuredModels(settings: Settings): ConfiguredModel[] {
+export function configuredModels(
+  settings: Settings,
+  source: NodeJS.ProcessEnv = process.env,
+): ConfiguredModel[] {
   const builtinId = builtinProviderId(settings);
   const builtinLabel = builtinProviderLabel(settings);
-  const providers = configuredProviders(settings);
+  const providers = configuredProviders(settings, source);
   const providerById = new Map(providers.map((provider) => [provider.id, provider]));
   const pricingSchedules = configuredModelPricingSchedules(settings);
   // The built-in (OpenAI/Azure) provider must NEVER claim a registry-namespaced
@@ -4034,7 +4779,12 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
     }
   }
   assertUniqueModelIdentities(out);
-  return out;
+  const defaultIndex = out.findIndex(
+    (model) => model.id === settings.openaiModel || model.aliases.includes(settings.openaiModel),
+  );
+  return defaultIndex > 0
+    ? [out[defaultIndex]!, ...out.slice(0, defaultIndex), ...out.slice(defaultIndex + 1)]
+    : out;
 }
 
 /** Resolve a known canonical id or alias. Unknown strings are returned unchanged. */
@@ -4105,9 +4855,38 @@ function settingsForTurnExecutionPolicy(settings: Settings, modelId: string): Se
     return withXaiSubscriptionCatalogProvider(settings);
   }
   if (modelId.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
+    // API/worker workspace boundaries may already have overlaid durable custom
+    // rows and, at execution time, the decrypted workspace key. Re-applying an
+    // empty static overlay would silently discard both. Only synthesize the
+    // curated fallback when this exact model is not already executable.
+    if (resolveModelProvider(settings, modelId)) {
+      return settings;
+    }
     return withWorkspaceGatewayCatalogProvider(settings);
   }
+  if (modelId.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)) {
+    if (resolveModelProvider(settings, modelId)) {
+      return settings;
+    }
+    return withWorkspaceOpenRouterCatalogProvider(settings);
+  }
   return settings;
+}
+
+/**
+ * Resolve the static catalog identity used by an accepted turn. Subscription
+ * overlays contain no account or bearer and do not prove connection readiness;
+ * callers must keep their live credential/readiness gate authoritative.
+ */
+export function resolveModelProviderForTurn(
+  settings: Settings,
+  modelId: string,
+): ReturnType<typeof resolveModelProvider> {
+  const catalogSettings = settingsForTurnExecutionPolicy(settings, modelId);
+  return resolveModelProvider(
+    catalogSettings,
+    canonicalizeConfiguredModelId(catalogSettings, modelId),
+  );
 }
 
 /**
@@ -4427,6 +5206,37 @@ export function calculateGatewayReportedCostMicros(
     .creditCostMicros;
 }
 
+type GatewayReportedCostDecimal = {
+  providerNumerator: bigint;
+  decimalScale: bigint;
+  providerCostMicros: number;
+};
+
+function parseGatewayReportedCostDecimal(inferenceCostUsd: string): GatewayReportedCostDecimal {
+  const match = /^(0|[1-9]\d*)(?:\.(\d{1,18}))?$/.exec(inferenceCostUsd);
+  if (!match) {
+    throw new Error("Invalid AI Gateway inference cost");
+  }
+  const fraction = match[2] ?? "";
+  const decimalDigits = BigInt(`${match[1]}${fraction}`);
+  const decimalScale = 10n ** BigInt(fraction.length);
+  const providerNumerator = decimalDigits * 1_000_000n;
+  const providerCostMicros = (providerNumerator + decimalScale - 1n) / decimalScale;
+  if (providerCostMicros > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("AI Gateway inference cost exceeds the supported billing range");
+  }
+  return {
+    providerNumerator,
+    decimalScale,
+    providerCostMicros: Number(providerCostMicros),
+  };
+}
+
+/** Exact provider-reported Gateway cost without requiring an OpenGeni price schedule. */
+export function calculateGatewayReportedProviderCostMicros(inferenceCostUsd: string): number {
+  return parseGatewayReportedCostDecimal(inferenceCostUsd).providerCostMicros;
+}
+
 export function calculateGatewayReportedCostBreakdown(
   settings: Settings,
   model: string,
@@ -4438,27 +5248,17 @@ export function calculateGatewayReportedCostBreakdown(
     throw new Error(`Missing model pricing for ${model}`);
   }
   const pricing = selectModelPricing(schedule, positiveInt(options?.inputTokens));
-  const match = /^(0|[1-9]\d*)(?:\.(\d{1,18}))?$/.exec(inferenceCostUsd);
-  if (!match) {
-    throw new Error("Invalid AI Gateway inference cost");
-  }
-  const fraction = match[2] ?? "";
-  const decimalDigits = BigInt(`${match[1]}${fraction}`);
-  const decimalScale = 10n ** BigInt(fraction.length);
-  const providerNumerator = decimalDigits * 1_000_000n;
-  const providerMicros = (providerNumerator + decimalScale - 1n) / decimalScale;
+  const { providerNumerator, decimalScale, providerCostMicros } =
+    parseGatewayReportedCostDecimal(inferenceCostUsd);
   const marginBps = BigInt(10_000 + (pricing.marginBps ?? 0));
   const numerator = providerNumerator * marginBps;
   const denominator = decimalScale * 10_000n;
   const creditMicros = (numerator + denominator - 1n) / denominator;
-  if (
-    providerMicros > BigInt(Number.MAX_SAFE_INTEGER) ||
-    creditMicros > BigInt(Number.MAX_SAFE_INTEGER)
-  ) {
+  if (creditMicros > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("AI Gateway inference cost exceeds the supported billing range");
   }
   return {
-    providerCostMicros: Number(providerMicros),
+    providerCostMicros,
     creditCostMicros: Number(creditMicros),
   };
 }
@@ -5332,7 +6132,7 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
   );
 }
 
-function validateSettings(settings: Settings): void {
+function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   if (settings.goalIdleBackoffMs.some((delayMs) => delayMs > settings.goalIdleBackoffMaxMs)) {
     throw new Error(
@@ -5638,15 +6438,6 @@ function validateSettings(settings: Settings): void {
   if (settings.productAccessMode !== "managed" && settings.billingMode === "stripe") {
     throw new Error("OPENGENI_BILLING_MODE=stripe requires OPENGENI_PRODUCT_ACCESS_MODE=managed");
   }
-  if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
-    const pricing = configuredModelPricing(settings);
-    const missing = configuredAllowedModels(settings).filter((model) => !pricing[model]);
-    if (missing.length > 0) {
-      throw new Error(
-        `Missing model pricing for managed billing model(s): ${missing.join(", ")}. Set OPENGENI_MODEL_PRICING_JSON.`,
-      );
-    }
-  }
   if (settings.usageLimitsMode === "static") {
     const limits = configuredStaticUsageLimits(settings);
     if (Object.keys(limits).length === 0) {
@@ -5951,15 +6742,23 @@ function validateSettings(settings: Settings): void {
         "OPENGENI_STREAM_TOKEN_SECRET to enable the live desktop stream.",
     );
   }
-  // Model provider registry: parse it here so JSON/zod errors surface at boot,
-  // reject a registry id colliding with the built-in provider id (it would
-  // shadow the built-in in configuredProviders), reject duplicate registry
-  // ids, and preserve the existing key requirement for every registry provider
-  // except connected Codex and the explicit anonymous opt-in. Anonymous
-  // providers are externally metered; a missing key on every other ordinary
-  // provider remains a boot error.
-  // Registry models flow through configuredAllowedModels, so the managed-billing
-  // pricing check above already covers the OpenGeni-credit providers.
+  if (settings.modelCatalogSource === "code") {
+    validateModelCatalogSettings(settings, source);
+  } else {
+    // Database mode resolves membership asynchronously. Only the independent
+    // deployment funding JSON is parsed here; env catalog and note inputs are
+    // intentionally ignored until resolveCatalogSettings applies the singleton.
+    parseModelCostPolicyJson(settings.modelCostPolicyJson);
+  }
+}
+
+/** Validate one fully resolved, secret-bearing executable catalog. */
+export function validateModelCatalogSettings(
+  settings: Settings,
+  source: NodeJS.ProcessEnv = process.env,
+): ConfiguredModel[] {
+  const costPolicy = parseModelCostPolicyJson(settings.modelCostPolicyJson);
+  const notes = parseModelNotesJson(settings.modelNotesJson);
   const registryProviders = parseModelProvidersJson(settings.modelProvidersJson);
   const builtinId = builtinProviderId(settings);
   const providerIds = new Set<string>();
@@ -5967,10 +6766,16 @@ function validateSettings(settings: Settings): void {
     if (
       provider.kind === "vercel-gateway-managed" ||
       provider.kind === "vercel-gateway-workspace" ||
+      provider.kind === "openrouter-workspace" ||
       provider.kind === "xai-subscription"
     ) {
       throw new Error(
         `OPENGENI_MODEL_PROVIDERS_JSON provider kind ${provider.kind} is reserved for a reviewed OpenGeni credential broker`,
+      );
+    }
+    if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
+      throw new Error(
+        `OPENGENI_MODEL_PROVIDERS_JSON provider id ${provider.id} is reserved for a reviewed OpenGeni provider`,
       );
     }
     if (provider.id === builtinId) {
@@ -5987,7 +6792,7 @@ function validateSettings(settings: Settings): void {
     if (
       provider.kind !== "codex-subscription" &&
       provider.kind !== "anonymous" &&
-      !resolveProviderApiKey(provider)
+      !resolveProviderApiKey(provider, source)
     ) {
       throw new Error(
         `OPENGENI_MODEL_PROVIDERS_JSON provider ${provider.id} requires a resolvable API key (set apiKey or apiKeyEnv)`,
@@ -5997,7 +6802,65 @@ function validateSettings(settings: Settings): void {
   // Materialize the normalized catalog at boot so canonical product ids,
   // aliases, definition digests, and capability/pricing normalization are
   // validated even when managed billing is disabled.
-  configuredModels(settings);
+  const models = configuredModels(settings, source);
+  const defaultCatalogSettings = settingsForTurnExecutionPolicy(settings, settings.openaiModel);
+  const defaultCatalogModels =
+    defaultCatalogSettings === settings ? models : configuredModels(defaultCatalogSettings, source);
+  if (models.length === 0 && defaultCatalogModels.length === 0) {
+    throw new Error("The resolved model catalog contains no executable models");
+  }
+  const defaultModelId = canonicalizeConfiguredModelId(
+    defaultCatalogSettings,
+    settings.openaiModel,
+  );
+  if (!defaultCatalogModels.some((model) => model.id === defaultModelId)) {
+    throw new Error(
+      `The default model ${settings.openaiModel} is not executable in the resolved model catalog`,
+    );
+  }
+
+  const deploymentProductIds = new Set(
+    models.filter((model) => model.credentialSource.kind === "deployment").map((model) => model.id),
+  );
+  const noteProductIds = new Set(models.map((model) => model.id));
+  for (const model of configuredGatewayCatalogModels(settings)) {
+    deploymentProductIds.add(model.productId);
+    noteProductIds.add(model.productId);
+    noteProductIds.add(model.workspaceProductId);
+  }
+  for (const model of configuredOpenRouterCatalogModels(settings)) {
+    const productId = `${OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`;
+    deploymentProductIds.add(productId);
+    noteProductIds.add(productId);
+    noteProductIds.add(`${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${model.upstreamModelId}`);
+  }
+  if (settings.modelCatalogSource === "code") {
+    for (const productId of Object.keys(costPolicy)) {
+      if (!deploymentProductIds.has(productId)) {
+        throw new Error(
+          `OPENGENI_MODEL_COST_POLICY_JSON references unknown deployment model ${productId}`,
+        );
+      }
+    }
+  }
+  for (const productId of Object.keys(notes)) {
+    if (!noteProductIds.has(productId)) {
+      throw new Error(`OPENGENI_MODEL_NOTES_JSON references unknown catalog model ${productId}`);
+    }
+  }
+
+  if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
+    const pricing = configuredModelPricing(settings);
+    const missing = models
+      .filter((model) => model.cost === "credits" && !pricing[model.id])
+      .map((model) => model.id);
+    if (missing.length > 0) {
+      throw new Error(
+        `Missing model pricing for managed billing model(s): ${missing.join(", ")}. Set OPENGENI_MODEL_PRICING_JSON.`,
+      );
+    }
+  }
+  return models;
 }
 
 /**

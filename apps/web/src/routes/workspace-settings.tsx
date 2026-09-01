@@ -26,7 +26,10 @@ import { CodexSubscriptionsCard } from "@/components/codex-connection";
 import { DefaultSessionModelPreferenceRow } from "@/components/default-session-model";
 import { ModelAccessPolicySection } from "@/components/model-access-policy";
 import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
-import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
+import {
+  AiGatewayConnectionCard,
+  OpenRouterConnectionCard,
+} from "@/components/ai-gateway-connection";
 import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
@@ -520,11 +523,15 @@ export function WorkspaceSettingsRoute({
                 </p>
               </div>
               <div className="rounded-lg border border-border px-3">
-                <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <DefaultSessionModelPreferenceRow
+                  key={`default-model:${workspaceId}:${gatewayRevision}`}
+                  workspaceId={workspaceId}
+                  canManage={canRename}
+                />
               </div>
             </section>
             <ModelAccessPolicySection
-              key={`model-access:${workspaceId}`}
+              key={`model-access:${workspaceId}:${gatewayRevision}`}
               workspaceId={workspaceId}
               canManage={canDeleteWorkspace}
             />
@@ -541,7 +548,14 @@ export function WorkspaceSettingsRoute({
             />
             <AiGatewayConnectionCard
               workspaceId={workspaceId}
-              canManage={canManageConnections}
+              canManageConnection={canManageConnections}
+              canManageCustomModels={canRename}
+              onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+            />
+            <OpenRouterConnectionCard
+              workspaceId={workspaceId}
+              canManageConnection={canManageConnections}
+              canManageCustomModels={canRename}
               onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
             />
           </>

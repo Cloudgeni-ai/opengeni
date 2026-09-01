@@ -1,9 +1,16 @@
 import {
   getScheduledVariableSetExpectedGenerationForAttempt,
+  getWorkspaceModelPolicy,
+  listWorkspaceGatewayCustomModels,
+  listWorkspaceOpenRouterCustomModels,
   persistAttemptToolCatalog,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
+  workspaceCodexSubscriptionActive,
+  workspaceVercelAiGatewayConnectionActive,
+  workspaceOpenRouterConnectionActive,
+  workspaceXaiSubscriptionActiveForAuthority,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -31,6 +38,8 @@ import {
   defaultSessionMcpServerIds,
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
+  resolveCatalogSettings,
+  resolveWorkspaceModelSelection,
   withFrozenPersonalConnectionDelegations,
   resolveSessionToolPolicy,
 } from "@opengeni/core";
@@ -44,7 +53,11 @@ import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { type ToolAuthNeededPayload } from "@opengeni/contracts";
 
-import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } from "./admission";
+import {
+  rollingSafeToolAuthNeededPayload,
+  shouldPublishToolAuthNeededForTurn,
+  xaiCatalogReadinessAuthority,
+} from "./admission";
 import { unavailableMcpOperationalContext } from "./errors";
 import { runtimeResourcesForTurn } from "./file-resources";
 import { waitForTurnOperation } from "./sandbox-provision";
@@ -65,6 +78,7 @@ import {
   shouldRequestMissingSessionTitle,
 } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
+import { createListModelsAttemptToolDefinition } from "./list-models";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -82,6 +96,7 @@ export type PrepareTurnToolPolicyDeps = {
 
 export type PrepareTurnToolRuntimeDeps = {
   input: RunAgentTurnInput;
+  catalogSourceSettings: Settings;
   db: ActivityServices["db"];
   bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
@@ -296,6 +311,7 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
 export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const {
     input,
+    catalogSourceSettings,
     db,
     bus,
     runtime,
@@ -513,6 +529,55 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : [];
   const attemptToolDefinitions = [
+    createListModelsAttemptToolDefinition({
+      currentModelId: turnExecutionPolicy.productModelId,
+      load: async () => {
+        const currentCatalog = await resolveCatalogSettings(db, catalogSourceSettings);
+        const currentSettings = currentCatalog.settings;
+        const xaiReadinessAuthority = xaiCatalogReadinessAuthority(turn, credentialSubjectId);
+        const [
+          policy,
+          codexSubscriptionActive,
+          xaiSubscriptionActive,
+          workspaceGatewayConnectionActive,
+          workspaceGatewayCustomModels,
+          openRouterConnectionActive,
+          workspaceOpenRouterCustomModels,
+        ] = await Promise.all([
+          getWorkspaceModelPolicy(db, input.workspaceId),
+          workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
+          xaiReadinessAuthority && currentSettings.supergrokSubscriptionEnabled
+            ? workspaceXaiSubscriptionActiveForAuthority(db, currentSettings, {
+                workspaceId: input.workspaceId,
+                ...xaiReadinessAuthority,
+              })
+            : false,
+          workspaceVercelAiGatewayConnectionActive(db, input.workspaceId),
+          listWorkspaceGatewayCustomModels(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          }),
+          workspaceOpenRouterConnectionActive(db, input.workspaceId),
+          listWorkspaceOpenRouterCustomModels(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+          }),
+        ]);
+        return {
+          selections: resolveWorkspaceModelSelection({
+            settings: currentSettings,
+            policy,
+            codexSubscriptionActive,
+            xaiSubscriptionActive,
+            workspaceGatewayConnectionActive,
+            workspaceGatewayCustomModels,
+            workspaceOpenRouterConnectionActive: openRouterConnectionActive,
+            workspaceOpenRouterCustomModels,
+          }),
+          modelNotes: currentCatalog.modelNotes,
+        };
+      },
+    }),
     ...(titleToolPlan.promoteTitleTool
       ? [
           createSessionTitleAttemptToolDefinition({

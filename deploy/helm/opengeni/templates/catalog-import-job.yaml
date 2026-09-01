@@ -34,10 +34,12 @@ spec:
               bun run catalog:import --snapshot {{ .Values.catalogImport.snapshotPath | quote }} --if-changed
               {{- if .Values.catalogImport.skipLogos }} --skip-logos{{- end }}
           envFrom:
-            - secretRef:
-                name: {{ include "opengeni.secretName" . }}
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
+            # Later envFrom sources win duplicate keys. Keep the runtime Secret
+            # authoritative for protected provider/model overrides.
+            - secretRef:
+                name: {{ include "opengeni.secretName" . }}
           env:
             # Global catalog/import-batch tables are intentionally unavailable
             # to the restricted runtime role. Keep this owner credential scoped

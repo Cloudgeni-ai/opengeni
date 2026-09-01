@@ -34,6 +34,8 @@ import {
   getSandbox,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
+  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   nestedPostgresSqlState,
   requireWorkspace,
   scopedKnowledgeScopeKey,
@@ -54,6 +56,7 @@ import {
 } from "../session-authorization";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
+import { workspaceCustomModelReference } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateVariableSetAttachment } from "./environments";
 import {
@@ -97,6 +100,35 @@ export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
     typeof agentConfig === "object" &&
     Object.prototype.hasOwnProperty.call(agentConfig, "tools"),
   );
+}
+
+function workspaceCustomModelCommitGuard(input: {
+  settings: Settings;
+  accountId: string;
+  workspaceId: string;
+  modelId: string;
+}): ((tx: Database) => Promise<void>) | undefined {
+  const reference = workspaceCustomModelReference(input.settings, input.modelId);
+  if (!reference) return undefined;
+  return async (tx: Database): Promise<void> => {
+    const active =
+      reference.providerKind === "openrouter"
+        ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          })
+        : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            upstreamModelId: reference.upstreamModelId,
+          });
+    if (!active) {
+      throw new HTTPException(422, {
+        message: `model is not available: ${input.modelId}`,
+      });
+    }
+  };
 }
 
 export function scheduledConnectionSurfaceEligibility(
@@ -146,7 +178,7 @@ export async function createValidatedScheduledTask(input: {
       action: knowledgeAction,
     });
   }
-  const agentConfig = knowledgeAction
+  const agentConfig: ScheduledTaskAgentConfig = knowledgeAction
     ? input.payload.agentConfig
     : await validateScheduledTaskAgentConfig({
         ...input,
@@ -235,6 +267,15 @@ export async function createValidatedScheduledTask(input: {
           workspaceId: input.grant.workspaceId,
           subjectId: input.grant.subjectId,
         });
+  const beforeCreateCommit =
+    !knowledgeAction && input.payload.runMode !== "existing_session"
+      ? workspaceCustomModelCommitGuard({
+          settings: input.settings,
+          accountId: input.grant.accountId,
+          workspaceId: input.grant.workspaceId,
+          modelId: agentConfig.model ?? input.settings.openaiModel,
+        })
+      : undefined;
   return await withScheduledTaskAuthorityWriteErrors(() =>
     createScheduledTask(input.db, {
       id,
@@ -257,6 +298,7 @@ export async function createValidatedScheduledTask(input: {
       variableSetId: input.payload.variableSetId ?? null,
       rigId: input.payload.rigId ?? null,
       metadata: input.payload.metadata,
+      ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
     }),
   );
 }
@@ -734,6 +776,15 @@ export async function validatedScheduledTaskUpdate(input: {
     (input.payload.metadata !== undefined &&
       !isDeepStrictEqual(input.payload.metadata, input.existing.metadata)) ||
     (input.existing.status === "paused" && input.payload.status === "active");
+  if (materialExecutionChange && nextRunMode !== "existing_session") {
+    const beforeUpdateCommit = workspaceCustomModelCommitGuard({
+      settings: input.settings,
+      accountId: input.existing.accountId,
+      workspaceId: input.existing.workspaceId,
+      modelId: nextAgentConfig.model ?? input.settings.openaiModel,
+    });
+    if (beforeUpdateCommit) update.beforeUpdateCommit = beforeUpdateCommit;
+  }
   const existingXaiAuthority = await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
     input.db,
     input.existing.workspaceId,

@@ -25,9 +25,10 @@ const migrationName = "0264_connection_authority_runtime_activation.sql";
 // 0275 replaces the accepted-authority capture installed by 0264, 0299 repairs
 // that membership wrapper, and 0315 extends the 0275 ledgers. Migration 0345
 // patches the frozen 0275 routine, while 0374 consumes the tenancy helpers
-// installed by 0345 and 0379 activates the cursor as public sequence authority.
-// The synthetic upgrade must therefore withhold all six dependents alongside
-// 0264 and replay all seven in real filename order.
+// installed by 0345, 0379 activates the cursor as public sequence authority,
+// and 0388 drift-guards the reaper definition produced by 0345. The synthetic
+// upgrade must therefore withhold all seven dependents alongside 0264 and
+// replay all eight in real filename order.
 const scheduledConnectionAuthorityMigrationName = "0275_scheduled_connection_authority.sql";
 const organizationMembershipLockOrderMigrationName = "0299_organization_membership_lock_order.sql";
 const personalGitHubRepositorySelectionMigrationName =
@@ -35,6 +36,8 @@ const personalGitHubRepositorySelectionMigrationName =
 const sessionTenancyFenceMigrationName = "0345_tenant_scoped_session_tenancy_fence.sql";
 const sessionEventCursorMigrationName = "0374_session_event_cursors.sql";
 const sessionEventRawLaneActivationMigrationName = "0379_session_event_raw_lane_activation.sql";
+const sandboxProviderDeadlineInteractionMigrationName =
+  "0388_sandbox_provider_deadline_interactions.sql";
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
@@ -86,7 +89,8 @@ describe("migration 0264 connection authority runtime activation", () => {
           (${personalGitHubRepositorySelectionMigrationName}),
           (${sessionTenancyFenceMigrationName}),
           (${sessionEventCursorMigrationName}),
-          (${sessionEventRawLaneActivationMigrationName})
+          (${sessionEventRawLaneActivationMigrationName}),
+          (${sandboxProviderDeadlineInteractionMigrationName})
       `;
       await migrate(blank.databaseUrl);
 
@@ -189,7 +193,8 @@ describe("migration 0264 connection authority runtime activation", () => {
           ${personalGitHubRepositorySelectionMigrationName},
           ${sessionTenancyFenceMigrationName},
           ${sessionEventCursorMigrationName},
-          ${sessionEventRawLaneActivationMigrationName}
+          ${sessionEventRawLaneActivationMigrationName},
+          ${sandboxProviderDeadlineInteractionMigrationName}
         )
       `;
       await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
@@ -238,7 +243,8 @@ describe("migration 0264 connection authority runtime activation", () => {
           ${personalGitHubRepositorySelectionMigrationName},
           ${sessionTenancyFenceMigrationName},
           ${sessionEventCursorMigrationName},
-          ${sessionEventRawLaneActivationMigrationName}
+          ${sessionEventRawLaneActivationMigrationName},
+          ${sandboxProviderDeadlineInteractionMigrationName}
         )
         order by name
       `;
@@ -250,6 +256,7 @@ describe("migration 0264 connection authority runtime activation", () => {
         sessionTenancyFenceMigrationName,
         sessionEventCursorMigrationName,
         sessionEventRawLaneActivationMigrationName,
+        sandboxProviderDeadlineInteractionMigrationName,
       ]);
     } finally {
       await sql.end({ timeout: 1 });

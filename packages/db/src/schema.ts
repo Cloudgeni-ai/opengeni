@@ -7080,6 +7080,15 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    promptActorOperation: index("session_command_receipts_prompt_actor_operation_idx")
+      .on(
+        table.workspaceId,
+        table.actorType,
+        table.actorSubjectId,
+        table.actorAttemptId,
+        table.operationKey,
+      )
+      .where(sql`${table.action} in ('prompt.send', 'prompt.steer')`),
     goalUpdateOperation: uniqueIndex("session_command_receipts_goal_update_operation_uq")
       .on(table.workspaceId, table.action, table.targetSessionId, table.operationKey)
       .where(sql`${table.action} = 'goal.update'`),
@@ -12626,6 +12635,92 @@ export const rigChanges = pgTable(
       table.createdAt,
     ),
     workspaceStatus: index("rig_changes_workspace_status_idx").on(table.workspaceId, table.status),
+  }),
+);
+
+export const deploymentModelCatalog = pgTable(
+  "deployment_model_catalog",
+  {
+    singleton: boolean("singleton").primaryKey().notNull().default(true),
+    document: jsonb("document").$type<unknown>().notNull(),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    singletonCheck: check("deployment_model_catalog_singleton_chk", sql`${table.singleton}`),
+    documentCheck: check(
+      "deployment_model_catalog_document_chk",
+      sql`jsonb_typeof(${table.document}) = 'object'`,
+    ),
+    versionCheck: check("deployment_model_catalog_version_chk", sql`${table.version} > 0`),
+  }),
+);
+
+export const workspaceGatewayCustomModels = pgTable(
+  "workspace_gateway_custom_models",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    providerKind: text("provider_kind").$type<"vercel_gateway" | "openrouter">().notNull(),
+    upstreamModelId: text("upstream_model_id").notNull(),
+    label: text("label"),
+    version: integer("version").notNull().default(1),
+    createOperationId: uuid("create_operation_id").notNull(),
+    createRequestHash: text("create_request_hash").notNull(),
+    deleteOperationId: uuid("delete_operation_id"),
+    deleteRequestHash: text("delete_request_hash"),
+    createdBySubjectId: text("created_by_subject_id").notNull(),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccountFk: foreignKey({
+      name: "workspace_gateway_custom_models_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceUpstream: uniqueIndex("workspace_gateway_custom_models_workspace_upstream_uq")
+      .on(table.workspaceId, table.providerKind, table.upstreamModelId)
+      .where(sql`${table.retiredAt} is null`),
+    createOperation: uniqueIndex("workspace_gateway_custom_models_create_operation_uq").on(
+      table.workspaceId,
+      table.providerKind,
+      table.createOperationId,
+    ),
+    deleteOperation: uniqueIndex("workspace_gateway_custom_models_delete_operation_uq")
+      .on(table.workspaceId, table.providerKind, table.deleteOperationId)
+      .where(sql`${table.deleteOperationId} is not null`),
+    providerKindCheck: check(
+      "workspace_gateway_custom_models_provider_kind_chk",
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter')`,
+    ),
+    upstreamCheck: check(
+      "workspace_gateway_custom_models_upstream_chk",
+      sql`octet_length(${table.upstreamModelId}) between 1 and 238 and ${table.upstreamModelId} ~ '^[!-~]+$' and ${table.upstreamModelId} !~ '[|]'`,
+    ),
+    labelCheck: check(
+      "workspace_gateway_custom_models_label_chk",
+      sql`${table.label} is null or (octet_length(${table.label}) between 1 and 128 and ${table.label} !~ '[\r\n|]')`,
+    ),
+    actorCheck: check(
+      "workspace_gateway_custom_models_actor_chk",
+      sql`octet_length(${table.createdBySubjectId}) between 1 and 1024`,
+    ),
+    versionCheck: check("workspace_gateway_custom_models_version_chk", sql`${table.version} > 0`),
+    createHashCheck: check(
+      "workspace_gateway_custom_models_create_hash_chk",
+      sql`${table.createRequestHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    deleteReceiptCheck: check(
+      "workspace_gateway_custom_models_delete_receipt_chk",
+      sql`(${table.deleteOperationId} is null and ${table.deleteRequestHash} is null) or (${table.deleteOperationId} is not null and ${table.deleteRequestHash} ~ '^[a-f0-9]{64}$' and ${table.retiredAt} is not null)`,
+    ),
   }),
 );
 

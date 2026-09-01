@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   AddWorkspaceMemberRequest,
   CreateWorkspaceRequest,
@@ -7,16 +8,25 @@ import {
   ListWorkspaceMembersResponse,
   SetWorkspaceDefaultRigRequest,
   UpdateWorkspaceMemberRequest,
+  CreateWorkspaceGatewayCustomModelRequest,
+  CreateWorkspaceOpenRouterCustomModelRequest,
+  DeleteWorkspaceGatewayCustomModelRequest,
+  DeleteWorkspaceOpenRouterCustomModelRequest,
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   WorkspaceModelCatalogResponse,
+  WorkspaceGatewayCustomModel,
+  WorkspaceGatewayCustomModelsResponse,
+  WorkspaceOpenRouterCustomModel,
+  WorkspaceOpenRouterCustomModelsResponse,
   WorkspaceRealtimeModelCatalogResponse,
   WorkspaceInferenceControlRequest,
   Workspace,
   WorkspaceMember,
   workspaceControlUtf8Bytes,
+  stableJson,
   type AccessContext,
   type Permission,
   type WorkspaceMemberCandidate,
@@ -36,6 +46,14 @@ import {
   normalizeWorkspaceMembershipPermissions,
   listWorkspaceControlEvents,
   listSharedWorkspacesForAccount,
+  listWorkspaceGatewayCustomModels,
+  listWorkspaceOpenRouterCustomModels,
+  createWorkspaceGatewayCustomModel,
+  createWorkspaceOpenRouterCustomModel,
+  deleteWorkspaceGatewayCustomModel,
+  deleteWorkspaceOpenRouterCustomModel,
+  replayWorkspaceGatewayCustomModelCreate,
+  replayWorkspaceOpenRouterCustomModelCreate,
   listWorkspacesForSubject,
   nestedPostgresSqlState,
   removeWorkspaceMember,
@@ -50,7 +68,12 @@ import {
   workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
+  workspaceOpenRouterConnectionActive,
+  WorkspaceGatewayCustomModelHistoryLimitError,
+  WorkspaceOpenRouterCustomModelHistoryLimitError,
   WorkspaceExternalIdentityConflictError,
+  WorkspaceGatewayCustomModelLimitError,
+  WorkspaceOpenRouterCustomModelLimitError,
   WorkspaceLimitExceededError,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
@@ -63,6 +86,7 @@ import {
   requireAccessContext,
   requireAccessGrant,
   requireFreshAccessGrant,
+  resolveWorkspaceCatalogSettings,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -83,6 +107,13 @@ import {
   SUPERGROK_REALTIME_MODEL_ID,
   canonicalizeConfiguredModelId,
   configuredStaticUsageLimits,
+  configuredGatewayUpstreamModelIds,
+  configuredGatewayWorkspaceProductModelIds,
+  configuredModelInputIdentities,
+  configuredOpenRouterUpstreamModelIds,
+  configuredOpenRouterWorkspaceProductModelIds,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
+  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 
@@ -94,6 +125,46 @@ export function canonicalWorkspacePolicyModelIds(
     return null;
   }
   return [...new Set(modelIds.map((modelId) => canonicalizeConfiguredModelId(settings, modelId)))];
+}
+
+function projectWorkspaceGatewayCustomModel(model: {
+  id: string;
+  upstreamModelId: string;
+  label: string | null;
+  version: number;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return WorkspaceGatewayCustomModel.parse({
+    id: model.id,
+    upstreamModelId: model.upstreamModelId,
+    label: model.label,
+    version: model.version,
+    createdAt: model.createdAt.toISOString(),
+    updatedAt: model.updatedAt.toISOString(),
+  });
+}
+
+function projectWorkspaceOpenRouterCustomModel(model: {
+  id: string;
+  upstreamModelId: string;
+  label: string | null;
+  version: number;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return WorkspaceOpenRouterCustomModel.parse({
+    id: model.id,
+    upstreamModelId: model.upstreamModelId,
+    label: model.label,
+    version: model.version,
+    createdAt: model.createdAt.toISOString(),
+    updatedAt: model.updatedAt.toISOString(),
+  });
+}
+
+function workspaceCustomModelRequestHash(value: unknown): string {
+  return createHash("sha256").update(stableJson(value), "utf8").digest("hex");
 }
 
 type WorkspaceMemberProjectionInput = Omit<WorkspaceMemberValue, "permissions"> & {
@@ -192,7 +263,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         name: payload.name,
         slug: payload.slug ?? null,
         ...(payload.agentInstructions !== undefined
-          ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
+          ? {
+              agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
+            }
           : {}),
         maxWorkspacesPerAccount: workspaceLimit(deps),
       });
@@ -317,28 +390,321 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const [
+      resolvedCatalog,
       policy,
       codexSubscriptionActive,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive,
+      workspaceGatewayCustomModels,
+      openRouterConnectionActive,
+      workspaceOpenRouterCustomModels,
     ] = await Promise.all([
+      deps.resolveCatalogSettings(),
       getWorkspaceModelPolicy(deps.db, workspaceId),
       workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
       workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
+      listWorkspaceGatewayCustomModels(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+      }),
+      workspaceOpenRouterConnectionActive(deps.db, workspaceId),
+      listWorkspaceOpenRouterCustomModels(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+      }),
     ]);
     c.header("cache-control", "private, no-store");
     return c.json(
       WorkspaceModelCatalogResponse.parse(
         buildWorkspaceModelCatalog({
-          settings: deps.settings,
+          settings: resolvedCatalog.settings,
           policy,
           codexSubscriptionActive,
           xaiSubscriptionActive,
           workspaceGatewayConnectionActive,
+          workspaceGatewayCustomModels,
+          workspaceOpenRouterConnectionActive: openRouterConnectionActive,
+          workspaceOpenRouterCustomModels,
         }),
       ),
     );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const models = await listWorkspaceGatewayCustomModels(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      WorkspaceGatewayCustomModelsResponse.parse({
+        models: models.map(projectWorkspaceGatewayCustomModel),
+      }),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const parsed = CreateWorkspaceGatewayCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid Gateway custom model" });
+    }
+    const requestHash = workspaceCustomModelRequestHash({
+      action: "create",
+      upstreamModelId: parsed.data.upstreamModelId,
+      label: parsed.data.label ?? null,
+    });
+    const replay = await replayWorkspaceGatewayCustomModelCreate(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      operationId: parsed.data.operationId,
+      requestHash,
+    });
+    if (replay.outcome === "conflict") {
+      throw new HTTPException(409, {
+        message: "Gateway custom model operation conflicts with current state",
+      });
+    }
+    if (replay.outcome === "success") {
+      return c.json(projectWorkspaceGatewayCustomModel(replay.model), 201);
+    }
+    const catalog = await deps.resolveCatalogSettings();
+    if (configuredGatewayUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)) {
+      throw new HTTPException(422, {
+        message: "Gateway model is already included in the deployment catalog",
+      });
+    }
+    const customProductId = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${parsed.data.upstreamModelId}`;
+    const deploymentProductIds = new Set([
+      ...configuredModelInputIdentities(catalog.settings),
+      ...configuredGatewayWorkspaceProductModelIds(catalog.settings),
+    ]);
+    if (deploymentProductIds.has(customProductId)) {
+      throw new HTTPException(422, {
+        message: "Gateway model product id conflicts with the deployment catalog",
+      });
+    }
+    try {
+      const model = await createWorkspaceGatewayCustomModel(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        upstreamModelId: parsed.data.upstreamModelId,
+        label: parsed.data.label ?? null,
+        operationId: parsed.data.operationId,
+        requestHash,
+        createdBySubjectId: grant.subjectId,
+      });
+      if (!model || model.retiredAt) {
+        throw new HTTPException(409, {
+          message: "Gateway custom model operation conflicts with current state",
+        });
+      }
+      return c.json(projectWorkspaceGatewayCustomModel(model), 201);
+    } catch (error) {
+      if (
+        error instanceof WorkspaceGatewayCustomModelLimitError ||
+        error instanceof WorkspaceGatewayCustomModelHistoryLimitError
+      ) {
+        throw new HTTPException(422, { message: error.message });
+      }
+      if (nestedPostgresSqlState(error) === "23505") {
+        throw new HTTPException(422, {
+          message: "Gateway custom model already exists",
+        });
+      }
+      throw error;
+    }
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/gateway-custom-models/:customModelId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const customModelId = c.req.param("customModelId");
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new HTTPException(422, {
+        message: "invalid Gateway custom model id",
+      });
+    }
+    const parsed = DeleteWorkspaceGatewayCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: "invalid Gateway custom model deletion",
+      });
+    }
+    const removed = await deleteWorkspaceGatewayCustomModel(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      customModelId,
+      expectedVersion: parsed.data.expectedVersion,
+      operationId: parsed.data.operationId,
+      requestHash: workspaceCustomModelRequestHash({
+        action: "delete",
+        customModelId,
+        expectedVersion: parsed.data.expectedVersion,
+      }),
+    });
+    if (removed.outcome === "not_found") {
+      throw new HTTPException(404, {
+        message: "Gateway custom model not found",
+      });
+    }
+    if (removed.outcome === "conflict") {
+      throw new HTTPException(409, {
+        message: "Gateway custom model changed; reload and retry",
+      });
+    }
+    return c.body(null, 204);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/openrouter-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const models = await listWorkspaceOpenRouterCustomModels(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      WorkspaceOpenRouterCustomModelsResponse.parse({
+        models: models.map(projectWorkspaceOpenRouterCustomModel),
+      }),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/openrouter-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const parsed = CreateWorkspaceOpenRouterCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid OpenRouter custom model" });
+    }
+    const requestHash = workspaceCustomModelRequestHash({
+      action: "create",
+      upstreamModelId: parsed.data.upstreamModelId,
+      label: parsed.data.label ?? null,
+    });
+    const replay = await replayWorkspaceOpenRouterCustomModelCreate(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      operationId: parsed.data.operationId,
+      requestHash,
+    });
+    if (replay.outcome === "conflict") {
+      throw new HTTPException(409, {
+        message: "OpenRouter custom model operation conflicts with current state",
+      });
+    }
+    if (replay.outcome === "success") {
+      return c.json(projectWorkspaceOpenRouterCustomModel(replay.model), 201);
+    }
+    const catalog = await deps.resolveCatalogSettings();
+    if (
+      configuredOpenRouterUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)
+    ) {
+      throw new HTTPException(422, {
+        message: "OpenRouter model is already included in the deployment catalog",
+      });
+    }
+    const customProductId = `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${parsed.data.upstreamModelId}`;
+    const deploymentProductIds = new Set([
+      ...configuredModelInputIdentities(catalog.settings),
+      ...configuredOpenRouterWorkspaceProductModelIds(catalog.settings),
+    ]);
+    if (deploymentProductIds.has(customProductId)) {
+      throw new HTTPException(422, {
+        message: "OpenRouter model product id conflicts with the deployment catalog",
+      });
+    }
+    try {
+      const model = await createWorkspaceOpenRouterCustomModel(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        upstreamModelId: parsed.data.upstreamModelId,
+        label: parsed.data.label ?? null,
+        operationId: parsed.data.operationId,
+        requestHash,
+        createdBySubjectId: grant.subjectId,
+      });
+      if (!model || model.retiredAt) {
+        throw new HTTPException(409, {
+          message: "OpenRouter custom model operation conflicts with current state",
+        });
+      }
+      return c.json(projectWorkspaceOpenRouterCustomModel(model), 201);
+    } catch (error) {
+      if (
+        error instanceof WorkspaceOpenRouterCustomModelLimitError ||
+        error instanceof WorkspaceOpenRouterCustomModelHistoryLimitError
+      ) {
+        throw new HTTPException(422, { message: error.message });
+      }
+      if (nestedPostgresSqlState(error) === "23505") {
+        throw new HTTPException(422, {
+          message: "OpenRouter custom model already exists",
+        });
+      }
+      throw error;
+    }
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/openrouter-custom-models/:customModelId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const customModelId = c.req.param("customModelId");
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new HTTPException(422, {
+        message: "invalid OpenRouter custom model id",
+      });
+    }
+    const parsed = DeleteWorkspaceOpenRouterCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: "invalid OpenRouter custom model deletion",
+      });
+    }
+    const removed = await deleteWorkspaceOpenRouterCustomModel(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      customModelId,
+      expectedVersion: parsed.data.expectedVersion,
+      operationId: parsed.data.operationId,
+      requestHash: workspaceCustomModelRequestHash({
+        action: "delete",
+        customModelId,
+        expectedVersion: parsed.data.expectedVersion,
+      }),
+    });
+    if (removed.outcome === "not_found") {
+      throw new HTTPException(404, {
+        message: "OpenRouter custom model not found",
+      });
+    }
+    if (removed.outcome === "conflict") {
+      throw new HTTPException(409, {
+        message: "OpenRouter custom model changed; reload and retry",
+      });
+    }
+    return c.body(null, 204);
   });
 
   app.get("/v1/workspaces/:workspaceId/realtime-model-catalog", async (c) => {
@@ -417,11 +783,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const payload = UpdateWorkspaceModelPolicyRequest.parse(await c.req.json());
+    const catalog = await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
     const policy = await upsertWorkspaceModelPolicy(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       allowedProviders: payload.allowedProviders ?? null,
-      allowedModels: canonicalWorkspacePolicyModelIds(deps.settings, payload.allowedModels),
+      allowedModels: canonicalWorkspacePolicyModelIds(catalog.settings, payload.allowedModels),
     });
     return c.json(policy);
   });

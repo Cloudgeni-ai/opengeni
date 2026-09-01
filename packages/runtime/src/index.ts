@@ -359,6 +359,7 @@ export {
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
+  WorkspaceOpenRouterUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,
   azureOpenAIDefaultQuery,

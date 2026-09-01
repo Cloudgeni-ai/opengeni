@@ -12,6 +12,7 @@ import {
   GatewayRealtimeConnectRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
+  CreateSessionRequest,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
   EndSessionRealtimeRequest,
@@ -47,6 +48,7 @@ import {
   SessionEventSemanticClass,
   SessionEventType,
   SessionMcpServerId,
+  SaveNewSessionDraftRequest,
   compactSessionEventResult,
   sessionEventLatestClassToSemanticClass,
   SaveComposerDraftRequest,
@@ -231,6 +233,7 @@ import {
   requirePermission,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
+  resolveWorkspaceCatalogSettings,
   withResolvedSessionAuthorization,
   SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
   SessionAuthorizationDeniedError,
@@ -549,6 +552,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     let session: Session;
     try {
+      CreateSessionRequest.parse(payload);
       session = await createSessionForRequest(deps, grant, workspaceId, payload, authorization);
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
@@ -562,7 +566,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    return c.json(await getActorNewSessionDraft({ settings, db }, grant, workspaceId));
+    const catalog = await resolveWorkspaceCatalogSettings(db, settings, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
+    return c.json(
+      await getActorNewSessionDraft({ settings: catalog.settings, db }, grant, workspaceId),
+    );
   });
 
   app.put("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
@@ -587,9 +597,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       );
     }
     try {
+      SaveNewSessionDraftRequest.parse(payload);
+      const catalog = await resolveWorkspaceCatalogSettings(db, settings, {
+        accountId: grant.accountId,
+        workspaceId,
+      });
       return c.json(
         await saveActorNewSessionDraft(
-          { settings, db, objectStorage },
+          { settings: catalog.settings, db, objectStorage },
           grant,
           workspaceId,
           payload,
@@ -2898,28 +2913,33 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = parseSteerSessionAdmission(await c.req.json().catch(() => null));
-    const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
-      text: payload.text,
-      annotations: payload.annotations,
-      modelContext: payload.modelContext ?? null,
-      resources: payload.resources,
-      model: payload.model ?? null,
-      reasoningEffort: payload.reasoningEffort ?? null,
-      latencyMode: payload.latencyMode ?? null,
-      mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
-      connectionAuthorities: payload.connectionAuthorities,
-      ...(payload.personalResourceAttachment
-        ? { personalResourceAttachment: payload.personalResourceAttachment }
-        : {}),
-      authorization,
-      delivery: "steer",
-      origin: "human",
-      ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
-      ...(payload.expectedDraftRevision !== undefined
-        ? { expectedDraftRevision: payload.expectedDraftRevision }
-        : {}),
-      ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
-    });
+    let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
+    try {
+      result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+        text: payload.text,
+        annotations: payload.annotations,
+        modelContext: payload.modelContext ?? null,
+        resources: payload.resources,
+        model: payload.model ?? null,
+        reasoningEffort: payload.reasoningEffort ?? null,
+        latencyMode: payload.latencyMode ?? null,
+        mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+        connectionAuthorities: payload.connectionAuthorities,
+        ...(payload.personalResourceAttachment
+          ? { personalResourceAttachment: payload.personalResourceAttachment }
+          : {}),
+        authorization,
+        delivery: "steer",
+        origin: "human",
+        ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
+        ...(payload.expectedDraftRevision !== undefined
+          ? { expectedDraftRevision: payload.expectedDraftRevision }
+          : {}),
+        ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
+      });
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
     return c.json(result, 202);
   });
 
@@ -2975,29 +2995,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     if (event.type === "user.message") {
-      const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
-        text: event.payload.text,
-        annotations: event.payload.annotations,
-        modelContext: event.payload.modelContext ?? null,
-        resources: event.payload.resources ?? [],
-        model: event.payload.model ?? null,
-        reasoningEffort: event.payload.reasoningEffort ?? null,
-        latencyMode: event.payload.latencyMode ?? null,
-        mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
-        connectionAuthorities: event.payload.connectionAuthorities,
-        ...(event.payload.personalResourceAttachment
-          ? { personalResourceAttachment: event.payload.personalResourceAttachment }
-          : {}),
-        authorization,
-        ...(event.payload.controlEtag !== undefined
-          ? { controlEtag: event.payload.controlEtag }
-          : {}),
-        ...(event.payload.expectedDraftRevision !== undefined
-          ? { expectedDraftRevision: event.payload.expectedDraftRevision }
-          : {}),
-        ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-      });
-      return c.json(accepted, 202);
+      let result: Awaited<ReturnType<typeof acceptSessionUserMessage>>;
+      try {
+        result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+          text: event.payload.text,
+          annotations: event.payload.annotations,
+          modelContext: event.payload.modelContext ?? null,
+          resources: event.payload.resources ?? [],
+          model: event.payload.model ?? null,
+          reasoningEffort: event.payload.reasoningEffort ?? null,
+          latencyMode: event.payload.latencyMode ?? null,
+          mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+          connectionAuthorities: event.payload.connectionAuthorities,
+          ...(event.payload.personalResourceAttachment
+            ? { personalResourceAttachment: event.payload.personalResourceAttachment }
+            : {}),
+          authorization,
+          ...(event.payload.controlEtag !== undefined
+            ? { controlEtag: event.payload.controlEtag }
+            : {}),
+          ...(event.payload.expectedDraftRevision !== undefined
+            ? { expectedDraftRevision: event.payload.expectedDraftRevision }
+            : {}),
+          ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
+        });
+      } catch (error) {
+        return commandConflictResponse(c, error);
+      }
+      return c.json(result.accepted, 202);
     }
 
     if (event.type === "user.approvalDecision") {

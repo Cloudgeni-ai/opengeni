@@ -84,7 +84,7 @@ import {
   type ScheduledTaskFormState,
 } from "@/lib/scheduled-tasks";
 import { cn } from "@/lib/utils";
-import { findPickerRow, type PickerModelRow } from "@/lib/model-policy";
+import { findPickerRow, payerSummaryForModel, type PickerModelRow } from "@/lib/model-policy";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { ScheduledTask, ScheduledTaskRun, Session } from "@/types";
 
@@ -1284,14 +1284,8 @@ function ScheduledTaskForm(props: {
     ? "Loading model"
     : (selectedModel?.label ?? form.model ?? "Default model");
   const billingLabel = selectedModel
-    ? selectedModel.billingClass === "opengeni_credits"
-      ? "OpenGeni credits"
-      : selectedModel.billingClass === "codex_subscription"
-        ? "Codex subscription"
-        : selectedModel.billingClass === "supergrok_subscription"
-          ? "SuperGrok subscription"
-          : "Your AI Gateway"
-    : "Billing route unavailable";
+    ? payerSummaryForModel(selectedModel.catalog)
+    : "Payment source unavailable";
   const setCadence = (next: ScheduledTaskCadence) => {
     setCadenceState(next);
     setForm((current) => applyScheduledTaskCadence(current, next));

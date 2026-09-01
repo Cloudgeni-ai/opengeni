@@ -2,6 +2,7 @@ import {
   DEFAULT_AGENT_INSTRUCTIONS,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
+  DEFAULT_MODEL_COST_POLICY_JSON,
   type Settings,
 } from "@opengeni/config";
 
@@ -171,6 +172,14 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
         outputMicrosPerMillionTokens: 1,
       },
     }),
+    modelCatalogSource: "code",
+    modelCostPolicyJson:
+      overrides.modelCostPolicyJson ??
+      (overrides.modelCatalogSource === "database" ? "{}" : DEFAULT_MODEL_COST_POLICY_JSON),
+    modelNotesJson: "{}",
+    openrouterApiKey: undefined,
+    resolvedGatewayModelsJson: undefined,
+    resolvedOpenRouterModelsJson: undefined,
     modelProvidersJson: "[]",
     codexSubscriptionEnabled: false,
     supergrokSubscriptionEnabled: false,
