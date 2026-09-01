@@ -56,3 +56,16 @@ test("the demo consumes public exports without type escape hatches or fake contr
   expect(`${app}\n${client}`).not.toContain("as never");
   expect(composer).not.toMatch(/selectedTools|onToolsChange/u);
 });
+
+test("native auth recovery preserves host authority", () => {
+  const components = resolve(import.meta.dir, "../src/components");
+  const row = readFileSync(join(components, "TimelineRow.svelte"), "utf8");
+  const timeline = readFileSync(join(components, "MessageTimeline.svelte"), "utf8");
+  const surface = readFileSync(join(components, "SessionSurface.svelte"), "utf8");
+
+  expect(row).toContain('item.authoritySource === "host" && item.authorizationUrl');
+  expect(row).toContain('item.authoritySource !== "host" && auth.actionable && onReconnect');
+  expect(row).toContain("await onReconnect(value)");
+  expect(timeline).toContain("<TimelineGroup {group} {renderers} {onReconnect} />");
+  expect(surface).toContain("composer={controllers.composer.controller} {onReconnect}");
+});

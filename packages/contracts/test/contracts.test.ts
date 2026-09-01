@@ -647,6 +647,25 @@ describe("contracts", () => {
         reason: "missing_connection",
       }).connectionId,
     ).toBe("host:cloud:7");
+    expect(
+      ToolAuthNeededPayload.parse({
+        serverId: "host-tools",
+        providerDomain: "github.com",
+        connectionId: "host:github:42",
+        authoritySource: "host",
+        reason: "unsupported_auth",
+        hostReason: "expired",
+        authorizationUrl: "https://host.example/connect/github",
+      }).hostReason,
+    ).toBe("expired");
+    expect(
+      ToolAuthNeededPayload.safeParse({
+        serverId: "host-tools",
+        providerDomain: "github.com",
+        authoritySource: "host",
+        reason: "expired",
+      }).success,
+    ).toBe(false);
   });
 
   test("auth-needed events keep capability recommendations secret-free and bounded", () => {

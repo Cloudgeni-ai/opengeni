@@ -3,6 +3,7 @@
   import type { SessionSurfaceControllers } from "../controllers";
   import { projectOptimisticQueuedMessages } from "../optimistic-messages";
   import { editQueuedTurnIntoComposer } from "../queue-edit";
+  import type { AuthReconnectHandler } from "../renderers";
   import { readableFromController } from "../store";
   import ApprovalSurface from "./ApprovalSurface.svelte";
   import GoalSurface from "./GoalSurface.svelte";
@@ -17,11 +18,13 @@
     title = "OpenGeni session",
     models = [],
     showChrome = true,
+    onReconnect,
   }: {
     controllers: SessionSurfaceControllers;
     title?: string;
     models?: readonly string[];
     showChrome?: boolean;
+    onReconnect?: AuthReconnectHandler | undefined;
   } = $props();
   let session = $derived(readableFromController(controllers.session.controller, { owned: false }));
   let events = $derived(readableFromController(controllers.events.controller, { owned: false }));
@@ -83,7 +86,7 @@
     />
   {/if}
   {#if $control.error}<div class="og-error" data-og-part="control-error" role="alert">{$control.error.message}</div>{/if}
-  <MessageTimeline controller={controllers.events.controller} composer={controllers.composer.controller} />
+  <MessageTimeline controller={controllers.events.controller} composer={controllers.composer.controller} {onReconnect} />
   <div data-og-part="controls">
     {#if approvals.length > 0}<ApprovalSurface {approvals} controller={controllers.control.controller} />{/if}
     {#if controllers.humanInput}<HumanInputSurface controller={controllers.humanInput.controller} />{/if}

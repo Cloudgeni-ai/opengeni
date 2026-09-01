@@ -12317,6 +12317,17 @@ export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFil
   return { includeTypes: [...included], excludeTypes: [...excluded] };
 }
 
+export const ToolAuthNeededReason = z.enum([
+  "missing_connection",
+  "expired",
+  "insufficient_scope",
+  "refresh_failed",
+  "personal_authority_unavailable",
+  "unsupported_auth",
+  "resource_scope_unavailable",
+]);
+export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
+
 export const ToolAuthNeededPayload = z.object({
   serverId: z.string().min(1),
   toolName: z.string().min(1).nullable().optional(),
@@ -12325,15 +12336,11 @@ export const ToolAuthNeededPayload = z.object({
   // Embedded hosts may use an opaque connection identity; never assume an
   // OpenGeni UUID on the public event wire.
   connectionId: z.string().min(1).nullable().optional(),
-  reason: z.enum([
-    "missing_connection",
-    "expired",
-    "insufficient_scope",
-    "refresh_failed",
-    "personal_authority_unavailable",
-    "unsupported_auth",
-    "resource_scope_unavailable",
-  ]),
+  /** The failed binding is owned by the embedding host, not OpenGeni's connection broker. */
+  authoritySource: z.literal("host").optional(),
+  reason: ToolAuthNeededReason,
+  /** Exact host recovery reason consumed by host-aware clients. */
+  hostReason: ToolAuthNeededReason.optional(),
   scopes: z.array(z.string().min(1)).optional(),
   resource: z.string().min(1).optional(),
   selectedResources: McpConnectionResourceScopes.optional(),
@@ -12354,6 +12361,29 @@ export const ToolAuthNeededPayload = z.object({
       requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
     })
     .optional(),
+}).superRefine((payload, context) => {
+  if (payload.authoritySource === "host") {
+    if (payload.reason !== "unsupported_auth") {
+      context.addIssue({
+        code: "custom",
+        message: "host auth-needed events require the legacy-safe unsupported_auth reason",
+        path: ["reason"],
+      });
+    }
+    if (!payload.hostReason) {
+      context.addIssue({
+        code: "custom",
+        message: "host auth-needed events require hostReason",
+        path: ["hostReason"],
+      });
+    }
+  } else if (payload.hostReason) {
+    context.addIssue({
+      code: "custom",
+      message: "hostReason is reserved for host-owned auth-needed events",
+      path: ["hostReason"],
+    });
+  }
 });
 export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
 

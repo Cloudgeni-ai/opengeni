@@ -1,7 +1,12 @@
 <script lang="ts">
-  import type { TimelineItem } from "@opengeni/sdk/session";
-  import { timelineRendererFor, type TimelineRendererRegistry } from "../renderers";
+  import type { AuthNeededItem, TimelineItem } from "@opengeni/sdk/session";
   import {
+    timelineRendererFor,
+    type AuthReconnectHandler,
+    type TimelineRendererRegistry,
+  } from "../renderers";
+  import {
+    authNeededPresentation,
     boundedTimelineValue,
     timelineItemLabel,
     timelineItemOutcome,
@@ -12,15 +17,19 @@
   let {
     item,
     renderers,
+    onReconnect,
   }: {
     item: TimelineItem;
     renderers?: TimelineRendererRegistry | undefined;
+    onReconnect?: AuthReconnectHandler | undefined;
   } = $props();
   let renderer = $derived(timelineRendererFor(renderers, item));
   let label = $derived(timelineItemLabel(item));
   let outcome = $derived(timelineItemOutcome(item));
   let summary = $derived(timelineItemSummary(item));
   let deliveryFailed = $derived(item.kind === "user-message" && item.delivery?.state === "failed");
+  let reconnecting = $state(false);
+  let reconnectFailed = $state(false);
 
   function humanize(value: string): string {
     return value.replaceAll("_", " ");
@@ -44,6 +53,19 @@
     if (value.goalStatus === "paused") return "Worker paused";
     if (value.goalStatus === "completed") return "Worker completed";
     return "Worker reported back";
+  }
+
+  async function reconnect(value: AuthNeededItem) {
+    if (!onReconnect || reconnecting) return;
+    reconnecting = true;
+    reconnectFailed = false;
+    try {
+      await onReconnect(value);
+    } catch {
+      reconnectFailed = true;
+    } finally {
+      reconnecting = false;
+    }
   }
 </script>
 
@@ -172,15 +194,26 @@
     {:else if item.kind === "machine-input-batch"}
       <ul>{#each item.members as member (member.id)}<li>{member.summary}</li>{/each}</ul>
     {:else if item.kind === "auth-needed"}
+      {@const auth = authNeededPresentation(item)}
       <div class="og-timeline-row__headline">
-        <strong>{item.providerDomain || "Provider"} needs to be connected again</strong>
+        <strong>{auth.title}</strong>
         <span class="og-timeline-row__pill">Action required</span>
       </div>
-      <p class="og-timeline-row__summary">The failed tool call was not replayed.</p>
-      {#if item.toolName}<p>Requested by <code>{item.toolName}</code></p>{/if}
-      {#if item.authorizationUrl}
-        <a class="og-button" href={item.authorizationUrl} rel="noreferrer" target="_blank">Connect</a>
+      <p class="og-timeline-row__summary">{auth.reasonLine}</p>
+      {#if auth.capability}<p>Provider: <code>{item.providerDomain}</code></p>{/if}
+      {#if auth.requiredVariables.length > 0}
+        <p>Needs variables: <code>{auth.requiredVariables.join(", ")}</code></p>
       {/if}
+      {#if item.toolName}<p>Requested by <code>{item.toolName}</code></p>{/if}
+      {#if item.authoritySource === "host" && item.authorizationUrl}
+        <a class="og-button" href={item.authorizationUrl} rel="noreferrer" target="_blank">{auth.actionLabel}</a>
+      {:else if item.authoritySource !== "host" && auth.actionable && onReconnect}
+        <button class="og-button" type="button" disabled={reconnecting} onclick={() => void reconnect(item)}>{reconnecting ? "Opening…" : auth.actionLabel}</button>
+      {:else if item.authoritySource !== "host" && auth.actionable && item.authorizationUrl}
+        <a class="og-button" href={item.authorizationUrl} rel="noreferrer" target="_blank">{auth.actionLabel}</a>
+      {/if}
+      {#if auth.followUpLine}<p class="og-timeline-row__summary">{auth.followUpLine}</p>{/if}
+      {#if reconnectFailed}<p class="og-timeline-row__failure" role="alert">Could not start connection setup. Try again.</p>{/if}
     {:else if item.kind === "turn-end"}
       <div class="og-timeline-row__status" role="status">
         <span aria-hidden="true"></span>
