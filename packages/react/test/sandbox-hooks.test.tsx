@@ -487,6 +487,43 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
+  test("a stalled viewer attach respects the warming deadline instead of loading forever", async () => {
+    let attachSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      getStreamCapabilities: async () => fakeColdCapabilities(),
+      attachViewer: async (_workspaceId, _sessionId, _request, options) => {
+        attachSignal = options?.signal;
+        return await new Promise<ReturnType<typeof fakeAttachResponse>>((_resolve, reject) => {
+          attachSignal?.addEventListener(
+            "abort",
+            () => reject(attachSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachFiles: true,
+          warmingDeadlineMs: 30,
+        }),
+      undefined,
+    );
+
+    await flush();
+    expect(attachSignal?.aborted).toBe(false);
+    expect(hook.result.current.state).toBe("negotiating");
+
+    await flush(100);
+    expect(attachSignal?.aborted).toBe(true);
+    expect(hook.result.current.state).toBe("error");
+    expect(hook.result.current.error?.message).toContain("sandbox did not warm in time");
+    await hook.unmount();
+  });
+
   test("a session switch renders zero frames of the previous capability document", async () => {
     let resolveSecond: (value: ReturnType<typeof fakeCapabilities>) => void = () => {};
     const secondCapabilities = new Promise<ReturnType<typeof fakeCapabilities>>((resolve) => {

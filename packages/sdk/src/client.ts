@@ -3014,11 +3014,14 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: AttachViewerRequest = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<AttachViewerResponse> {
     return await this.requestJson<AttachViewerResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers`,
       request,
+      {},
+      options,
     );
   }
 

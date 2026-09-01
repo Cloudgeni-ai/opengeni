@@ -72,9 +72,10 @@ export type UseSessionCapabilitiesOptions = ClientOverride & {
   /** Poll cadence (ms) while the lease is cold/warming. Default 1500. */
   warmingPollMs?: number | undefined;
   /**
-   * Give up waiting for `warm` after this long while polling (ms) and surface a
-   * stalled error with a manual `renegotiate`. Default 30000. This is a UI
-   * patience deadline, independent from the worker's sandbox warming timeout.
+   * Give up negotiating or waiting for `warm` after this long (ms) and surface
+   * a stalled error with a manual `renegotiate`. The deadline aborts the initial
+   * capability read, viewer attach, and warming polls. Default 30000. This is a
+   * UI patience deadline, independent from the worker's sandbox warming timeout.
    * 0 disables the deadline.
    */
   warmingDeadlineMs?: number | undefined;
@@ -209,13 +210,33 @@ export function useSessionCapabilities(
     let cancelled = false;
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+    let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
     let localViewerId: string | null = null;
     const requestAbort = new AbortController();
     const startedAt = Date.now();
 
+    const warmDeadlineError = () =>
+      new Error("sandbox did not warm in time — retry to re-negotiate");
+
+    const clearDeadline = () => {
+      if (deadlineTimer !== null) clearTimeout(deadlineTimer);
+      deadlineTimer = null;
+    };
+
+    if (warmingDeadlineMs > 0) {
+      deadlineTimer = setTimeout(() => {
+        if (cancelled) return;
+        const cause = new DOMException("Sandbox warm-up timed out", "TimeoutError");
+        requestAbort.abort(cause);
+        setState("error");
+        setError(warmDeadlineError());
+      }, warmingDeadlineMs);
+    }
+
     const clearTimers = () => {
       if (pollTimer !== null) clearTimeout(pollTimer);
       if (heartbeatTimer !== null) clearTimeout(heartbeatTimer);
+      clearDeadline();
       pollTimer = null;
       heartbeatTimer = null;
     };
@@ -271,12 +292,14 @@ export function useSessionCapabilities(
             if (cancelled) return;
             settle(caps);
             if (sandboxAcceptsLiveIo(caps.liveness)) {
+              clearDeadline();
               setState("ready");
               return;
             }
             if (warmingDeadlineMs > 0 && Date.now() - startedAt > warmingDeadlineMs) {
+              clearDeadline();
               setState("error");
-              setError(new Error("sandbox did not warm in time — retry to re-negotiate"));
+              setError(warmDeadlineError());
               return;
             }
             pollUntilWarm();
@@ -284,10 +307,18 @@ export function useSessionCapabilities(
           .catch((cause) => {
             if (!cancelled) {
               if (isSandboxOwnershipDisabledError(cause)) {
+                clearDeadline();
                 setState("on-demand");
                 setError(null);
                 return;
               }
+              if (isTimeoutError(cause)) {
+                clearDeadline();
+                setState("error");
+                setError(warmDeadlineError());
+                return;
+              }
+              clearDeadline();
               setState("error");
               setError(cause instanceof Error ? cause : new Error(String(cause)));
             }
@@ -339,11 +370,18 @@ export function useSessionCapabilities(
             // un-redacted pixel plane (which carries the consent gate); a
             // terminal-only attach (`desktop:false`) warms the box + mints the
             // pty-ws terminal cell WITHOUT tripping the desktop consent 409.
-            const holder = await client.attachViewer(workspaceId, sessionId, {
-              desktop: wantDesktopAttach,
-              terminal: wantTerminalAttach,
-              files: wantFilesAttach,
-            });
+            const holder = await client.attachViewer(
+              workspaceId,
+              sessionId,
+              {
+                desktop: wantDesktopAttach,
+                terminal: wantTerminalAttach,
+                files: wantFilesAttach,
+              },
+              {
+                signal: requestAbort.signal,
+              },
+            );
             if (cancelled) {
               // The attach crossed an identity/unmount boundary after the server
               // had already minted a holder. It is too late to publish the result,
@@ -441,6 +479,7 @@ export function useSessionCapabilities(
         // boxless resting state (below), never an error.
         const warmUpRequested = wantDesktopAttach || wantTerminalAttach || wantFilesAttach;
         if (sandboxAcceptsLiveIo(caps.liveness) || localViewerId) {
+          clearDeadline();
           setState("ready");
           startHeartbeat(caps);
         } else if (warmUpRequested) {
@@ -454,20 +493,30 @@ export function useSessionCapabilities(
           // NO poll, NO deadline, NO false "sandbox offline". The box is created on
           // demand when the agent first runs a sandbox tool; the workbench watches
           // for `sandbox.provision` and renegotiates to pick the warm box back up.
+          clearDeadline();
           setState("on-demand");
         }
       } catch (cause) {
         if (cancelled) return;
         if (isSandboxOwnershipDisabledError(cause)) {
+          clearDeadline();
           setState("on-demand");
           setError(null);
           return;
         }
+        if (isTimeoutError(cause)) {
+          clearDeadline();
+          setState("error");
+          setError(warmDeadlineError());
+          return;
+        }
         if (cause instanceof OpenGeniApiError && cause.status === 403) {
+          clearDeadline();
           setState("error");
           setError(new Error("not permitted to view this session's sandbox"));
           return;
         }
+        clearDeadline();
         setState("error");
         setError(cause instanceof Error ? cause : new Error(String(cause)));
       }
@@ -541,4 +590,8 @@ function isSandboxOwnershipDisabledError(error: unknown): boolean {
     error.status === 404 &&
     error.message.includes("sandbox ownership is not enabled")
   );
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "TimeoutError";
 }
