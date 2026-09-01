@@ -50,6 +50,7 @@ import {
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
+import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -2638,7 +2639,10 @@ export function RootRouteComponent() {
           />
         </Suspense>
       ) : null}
-      {actorFencedSurface}
+      {clientConfig ? (
+        <SecureContextWarning productAccessMode={clientConfig.productAccessMode} />
+      ) : null}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{actorFencedSurface}</div>
     </main>
   );
 }

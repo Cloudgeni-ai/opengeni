@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/artifact-client";
-import { OpenGeniApiError } from "../src/errors";
+import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "../src/errors";
 import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
@@ -981,6 +981,85 @@ describe("OpenGeniClient variable sets", () => {
 });
 
 describe("OpenGeniClient files", () => {
+  test("uploadFile fails before any request when the browser context is insecure", async () => {
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { isSecureContext: false },
+    });
+    const { client, requests } = makeClient(() => {
+      throw new Error("fetch must not run from an insecure browser context");
+    });
+
+    try {
+      const error = await client
+        .uploadFile(WORKSPACE_ID, {
+          filename: "insecure.txt",
+          contentType: "text/plain",
+          data: "x",
+          sha256: "a".repeat(64),
+        })
+        .then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+
+      expect(error).toBeInstanceOf(OpenGeniSecureContextRequiredError);
+      expect(error).toMatchObject({
+        code: "secure_context_required",
+        reason: "insecure_context",
+        retryable: false,
+      });
+      expect((error as Error).message).toContain("OpenGeni is open over HTTP");
+      expect(requests).toHaveLength(0);
+    } finally {
+      if (windowDescriptor) {
+        Object.defineProperty(globalThis, "window", windowDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, "window");
+      }
+    }
+  });
+
+  test("uploadFile returns the typed secure-context error when Web Crypto is unavailable", async () => {
+    const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: { getRandomValues: cryptoDescriptor?.value?.getRandomValues },
+    });
+    const { client, requests } = makeClient(() => {
+      throw new Error("fetch must not run without Web Crypto");
+    });
+
+    try {
+      const error = await client
+        .uploadFile(WORKSPACE_ID, {
+          filename: "unsupported.txt",
+          contentType: "text/plain",
+          data: "x",
+          sha256: "a".repeat(64),
+        })
+        .then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+
+      expect(error).toBeInstanceOf(OpenGeniSecureContextRequiredError);
+      expect(error).toMatchObject({
+        code: "secure_context_required",
+        reason: "web_crypto_unavailable",
+        retryable: false,
+      });
+      expect(requests).toHaveLength(0);
+    } finally {
+      if (cryptoDescriptor) {
+        Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, "crypto");
+      }
+    }
+  });
+
   test("uploadFile runs begin -> signed PUT -> complete and returns the ready file", async () => {
     const begin = {
       fileId: FILE_ID,

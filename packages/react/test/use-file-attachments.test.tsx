@@ -5,7 +5,7 @@
    distinct progress (`uploading`) and loss-prevention (`hasUnresolved`) gates.
    -------------------------------------------------------------------------- */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { FileAsset } from "@opengeni/sdk";
+import { OpenGeniSecureContextRequiredError, type FileAsset } from "@opengeni/sdk";
 import { act, startTransition, Suspense } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
@@ -604,6 +604,31 @@ describe("useFileAttachments", () => {
     await flushing(() => hook.result.current.remove(attachment.id));
     expect(hook.result.current.attachments).toEqual([]);
     expect(hook.result.current.hasUnresolved).toBe(false);
+    await hook.unmount();
+  });
+
+  test("classifies a typed secure-context upload failure for the attachment card", async () => {
+    const failure = new OpenGeniSecureContextRequiredError("insecure_context");
+    const client = fakeClient({
+      uploadFile: async () => {
+        throw failure;
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("dragged.png")]));
+    await flush();
+
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      name: "dragged.png",
+      status: "failed",
+      errorCode: "secure_context_required",
+      error: failure.message,
+    });
+    expect(hook.result.current.hasUnresolved).toBe(true);
     await hook.unmount();
   });
 

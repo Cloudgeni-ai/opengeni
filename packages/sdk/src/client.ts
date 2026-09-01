@@ -1,6 +1,7 @@
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
 } from "./errors";
 import {
@@ -5570,6 +5571,7 @@ export class OpenGeniClient {
     ) {
       throw new Error("File upload timeout must be a positive number");
     }
+    assertBrowserFileUploadSecureContext();
     const withTimeout = async <T>(
       timeoutMs: number,
       operation: (signal: AbortSignal) => Promise<T>,
@@ -7791,6 +7793,18 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
     mutation: true,
     displayMessage: "OpenGeni could not confirm the request — reconcile before retrying.",
   });
+}
+
+function assertBrowserFileUploadSecureContext(): void {
+  if (typeof window !== "undefined" && window.isSecureContext === false) {
+    throw new OpenGeniSecureContextRequiredError("insecure_context");
+  }
+  if (
+    typeof globalThis.crypto === "undefined" ||
+    typeof globalThis.crypto.subtle?.digest !== "function"
+  ) {
+    throw new OpenGeniSecureContextRequiredError("web_crypto_unavailable");
+  }
 }
 
 async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<string> {

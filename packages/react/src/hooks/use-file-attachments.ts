@@ -1,4 +1,8 @@
-import type { FileAsset, FileResourceRef } from "@opengeni/sdk";
+import {
+  OpenGeniSecureContextRequiredError,
+  type FileAsset,
+  type FileResourceRef,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   useEmbeddedFileAttachments,
@@ -26,6 +30,8 @@ export type FileAttachment = {
   file?: FileAsset | undefined;
   /** Object-URL for an inline preview; minted for `image/*` files only. */
   previewUrl?: string | undefined;
+  /** Stable SDK failure code for UI behavior that must not parse error copy. */
+  errorCode?: "secure_context_required" | undefined;
   error?: string | undefined;
 };
 
@@ -198,6 +204,7 @@ export function useFileAttachments(
                     name: asset.filename,
                     contentType: asset.contentType,
                     sizeBytes: asset.sizeBytes,
+                    errorCode: undefined,
                     error: undefined,
                   }
                 : attachment,
@@ -212,6 +219,8 @@ export function useFileAttachments(
                 ? {
                     ...attachment,
                     status: "failed",
+                    errorCode:
+                      error instanceof OpenGeniSecureContextRequiredError ? error.code : undefined,
                     error: error instanceof Error ? error.message : String(error),
                   }
                 : attachment,
@@ -255,7 +264,7 @@ export function useFileAttachments(
       setAttachments((current) =>
         current.map((attachment) =>
           attachment.id === id
-            ? { ...attachment, status: "uploading", error: undefined }
+            ? { ...attachment, status: "uploading", errorCode: undefined, error: undefined }
             : attachment,
         ),
       );
@@ -305,6 +314,7 @@ export function useFileAttachments(
                 sizeBytes: file.sizeBytes,
                 status: "ready",
                 file,
+                errorCode: undefined,
                 error: undefined,
               }
             : {
