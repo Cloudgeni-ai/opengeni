@@ -192,8 +192,8 @@ export function WorkspaceManagementShell({
   children: ReactNode;
 }) {
   return (
-    <div className="grid h-dvh min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1">
-      <aside className="max-h-[50dvh] min-h-0 overflow-y-auto overscroll-y-contain border-b border-border bg-surface/35 lg:h-dvh lg:max-h-none lg:border-r lg:border-b-0">
+    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1">
+      <aside className="max-h-[50dvh] min-h-0 overflow-y-auto overscroll-y-contain border-b border-border bg-surface/35 lg:h-full lg:max-h-none lg:border-r lg:border-b-0">
         <div className="flex h-full min-h-0 flex-col px-3 py-3 lg:py-4">
           <Link
             to="/workspaces/$workspaceId/sessions"
