@@ -26,10 +26,12 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
   isRetryableStreamError,
 } from "./errors";
+export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   deriveSessionDisplayTitle,

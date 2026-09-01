@@ -23,6 +23,8 @@ export type FileAttachment = Readonly<{
   status: "uploading" | "ready" | "failed";
   file?: FileAsset | undefined;
   previewUrl?: string | undefined;
+  /** Stable browser capability failure code; UI must not parse error copy. */
+  errorCode?: "secure_context_required" | undefined;
   error?: string | undefined;
 }>;
 
@@ -50,6 +52,8 @@ const EMPTY_SNAPSHOT: FileAttachmentStoreSnapshot = Object.freeze({
   uploading: false,
   hasUnresolved: false,
 });
+
+let fallbackAttachmentId = 0;
 
 export function createFileAttachmentStore(options: {
   client: FileAttachmentClientLike;
@@ -132,6 +136,7 @@ export function createFileAttachmentStore(options: {
           name: asset.filename,
           contentType: asset.contentType,
           sizeBytes: asset.sizeBytes,
+          errorCode: undefined,
           error: undefined,
         }));
       } catch (cause) {
@@ -139,6 +144,7 @@ export function createFileAttachmentStore(options: {
         updateAttachment(id, (attachment) => ({
           ...attachment,
           status: "failed",
+          errorCode: secureContextRequiredErrorCode(cause),
           error: cause instanceof Error ? cause.message : String(cause),
         }));
       }
@@ -150,7 +156,7 @@ export function createFileAttachmentStore(options: {
       for (const input of files) {
         if (store.signal.aborted) return;
         const source = normalizeSource(input);
-        const id = environment.ids.randomUUID();
+        const id = createAttachmentId(environment);
         sources.set(id, source);
         let previewUrl: string | undefined;
         if (
@@ -202,6 +208,7 @@ export function createFileAttachmentStore(options: {
               sizeBytes: file.sizeBytes,
               status: "ready",
               file,
+              errorCode: undefined,
               error: undefined,
             }
           : {
@@ -223,7 +230,12 @@ export function createFileAttachmentStore(options: {
       const source = sources.get(id);
       const attachment = store.getSnapshot().attachments.find((candidate) => candidate.id === id);
       if (!source || attachment?.status !== "failed" || store.signal.aborted) return;
-      updateAttachment(id, (current) => ({ ...current, status: "uploading", error: undefined }));
+      updateAttachment(id, (current) => ({
+        ...current,
+        status: "uploading",
+        errorCode: undefined,
+        error: undefined,
+      }));
       startUpload(id, source);
     },
     retainPreview(id: string) {
@@ -277,6 +289,24 @@ export function createFileAttachmentStore(options: {
 function normalizeSource(input: SessionAttachmentSource | File): SessionAttachmentSource {
   if ("data" in input) return input;
   return { name: input.name, type: input.type, size: input.size, data: input };
+}
+
+function createAttachmentId(environment: SessionRuntimeEnvironment): string {
+  try {
+    return environment.ids.randomUUID();
+  } catch {
+    fallbackAttachmentId += 1;
+    return `attachment:${environment.clock.now().toString(36)}:${fallbackAttachmentId.toString(36)}`;
+  }
+}
+
+function secureContextRequiredErrorCode(error: unknown): "secure_context_required" | undefined {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "secure_context_required"
+    ? error.code
+    : undefined;
 }
 
 function uploadDataSize(data: FileUploadData): number {
