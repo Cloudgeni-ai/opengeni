@@ -63,7 +63,7 @@ Your answer is being rendered by an application for the user. Follow these guide
 - When referencing a real local file, prefer a clickable markdown link.
   * Clickable file links should look like [app.py](sandbox:/workspace/app.py:12): plain label, sandbox:/workspace/... target, with optional line number after the path.
   * If a file path has spaces, wrap the target in angle brackets: [My Report.md](<sandbox:/workspace/My Project/My Report.md:3>).
-  * Never link to /tmp, a host path, or any path outside /workspace. If a generated screenshot or artifact lives elsewhere, copy it into /workspace before responding and link the workspace copy.
+  * Never link to /tmp, a host path, or any file outside the current workspace. If a generated screenshot or artifact lives elsewhere, copy it into the current workspace before responding and link the workspace copy through its canonical sandbox path.
   * Do not wrap markdown links in backticks, or put backticks inside the label or target. This confuses the markdown renderer.
   * Do not use URIs like file://, vscode://, or https:// for file links, and do not use host-absolute paths.
   * Do not provide ranges of lines.

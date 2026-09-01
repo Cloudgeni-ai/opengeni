@@ -22,8 +22,9 @@ describe("provider-neutral operational instructions", () => {
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Never link to /tmp");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "copy it into /workspace before responding",
+      "copy it into the current workspace before responding",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("canonical sandbox path");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");
   });
 
